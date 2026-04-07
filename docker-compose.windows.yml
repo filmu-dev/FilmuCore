@@ -1,0 +1,276 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: filmu-local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-filmu}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - filmu-local-postgres18-data:/var/lib/postgresql
+    networks:
+      - filmu-local
+
+  redis:
+    image: redis:8.6.1-alpine
+    container_name: filmu-local-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    networks:
+      - filmu-local
+
+  zilean-postgres:
+    image: postgres:16.3-alpine3.20
+    container_name: filmu-local-zilean-postgres
+    restart: unless-stopped
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_DB: ${ZILEAN_POSTGRES_DB:-zilean}
+      POSTGRES_USER: ${ZILEAN_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${ZILEAN_POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - filmu-local-zilean-postgres-data:/var/lib/postgresql/data/pgdata
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - filmu-local
+
+  zilean:
+    image: ipromknight/zilean:latest
+    container_name: filmu-local-zilean
+    restart: unless-stopped
+    tty: true
+    environment:
+      Zilean__Database__ConnectionString: Host=zilean-postgres;Port=5432;Database=${ZILEAN_POSTGRES_DB:-zilean};Username=${ZILEAN_POSTGRES_USER:-postgres};Password=${ZILEAN_POSTGRES_PASSWORD:-postgres}
+      # Uncomment on lower-memory systems; initial DMM import can use several GB of RAM.
+      # Zilean__Dmm__ImportBatched: "true"
+    ports:
+      - "8181:8181"
+    volumes:
+      - filmu-local-zilean-data:/app/data
+    depends_on:
+      zilean-postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl --connect-timeout 10 --silent --show-error --fail http://127.0.0.1:8181/healthchecks/ping > /dev/null || exit 1",
+        ]
+      interval: 30s
+      timeout: 60s
+      retries: 10
+      start_period: 15s
+    networks:
+      - filmu-local
+
+  filmu-python:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: filmu-python
+    restart: unless-stopped
+    environment:
+      FILMU_PY_ENV: ${FILMU_PY_ENV:-development}
+      FILMU_PY_HOST: 0.0.0.0
+      FILMU_PY_PORT: 8000
+      FILMU_PY_GRPC_BIND_ADDRESS: 0.0.0.0:50051
+      FILMU_PY_API_KEY: ${FILMU_PY_API_KEY:-32_character_filmu_api_key_local_}
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      FILMU_PY_REALDEBRID_API_TOKEN: ${FILMU_PY_REALDEBRID_API_TOKEN:-}
+      FILMU_PY_ALLDEBRID_API_TOKEN: ${FILMU_PY_ALLDEBRID_API_TOKEN:-}
+      FILMU_PY_DEBRIDLINK_API_TOKEN: ${FILMU_PY_DEBRIDLINK_API_TOKEN:-}
+      REAL_DEBRID_API_KEY: ${REAL_DEBRID_API_KEY:-}
+      REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
+      ALL_DEBRID_API_KEY: ${ALL_DEBRID_API_KEY:-}
+      ALLDEBRID_API_KEY: ${ALLDEBRID_API_KEY:-}
+      DEBRID_LINK_API_KEY: ${DEBRID_LINK_API_KEY:-}
+      DEBRIDLINK_API_KEY: ${DEBRIDLINK_API_KEY:-}
+      FILMU_PY_RUN_MIGRATIONS_ON_STARTUP: ${FILMU_PY_RUN_MIGRATIONS_ON_STARTUP:-true}
+      FILMU_PY_ARQ_ENABLED: "true"
+      FILMU_PY_LOG_LEVEL: ${FILMU_PY_LOG_LEVEL:-INFO}
+      FILMU_PY_PROMETHEUS_ENABLED: ${FILMU_PY_PROMETHEUS_ENABLED:-true}
+      FILMU_PY_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-filmu}
+      FILMU_PY_REDIS_URL: redis://redis:6379/0
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "filmu_py.app:create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
+    volumes:
+      - ./:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+      - "50051:50051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:8000/openapi.json > /dev/null || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    networks:
+      - filmu-local
+
+  arq-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: filmu-arq-worker
+    restart: unless-stopped
+    environment:
+      FILMU_PY_ENV: ${FILMU_PY_ENV:-development}
+      FILMU_PY_HOST: 0.0.0.0
+      FILMU_PY_PORT: 8000
+      FILMU_PY_API_KEY: ${FILMU_PY_API_KEY:-32_character_filmu_api_key_local_}
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      FILMU_PY_REALDEBRID_API_TOKEN: ${FILMU_PY_REALDEBRID_API_TOKEN:-}
+      FILMU_PY_ALLDEBRID_API_TOKEN: ${FILMU_PY_ALLDEBRID_API_TOKEN:-}
+      FILMU_PY_DEBRIDLINK_API_TOKEN: ${FILMU_PY_DEBRIDLINK_API_TOKEN:-}
+      REAL_DEBRID_API_KEY: ${REAL_DEBRID_API_KEY:-}
+      REALDEBRID_API_KEY: ${REALDEBRID_API_KEY:-}
+      ALL_DEBRID_API_KEY: ${ALL_DEBRID_API_KEY:-}
+      ALLDEBRID_API_KEY: ${ALLDEBRID_API_KEY:-}
+      DEBRID_LINK_API_KEY: ${DEBRID_LINK_API_KEY:-}
+      DEBRIDLINK_API_KEY: ${DEBRIDLINK_API_KEY:-}
+      FILMU_PY_RUN_MIGRATIONS_ON_STARTUP: ${FILMU_PY_RUN_MIGRATIONS_ON_STARTUP:-true}
+      FILMU_PY_ARQ_ENABLED: ${FILMU_PY_ARQ_ENABLED:-true}
+      FILMU_PY_LOG_LEVEL: ${FILMU_PY_LOG_LEVEL:-INFO}
+      FILMU_PY_PROMETHEUS_ENABLED: ${FILMU_PY_PROMETHEUS_ENABLED:-true}
+      FILMU_PY_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-filmu}
+      FILMU_PY_REDIS_URL: redis://redis:6379/0
+    command:
+      [
+        "python", "-c",
+        "from filmu_py.workers.tasks import run_worker_entrypoint; run_worker_entrypoint()",
+      ]
+    volumes:
+      - ./:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - filmu-local
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: filmu-tests
+    restart: "no"
+    environment:
+      FILMU_PY_ENV: test
+      FILMU_PY_API_KEY: ${FILMU_PY_API_KEY:-32_character_filmu_api_key_local_}
+      FILMU_PY_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-filmu}
+      FILMU_PY_REDIS_URL: redis://redis:6379/0
+    working_dir: /app
+    command: ["python", "-m", "pytest", "-q"]
+    volumes:
+      - ./:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - filmu-local
+
+  frontend:
+    build:
+      context: ${FILMU_FRONTEND_CONTEXT:-../../Triven_riven-fork/Triven_frontend}
+      dockerfile: Dockerfile
+    container_name: frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://filmu-python:8000
+      BACKEND_API_KEY: ${FILMU_PY_API_KEY:-32_character_filmu_api_key_local_}
+      PUBLIC_TMDB_READ_ACCESS_TOKEN: ${PUBLIC_TMDB_READ_ACCESS_TOKEN:-}
+      AUTH_SECRET: ${FRONTEND_AUTH_SECRET:-local_frontend_auth_secret_32_chars}
+      ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      DATABASE_URL: /riven/data/riven.db
+    ports:
+      - "3000:3000"
+    depends_on:
+      filmu-python:
+        condition: service_healthy
+    volumes:
+      - filmu-local-frontend-data:/riven/data
+    networks:
+      - filmu-local
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: filmu-local-prowlarr
+    restart: unless-stopped
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: Etc/UTC
+    ports:
+      - "9696:9696"
+    volumes:
+      - filmu-local-prowlarr-config:/config
+    networks:
+      - filmu-local
+
+volumes:
+  filmu-local-postgres18-data:
+  filmu-local-frontend-data:
+  filmu-local-prowlarr-config:
+  filmu-local-zilean-data:
+  filmu-local-zilean-postgres-data:
+
+networks:
+  filmu-local:
+    name: filmu-local

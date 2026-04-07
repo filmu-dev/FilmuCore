@@ -1,0 +1,65 @@
+name: Run Project Check
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Human-readable job name
+        required: true
+        type: string
+      command:
+        description: Command to run
+        required: true
+        type: string
+      python:
+        description: Set up the Python toolchain and project dependencies
+        required: false
+        default: false
+        type: boolean
+      rust:
+        description: Set up the Rust toolchain
+        required: false
+        default: false
+        type: boolean
+      fuse:
+        description: Install FUSE system packages needed by Rust checks
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  run-check:
+    name: ${{ inputs.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: ${{ inputs.fuse }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3 libfuse3-dev pkg-config
+
+      - name: Set up Python
+        if: ${{ inputs.python }}
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        if: ${{ inputs.python }}
+        run: uv sync --frozen --extra dev
+
+      - name: Set up Rust
+        if: ${{ inputs.rust }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run ${{ inputs.name }}
+        run: ${{ inputs.command }}
+

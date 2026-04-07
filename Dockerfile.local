@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock README.md ./
+COPY filmu_py ./filmu_py
+COPY filmuvfs ./filmuvfs
+
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system -e .[dev]
+
+EXPOSE 8080
+
+CMD ["python", "-m", "filmu_py.main"]

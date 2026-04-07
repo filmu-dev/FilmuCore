@@ -1,0 +1,740 @@
+param(
+    [string] $TmdbId = '603',
+    [string] $Title = 'The Matrix',
+    [ValidateSet('movie', 'tv')]
+    [string] $MediaType = 'movie',
+    [ValidateSet('', 'plex', 'jellyfin', 'emby')]
+    [string] $MediaServerProvider = '',
+    [string] $MediaServerUrl = '',
+    [string] $MediaServerToken = '',
+    [string] $MediaServerRequestLogPath = '',
+    [string] $JellyfinApiKey = '',
+    [string] $JellyfinUserId = '',
+    [string] $JellyfinLibraryId = '',
+    [string] $JellyfinSearchTerm = '',
+    [string] $BackendUrl = 'http://localhost:8000',
+    [string] $FrontendUrl = 'http://localhost:3000',
+    [string] $FrontendUsername = '',
+    [string] $FrontendPassword = '',
+    [string] $PreferredClientBrowserContainer = '',
+    [string] $PreferredClientBrowserExecutable = '',
+    [string] $BackendContainerName = '',
+    [string] $ApiKey = '',
+    [string] $WslDistro = 'Ubuntu-22.04',
+    [string] $MountRoot = '/mnt/filmuvfs',
+    [int] $FrontendTimeoutSeconds = 60,
+    [int] $PreferredClientPlaybackTimeoutSeconds = 90,
+    [int] $AcquisitionTimeoutSeconds = 900,
+    [int] $MediaServerTimeoutSeconds = 60,
+    [int] $MountVisibilityTimeoutSeconds = 60,
+    [int] $PollIntervalSeconds = 5,
+    [int] $MountedReadBytes = 1048576,
+    [switch] $ProofStaleDirectRefresh,
+    [switch] $RequirePreferredClientPlayback,
+    [switch] $ReuseExistingItem,
+    [switch] $SkipStart,
+    [switch] $StopWhenDone,
+    [switch] $DryRun
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+function Wait-HttpReady {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Uri,
+        [Parameter(Mandatory = $true)]
+        [int] $TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 5
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+                return $true
+            }
+        }
+        catch {
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    return $false
+}
+
+function Invoke-WslBash {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Command
+    )
+
+    return & wsl.exe -d $WslDistro -u root -- bash -lc $Command
+}
+
+function Invoke-NativeCommandChecked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CommandName,
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments,
+        [Parameter(Mandatory = $true)]
+        [string] $FailureLabel
+    )
+
+    $output = & $CommandName @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $details = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+        if ([string]::IsNullOrWhiteSpace($details)) {
+            $details = 'no stderr output'
+        }
+        throw ("{0} failed with exit code {1}: {2}" -f $FailureLabel, $exitCode, $details)
+    }
+
+    return $output
+}
+
+function Test-IsWindowsHost {
+    return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows
+    )
+}
+
+function Invoke-MountShell {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Command
+    )
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+
+    if (-not (Test-IsWindowsHost)) {
+        try {
+            return Invoke-NativeCommandChecked -CommandName 'bash' -Arguments @('-lc', $Command) -FailureLabel 'Host bash mount command'
+        }
+        catch {
+            $failures.Add($_.Exception.Message)
+        }
+    }
+    else {
+        $wslCommand = Get-Command wsl.exe -ErrorAction SilentlyContinue
+        if ($null -ne $wslCommand) {
+            try {
+                return Invoke-NativeCommandChecked -CommandName $wslCommand.Source -Arguments @('-d', $WslDistro, '-u', 'root', '--', 'bash', '-lc', $Command) -FailureLabel 'WSL mount command'
+            }
+            catch {
+                $failures.Add($_.Exception.Message)
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($script:BackendContainerName)) {
+        try {
+            return Invoke-NativeCommandChecked -CommandName 'docker' -Arguments @('exec', $script:BackendContainerName, 'sh', '-lc', $Command) -FailureLabel 'Backend-container mount command'
+        }
+        catch {
+            $failures.Add($_.Exception.Message)
+        }
+    }
+
+    $details = ($failures | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ' | '
+    if ([string]::IsNullOrWhiteSpace($details)) {
+        $details = 'no mount execution strategy succeeded'
+    }
+    throw ("Failed to execute mount command: {0}" -f $details)
+}
+
+function ConvertTo-BashSingleQuoted {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Value
+    )
+
+    $singleQuote = [string][char]39
+    $doubleQuote = [string][char]34
+    $replacement = $singleQuote + $doubleQuote + $singleQuote + $doubleQuote + $singleQuote
+    $escaped = $Value.Replace($singleQuote, $replacement)
+    return $singleQuote + $escaped + $singleQuote
+}
+
+function Write-JsonFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+        [Parameter(Mandatory = $true)]
+        [object] $Value
+    )
+
+    $Value | ConvertTo-Json -Depth 20 | Set-Content -Path $Path -Encoding UTF8
+}
+
+function Convert-ToCompactJsonValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object] $Value
+    )
+
+    if ($null -eq $Value) {
+        return 'null'
+    }
+
+    return (ConvertTo-Json -InputObject $Value -Compress)
+}
+
+function Write-SummaryFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+        [Parameter(Mandatory = $true)]
+        [hashtable] $Summary
+    )
+
+    $summaryDir = Split-Path -Parent $Path
+    $summaryStagePath = Join-Path $summaryDir 'summary-stage.txt'
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:start'
+
+    $stepSnapshot = @(
+        $script:StepResults | ForEach-Object {
+            [pscustomobject]@{
+                name        = $_.name
+                status      = $_.status
+                details     = $_.details
+                recorded_at = $_.recorded_at
+            }
+        }
+    )
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:step-snapshot'
+
+    $timestampJson = Convert-ToCompactJsonValue -Value $Summary.timestamp
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:timestamp'
+    $artifactDirJson = Convert-ToCompactJsonValue -Value $Summary.artifact_dir
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:artifact-dir'
+    $parametersJson = ConvertTo-Json -InputObject $Summary.parameters -Depth 20
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:parameters'
+    $movieJson = ConvertTo-Json -InputObject $Summary.movie -Depth 20
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:movie'
+    $mountJson = ConvertTo-Json -InputObject $Summary.mount -Depth 20
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:mount'
+    $preferredClientJson = ConvertTo-Json -InputObject $Summary.preferred_client -Depth 20
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:preferred-client'
+    $mediaServerLines = @(
+        '{'
+        ('  "provider": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.provider))
+        ('  "configured": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.configured))
+        ('  "signal_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.signal_status))
+        ('  "signal_container": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.signal_container))
+        ('  "jellyfin_visibility_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_visibility_status))
+        ('  "jellyfin_item_id": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_item_id))
+        ('  "jellyfin_library_id": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_library_id))
+        ('  "jellyfin_playback_info_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_playback_info_status))
+        ('  "jellyfin_playback_media_source_id": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_playback_media_source_id))
+        ('  "jellyfin_playback_path": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_playback_path))
+        ('  "jellyfin_stream_open_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_stream_open_status))
+        ('  "jellyfin_stream_open_status_code": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_stream_open_status_code))
+        ('  "jellyfin_stream_open_bytes_read": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_stream_open_bytes_read))
+        ('  "jellyfin_stream_open_content_range": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_stream_open_content_range))
+        ('  "jellyfin_session_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_session_status))
+        ('  "jellyfin_session_started_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_session_started_status))
+        ('  "jellyfin_session_progress_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_session_progress_status))
+        ('  "jellyfin_session_stopped_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_session_stopped_status))
+        ('  "jellyfin_directstream_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_directstream_status))
+        ('  "jellyfin_directstream_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_directstream_details))
+        ('  "jellyfin_directstream_log_path": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_directstream_log_path))
+        ('  "jellyfin_directstream_cached_codec": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_directstream_cached_codec))
+        ('  "jellyfin_directstream_actual_codec": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.jellyfin_directstream_actual_codec))
+        ('  "stale_refresh_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_status))
+        ('  "stale_refresh_entry_id": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_entry_id))
+        ('  "stale_refresh_initial_status_code": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_initial_status_code))
+        ('  "stale_refresh_initial_body": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_initial_body))
+        ('  "stale_refresh_route_status_code": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_route_status_code))
+        ('  "stale_refresh_bytes_read": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_bytes_read))
+        ('  "stale_refresh_content_range": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_content_range))
+        ('  "stale_refresh_attempt_count": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_attempt_count))
+        ('  "stale_refresh_recovered_url": {0}' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.stale_refresh_recovered_url))
+        '}'
+    )
+    $mediaServerJson = $mediaServerLines -join [Environment]::NewLine
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:media-server'
+    $hardeningJson = ConvertTo-Json -InputObject $Summary.hardening -Depth 20
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:hardening'
+    $stepsJson = ConvertTo-Json -InputObject $stepSnapshot -Depth 20
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:steps-json'
+
+    $json = @(
+        '{'
+        ('  "timestamp": {0},' -f $timestampJson)
+        ('  "artifact_dir": {0},' -f $artifactDirJson)
+        ('  "parameters": {0},' -f $parametersJson)
+        ('  "movie": {0},' -f $movieJson)
+        ('  "mount": {0},' -f $mountJson)
+        ('  "preferred_client": {0},' -f $preferredClientJson)
+        ('  "media_server": {0},' -f $mediaServerJson)
+        ('  "hardening": {0},' -f $hardeningJson)
+        ('  "steps": {0}' -f $stepsJson)
+        '}'
+    ) -join [Environment]::NewLine
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:json-built'
+
+    Set-Content -Path $Path -Encoding UTF8 -Value $json
+    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:summary-written'
+}
+
+function Add-StepResult {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('passed', 'failed', 'skipped', 'pending')]
+        [string] $Status,
+        [string] $Details = ''
+    )
+
+    $script:StepResults.Add(
+        [pscustomobject]@{
+            name        = $Name
+            status      = $Status
+            details     = $Details
+            recorded_at = (Get-Date).ToString('o')
+        }
+    )
+}
+
+function ConvertTo-DockerReachableUrl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Url
+    )
+
+    $uri = [System.Uri] $Url
+    $builder = [System.UriBuilder]::new($uri)
+    if ($builder.Host -in @('localhost', '127.0.0.1', '[::1]')) {
+        $builder.Host = 'host.docker.internal'
+    }
+
+    return $builder.Uri.AbsoluteUri.TrimEnd('/')
+}
+
+function Resolve-PreferredClientHostBrowserExecutable {
+    param(
+        [string] $RequestedPath = ''
+    )
+
+    $candidate = $RequestedPath
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $candidate = [string] $env:FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        return ''
+    }
+
+    if (-not (Test-Path $candidate)) {
+        throw ("Preferred-client browser executable was not found: {0}" -f $candidate)
+    }
+    return $candidate
+}
+
+function Invoke-PreferredClientPlaybackProof {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FrontendBaseUrl,
+        [Parameter(Mandatory = $true)]
+        [string] $Username,
+        [Parameter(Mandatory = $true)]
+        [string] $Password,
+        [Parameter(Mandatory = $true)]
+        [string] $TmdbIdentifier,
+        [Parameter(Mandatory = $true)]
+        [string] $ItemIdentifier,
+        [Parameter(Mandatory = $true)]
+        [string] $ResolvedMediaType,
+        [Parameter(Mandatory = $true)]
+        [string] $ArtifactDir,
+        [Parameter(Mandatory = $true)]
+        [string] $ContainerName,
+        [Parameter(Mandatory = $true)]
+        [int] $TimeoutSeconds,
+        [string] $BrowserExecutablePath = ''
+    )
+
+    $scriptPath = Join-Path $repoRoot 'scripts\preferred_client_playback_proof.mjs'
+    $frontendRuntimeUrl = $FrontendBaseUrl.TrimEnd('/')
+    $detailUrl = "{0}/details/media/{1}/{2}?play=true" -f $frontendRuntimeUrl, $TmdbIdentifier, $ResolvedMediaType
+
+    $localConfigPath = Join-Path $ArtifactDir 'preferred-client-playback-config.json'
+    $localResultPath = Join-Path $ArtifactDir 'preferred-client-playback-result.json'
+    $localScreenshotPath = Join-Path $ArtifactDir 'preferred-client-playback.png'
+
+    $containerScriptPath = '/tmp/preferred-client-playback-proof.mjs'
+    $containerConfigPath = '/tmp/preferred-client-playback-config.json'
+    $containerResultPath = '/tmp/preferred-client-playback-result.json'
+    $containerScreenshotPath = '/tmp/preferred-client-playback.png'
+
+    $browserProcess = $null
+    $config = [ordered]@{
+        frontendUrl          = $frontendRuntimeUrl
+        detailUrl            = $detailUrl
+        itemId               = $ItemIdentifier
+        username             = $Username
+        password             = $Password
+        playbackTimeoutMs    = $TimeoutSeconds * 1000
+        screenshotPath       = $containerScreenshotPath
+        browserExecutablePath = ''
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($BrowserExecutablePath)) {
+        $browserProfileDir = Join-Path $ArtifactDir 'preferred-client-browser-profile'
+        New-Item -ItemType Directory -Path $browserProfileDir -Force | Out-Null
+        $browserCdpPort = 9222
+        $browserArguments = @(
+            '--headless=new',
+            '--remote-debugging-address=0.0.0.0',
+            ("--remote-debugging-port={0}" -f $browserCdpPort),
+            ("--user-data-dir={0}" -f $browserProfileDir),
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--autoplay-policy=no-user-gesture-required',
+            'about:blank'
+        )
+        $browserProcess = Start-Process -FilePath $BrowserExecutablePath -ArgumentList $browserArguments -PassThru -WindowStyle Hidden
+
+        $versionUrl = "http://127.0.0.1:{0}/json/version" -f $browserCdpPort
+        $deadline = (Get-Date).AddSeconds(20)
+        $ready = $false
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $versionResponse = Invoke-RestMethod -Method Get -Uri $versionUrl -TimeoutSec 5
+                $webSocketDebuggerUrl = [string] $versionResponse.webSocketDebuggerUrl
+                if ([string]::IsNullOrWhiteSpace($webSocketDebuggerUrl)) {
+                    throw 'Preferred-client host browser did not report a websocket debugger URL.'
+                }
+                $webSocketUri = [System.Uri] $webSocketDebuggerUrl
+                $config.browserCdpUrl = ("{0}://host.docker.internal:{1}{2}" -f $webSocketUri.Scheme, $webSocketUri.Port, $webSocketUri.PathAndQuery)
+                $ready = $true
+                break
+            }
+            catch {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+        if (-not $ready) {
+            throw 'Preferred-client host browser did not expose a CDP endpoint in time.'
+        }
+
+    }
+
+    Write-JsonFile -Path $localConfigPath -Value $config
+
+    try {
+        docker cp $scriptPath "${ContainerName}:${containerScriptPath}" | Out-Null
+        docker cp $localConfigPath "${ContainerName}:${containerConfigPath}" | Out-Null
+
+        & docker exec $ContainerName node $containerScriptPath $containerConfigPath $containerResultPath
+        $exitCode = $LASTEXITCODE
+
+        docker cp "${ContainerName}:${containerResultPath}" $localResultPath | Out-Null
+        try {
+            docker cp "${ContainerName}:${containerScreenshotPath}" $localScreenshotPath | Out-Null
+        }
+        catch {
+        }
+    }
+    finally {
+        if ($null -ne $browserProcess) {
+            try {
+                if (-not $browserProcess.HasExited) {
+                    Stop-Process -Id $browserProcess.Id -Force -ErrorAction SilentlyContinue
+                }
+            }
+            catch {
+            }
+        }
+    }
+
+    if (-not (Test-Path $localResultPath)) {
+        throw 'Preferred-client playback proof did not produce a result file.'
+    }
+
+    $result = Get-Content -Path $localResultPath -Raw | ConvertFrom-Json
+    if ($exitCode -ne 0 -or [string] $result.status -ne 'playing') {
+        $errorText = [string] $result.error_text
+        if ([string]::IsNullOrWhiteSpace($errorText)) {
+            $errorText = 'preferred-client playback did not reach a playing state'
+        }
+        throw ("Preferred-client playback proof failed: {0}" -f $errorText)
+    }
+
+    return $result
+}
+
+function Get-BackendJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Uri
+    )
+
+    return Invoke-RestMethod -Method Get -Uri $Uri -Headers $script:BackendHeaders -TimeoutSec 15
+}
+
+function Post-BackendJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Uri,
+        [Parameter(Mandatory = $true)]
+        [object] $Body
+    )
+
+    $jsonBody = $Body | ConvertTo-Json -Depth 10
+    return Invoke-RestMethod -Method Post -Uri $Uri -Headers $script:BackendHeaders -ContentType 'application/json' -Body $jsonBody -TimeoutSec 30
+}
+
+function Delete-BackendJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Uri,
+        [Parameter(Mandatory = $true)]
+        [object] $Body
+    )
+
+    $jsonBody = $Body | ConvertTo-Json -Depth 10
+    return Invoke-RestMethod -Method Delete -Uri $Uri -Headers $script:BackendHeaders -ContentType 'application/json' -Body $jsonBody -TimeoutSec 30
+}
+
+function Get-JellyfinJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Uri,
+        [Parameter(Mandatory = $true)]
+        [string] $ApiKey
+    )
+
+    return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ 'X-Emby-Token' = $ApiKey } -TimeoutSec 20
+}
+
+function Resolve-JellyfinContext {
+    if ([string]::IsNullOrWhiteSpace($JellyfinApiKey)) {
+        return $null
+    }
+
+    $baseUrl = if ([string]::IsNullOrWhiteSpace($MediaServerUrl)) { 'http://localhost:8096' } else { $MediaServerUrl.TrimEnd('/') }
+    $resolvedUserId = $JellyfinUserId
+    if ([string]::IsNullOrWhiteSpace($resolvedUserId)) {
+        $usersResponse = Get-JellyfinJson -Uri "$baseUrl/Users" -ApiKey $JellyfinApiKey
+        $users = @($usersResponse)
+        $resolvedUser = $users | Select-Object -First 1
+        if ($null -eq $resolvedUser) {
+            throw 'Unable to resolve a Jellyfin user for the playback proof.'
+        }
+        $resolvedUserId = [string] $resolvedUser.Id
+    }
+
+    $resolvedLibraryId = $JellyfinLibraryId
+    if ([string]::IsNullOrWhiteSpace($resolvedLibraryId)) {
+        $views = Get-JellyfinJson -Uri "$baseUrl/Users/$resolvedUserId/Views" -ApiKey $JellyfinApiKey
+        $expectedCollectionType = if ($MediaType -eq 'tv') { 'tvshows' } else { 'movies' }
+        $resolvedLibrary = @($views.Items) | Where-Object {
+            $_.CollectionType -eq $expectedCollectionType -and $_.LocationType -eq 'FileSystem'
+        } | Select-Object -First 1
+        if ($null -eq $resolvedLibrary) {
+            throw ("Unable to resolve a Jellyfin {0} library view for the playback proof." -f $MediaType)
+        }
+        $resolvedLibraryId = [string] $resolvedLibrary.Id
+    }
+
+    return [pscustomobject]@{
+        base_url   = $baseUrl
+        api_key    = $JellyfinApiKey
+        user_id    = $resolvedUserId
+        library_id = $resolvedLibraryId
+    }
+}
+
+function Get-JellyfinVisibilitySignal {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Context,
+        [Parameter(Mandatory = $true)]
+        [string] $SearchTerm
+    )
+
+    $encodedSearch = [uri]::EscapeDataString($SearchTerm)
+    $uri = "$($Context.base_url)/Users/$($Context.user_id)/Items?ParentId=$($Context.library_id)&Recursive=true&SearchTerm=$encodedSearch"
+    $result = Get-JellyfinJson -Uri $uri -ApiKey $Context.api_key
+    $items = @($result.Items)
+    if ($items.Count -gt 0) {
+        return [pscustomobject]@{
+            status = 'visible'
+            item   = $items[0]
+        }
+    }
+
+    return $null
+}
+
+function Get-JellyfinPlaybackInfo {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Context,
+        [Parameter(Mandatory = $true)]
+        [string] $JellyfinItemId
+    )
+
+    $uri = "$($Context.base_url)/Items/$JellyfinItemId/PlaybackInfo?UserId=$($Context.user_id)"
+    $result = Get-JellyfinJson -Uri $uri -ApiKey $Context.api_key
+    $mediaSources = @($result.MediaSources)
+    if ($mediaSources.Count -gt 0) {
+        return [pscustomobject]@{
+            status          = 'ready'
+            media_source    = $mediaSources[0]
+            play_session_id = [string] $result.PlaySessionId
+        }
+    }
+
+    return $null
+}
+
+function Get-JellyfinStreamOpenSignal {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Context,
+        [Parameter(Mandatory = $true)]
+        [string] $JellyfinItemId,
+        [Parameter(Mandatory = $true)]
+        [string] $MediaSourceId,
+        [Parameter(Mandatory = $true)]
+        [string] $Container,
+        [Parameter(Mandatory = $true)]
+        [string] $PlaySessionId
+    )
+
+    $query = @(
+        'container=' + [uri]::EscapeDataString($Container)
+        'static=true'
+        'mediaSourceId=' + [uri]::EscapeDataString($MediaSourceId)
+        'playSessionId=' + [uri]::EscapeDataString($PlaySessionId)
+        'api_key=' + [uri]::EscapeDataString($Context.api_key)
+    ) -join '&'
+
+    $uri = "$($Context.base_url)/Videos/$JellyfinItemId/stream?$query"
+    $request = [System.Net.HttpWebRequest]::Create($uri)
+    $request.Method = 'GET'
+    $request.Timeout = 20000
+    $request.ReadWriteTimeout = 20000
+    $request.AddRange(0, 1023)
+
+    try {
+        $response = [System.Net.HttpWebResponse] $request.GetResponse()
+        try {
+            $contentRange = $response.Headers['Content-Range']
+            $acceptRanges = $response.Headers['Accept-Ranges']
+            $contentType = $response.ContentType
+            $statusCode = [int] $response.StatusCode
+            $stream = $response.GetResponseStream()
+            $buffer = New-Object byte[] 1024
+            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+            return [pscustomobject]@{
+                status        = 'opened'
+                uri           = $uri
+                status_code   = $statusCode
+                bytes_read    = $bytesRead
+                content_type  = $contentType
+                content_range = $contentRange
+                accept_ranges = $acceptRanges
+            }
+        }
+        finally {
+            $response.Close()
+        }
+    }
+    catch [System.Net.WebException] {
+        $response = $_.Exception.Response
+        if ($null -ne $response) {
+            $httpResponse = [System.Net.HttpWebResponse] $response
+            try {
+                return [pscustomobject]@{
+                    status        = 'failed'
+                    uri           = $uri
+                    status_code   = [int] $httpResponse.StatusCode
+                    bytes_read    = 0
+                    content_type  = $httpResponse.ContentType
+                    content_range = $httpResponse.Headers['Content-Range']
+                    accept_ranges = $httpResponse.Headers['Accept-Ranges']
+                }
+            }
+            finally {
+                $httpResponse.Close()
+            }
+        }
+        throw
+    }
+}
+
+function Invoke-JellyfinSessionProof {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Context,
+        [Parameter(Mandatory = $true)]
+        [string] $JellyfinItemId,
+        [Parameter(Mandatory = $true)]
+        [string] $MediaSourceId,
+        [Parameter(Mandatory = $true)]
+        [string] $PlaySessionId,
+        [Int64] $PositionTicks = 0
+    )
+
+    $headers = @{ 'X-Emby-Token' = $Context.api_key }
+    $payload = @{
+        ItemId        = $JellyfinItemId
+        MediaSourceId = $MediaSourceId
+        PlaySessionId = $PlaySessionId
+        CanSeek       = $true
+        PositionTicks = $PositionTicks
+        IsPaused      = $false
+        IsMuted       = $false
+    } | ConvertTo-Json -Depth 6
+
+    $results = [ordered]@{}
+    $steps = [ordered]@{
+        started  = 'Sessions/Playing'
+        progress = 'Sessions/Playing/Progress'
+        stopped  = 'Sessions/Playing/Stopped'
+    }
+
+    foreach ($entry in $steps.GetEnumerator()) {
+        $uri = "$($Context.base_url)/$($entry.Value)"
+        $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec 20
+        $results[$entry.Key] = [int] $response.StatusCode
+    }
+
+    return [pscustomobject]@{
+        status          = 'reported'
+        started_status  = $results.started
+        progress_status = $results.progress
+        stopped_status  = $results.stopped
+    }
+}
+
+function Get-JellyfinHostLogDirectory {
+    $localAppData = [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return $null
+    }
+
+    return (Join-Path $localAppData 'jellyfin\log')
+}
+
+function Get-LatestJellyfinDirectStreamDiagnostic {
+    param(
+        [datetime] $Since = [datetime]::MinValue,
+        [string] $ArtifactDir = ''
+    )
+
+    $logDirectory = Get-JellyfinHostLogDirectory
+    if ([string]::IsNullOrWhiteSpace($logDirectory) -or (-not (Test-Path -LiteralPath $logDirectory))) {
+        return $null
+    }
+
+    $logFile = Get-ChildItem -LiteralPath $logDirectory -Filter 'FFmpeg.DirectStream-*.log' -ErrorAction SilentlyContinue |
+        Where-Object { $_

@@ -1,0 +1,43 @@
+{
+  "name": "@repo/filmu-python",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "lint": ".\\.venv\\Scripts\\python.exe -m ruff check . && .\\.venv\\Scripts\\python.exe -m mypy filmu_py",
+    "lint:fix": ".\\.venv\\Scripts\\python.exe -m ruff check . --fix && .\\.venv\\Scripts\\python.exe -m ruff format .",
+    "format:check": "prettier --check \"README.md\" \"package.json\" \"docs/**/*.md\" && .\\.venv\\Scripts\\python.exe -m ruff format --check .",
+    "format:fix": "prettier --write \"README.md\" \"package.json\" \"docs/**/*.md\" && .\\.venv\\Scripts\\python.exe -m ruff format .",
+    "proof:playback": "pwsh -NoProfile -File ./scripts/run_playback_proof.ps1",
+    "proof:playback:jellyfin": "pwsh -NoProfile -File ./scripts/run_playback_proof.ps1 -MediaServerProvider jellyfin -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
+    "proof:playback:plex": "pwsh -NoProfile -File ./scripts/run_playback_proof.ps1 -MediaServerProvider plex -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
+    "proof:playback:emby": "pwsh -NoProfile -File ./scripts/run_playback_proof.ps1 -MediaServerProvider emby -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
+    "proof:playback:providers": "pwsh -NoProfile -File ./scripts/run_media_server_proof_gate.ps1 -Providers plex,emby -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
+    "proof:playback:stability": "pwsh -NoProfile -File ./scripts/run_playback_proof_stability.ps1",
+    "proof:playback:gate": "pwsh -NoProfile -File ./scripts/run_playback_proof_stability.ps1 -RepeatCount 2 -ProofStaleDirectRefresh -RequirePreferredClientPlayback -ReuseExistingItem -RequireCompletedState -TmdbId 603 -Title \"The Matrix\"",
+    "proof:playback:providers:gate": "pwsh -NoProfile -File ./scripts/run_media_server_proof_gate.ps1 -Providers plex,emby -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
+    "proof:windows:vfs:providers": "pwsh -NoProfile -File ./scripts/run_windows_media_server_gate.ps1 -Providers jellyfin,emby,plex -MountPath C:\\FilmuCoreVFS -ReuseExistingItem -SkipStart",
+    "proof:windows:vfs:providers:gate": "pwsh -NoProfile -File ./scripts/run_windows_media_server_gate.ps1 -Providers jellyfin,emby,plex -MountPath C:\\FilmuCoreVFS -ReuseExistingItem -SkipStart",
+    "proof:playback:ci:readiness": "pwsh -NoProfile -File ./scripts/check_playback_gate_runner.ps1",
+    "proof:playback:ci:readiness:providers": "pwsh -NoProfile -File ./scripts/check_playback_gate_runner.ps1 -RequireProviderGate",
+    "proof:windows:vfs:soak": "pwsh -NoProfile -File ./scripts/run_windows_vfs_soak.ps1 -RequireFilmuvfs",
+    "proof:windows:vfs:gate": "pwsh -NoProfile -File ./scripts/run_windows_vfs_soak.ps1 -RequireFilmuvfs -RequireRemux -SequentialMinutes 15 -SeekIterations 32 -ConcurrentReaders 3 -ConcurrentIterations 64",
+    "stack:validate": "pwsh -NoProfile -File ./scripts/validate_platform_stack.ps1",
+    "stack:windows:start": "pwsh -NoProfile -File ./scripts/start_windows_stack.ps1",
+    "stack:windows:check": "pwsh -NoProfile -File ./scripts/status_windows_stack.ps1",
+    "stack:windows:status": "pwsh -NoProfile -File ./scripts/status_windows_stack.ps1",
+    "stack:windows:stop": "pwsh -NoProfile -File ./scripts/stop_windows_stack.ps1",
+    "rust:fmt": "cargo fmt --manifest-path ./rust/filmuvfs/Cargo.toml --all --check",
+    "rust:check": "cargo check --manifest-path ./rust/filmuvfs/Cargo.toml",
+    "rust:test": "cargo test --manifest-path ./rust/filmuvfs/Cargo.toml",
+    "security:audit": "uv run --extra quality pip-audit",
+    "security:bandit": "uv run --extra quality bandit -r filmu_py -q",
+    "perf:bench": "uv run --extra quality pytest -q --benchmark-only",
+    "worker": "python -m filmu_py.workers.tasks",
+    "dev": "python -m filmu_py.main"
+  }
+}
+
+
+

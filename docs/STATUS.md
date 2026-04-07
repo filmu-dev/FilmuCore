@@ -1,0 +1,871 @@
+# Implementation Status
+
+## Current focus
+
+The current priority order is:
+
+1. Provision and enforce the new self-hosted playback-gate CI path, then keep it green. The runner-readiness path now exists in [PLAYBACK_GATE_RUNNER_SETUP.md](PLAYBACK_GATE_RUNNER_SETUP.md) and [../scripts/check_playback_gate_runner.ps1](../scripts/check_playback_gate_runner.ps1); Windows dev hosts are expected to fail that check because the merge gate targets a Linux /dev/fuse runner.
+2. Deepen the mounted FilmuVFS data plane now that chunk-engine reads, adaptive prefetch, and optional L2 cache exist: longer-running soak/backpressure validation, richer mounted metrics, and rollout hardening.
+3. Expand the plugin platform from the now-real runtime baseline into richer packaged distribution, explicit compatibility/version policy, and real non-stub built-in integrations.
+4. Extend observability beyond the new layer-1 baseline with rate-limiter, GraphQL, queue/control-plane, and mount/VFS data-plane visibility.
+5. Harden orchestration semantics further (idempotency, outbox, replay safety) before durable-bridge work.
+
+## Current live-stack issues
+
+- The FilmuVFS mount layer is no longer Linux-only in code. [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs) now resolves a host adapter, Linux hosts use `fuse3`, and Windows hosts route through the explicit adapter boundary in [`../rust/filmuvfs/src/windows_host.rs`](../rust/filmuvfs/src/windows_host.rs). Windows now has both ProjFS in [`../rust/filmuvfs/src/windows_projfs.rs`](../rust/filmuvfs/src/windows_projfs.rs) and WinFSP in [`../rust/filmuvfs/src/windows_winfsp.rs`](../rust/filmuvfs/src/windows_winfsp.rs); `auto` still resolves to ProjFS by policy/default, while the current verified native Windows-host playback path is the raw WinFSP folder mount at `C:\FilmuCoreVFS`.
+- The Windows-native adapter boundary removes `\\wsl.localhost` from the intended playback path for Windows-hosted Jellyfin/Plex/Emby. The WSL UNC bridge remains available for debugging, but it should not be treated as the production-performance topology. The canonical helper-managed native Windows folder path used in current validation is `C:\FilmuCoreVFS`; drive-letter aliases are intentionally not part of that managed path.
+- The Windows adapter path has passed the Rust compile/test gate on this host. The current ProjFS backend keeps per-stream handles keyed by ProjFS `DataStreamId`, releases them on file-handle-close notifications instead of reopening for every `GetFileData` callback, and emits Windows-native metrics from [`../rust/filmuvfs/src/telemetry.rs`](../rust/filmuvfs/src/telemetry.rs): `filmuvfs_windows_projfs_callbacks_total`, `filmuvfs_windows_projfs_callback_duration_seconds`, `filmuvfs_windows_projfs_stream_handle_events_total`, and `filmuvfs_windows_projfs_notifications_total`. Long-running Windows sessions also emit the same `windows projfs adapter summary` operator rollup periodically by default every 300 seconds through `FILMUVFS_WINDOWS_PROJFS_SUMMARY_INTERVAL_SECONDS` / `--windows-projfs-summary-interval-seconds`, with `0` disabling the background task.
+- Current Windows playback evidence is now split clearly by backend:
+  - ProjFS remains the policy/default backend and still has the earlier sparse multi-gigabyte `GetFileData` callback behavior that makes it a poor streaming path for real Jellyfin/Plex/Emby workloads.
+  - The raw WinFSP folder-mount path is now validated past first bring-up: root enumeration works, direct `ffprobe` works, the native soak/remux gate passes on `C:\FilmuCoreVFS`, Jellyfin reaches sustained mounted reads and successful software transcode, and sampled native Emby playback/probe/stream-open checks now succeed across multiple titles.
+  - The recent native Windows buffering fix came from in-flight foreground chunk-fetch coalescing in [`../rust/filmuvfs/src/chunk_engine.rs`](../rust/filmuvfs/src/chunk_engine.rs), which stopped duplicate upstream fetches for the same chunk under Emby playback pressure.
+- Windows now also has a native soak/regression runner in [../scripts/run_windows_vfs_soak.ps1](../scripts/run_windows_vfs_soak.ps1) plus package entrypoints [../package.json](../package.json) proof:windows:vfs:soak and proof:windows:vfs:gate, and that gate is currently green on this workspace.
+- The isolated Docker Plex path is now also materially fixed on the Linux/WSL topology: the WSL host mount at `/mnt/filmuvfs` is shared into the Plex container correctly, stale host-binary reuse is eliminated, entry-id refresh collisions are fixed, direct Plex part reads return `206`, and recent Plex logs show real playback/transcode startup against mounted files.
+- Native Windows media-center support is now treated as a first-class contract for Jellyfin, Emby, and Plex on `C:\FilmuCoreVFS`. Docker Plex parity is covered by repeatable proof artifacts, the new native Windows provider gate exists in [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1), and current recorded evidence is green for Emby with earlier native Jellyfin proof still valid. The remaining native Windows parity gap is collecting the same recorded evidence for a real local Plex Media Server once one is configured.
+
+- The previously investigated post-commit async ORM failures in [`request_item()`](../filmu_py/services/media.py#L3966), [`retry_item()`](../filmu_py/services/media.py#L2505), and [`reset_item()`](../filmu_py/services/media.py#L2546) are now fixed by materializing detached snapshots before commit, so the frontend request/retry/reset flows no longer rely on expired ORM state.
+- The last documented worker-side post-commit ORM failure in [`rank_streams()`](../filmu_py/workers/tasks.py#L980) is now fixed too: selected-stream data is materialized into detached primitives and [`SelectedStreamCandidateRecord`](../filmu_py/services/media.py#L1361) before crossing the selection commit boundary, so the `rank_streams -> debrid_item` handoff no longer trips `DetachedInstanceError` / `MissingGreenlet`.
+- The previously investigated direct-play failed-lease contract regression is now fixed: direct route callers keep the stable `503` detail from persisted lease state, while fresher provider failure reasons are still recorded/logged during the refresh attempt in [`resolve_direct_file_link_resolution()`](../filmu_py/services/playback.py#L3492) and [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py#L1153).
+- The previously unrelated full-suite failures in [`tests/test_dashboard_routes.py`](../tests/test_dashboard_routes.py) and [`tests/test_rank_stage_domain.py`](../tests/test_rank_stage_domain.py) are now fixed at the test layer: dashboard assertions are environment-agnostic and rank-stage assertions now match the detached [`SelectedStreamCandidateRecord`](../filmu_py/services/media.py#L1364) DTO contract.
+- The worker pipeline now emits explicit downstream enqueue outcomes from [`scrape_item()`](../filmu_py/workers/tasks.py#L1141), [`parse_scrape_results()`](../filmu_py/workers/tasks.py#L712), and [`rank_streams()`](../filmu_py/workers/tasks.py#L825), and it clears stale queued ARQ jobs before re-enqueueing downstream parse/rank/debrid stages in [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py). This removed the earlier silent stall where items could reach `scraped` and stop with no parse/rank/debrid evidence after retry/reset cycles.
+- Live Docker verification now shows the fixed behavior on a real reset path: the worker logs explicit downstream `parse_scrape_results`, `rank_streams`, and `debrid_item` enqueue events, and a previously stuck item (`9f520078-633f-4663-9f23-7c4ae104221c`) advanced through `scraped -> downloaded -> completed` with persisted media entries.
+- The worker scrape path still shows live upstream instability through repeated Torrentio `403 Forbidden` failures and `imdb_id_missing` skips, but those warnings are now structured with `provider=torrentio`, `status=403`, and `item_id`, which makes them filterable apart from true pipeline-stall evidence.
+- The scraping cooldown compatibility fields are already present and forwarded through the legacy settings surface in [`ScrapingSettings`](../filmu_py/config.py#L446) and [`Settings.from_compatibility_dict()`](../filmu_py/config.py#L834): `after_2`, `after_5`, `after_10`, and `max_failed_attempts`.
+- [`/api/v1/scrape/auto`](../filmu_py/api/routes/scrape.py) now resolves namespaced external identifiers (`tvdb:`, `tmdb:`, `imdb:`) through an external-ref-aware lookup before any UUID-only fetch happens, so requests like `tvdb:424536` no longer crash PostgreSQL with invalid-UUID errors. Missing items still upsert through the shared request-intake path with optional `requested_seasons` / `requested_episodes` before continuing into the real scrape queue, and [`get_item()`](../filmu_py/services/media.py) now fails fast with a clear UUID-only error if a future caller passes an external ref by mistake.
+- Library item-type compatibility is now normalized on the backend: [`_build_summary_record()`](../filmu_py/services/media.py#L328) emits `show` as the wire type, [`_matches_item_type()`](../filmu_py/services/media.py#L1010) treats `show` and `tv` as aliases, and GraphQL now exposes both compatibility [`mediaType`](../filmu_py/graphql/types.py#L33) and enum-backed [`mediaKind`](../filmu_py/graphql/types.py#L34) for the same rows. Live verification confirmed both [`GET /api/v1/items?type=show`](../filmu_py/api/routes/items.py#L246) and [`GET /api/v1/items?type=tv`](../filmu_py/api/routes/items.py#L246) now return TV shows, and newly requested shows appear in the library immediately.
+- Current live blocker for newly requested TV shows is no longer library visibility but metadata/scrape completeness: TMDB external-ref enrichment for TVDB-originated requests still falls back to placeholder rows when [`find_by_external_id()`](../filmu_py/services/tmdb.py#L241) cannot resolve the TVDB id, leaving `poster_path` and IMDb data empty. In live Docker verification that means the library now shows the row, but the card has no poster and the worker can stall/fail quickly because [`torrentio`](../filmu_py/plugins/builtin/torrentio.py#L81) skips `imdb_id_missing` requests and [`scrape_item()`](../filmu_py/workers/tasks.py#L1517) ultimately records `no candidates`.
+- TVDB-originated request enrichment now has a dedicated fallback client in [`tvdb.py`](../filmu_py/services/tvdb.py), caches the TVDB bearer token in Redis-backed [`CacheManager`](../filmu_py/core/cache.py), and runs a three-stage recovery path inside [`_fetch_request_metadata()`](../filmu_py/services/media.py#L2481): direct TVDB series lookup, TMDB cross-lookup via resolved IMDb, and a last-resort TMDB TV search by title. The REST surface is unchanged, but request-time rows can now pick up `title`, `poster_path`, `tmdb_id`, and `imdb_id` even when TMDB `/find?...external_source=tvdb_id` returns nothing.
+- The worker scrape path now gives TVDB-only show requests one inline enrichment retry before failing: [`scrape_item()`](../filmu_py/workers/tasks.py#L1452) calls [`enrich_item_metadata()`](../filmu_py/services/media.py#L2752) when a row has `tvdb_id` but no `imdb_id` and the first scraper pass produced no candidates, then re-runs scraper fan-out with the updated attributes before deciding whether the item truly failed.
+- GraphQL request intake is now richer but additive-only: the existing [`requestItem`](../filmu_py/graphql/resolvers.py#L306) mutation now returns [`RequestItemResult`](../filmu_py/graphql/types.py#L186) with `itemId`, `enrichmentSource`, `hasPoster`, `hasImdbId`, and `warnings`, while all REST request endpoints keep their prior request/response shapes.
+- Live Docker verification after rebuilding [`filmu-python`](../docker-compose.local.yml#L43) and [`arq-worker`](../docker-compose.local.yml#L107) confirmed the enrichment path is now active for `tvdb:424536`: the GraphQL [`requestItem`](../filmu_py/graphql/resolvers.py#L306) mutation reported `enrichmentSource="search_fallback"`, `hasPoster=true`, and `hasImdbId=true`, and [`GET /api/v1/items/{id}`](../filmu_py/api/routes/items.py#L320) returned populated `tmdb_id`, `imdb_id`, and `poster_path` metadata. The remaining live blocker on that item is now upstream scraper behavior (`torrentio` `403 Forbidden` / empty provider summaries), not missing TVDB enrichment or `imdb_id_missing` intake gaps.
+- Startup and recovery behavior now actively repair stale library rows instead of waiting for manual retries: [`create_app()`](../filmu_py/app.py#L231) now enqueues one-shot [`backfill_imdb_ids`](../filmu_py/workers/tasks.py#L1436), [`recover_incomplete_library`](../filmu_py/workers/tasks.py#L1271), and [`retry_library`](../filmu_py/workers/tasks.py#L1314) jobs at boot when ARQ is enabled, and the sentinel key was versioned so local stacks re-run metadata repair after this pass.
+- Failed TVDB placeholder rows with no `tmdb_id` are now repairable by the same metadata backfill path: [`backfill_missing_imdb_ids()`](../filmu_py/services/media.py#L2816) no longer skips TVDB-only failed items, but instead re-enters [`_fetch_request_metadata()`](../filmu_py/services/media.py#L2681), persists recovered `tmdb_id` / `poster_path` / `imdb_id`, and retries the item back into the active queue.
+- Recovery routing is now more accurate for failed items: [`recover_incomplete_library()`](../filmu_py/services/media.py#L4381) inspects whether a failed row has persisted [`ScrapeCandidateORM`](../filmu_py/db/models.py#L508) records; failed rows with prior scrape candidates are requeued at parse time, while failed rows with no scrape candidates are moved back to `requested` and requeued through [`scrape_item`](../filmu_py/workers/tasks.py#L1452) instead of being incorrectly pushed straight to parse.
+- Torrentio requests are now normalized to HTTPS even if a local setting or persisted compatibility payload still points at `http://torrentio.strem.fun`: [`_normalize_base_url()`](../filmu_py/plugins/builtin/torrentio.py#L21) upgrades the official host during [`TorrentioScraper.initialize()`](../filmu_py/plugins/builtin/torrentio.py#L70), removing the avoidable plain-HTTP failure class from live stacks.
+- Torrentio is now treated as disabled when it is unconfigured: [`TorrentioScraper.initialize()`](../filmu_py/plugins/builtin/torrentio.py#L70) defaults `enabled` to `False` unless the compatibility settings explicitly enable it, which matches the backend settings model in [`TorrentioConfig`](../filmu_py/config.py#L388) and avoids silently treating an unconfigured scraper as active.
+- Stale ARQ result keys were a concrete cause of some rows remaining forever in `Scraped`: stable stage job ids such as [`parse_scrape_results_job_id()`](../filmu_py/workers/tasks.py#L178) and [`rank_streams_job_id()`](../filmu_py/workers/tasks.py#L190) can leave `arq:result:*` entries behind, and those stale results block re-enqueue attempts. The enqueue helpers ([`enqueue_parse_scrape_results()`](../filmu_py/workers/tasks.py#L314), [`enqueue_scrape_item()`](../filmu_py/workers/tasks.py#L352), [`enqueue_rank_streams()`](../filmu_py/workers/tasks.py#L380), [`enqueue_debrid_item()`](../filmu_py/workers/tasks.py#L392), and [`enqueue_finalize_item()`](../filmu_py/workers/tasks.py#L404)) now proactively clear stale `arq:result:*` rows before enqueueing, so recovery jobs can actually restart orphaned pipeline stages.
+- Backend settings saves now propagate scraper/runtime configuration correctly without frontend changes: [`_persist_runtime_settings()`](../filmu_py/api/routes/settings.py#L58) now updates the in-memory [`plugin_settings_payload`](../filmu_py/resources.py#L49), and worker plugin runtime in [`_resolve_plugin_registry()`](../filmu_py/workers/tasks.py#L1961) now rebuilds whenever the persisted plugin-settings snapshot changes.
+- The live `MissingGreenlet` crash in [`rank_streams()`](../filmu_py/workers/tasks.py#L1035) was caused by [`_set_item_next_retry_at()`](../filmu_py/workers/tasks.py#L836) reading an ORM field after commit; that helper now returns the requested value directly, removing the post-commit lazy-load path that was exploding inside ARQ workers.
+- [`/api/v1/items`](../filmu_py/api/routes/items.py) and [`/api/v1/items/{id}`](../filmu_py/api/routes/items.py) now also expose additive cooldown metadata (`next_retry_at`, `recovery_attempt_count`, `is_in_cooldown`) backed by [`MediaItemORM.next_retry_at`](../filmu_py/db/models.py) and migration [`20260322_0021_media_item_next_retry_at.py`](../filmu_py/db/alembic/versions/20260322_0021_media_item_next_retry_at.py), so clients can show retry timing without inventing a new lifecycle state string.
+- [`rank_streams()`](../filmu_py/workers/tasks.py#L921) now emits structured `rank_streams.no_winner` diagnostics (`parsed_stream_count`, `passing_fetch_count`, `above_threshold_count`, `failure_reason`) and [`scrape_item()`](../filmu_py/workers/tasks.py#L1167) now emits per-provider `scrape_item.provider_summary` logs, which makes it possible to distinguish scraper starvation from ranking rejection without querying the database.
+- Live verification confirms the new diagnostics are present in Docker logs for rank-failure items, including provider contribution summaries and `rank_streams.no_winner` fields such as `failure_reason=no_candidates_passing_fetch`. The cooldown re-enqueue path is wired in code and test-clean, though the latest live verification still showed intermittent stale-result suppression on one historically stuck item, so the diagnostics are authoritative even where the cooldown re-scrape was not yet clearly observed in the captured log tail.
+- Non-English / alternate-title ranking now persists TMDB alternative titles into the item metadata blob under `metadata["aliases"]`, forwards that alias list into [`RTN.rank_torrent()`](../filmu_py/workers/tasks.py#L1040), and reuses the best canonical-vs-alias Levenshtein ratio inside [`rank_persisted_streams_for_item()`](../filmu_py/services/media.py#L1755) instead of comparing only against the canonical title.
+- Live Docker verification after rebuilding [`filmu-python`](../docker-compose.local.yml#L43) and [`arq-worker`](../docker-compose.local.yml#L107) confirmed the alias path is active for a real item: requesting `tmdb:13274` persisted multiple TMDB aliases on the existing row, the worker enqueued `parse_scrape_results` → `rank_streams` → `debrid_item`, and the item advanced to `downloaded` instead of stopping at `rank_streams`.
+- The debrid failure path is now hardened for transient provider throttling: [`DebridRateLimitError`](../filmu_py/services/debrid.py#L31) carries provider + retry-after metadata from the download limiter, [`debrid_item()`](../filmu_py/workers/tasks.py#L1500) now emits structured `debrid_item.rate_limited` warnings for both limiter-driven throttling and provider `429` responses, and those rate-limited attempts are left in ARQ retry/backoff rather than transitioning the item to `failed`.
+- The detached async ORM failure-transition regression in [`transition_item()`](../filmu_py/services/media.py#L4240) is now fixed with the same detached-record pattern used in the earlier request/reset/retry pass: transition results are materialized before commit and reused after the session boundary, so debrid-stage failure handling no longer masks the original provider error with `DetachedInstanceError` / post-commit ORM access.
+- Live Docker verification after rebuilding [`filmu-python`](../docker-compose.local.yml#L43) and [`arq-worker`](../docker-compose.local.yml#L107) confirmed the new behavior on `tmdb:13274`: the worker again advanced through `scrape_item` → `parse_scrape_results` → `rank_streams` → `debrid_item`, logged `debrid_item.rate_limited` at `WARNING` with `provider=realdebrid` and `retry_after=1.0`, left the row in `downloaded`, and no detached-ORM / `MissingGreenlet` secondary crash appeared in the worker log.
+- The Dockerized [`filmuvfs`](../docker-compose.local.yml) sidecar is now up and mounted successfully in the WSL-driven local stack, but its watch client still shows intermittent reconnect warnings before later delta recovery, so the control plane is resilient but still noisy.
+- The containerized local stack still represents the Linux/FUSE validation topology. It is not the same thing as Windows-native mounted playback, which now has its own native adapter boundary with ProjFS and WinFSP backends.
+- The active [`FilmuCore`](../docker-compose.local.yml) local stack now also includes optional [`zilean`](../docker-compose.local.yml) plus [`zilean-postgres`](../docker-compose.local.yml). Backend-facing scraper settings must use the Compose-network URL `http://zilean:8181`; `http://localhost:8181` points back to the backend container itself and is not a valid in-container scraper target.
+- The Windows/WSL stale mount-root failure class (`Transport endpoint is not connected`, mountpoint `ENOTCONN`, and Docker `/mnt/filmuvfs` bind-source validation failures) is now auto-healed by preflight logic in [`../start_local_stack.ps1`](../start_local_stack.ps1): [`Repair-MountRoot`](../start_local_stack.ps1) runs before Compose startup and the script performs one automatic compose retry after repair.
+- The playback-proof harness in [`../scripts/run_playback_proof.ps1`](../scripts/run_playback_proof.ps1) is now beyond baseline status. It can start or reuse the local stack, verify frontend/backend readiness, submit a real movie request through [`POST /api/v1/items/add`](../filmu_py/api/routes/items.py), poll public item APIs, verify mounted-file visibility, perform a mounted byte-read proof, capture [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) snapshots, write timestamped evidence bundles under `playback-proof-artifacts/`, optionally configure one media-server updater target, restart the worker so persisted updater settings are applied immediately, accept stub request-log evidence for the media-server stage, auto-load local Plex/Jellyfin/Emby URLs and auth tokens from [`.env`](../.env), and now also prove real Jellyfin library visibility, playback-info, stream-open, playback-session reporting, stale-link route recovery, true preferred-client playback, Docker Plex playback-start on the WSL host mount, and native Windows Emby playback-start/session reporting.
+- The same harness now also includes a stale-link proof path: it can force the selected direct media entry stale through [`../tests/fixtures/force_media_entry_unrestricted_stale.py`](../tests/fixtures/force_media_entry_unrestricted_stale.py), reuse an already completed item, and verify live route-level recovery through [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py). Current live evidence shows the route can recover and serve `206 Partial Content` even when persisted item detail still reports the stale `unrestricted_url`, so the proof is valid at the HTTP serving layer but the persisted lease-refresh story still needs follow-up hardening.
+- The previous late-stage playback-harness blocker is now fixed: successful stale-refresh and preferred-client runs emit `summary.json` and print the terminal PASS line again.
+- The stricter gate-oriented wrapper in [`../package.json`](../package.json) as `proof:playback:gate`, backed by [`../scripts/run_playback_proof_stability.ps1`](../scripts/run_playback_proof_stability.ps1), is now live-green locally with repeated passes for the full Jellyfin/preferred-client path. A second media-center parity gate now also exists as `proof:playback:providers:gate`, backed by [`../scripts/run_media_server_proof_gate.ps1`](../scripts/run_media_server_proof_gate.ps1), and is live-green for Docker Plex plus native Windows Emby. The remaining step is CI/merge-policy promotion, not first local gate success.
+- A first self-hosted Linux CI wiring path now exists in [`.github/workflows/playback-gate.yml`](../.github/workflows/playback-gate.yml), using [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) plus env-driven frontend/browser/debrid prerequisites. That helper now also starts Plex + Emby and runs [`../scripts/run_media_server_proof_gate.ps1`](../scripts/run_media_server_proof_gate.ps1) automatically when `PLEX_TOKEN` and `EMBY_API_KEY` are present on the runner. The remaining step is provisioning that runner/secrets path and making the checks required.
+- Preferred-client playback proof is now claimed with live evidence: a Chrome-backed host-browser run reached a real playing state end-to-end through the authenticated frontend client, and a standalone Edge-backed host-browser run also passed against the same backend stack.
+- The proof runner is now less machine-specific: host-browser playback is selected explicitly through `-PreferredClientBrowserExecutable` or `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`, the package scripts now use `pwsh` so Windows and Linux hosts stay viable, and mounted-read proof no longer depends on WSL alone because the runner can fall back to host bash or backend-container shell execution.
+- Local-stack playback-proof auth drift is now reduced: [`../docker-compose.local.yml`](../docker-compose.local.yml) now aligns [`FILMU_PY_API_KEY`](../docker-compose.local.yml) for [`filmu-python`](../docker-compose.local.yml) with the same environment-driven value already used by the other local-stack services.
+- Re-audit of TV completion/projection behavior confirms major compatibility progress (`covered_season_numbers` projection and range-aware season parsing), but two high-risk completion edges still remain: [`_evaluate_show_completion()`](../filmu_py/services/media.py) currently treats any persisted media-entry row as coverage in key paths (without consistently requiring `refresh_state == "ready"`), and ambiguous show-pack names still fall back to full-season coverage when no season can be inferred.
+- Partial multi-season ranking is now less likely to collapse to one high-quality episode: [`rank_streams()`](../filmu_py/workers/tasks.py) applies a coverage-aware bonus for partial show requests so season packs and broader multi-episode batches outrank narrow single-episode hits when they satisfy more of the requested missing scope. This keeps the existing multipart tie-break and idempotent media-entry fixes intact while moving selection behavior closer to the stricter `riven-ts` season/episode filtering model.
+- Mounted FilmuVFS output now also normalizes real shows under season folders while preserving sanitized source filenames. Live verification against `Stranger Things (2016)` now shows `Season 01` through `Season 05` directories instead of a flat root-level file dump, and the Python catalog supplier emits path-migration removals so those visible moves propagate to the Rust sidecar.
+- The remaining orchestration gap versus current `riven-ts` is no longer first partial-scope awareness; it is deeper **torrent-content completeness validation**. Upstream TypeScript validates season/episode coverage at parse time and again at torrent-file/container selection time, while FilmuCore still primarily improves completeness through parse filtering, coverage-aware ranking, and show-level retry semantics.
+
+Current local testing status:
+
+- Threshold B is effectively reached: meaningful local frontend + python-backend testing is now possible for dashboard, library, calendar, settings, logs/notifications SSE, and scrape compatibility flows.
+- `/api/v1/triven/item/{id}` is available, `/api/v1/stream/file/{item_id}` has a hardened direct-play baseline, and the HLS routes now provide a partial baseline for both local file-backed generation and upstream playlist/segment proxying.
+- The HLS route family now also supports using a resolved `remote-direct` playback winner as a transcode input, and generated-local HLS cache reuse is now source-aware.
+- Full playback validation is no longer blocked by the earlier frontend/backend item-ID contract mismatch, but it is still limited by stronger direct-play source resolution, end-to-end playback verification, and production-grade ffmpeg/transcoding governance.
+- Items can currently be requested, scraped through 3 built-in scraper plugins (Prowlarr, RARBG, Torrentio), parsed, ranked via the RTN-compatible ranking engine, selected, and downloaded through the real debrid provider pipeline. Raw scrape results persist to `ScrapeCandidateORM` and the end-to-end worker path (`scrape_item` → `parse_scrape_results` → `rank_streams` → `debrid_item` → `finalize_item`, plus recovery/content-service/outbox crons) executes with provider-backed debrid integration.
+- The latest targeted detached-session regression sweep passed with `51 passed / 3 warnings` using [`./.uv-test-env/Scripts/python.exe -m pytest -q tests/test_rank_stage_domain.py tests/test_scraped_item_worker.py`](../.uv-test-env/Scripts/python.exe).
+- The current full Python run is green at `628 passed`, and the local verification pass for the latest backend/doc updates also completed successfully after installing the declared project dependencies.
+- The authoritative readiness breakdown is documented in [`LOCAL_FRONTEND_TESTING_READINESS.md`](LOCAL_FRONTEND_TESTING_READINESS.md).
+
+## Current state snapshot
+
+- GraphQL baseline is live with plugin-aware schema composition.
+- Filesystem plugin loading is live for the current manifest-based baseline.
+- ARQ worker reliability baseline is in place.
+- A first `ItemRequest` persistence slice now exists, separating request intent from the core `MediaItemORM` lifecycle row for repeated external-reference requests.
+- A first additive media-specialization persistence slice now exists, with one-to-one `Movie`, `Show`, `Season`, and `Episode` rows linked to `MediaItemORM` without changing the current route contracts.
+- A first additive stream-candidate persistence slice now exists, with persisted stream candidates plus blacklist and parent/child relation rows linked to `MediaItemORM`.
+- A first parse-stage persistence seam now exists: manual scrape session completion can parse selected filenames and persist validated pre-ranking candidates into `StreamORM`.
+- A first service-layer rank-streams seam now exists: persisted parsed candidates can be scored durably back onto `StreamORM.rank` and `StreamORM.lev_ratio` without reparsing raw titles.
+- The dev toolchain now includes `pytest-cov`, and the built-in Real-Debrid / AllDebrid clients now use explicit `httpx` connection-pool limits for better future provider-load behavior.
+- Settings, dashboard, library, calendar, scrape, and legacy watch-redirect compatibility baselines are in place.
+- Public watch/media-type alias `/api/v1/triven/item/{id}` is available.
+- Logs/history and minimal SSE compatibility baseline are in place.
+- Request-time TMDB enrichment now also performs secondary external-ID recovery for missing IMDb mappings, persists recovered `imdb_id` values into the item `attributes` blob, and exposes a worker-side backfill path for already-stuck items missing IMDb IDs.
+- `/api/v1/stream/file/{item_id}` has a hardened direct-play baseline with broader identifier/source matching.
+- `/api/v1/stream/hls/{item_id}/*` has a partial baseline for local file-backed generation, already-HLS-compatible upstream playlist sources, and `remote-direct` ffmpeg transcode fallback.
+- A reusable shared serving core now exists in [`filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) and already powers direct-file serving, partial HLS support, remote proxying, and serving-runtime visibility.
+- An internal serving-status surface now exists at [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) for serving-runtime visibility.
+- A local frontend + backend integration stack now exists in [`docker-compose.local.yml`](../docker-compose.local.yml), with operator instructions in [`LOCAL_DOCKER_STACK.md`](LOCAL_DOCKER_STACK.md).
+- That local stack has now also been exercised end-to-end at the container level: `postgres`, `redis`, `filmu-python`, and `frontend` all come up together once the backend Alembic startup path is made async-DSN-safe.
+- The local stack now pins currently available latest-compatible image tags for local testing in [`docker-compose.local.yml`](../docker-compose.local.yml): `postgres:18` and `redis:8.6.1-alpine`.
+- The same local stack now also includes optional [`zilean`](../docker-compose.local.yml) plus [`zilean-postgres`](../docker-compose.local.yml), with the backend expected to use `http://zilean:8181` as the in-network scraper URL.
+- A proto-first FilmuVFS catalog contract now exists at [`proto/filmuvfs/catalog/v1/catalog.proto`](../proto/filmuvfs/catalog/v1/catalog.proto), and the Python-side catalog supplier/runtime boundary now exists at [`filmu_py/services/vfs_catalog.py`](../filmu_py/services/vfs_catalog.py) and [`filmu_py/resources.py`](../filmu_py/resources.py).
+- A Rust FilmuVFS runtime now exists under [`rust/filmuvfs`](../rust/filmuvfs), including [`Cargo.toml`](../rust/filmuvfs/Cargo.toml), [`build.rs`](../rust/filmuvfs/build.rs), generated-proto wiring in [`src/proto.rs`](../rust/filmuvfs/src/proto.rs), WatchCatalog client/runtime code in [`src/catalog/client.rs`](../rust/filmuvfs/src/catalog/client.rs) and [`src/catalog/state.rs`](../rust/filmuvfs/src/catalog/state.rs), bootstrap in [`src/main.rs`](../rust/filmuvfs/src/main.rs), the Linux `fuse3` mount adapter in [`src/mount.rs`](../rust/filmuvfs/src/mount.rs), the Windows ProjFS adapter in [`src/windows_projfs.rs`](../rust/filmuvfs/src/windows_projfs.rs), and the Windows WinFSP adapter in [`src/windows_winfsp.rs`](../rust/filmuvfs/src/windows_winfsp.rs).
+- The Rust validation gate has now passed on this Windows host: [`rust:fmt`](../package.json), [`rust:check`](../package.json), and [`rust:test`](../package.json) all succeeded for [`../rust/filmuvfs`](../rust/filmuvfs).
+- The Rust crate now gates `fuse3` behind Linux-only boundaries and the Windows-native adapters behind Windows-only boundaries in [`../rust/filmuvfs/Cargo.toml`](../rust/filmuvfs/Cargo.toml), [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs), [`../rust/filmuvfs/src/windows_projfs.rs`](../rust/filmuvfs/src/windows_projfs.rs), and [`../rust/filmuvfs/src/windows_winfsp.rs`](../rust/filmuvfs/src/windows_winfsp.rs), so the catalog/runtime/telemetry path stays shared while each host uses its native adapter.
+- A first Rust mount-facing lifecycle layer now also exists in [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs), including catalog-backed `getattr`, `readdir`, `open`, `read`, and `release` behavior with focused tests and real WSL/Linux mounted execution.
+- A first cross-platform `Session::mount(...)` bootstrap seam now also exists in [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs), including stable inode mapping over the catalog hierarchy plus Linux `fuse3` and Windows native adapter selection; automated WSL/Linux mount-lifecycle validation, manual mounted-read smoke, and Plex/Emby playback validation now all pass in this workspace, and the Windows WinFSP folder-mount path now also reaches direct `ffprobe`, sustained Jellyfin reads, and successful software transcode on `C:\FilmuCoreVFS`.
+- A Linux-target compile check now also passes from this Windows host for [`../rust/filmuvfs`](../rust/filmuvfs) using `--target x86_64-unknown-linux-gnu`, and the local Docker stack now also supports the Dockerized [`filmuvfs`](../docker-compose.local.yml) sidecar when Compose is launched from WSL with the shared `/mnt/filmuvfs` host mount prepared.
+- Full current-frontend / Plex/Emby playback validation has now been exercised successfully on top of the mounted WSL path, the Python gRPC bridge now refreshes stale provider-backed direct links at serve time through [`../filmu_py/services/vfs_server.py`](../filmu_py/services/vfs_server.py), and the Windows/WSL stack now has one-command orchestration plus stale-mount recovery through [`../start_local_stack.ps1`](../start_local_stack.ps1), [`../status_local_stack.ps1`](../status_local_stack.ps1), [`../stop_local_stack.ps1`](../stop_local_stack.ps1), and the helper scripts under [`../rust/filmuvfs/scripts/`](../rust/filmuvfs/scripts/).
+- The Python-side FilmuVFS control plane is now generation-aware: [`../filmu_py/services/vfs_catalog.py`](../filmu_py/services/vfs_catalog.py) reuses generations for unchanged snapshots and can build reconnect deltas, while [`../filmu_py/services/vfs_server.py`](../filmu_py/services/vfs_server.py) now serves reconnect deltas when possible and exposes `RefreshCatalogEntry` for forced provider-link refresh.
+- The Python supplier now also normalizes mounted show paths into `Show Title (Year)/Season XX/<sanitized source filename>`, covers `S05x08`-style season/episode inference for show-level media entries, and emits delta removals when an existing entry id changes path so live mounted trees actually move.
+- The Rust sidecar now hardens stale reads and catalog identity: [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs) retries stale upstream reads inline through the new refresh RPC, [`../rust/filmuvfs/src/chunk_engine.rs`](../rust/filmuvfs/src/chunk_engine.rs) now uses `moka::future::Cache` instead of the synchronous cache, and [`../rust/filmuvfs/src/catalog/state.rs`](../rust/filmuvfs/src/catalog/state.rs) preserves stable assigned inodes while allocating fallback inodes on collisions.
+- The plugin runtime now includes plugin-scoped settings, host datasource injection, typed event hook workers, namespaced publishable-event governance, real MDBList polling plus real webhook notifications, and runtime visibility through [`/api/v1/plugins/events`](../filmu_py/api/routes/default.py) powered by [`../filmu_py/plugins/settings.py`](../filmu_py/plugins/settings.py), [`../filmu_py/plugins/context.py`](../filmu_py/plugins/context.py), [`../filmu_py/plugins/hooks.py`](../filmu_py/plugins/hooks.py), and [`../filmu_py/plugins/registry.py`](../filmu_py/plugins/registry.py).
+- The first operator-facing observability layer is now live: template-based route metrics, worker stage/retry/DLQ metrics with `structlog.contextvars`, cache hit/miss/invalidation/stale metrics, plugin load metrics, and plugin hook invocation/duration metrics now ship from [`../filmu_py/api/router.py`](../filmu_py/api/router.py), [`../filmu_py/workers/retry.py`](../filmu_py/workers/retry.py), [`../filmu_py/core/cache.py`](../filmu_py/core/cache.py), [`../filmu_py/plugins/loader.py`](../filmu_py/plugins/loader.py), and [`../filmu_py/plugins/hooks.py`](../filmu_py/plugins/hooks.py), with dedicated coverage in [`../tests/test_observability.py`](../tests/test_observability.py).
+- SubtitleEntryORM added (migration 0020): service helpers add/get/remove, subtitles list projected onto GET /api/v1/items/{id} extended detail response.
+- DownloaderAccountService: real provider account info from Real-Debrid / AllDebrid / Debrid-Link APIs, normalized shape, 5-minute cached at CacheManager key `downloader:user_info`.
+- GET /api/v1/downloader_user_info now returns real provider account data.
+- GET /api/v1/services now returns real provider enablement map from runtime DownloadersSettings.
+- ItemRequestORM now carries `requested_seasons`, `requested_episodes`, `is_partial` after migration `20260320_0019`.
+- POST /api/v1/webhook/overseerr now receives Overseerr/Jellyseerr request webhooks and creates item requests with optional partial season tracking.
+- `poll_content_services` now runs as an ARQ cron every 30 minutes and fans out to registered ContentServicePlugin implementations including MDBListContentService.
+- MDBListContentService is now a real HTTP polling implementation instead of a stub.
+- WebhookNotificationPlugin is now a real implementation with Discord embed + generic JSON webhook support, registered as both NotificationPlugin and PluginEventHookWorker.
+- VFS mounted `read()` now uses `ChunkEngine` planning + `moka::future` chunk caching, and stale CDN/provider URLs trigger `RefreshCatalogEntry` retry before returning `ESTALE`.
+- GraphQL compat subscriptions now exist on `/graphql`: [`itemStateChanged`](../filmu_py/graphql/schema.py), [`logStream`](../filmu_py/graphql/schema.py), and [`notifications`](../filmu_py/graphql/schema.py). [`itemStateChanged`](../filmu_py/graphql/schema.py) and [`notifications`](../filmu_py/graphql/schema.py) still mirror the existing SSE payload shapes, while [`logStream`](../filmu_py/graphql/schema.py) is now the intentional richer structured log surface on top of the same bounded broker in [`../filmu_py/core/log_stream.py`](../filmu_py/core/log_stream.py).
+- WebSocket subscription transport is enabled on `/graphql` for both `graphql-transport-ws` and `graphql-ws`, while `/api/v1/stream/*` remains unchanged for the current frontend.
+- GraphQL surface strategy is now explicit: REST + SSE remain frozen compatibility surfaces, while future frontend growth lands in GraphQL first.
+- Partial season filtering now applies during `parse_scrape_results()`, dropping parsed candidates whose season scope does not overlap the latest partial request before `StreamORM` persistence.
+- StremThru is now a real built-in DownloaderPlugin implementation with token-authenticated magnet add, status polling, and download-link resolution against the StremThru v0 API.
+- Show finalization is no longer eager for TV items: [`finalize_item()`](../filmu_py/workers/tasks.py) now evaluates requested episode scope against cached metadata, released-episode coverage, and active streams before choosing `completed`, `partially_completed`, or `ongoing`.
+- Non-terminal TV completion is now explicit in the Python state machine: [`ItemState.PARTIALLY_COMPLETED`](../filmu_py/state/item.py) and [`ItemState.ONGOING`](../filmu_py/state/item.py) remain scrape-eligible and are re-polled through [`poll_ongoing_shows()`](../filmu_py/workers/tasks.py).
+- Unreleased-item polling remains preserved as a separate cron path via [`poll_unreleased_items()`](../filmu_py/workers/tasks.py), while ongoing/partially-completed shows are checked independently for newly released missing episodes.
+- Historical validation after the show-completion slice: `uv run pytest -q` ✅ (`581 passed, 18 warnings`), targeted `uv run ruff check filmu_py tests` ✅, targeted touched-suite `uv run pytest tests/test_show_completion.py tests/test_scraped_item_worker.py tests/test_unreleased_guard.py -q` ✅ (`51 passed`).
+- Current Docker snapshot during validation showed all local stack containers healthy/running, including `filmu-python`, `filmu-arq-worker`, `frontend`, `filmuvfs`, Postgres, Redis, and Prowlarr.
+- The item-action service layer now materializes detached snapshots/records before commit in [`../filmu_py/services/media.py`](../filmu_py/services/media.py), removing the async ORM `MissingGreenlet` path that previously broke frontend request/retry/reset operations.
+- Direct-play/HLS route compatibility now preserves the stable selected-lease `503` detail expected by route callers even when a refresh attempt discovers a fresher provider-side failure reason; the newer reason is still persisted and logged in the playback layer.
+- CacheEngine trait: trait-based L1/L2 cache abstraction compiled into the binary; [`MemoryCache`](../rust/filmuvfs/src/cache.rs) (`moka::future`, default) and [`HybridCache`](../rust/filmuvfs/src/cache.rs) (L1 + `sled` disk cache, opt-in) both ship, with [`config.cache.l2_enabled`](../rust/filmuvfs/src/config.rs) selecting the implementation at startup.
+- Adaptive velocity-based prefetching: [`VelocityTracker`](../rust/filmuvfs/src/prefetch.rs) tracks bytes/sec and sequential streak per file handle, adaptive window growth is applied in [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs), and background warming runs through [`ChunkEngine.prefetch_ahead()`](../rust/filmuvfs/src/chunk_engine.rs).
+- Hidden path guard: [`is_hidden_path()`](../rust/filmuvfs/src/hidden_paths.rs) + [`is_ignored_path()`](../rust/filmuvfs/src/hidden_paths.rs) are applied in FUSE lookup/open/getattr/readdir paths before catalog access, covering macOS metadata, Plex/Emby probes, Windows metadata, and dot-files with `trace`-only logging.
+- GraphQL mutations: `requestItem`, `itemAction`, and `updateSetting` now exist on [`/graphql`](../filmu_py/graphql/schema.py), wired through the shared service layer in [`../filmu_py/graphql/resolvers.py`](../filmu_py/graphql/resolvers.py) and [`../filmu_py/services/settings_service.py`](../filmu_py/services/settings_service.py), while REST [`/api/v1/*`](../filmu_py/api/router.py) remains unchanged as the frozen compatibility surface.
+
+## Accumulated implementation history
+
+- Created `apps/filmu-python` scaffold.
+- Added Python project config with modern dependencies and strict lint/type setup.
+- Added `.env.example` and runtime settings model.
+- Added logging + observability bootstrap modules.
+- Added cache and distributed token-bucket limiter primitives.
+- Added initial compatibility API app factory and base `/api/v1` default routes.
+- Added docs for architecture, cache, rate limits, VFS plan, and plugin strategy.
+- Added comprehensive phased implementation roadmap and quality gate policy in `docs/EXECUTION_PLAN.md`.
+- Revised roadmap sequencing after architecture audit:
+  - Phase A (GraphQL parity) and Phase B (plugin runtime boundaries) run in parallel.
+  - Queue/orchestration is split into D1 (ARQ hardening) and D2 (conditional durable bridge).
+  - Migration governance and local+CI quality gates are now cross-cutting requirements.
+- Added workspace-level `package.json` scripts for lint/format consistency.
+- Hardened settings/security:
+  - API key is required and validated (minimum length, no placeholder defaults).
+  - Secrets use `SecretStr` for masking in logs/debug output.
+- Hardened runtime startup:
+  - Lifespan now uses resolved settings consistently.
+  - Redis connectivity is verified at startup (`PING`) before serving traffic.
+  - App runtime resources are stored in typed application state.
+- Hardened API contract baseline:
+  - Added shared typed dependency accessors (`deps.py`).
+  - Added router-level API key enforcement dependency for `/api/v1`.
+  - Health endpoint now performs real dependency probing and returns structured checks.
+  - `operation_id` values are namespaced to reduce future OpenAPI client collisions.
+- Hardened resilience/observability:
+  - Rate limiter now handles Redis `NOSCRIPT` fallback and includes retry-after output.
+  - Rate limiter bucket reset API added.
+  - Cache now supports explicit invalidation, namespacing, thread-safe local access, and metrics counters.
+  - Event bus now records dropped-event metrics.
+  - Observability now uses default Prometheus registry scraping, logs bootstrap failures, and adds FastAPI OpenTelemetry instrumentation.
+- Added request correlation middleware:
+  - Propagates/generates `X-Request-ID` and binds request IDs to structlog context.
+- Verified quality gates in this workspace:
+  - `ruff check` ✅
+  - `ruff format --check` ✅
+  - `mypy` (strict) ✅
+  - `prettier --check` (docs/package/readme scope) ✅
+- Re-audited `riven-ts` scope alignment against the current local TypeScript backend:
+  - Confirmed the current TS backend is GraphQL-first on `@apollo/server` + `type-graphql`, uses `xstate` bootstrap/program/main-runner machines, `bullmq` flows/workers, and `@zkochan/fuse-native` for VFS.
+  - Confirmed the plugin runtime is materially broader than earlier resolver-only assumptions: dependency-based plugin discovery from `apps/riven/package.json`, `PluginSettings`, per-plugin datasource construction, optional `plugin.context` GraphQL/runtime context injection, validator retries, queue-backed hook workers, and publishable-event gating.
+  - Corrected one important assumption: current TS plugin discovery is package/dependency-scan based, not a generic language-level entry-point model.
+  - Late re-audit of the current local TS workspace confirmed it is now a much broader pnpm monorepo rather than a single backend app snapshot: `pnpm-workspace.yaml` now spans `apps/*`, `packages/*`, and `packages/core/*`. The refreshed local working tree now uses the newer app dependency graph (`plugin-comet`, `plugin-mdblist`, `plugin-notifications`, `plugin-stremthru`, etc.) while also still physically retaining `packages/plugin-realdebrid`, which makes the local TS source a mixed filesystem baseline rather than a clean single-commit snapshot.
+  - Updated the Filmu docs to position the platform to exceed `riven-ts`, not just mirror it.
+- Added GraphQL compatibility baseline:
+  - Added Strawberry dependency and schema router wiring (`/graphql`).
+  - Added scaffold Query/Mutation/Subscription types and schema exports for incremental parity work.
+- Expanded GraphQL/service implementation:
+  - Added typed GraphQL context and plugin-kind aware schema composition.
+  - Wired Query/Mutation to real media persistence service (list/get/request/transition).
+  - Wired Subscription to event bus (`item.state.changed`) stream.
+- Added Phase A/B progress for GraphQL settings parity and plugin registration safety:
+  - Added `settings { filmu { version apiKey logLevel } }` query baseline.
+  - Added defensive `safe_register_many(...)` plugin registration path with skip/reject behavior.
+  - Added focused tests for settings query shape and plugin safety boundary checks.
+- Added DB + migration baseline:
+  - Added async SQLAlchemy runtime/session provider.
+  - Added media item and lifecycle event ORM models.
+  - Added embedded Alembic environment + initial migration revision.
+- Added the first ARQ worker baseline:
+  - Added scrape/debrid/finalize task plumbing, distributed limiter buckets with retry deferral, and worker startup/shutdown resource lifecycle.
+  - This was the initial worker slice before the later real provider-backed scrape, parse, rank, debrid, finalize, recovery, and outbox stages documented above.
+- Expanded “superior-by-design” foundations:
+  - Added optional `performance`, `security`, and `quality` dependency groups.
+  - Added security/perf command scripts (bandit, pip-audit, benchmark harness).
+  - Added startup safety env toggles (`UNSAFE_CLEAR_QUEUES_ON_STARTUP`, `UNSAFE_REFRESH_DATABASE_ON_STARTUP`).
+- Added Phase C settings compatibility baseline:
+  - Implemented `/api/v1/settings/*` routes (`schema`, `schema/keys`, `get`, `set`, `load`, `save`) in [`filmu_py/api/routes/settings.py`](filmu_py/api/routes/settings.py).
+  - Added tolerant unknown-key behavior for `/schema/keys` and null-safe missing-path behavior for `/get/{paths}`.
+  - Kept API-key protection via shared router dependencies.
+  - Added focused API compatibility tests in [`tests/test_api_settings_routes.py`](tests/test_api_settings_routes.py).
+- Added Phase D1 worker reliability baseline:
+  - Added bounded exponential retry policy helpers and attempt parsing in [`filmu_py/workers/retry.py`](filmu_py/workers/retry.py).
+  - Added dead-letter routing to queue-scoped Redis lists with structured JSON payloads in [`filmu_py/workers/retry.py`](filmu_py/workers/retry.py).
+  - Integrated retry/dead-letter behavior into scrape/debrid/finalize worker tasks in [`filmu_py/workers/tasks.py`](filmu_py/workers/tasks.py).
+  - Added focused worker retry/dead-letter tests in [`tests/test_worker_retry.py`](tests/test_worker_retry.py).
+  - Current limitation: the worker tasks currently exercise pipeline/state plumbing only; they do not execute real scraper fan-out, debrid-service calls, or real provider-backed item progression.
+- Verified quality gates after D1 updates:
+  - `ruff check` ✅
+  - `mypy` (strict) ✅
+  - `pytest -q` ✅ (`12 passed`)
+  - `ruff format --check` ✅
+- Completed scoped internal naming migration from `riven` to `filmu` across first-party app files:
+  - Renamed Python package directory to [`filmu_py/`](filmu_py).
+  - Updated imports, scripts, package metadata, docs, environment keys, service/queue defaults, and metric prefixes to `filmu*` naming.
+  - Renamed audit document to [`docs/FILMU_WORD_AUDIT.md`](docs/FILMU_WORD_AUDIT.md).
+- Added Phase B filesystem plugin boundary baseline:
+  - Added validated plugin manifests and manifest-declared GraphQL resolver exports in [`../filmu_py/plugins/manifest.py`](../filmu_py/plugins/manifest.py).
+  - Added safe filesystem plugin discovery and GraphQL resolver loading in [`../filmu_py/plugins/loader.py`](../filmu_py/plugins/loader.py).
+  - Wired plugin discovery into app creation before schema construction in [`../filmu_py/app.py`](../filmu_py/app.py).
+  - Added focused plugin discovery and failure-isolation tests in [`../tests/test_plugin_loader.py`](../tests/test_plugin_loader.py).
+- Extended Phase A/B GraphQL settings parity:
+  - Added plugin-contributed nested `settings { ... }` extension support via `settings_resolvers` in [`../filmu_py/plugins/manifest.py`](../filmu_py/plugins/manifest.py).
+  - Built the GraphQL query root dynamically so plugin settings fields are exposed on the merged settings object in [`../filmu_py/graphql/schema.py`](../filmu_py/graphql/schema.py).
+  - Added coverage for plugin-contributed settings fields in [`../tests/test_plugin_loader.py`](../tests/test_plugin_loader.py).
+- Added Phase C REST/SSE compatibility baseline:
+  - Added bounded in-memory historical log storage and live log fan-out in [`../filmu_py/core/log_stream.py`](../filmu_py/core/log_stream.py).
+  - Added authenticated [`/api/v1/logs`](../filmu_py/api/routes/default.py) and [`/api/v1/stream/*`](../filmu_py/api/routes/stream.py) compatibility routes for historical logs, event types, and SSE streams.
+  - Wired stdlib logging into the live/history log broker in [`../filmu_py/logging.py`](../filmu_py/logging.py) and startup lifecycle in [`../filmu_py/app.py`](../filmu_py/app.py).
+  - Added minimal notification publishing on completed item transitions in [`../filmu_py/services/media.py`](../filmu_py/services/media.py).
+  - Added focused REST/SSE compatibility coverage in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Verified quality gates after Phase C baseline:
+  - `ruff check` ✅
+  - `mypy` (strict) ✅
+  - `pytest -q tests/test_stream_routes.py tests/test_plugin_loader.py tests/test_graphql_settings.py` ✅ (`10 passed`)
+  - `ruff format --check` ✅
+- Added Phase C dashboard-essential compatibility slice:
+  - Added shared dashboard response models for stats and downloader/service visibility in [`../filmu_py/api/models.py`](../filmu_py/api/models.py).
+  - Added aggregated stats snapshot generation in [`../filmu_py/services/media.py`](../filmu_py/services/media.py).
+  - Added minimal compatibility routes for [`/api/v1/stats`](../filmu_py/api/routes/default.py), [`/api/v1/services`](../filmu_py/api/routes/default.py), and [`/api/v1/downloader_user_info`](../filmu_py/api/routes/default.py).
+  - Added focused dashboard route coverage in [`../tests/test_dashboard_routes.py`](../tests/test_dashboard_routes.py).
+- Verified quality gates after the dashboard-essential slice:
+  - `ruff check` ✅
+  - `mypy` (strict) ✅
+  - `pytest -q tests/test_dashboard_routes.py` ✅ (`4 passed`)
+  - `ruff format --check` ✅
+- Added Phase C item list/detail/action compatibility slice:
+  - Added item-list/detail/action response models in [`../filmu_py/api/models.py`](../filmu_py/api/models.py).
+  - Added item summary/search/detail/action service logic in [`../filmu_py/services/media.py`](../filmu_py/services/media.py).
+  - Added item compatibility routes in [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) and wired them in [`../filmu_py/api/router.py`](../filmu_py/api/router.py).
+  - Added focused item route coverage in [`../tests/test_item_routes.py`](../tests/test_item_routes.py).
+- Verified quality gates after the item list/detail/action slice:
+  - `ruff check` ✅
+  - `mypy` (strict) ✅
+  - `pytest -q tests/test_item_routes.py` ✅ (`5 passed`)
+  - `ruff format --check` ✅
+- Added Phase C calendar compatibility slice:
+  - Added calendar response models in [`../filmu_py/api/models.py`](../filmu_py/api/models.py).
+  - Added calendar snapshot generation in [`../filmu_py/services/media.py`](../filmu_py/services/media.py).
+  - Added compatibility calendar route in [`../filmu_py/api/routes/default.py`](../filmu_py/api/routes/default.py).
+  - Added focused calendar route coverage in [`../tests/test_calendar_routes.py`](../tests/test_calendar_routes.py).
+- Verified quality gates after the calendar slice:
+  - `ruff check` ✅
+  - `mypy` (strict) ✅
+  - `pytest -q tests/test_calendar_routes.py` ✅ (`2 passed`)
+  - `ruff format --check` ✅
+- Added Phase C API-key regeneration compatibility slice:
+  - Added compatibility [`/api/v1/generateapikey`](../filmu_py/api/routes/default.py) in [`../filmu_py/api/routes/default.py`](../filmu_py/api/routes/default.py).
+  - Implemented strong key generation for the frontend settings widget and later upgraded it to rotate the live runtime key immediately while returning an explicit operator warning about updating `BACKEND_API_KEY` on the frontend/BFF side before the next protected request.
+  - Added focused coverage in [`../tests/test_api_settings_routes.py`](../tests/test_api_settings_routes.py).
+- Added Phase C scrape-auto compatibility slice:
+  - Added compatibility [`/api/v1/scrape/auto`](../filmu_py/api/routes/scrape.py) in [`../filmu_py/api/routes/scrape.py`](../filmu_py/api/routes/scrape.py).
+  - Wired the new scrape router in [`../filmu_py/api/router.py`](../filmu_py/api/router.py).
+  - Implemented the current dual-layer compatibility behavior: existing persisted items still re-enter scrape directly, while missing items are created first through the shared [`request_item()`](../filmu_py/services/media.py) service path and then indexed/enqueued.
+  - Accepted and now actively use richer upstream request fields (`requested_seasons`, `requested_episodes`, `season_numbers`) for new-item TV requests, while still keeping ranking/filesize overrides compatibility-safe for the current frontend surface.
+  - Added focused coverage in [`../tests/test_scrape_routes.py`](../tests/test_scrape_routes.py).
+- Expanded Phase C scrape compatibility with a minimal manual-scrape baseline:
+  - Added compatibility [`/api/v1/scrape`](../filmu_py/api/routes/scrape.py) in [`../filmu_py/api/routes/scrape.py`](../filmu_py/api/routes/scrape.py).
+  - Implemented empty-result JSON and SSE responses with the event envelope the current manual-scrape UI already understands.
+  - Kept the route intentionally compatibility-safe by resolving the scrape target cleanly while deferring real scraper fan-out, ranking, and downloader-backed session orchestration.
+  - Extended focused coverage in [`../tests/test_scrape_routes.py`](../tests/test_scrape_routes.py).
+- Expanded Phase C scrape compatibility with a minimal manual-session baseline:
+  - Added compatibility [`/api/v1/scrape/start_session`](../filmu_py/api/routes/scrape.py) and [`/api/v1/scrape/session/{session_id}`](../filmu_py/api/routes/scrape.py) in [`../filmu_py/api/routes/scrape.py`](../filmu_py/api/routes/scrape.py).
+  - Implemented in-memory compatibility sessions with synthetic parsed-file/torrent payloads so the frontend can move through start, select-files, complete, and abort flows without a hard backend failure.
+  - Kept the session layer intentionally compatibility-safe and in-memory only, deferring real downloader-backed torrent inspection, cached-file resolution, and attribute-application orchestration.
+  - Extended focused coverage in [`../tests/test_scrape_routes.py`](../tests/test_scrape_routes.py).
+- Added legacy public-watch alias compatibility:
+  - Added [`/api/v1/triven/item/{id}`](../filmu_py/api/routes/triven.py) in [`../filmu_py/api/routes/triven.py`](../filmu_py/api/routes/triven.py).
+  - Wired the legacy alias router in [`../filmu_py/api/router.py`](../filmu_py/api/router.py).
+  - Reused the current item-detail resolution path to normalize `tv` items to the legacy `show` type expected by the public watch redirect flow.
+  - Added focused coverage in [`../tests/test_triven_routes.py`](../tests/test_triven_routes.py).
+- Expanded the playback/shared-serving substrate:
+  - Consolidated reusable byte-serving helpers in [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) and reused them from [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py).
+  - Added serving-session, handle, and registered-path tracking for local files, generated-HLS assets, and remote proxy resources.
+  - Added category-aware directory hierarchy registration, path classification, path attributes, directory listing, explicit mount-facing path/handle helpers, explicit VFS-facing `getattr`/`readdir` wrappers, and owner-aware stale runtime cleanup.
+  - Added internal serving-status reporting at [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py).
+  - Extended focused route/runtime coverage in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened playback-source resolution further:
+  - Stream/HLS source extraction in [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now prioritizes explicitly active/selected playback nodes over generic fallback metadata.
+  - Playback resolution in [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now classifies typed local-file, remote-direct, and remote-HLS sources before the routes choose how to serve them.
+  - Added focused regression coverage for active-stream preference and selected HLS playlist preference in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened shared serving-core accounting further:
+  - Remote proxy streaming in [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now opens explicit remote handles, updates tracked-path/runtime counters during streaming, and releases those resources cleanly on completion.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now routes all byte-serving behavior through the shared serving core without keeping duplicate route-local file/remote helper implementations.
+  - Added focused regression coverage for remote-proxy handle/path accounting in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a playback-attachment abstraction above raw metadata walking:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now resolves `PlaybackAttachment` records carrying kind, locator, filename, file size, and debrid-services metadata rather than only bare path/URL values.
+  - The attachment layer now preserves provider and provider-download identifiers so future debrid-services-backed file attachments can feed both HTTP playback and FilmuVFS from one higher-level source shape.
+  - Added focused regression coverage for attachment metadata preservation in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Extracted playback resolution into a reusable API boundary:
+  - Attachment/source resolution helpers now live in [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) rather than remaining embedded inside [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py).
+  - Stream routes now consume that shared resolver boundary, reducing route-local complexity and making the next service/VFS extraction step clearer.
+- Added a service-layer playback resolver boundary:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now resolves playback and HLS attachments from persisted items so the API routes no longer own end-to-end attachment selection logic.
+  - Added focused direct service coverage in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py) so the playback boundary is tested both through the route layer and directly at the service boundary.
+- Added the first domain-backed playback attachment layer:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now includes persisted playback attachment records that can coexist with metadata-derived resolution.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now prefers persisted attachments before falling back to flexible metadata extraction.
+  - Added the follow-up Alembic revision for the new attachment table and focused regression coverage for persisted attachment preference in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Expanded persisted playback attachment lifecycle semantics:
+  - Persisted playback attachments now carry preference rank plus refresh-ready lifecycle fields such as expiry, last refresh time, and last refresh error in [`../filmu_py/db/models.py`](../filmu_py/db/models.py).
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now prefers higher-priority persisted attachments and can fall back from expired unrestricted links to restricted links when available.
+  - Added focused regression coverage for preferred-vs-fallback ordering and expired-link fallback behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added explicit persisted attachment state semantics:
+  - Persisted playback attachments now also carry a refresh state in [`../filmu_py/db/models.py`](../filmu_py/db/models.py) so ready, stale, refreshing, and failed attachment states are distinguishable instead of inferred only from timestamps.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now treats stale/refreshing records as restricted-link fallback candidates and skips failed attachments in favour of usable lower-priority records.
+  - Added focused regression coverage for stale and failed attachment handling in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added explicit persisted refresh transition helpers:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes explicit transition/update helpers for marking attachments stale, starting refresh, completing refresh, and recording refresh failure.
+  - This is still not a real debrid-services unrestriction workflow, but it establishes the first intentional refresh-transition path above the persisted attachment model.
+  - Added focused regression coverage for the new refresh transition helpers in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a refresh request/result boundary for persisted playback attachments:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes explicit refresh request/result dataclasses so refresh intent and refresh outcomes are modeled separately from raw ORM mutation.
+  - This gives the playback layer a cleaner handoff point for future debrid-services-backed refresh execution without baking provider logic into the route layer.
+  - Added focused regression coverage for refresh request/result handling in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added explicit refresh planning/request helpers:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes planning and request helpers that select refreshable persisted attachments in priority order and move them into `refreshing` intentionally.
+  - This provides the first service-driven refresh selection path on top of the persisted attachment model rather than leaving refresh orchestration entirely implicit.
+  - Added focused regression coverage for refresh planning and request selection in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a provider-facing refresh orchestration boundary:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes a provider-facing execution seam that can consume planned refresh requests and apply the resulting success/failure back onto persisted attachments.
+  - This remains provider-agnostic for now, but it is the first explicit orchestration boundary for future debrid-services-backed refresh execution.
+  - Added focused regression coverage for provider-facing refresh orchestration behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first provider-client-backed refresh execution path:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now defines a small provider-client `unrestrict_link(...)` protocol and can wrap provider clients into concrete refresh executors selected by provider key.
+  - This is still not a built-in Real-Debrid/AllDebrid/Debrid-Link integration, but it is the first real provider-client unrestriction path above the persisted refresh orchestration seam.
+  - Added focused regression coverage for provider-client refresh executor selection and execution in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first built-in Real-Debrid playback client:
+  - [`../filmu_py/services/debrid.py`](../filmu_py/services/debrid.py) now exposes a minimal built-in Real-Debrid `unrestrict/link` client for persisted playback refresh execution.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) can now resolve built-in provider clients from runtime settings, so refresh execution no longer requires every Real-Debrid client to be manually injected.
+  - [`../filmu_py/config.py`](../filmu_py/config.py) and [`../filmu_py/api/routes/settings.py`](../filmu_py/api/routes/settings.py) now surface the Real-Debrid token configuration needed for that built-in playback client.
+  - Added focused regression coverage for built-in Real-Debrid client creation, endpoint calls, and service-level wiring in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Expanded built-in debrid-services playback coverage:
+  - [`../filmu_py/services/debrid.py`](../filmu_py/services/debrid.py) now also exposes built-in AllDebrid and Debrid-Link playback clients alongside the existing Real-Debrid client.
+  - [`../filmu_py/config.py`](../filmu_py/config.py) and [`../filmu_py/api/routes/settings.py`](../filmu_py/api/routes/settings.py) now surface AllDebrid and Debrid-Link token settings under the compatibility `downloaders` structure.
+  - Added focused regression coverage for AllDebrid unlock calls, Debrid-Link direct-link passthrough, built-in provider-client construction, and AllDebrid service-level wiring in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first provider-download-id-driven refresh path:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now supports refresh results that also persist a newly resolved `restricted_url`, which lets provider-driven refresh flows update more than the unrestricted locator alone.
+  - [`../filmu_py/services/debrid.py`](../filmu_py/services/debrid.py) now lets the built-in Real-Debrid client resolve a persisted `provider_download_id` through `torrents/info/{id}`, match the correct file/link, and then unrestrict that link.
+  - Added focused regression coverage for Real-Debrid download-id refresh resolution and the service-level provider-download-id path in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Expanded persisted provider/file identity for less heuristic matching:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) plus the new Alembic revision now persist provider-side file identity fields alongside the existing provider download identifier.
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) and [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now carry those provider/file identity fields through flexible metadata extraction, persisted attachments, and refresh requests.
+  - [`../filmu_py/services/debrid.py`](../filmu_py/services/debrid.py) now prefers provider file identity during Real-Debrid file/link matching before falling back to filename/filesize heuristics.
+  - Added focused regression coverage for provider/file identity extraction, refresh-request emission, and Real-Debrid identity-first matching in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first provider-side attachment projection model:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now defines provider-side file projections plus a projection-aware refresh execution path that selects projected files intentionally before unrestricting them.
+  - Successful projection-backed refreshes now persist projected provider file identity back onto [`../filmu_py/db/models.py`](../filmu_py/db/models.py) attachments, so later refreshes can reuse provider-native identifiers instead of falling back to filename/filesize heuristics again.
+  - [`../filmu_py/services/debrid.py`](../filmu_py/services/debrid.py) now projects selected Real-Debrid torrent files from `torrents/info/{id}` and reuses that projection for both restricted-link resolution and service-level refresh execution.
+  - Added focused regression coverage for projection selection and projection-backed refresh persistence in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first item-detail playback attachment projection:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now loads persisted playback attachments when building extended item-detail responses and projects them into a compatibility-safe detail shape.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) and [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) now expose those projected persisted attachments on [`/api/v1/items/{id}`](../filmu_py/api/routes/items.py) without changing the existing list route contract.
+  - Added focused regression coverage for the new detail projection in [`../tests/test_item_routes.py`](../tests/test_item_routes.py) and kept the legacy alias test doubles aligned in [`../tests/test_triven_routes.py`](../tests/test_triven_routes.py).
+- Added a resolved playback snapshot on item details:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes a reusable playback-resolution snapshot for read-model consumers so item details and future VFS-facing projections can reuse the same direct/HLS attachment selection semantics as the stream routes.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now projects the best current direct and HLS attachments plus readiness flags onto the extended item-detail response.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) and [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) now expose that resolved playback snapshot as an additive field beside the persisted attachment list.
+  - Added focused regression coverage for the resolved playback snapshot in [`../tests/test_item_routes.py`](../tests/test_item_routes.py).
+- Added the first VFS-facing `media_entries` detail projection:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now derives a first `media_entries` read model from persisted playback attachments, carrying original filename, best URL, provider identifiers, provider file identity, and timestamp metadata in a VFS-oriented shape.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) and [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) now expose that additive `media_entries` field on [`/api/v1/items/{id}`](../filmu_py/api/routes/items.py).
+  - Added focused regression coverage for the new `media_entries` field in [`../tests/test_item_routes.py`](../tests/test_item_routes.py).
+- Added explicit active-stream ownership/readiness on item details:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now links the resolved direct/HLS playback snapshot back to owning `media_entries` and marks each projected media entry when it backs direct and/or HLS playback.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) and [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) now expose an additive `active_stream` detail model plus per-entry active ownership flags on [`/api/v1/items/{id}`](../filmu_py/api/routes/items.py).
+  - Added focused regression coverage for both unique-owner and shared-owner active-stream mapping in [`../tests/test_item_routes.py`](../tests/test_item_routes.py).
+- Added the first persisted media-entry domain slice:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now defines persisted `MediaEntryORM` records related to both media items and source playback attachments, and [`../filmu_py/db/alembic/versions/20260312_0006_media_entries.py`](../filmu_py/db/alembic/versions/20260312_0006_media_entries.py) adds the backing schema.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now prefers persisted media entries when projecting item-detail `media_entries`, while keeping `active_stream` derived from the resolved playback snapshot on top of those persisted rows.
+  - Added focused regression coverage for persisted-media-entry preference in [`../tests/test_item_routes.py`](../tests/test_item_routes.py).
+- Added the first persisted active-stream relation:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now defines persisted `ActiveStreamORM` rows keyed to `MediaEntryORM`, and [`../filmu_py/db/alembic/versions/20260312_0007_active_streams.py`](../filmu_py/db/alembic/versions/20260312_0007_active_streams.py) adds the schema plus per-item/per-role uniqueness.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now prefers persisted active-stream selections over heuristic ownership matching when projecting item-detail `active_stream` and per-entry active flags.
+  - Added focused regression coverage for persisted active-stream preference in [`../tests/test_item_routes.py`](../tests/test_item_routes.py).
+- Rewired playback resolution to prefer the persisted selection model:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now resolves direct/HLS playback from persisted `media_entries` plus persisted `active_streams` before falling back to attachment-only or metadata-derived selection.
+  - The HTTP playback routes in [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) continue using the same compatibility contract, but they now inherit that durable selection preference through the playback service.
+  - Added focused regression coverage for persisted direct/HLS selection preference in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added persisted lease/refresh semantics for media entries:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) plus [`../filmu_py/db/alembic/versions/20260312_0008_media_entry_lease_state.py`](../filmu_py/db/alembic/versions/20260312_0008_media_entry_lease_state.py) now persist refresh state, expiry, and refresh timestamps/errors directly on `MediaEntryORM`.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now prefers durable media-entry leases first, falling back to restricted URLs when a selected lease is stale/refreshing/expired, and exposes explicit media-entry lease transition helpers beside the existing attachment refresh helpers.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py), [`../filmu_py/api/models.py`](../filmu_py/api/models.py), and [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) now surface media-entry refresh/expiry state on item details.
+  - Added focused regression coverage for stale media-entry lease fallback and lease transition helpers in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added provider-backed media-entry lease refresh orchestration:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes media-entry refresh request/execution helpers that route selected leased entries through the existing provider-client refresh seam rather than only through playback-attachment refresh orchestration.
+  - The playback service can now refresh durable `media_entries` directly through configured provider clients and persist the refreshed lease back onto those rows before the next playback selection occurs.
+  - Added focused regression coverage for provider-backed media-entry refresh execution in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added fail-closed playback-risk handling for selected failed leases:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now returns explicit `503` playback failures when the selected direct or HLS media-entry lease is already in `failed` state rather than silently degrading to a stale restricted fallback.
+  - Added focused regression coverage for direct-file and HLS `503` lease-failure behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened HLS lifecycle governance in the shared serving layer:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now tracks HLS generation timeout/failure cleanup counters, cleans partial output directories on failure, and applies an explicit timeout budget to local ffmpeg generation.
+  - Local HLS segment serving now uses `http-hls` ownership through the shared local-file serving path, so generated segment traffic participates in the same serving-runtime accounting model as proxied HLS traffic.
+  - Added focused regression coverage for generated-local HLS ownership and cleanup-on-failure behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Simplified the client-facing HLS failure mapping:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now collapses HLS generation and lease-risk failures to `503` while still keeping true missing generated child files as `404`.
+  - Added focused regression coverage for the simplified HLS `503`/`404` policy in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Expanded stream-status observability with playback governance counters:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes a playback-governance snapshot covering tracked media entries, active-stream lease pressure, and selected-stream failure/refresh counts.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now merges that playback-governance data into [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) alongside the shared serving-core counters.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) now carries the additive serving-governance fields needed for those playback counters, and focused status-route coverage lives in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first Prometheus-backed stream/playback metrics slice:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now emits HLS generation event counters by result.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now emits lease-refresh failure counters by record type/reason plus playback-risk counters for selected failed direct/HLS leases.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now emits route outcome counters for direct-file and HLS endpoints by route/status code.
+  - Added focused regression coverage for the new metrics behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first latency histograms for the playback path:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now emits histograms for local HLS generation duration and remote proxy open latency.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now emits playback-resolution duration histograms for direct and HLS resolution outcomes.
+  - Added focused regression coverage for the new latency metrics in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added abort/cancellation telemetry in the shared serving core:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now emits abort counters by owner/category/reason and surfaces aggregate abort counts through the serving-governance snapshot.
+  - Added focused regression coverage for local-file and remote-proxy cancellation behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added request-shape telemetry for the shared stream entry points:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now classifies full-file, range, and suffix-range requests and emits response-outcome counters for full vs partial vs range-nonpartial responses.
+  - Added focused regression coverage for local full/range/suffix request shapes and remote range request outcomes in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first per-read size proxy metrics in the shared serving core:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now emits per-read size histograms plus small/medium/large read-bucket counters at the shared handle-read seam.
+  - Added focused regression coverage for local, remote, and direct handle-read size buckets in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first session-level read-amplification proxy metrics:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now emits read-operations-per-session and bytes-per-read proxy histograms when serving sessions close.
+  - Added focused regression coverage for local and remote session-level read-amplification proxy behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first pre-chunk seek/scan-pattern classifier:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now classifies request-boundary access patterns into `full-request`, `head-probe`, `tail-probe`, `seek-probe`, and `stream-window` buckets before the shared chunk engine is wired into live route execution.
+  - Added focused regression coverage for local head/tail/seek probes and remote head-probe classification in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Implemented the shared chunk engine:
+  - [`../filmu_py/core/chunk_engine.py`](../filmu_py/core/chunk_engine.py) now provides header/footer/body chunk geometry, 6-way read classification, byte-weighted in-memory chunk caching, ordered chunk resolution, strict upstream range validation, EOF-safe stitch behavior, and dedicated `filmu_chunk_*` Prometheus metrics.
+  - Added focused regression coverage for geometry, classification, cache behavior, fetch/stitch correctness, short-payload rejection, bad-range-response rejection, and EOF clamping in [`../tests/test_chunk_engine.py`](../tests/test_chunk_engine.py).
+- Wired the shared chunk engine into the live HTTP direct-play range path:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now uses the shared chunk engine for known-size remote-proxy range requests served by [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py), while preserving the existing remote streaming proxy as the unknown-size fallback.
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now exposes chunk-engine-backed remote range serving plus content-length probing for that route-level adoption.
+  - Added focused regression coverage for chunk-path byte serving, cache reuse, metric increments, and fallback behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened direct-file source resolution further:
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) now treats restricted-link fallbacks as degraded direct-play candidates, so they no longer outrank stable local-file or non-degraded direct sources.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now also ignores degraded selected direct entries when looking for the best persisted active-stream-backed direct attachment, allowing a ready local or non-degraded direct candidate to win instead of pinning the route to a stale restricted fallback.
+  - Added focused regression coverage for degraded persisted-attachment fallback and degraded selected-media-entry fallback behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened direct-file direct-source ranking further:
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) now prefers provider-backed unrestricted direct URLs over otherwise-generic direct URLs when multiple non-degraded direct candidates coexist.
+  - Added focused regression coverage for provider-backed direct attachments and provider-backed direct media entries in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened provider-backed direct ranking with lease freshness:
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) now carries `expires_at` on resolved playback attachments and uses lease freshness plus provider-native identity when ranking among multiple provider-backed unrestricted direct candidates, while still keeping local-file candidates ahead of remote direct sources.
+  - Added focused regression coverage for fresher provider-backed direct selection while preserving local-file precedence in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened selected-media-entry recovery for direct playback:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now lets a degraded or invalid selected direct media entry recover to a sibling media entry that shares the same provider file identity, instead of giving up immediately when the selected direct row is stale, mismatched, or otherwise unusable.
+  - Added focused regression coverage for provider-file-id and provider-file-path related-entry recovery in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Locked the active-stream authority policy explicitly:
+  - a usable selected direct `active_stream` winner remains authoritative even when a sibling entry for the same provider-backed file has a fresher lease; sibling recovery is only for degraded, missing, or invalid selected entries.
+  - Added focused regression coverage for the confirmed policy in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened non-active direct-entry ranking for same-file siblings:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now collapses non-active provider-backed direct media-entry sibling groups only when they share the same persisted `provider_file_id` or `provider_file_path`, selecting the best candidate inside that same-file group while leaving different-file groups separate.
+  - Added focused regression coverage for same-file sibling collapse and different-file separation in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened different-file direct fallback ordering explicitly:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now breaks ties between different-file provider-backed direct candidates by richer preserved provider identity first and lease freshness second, instead of relying on incidental ordering after same-file sibling collapse.
+  - Added focused regression coverage for richer-identity-first and freshness-as-tiebreak behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened local HLS cache integrity and child-file serving:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now validates that cached generated playlists still reference on-disk child files before reuse, regenerates incomplete cached HLS directories instead of serving partial leftovers, and exposes explicit referenced-file inspection for generated playlists.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now serves generated local HLS child files only when they are both on disk and actually referenced by the generated playlist, rather than treating any file under the output directory as implicitly valid.
+  - Added focused regression coverage for incomplete-playlist regeneration and unreferenced generated-child rejection in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened generated-local HLS manifest validation explicitly:
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now rejects malformed generated playlists that are empty, missing `#EXTM3U`, or contain no media segments, increments explicit `hls_manifest_invalid` / `hls_manifest_regenerated` governance counters, and fails malformed fresh ffmpeg output instead of treating it as reusable cache.
+  - Added focused regression coverage for malformed cached-manifest regeneration and malformed fresh-generation failure in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Extended route-level HLS malformed-manifest signaling:
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) now exposes `hls_manifest_invalid` and `hls_manifest_regenerated` on the serving-governance response model so [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) can report malformed-manifest state directly.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now surfaces malformed generated-local playlists through the same simplified client-facing `503` HLS risk policy used for other generation failures.
+  - Added focused regression coverage for route-level malformed-manifest `503` signaling and status-surface manifest counters in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added normalized HLS failure-reason observability:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now classifies normalized HLS `503` failures into a small reason taxonomy (`generation_failed`, `generation_timeout`, `generator_unavailable`, `lease_failed`, `manifest_invalid`) without changing the external client contract.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) plus [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now expose additive `hls_route_failures_*` counters on [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py), giving operators a first route-level reason breakdown above raw route/status counts.
+  - Added focused regression coverage for timeout, lease-failed, and malformed-manifest reason counters in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Expanded the HLS failure taxonomy across the remaining route paths:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now also counts `generated_missing` for missing generated child files and `upstream_failed` for upstream remote playlist/segment failures, so the HLS route taxonomy is no longer limited to normalized `503` cases only.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) now exposes those additive counters on [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py).
+  - Added focused regression coverage for generated-missing and upstream playlist/segment failure counting in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added upstream-playlist structural validation for remote HLS:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now validates upstream playlists before rewriting them, rejecting empty, malformed, or segmentless upstream payloads with explicit `502` behavior rather than proxying structurally invalid text onward.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) plus [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now expose `hls_route_failures_upstream_manifest_invalid` on [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py).
+  - Added focused regression coverage for empty and segmentless upstream playlist rejection in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened upstream remote HLS transport failures explicitly:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now maps remote upstream playlist timeout and transport errors to explicit `504` / `502` failures instead of leaking raw client exceptions.
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now maps remote segment/direct proxy open timeout and transport failures to explicit `504` / `502` playback errors and records `timeout` / `error` open outcomes for observability.
+  - Added focused regression coverage for upstream playlist timeout and upstream segment transport failure behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a frontend-facing playback contract harness:
+  - Re-audited the current frontend BFF direct-play route in [`../../Triven_riven-fork/Triven_frontend/src/routes/(protected)/api/stream/[itemId]/+server.ts`](<../../Triven_riven-fork/Triven_frontend/src/routes/(protected)/api/stream/[itemId]/+server.ts>) plus the HLS proxy route and player component in [`../../Triven_riven-fork/Triven_frontend/src/routes/(protected)/api/stream/[itemId]/hls/[...file]/+server.ts`](<../../Triven_riven-fork/Triven_frontend/src/routes/(protected)/api/stream/[itemId]/hls/[...file]/+server.ts>) and [`../../Triven_riven-fork/Triven_frontend/src/lib/components/media/video-player.svelte`](../../Triven_riven-fork/Triven_frontend/src/lib/components/media/video-player.svelte).
+  - Added backend-side regression coverage in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py) that mirrors the current frontend playback contract for direct-range header forwarding and the player's HLS query-parameter pattern, so the backend now has a durable guard against that BFF/player contract drifting silently.
+- Added explicit HLS cache-control/freshness policy:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now applies `Cache-Control: no-store` to HLS playlist responses and `Cache-Control: public, max-age=3600` to HLS child files/segments.
+  - This aligns the backend with the current frontend HLS proxy expectations while making playlist freshness and segment cacheability explicit instead of incidental.
+  - Added focused regression coverage for both local and remote playlist responses plus local/remote segment responses in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added bounded remote-HLS retry/cooldown recovery:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now retries one transient remote-HLS playlist timeout/transport failure or segment proxy transport failure before surfacing the upstream error.
+  - Repeated transient failures for the same upstream playlist URL now enter a short in-memory cooldown window with `Retry-After`, so the backend avoids hammering the same unhealthy remote-HLS upstream on every immediate follow-up request.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) plus [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now expose additive `remote_hls_retry_attempts`, `remote_hls_cooldown_starts`, `remote_hls_cooldown_hits`, and `remote_hls_cooldowns_active` counters on [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py).
+  - Added focused regression coverage for retry-once success and cooldown-entry behavior for both remote playlists and remote segments in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Unified direct-play source authority and medium preference in the shared selector:
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) now carries extraction-time resolver priority on [`PlaybackAttachment`](../filmu_py/api/playback_resolution.py) and uses that source authority ahead of medium-type ranking in [`select_direct_playback_attachment()`](../filmu_py/api/playback_resolution.py).
+  - This keeps explicit active/selected direct sources authoritative over generic fallback metadata while still preserving the intended rule that ready local files beat remote direct links when source authority is otherwise equal.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now reuses that same shared selector for non-active persisted direct media-entry fallback selection instead of keeping a divergent local ranking path.
+  - Added focused regression coverage for attachment-backed local-file-over-provider-direct precedence in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py) while preserving the earlier active-stream-over-top-level fallback contract.
+- Added a named direct-play source-classification layer:
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) now defines explicit direct source classes such as `selected-local-file`, `selected-provider-direct`, `fallback-local-file`, and degraded fallback classes instead of leaving the selector to operate only on opaque tuple-priority math.
+  - Extraction now carries explicit `resolver_authoritative` state from preferred containers/flags into [`PlaybackAttachment`](../filmu_py/api/playback_resolution.py), so selected-vs-fallback semantics are preserved intentionally instead of being inferred only from numeric priority.
+  - Added focused regression coverage for the named source-class model in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added direct-play lease-health source classes:
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) now classifies provider-backed direct links into explicit health-state classes such as `selected-provider-direct-ready`, `selected-provider-direct-stale`, `selected-provider-direct-refreshing`, `selected-provider-direct-failed`, and degraded fallback variants.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now carries persisted attachment/media-entry refresh state into the shared [`PlaybackAttachment`](../filmu_py/api/playback_resolution.py) model, so the shared selector can reason about link health explicitly instead of flattening that state back into generic fallback behavior.
+  - Added focused regression coverage for the new lease-health source classes in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added an explicit direct-play route-policy decision seam:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now defines a small `DirectPlaybackDecision` model plus `build_direct_playback_decision(...)` / `resolve_direct_playback_decision(...)`, so direct-file policy is represented explicitly as serve-vs-fail with additive refresh intent instead of being spread across route-local and exception-only branches.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now routes [`resolve_playback_attachment()`](../filmu_py/services/playback.py) through that decision seam while preserving the existing `404`/`503` contract.
+  - Added focused regression coverage for failed-lease decisions and stale-provider-direct refresh-intent decisions in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added explicit refresh-recommendation payloads on direct-play decisions:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now carries a small `DirectPlaybackRefreshRecommendation` payload on `DirectPlaybackDecision`, so direct-play decisions can surface provider, download/file identity, restricted URL, target kind, and reason alongside the existing serve/fail contract.
+  - Stale/refreshing/degraded provider-backed direct attachments now produce explicit internal refresh guidance instead of only a boolean `refresh_intent`, while selected failed direct leases now emit a concrete failed-lease recommendation payload.
+  - Added focused regression coverage for both failed-lease recommendation details and stale-provider-direct recommendation payloads in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a direct-play refresh-dispatch seam:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now defines `DirectPlaybackRefreshDispatch` plus helpers that translate direct-play refresh recommendations into the existing `MediaEntryLeaseRefreshRequest` or `PlaybackAttachmentRefreshRequest` models.
+  - This keeps the new direct-play policy/recommendation layer connected to the existing refresh orchestration seams without forcing live refresh execution into the HTTP request path.
+  - Added focused regression coverage for failed direct-lease recommendation dispatch to media-entry refresh requests and stale direct-attachment recommendation dispatch to persisted attachment refresh requests in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added one-shot direct-play refresh-dispatch execution helpers:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now defines `DirectPlaybackRefreshDispatchExecution` plus one-shot execution helpers that can resolve a translated dispatch and execute it through the existing provider refresh seam outside the HTTP request path.
+  - This keeps the request path non-blocking by policy while still proving that the new decision -> recommendation -> dispatch chain can drive real media-entry or attachment refresh state transitions when called deliberately from service/orchestration code.
+  - Added focused regression coverage for one-shot failed-lease media-entry refresh execution and stale direct-attachment refresh execution in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added provider-aware limiter/backpressure around direct-play refresh execution:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now applies a dedicated `ratelimit:{provider}:stream_link_refresh` limiter bucket before executing one-shot direct-play refresh dispatches.
+  - Limiter denial now returns a typed execution result with `rate_limited`, `retry_after_seconds`, and `limiter_bucket_key` instead of silently running the provider refresh anyway, and it increments the existing playback-risk metric surface with a `refresh_rate_limited` signal.
+  - Added focused regression coverage for direct-play refresh limiter denial and retry-after signaling in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a small background direct-play refresh scheduling seam above the limiter-aware one-shot execution helper:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now defines a background schedule-request/result model plus a minimal scheduler protocol, so direct-play refresh work can be prepared or scheduled without blocking the live [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py) request path.
+  - Scheduled direct-play refresh execution now consumes the existing one-shot provider-execution outcome and translates limiter denial into explicit run-later guidance, preserving `retry_after_seconds` as the next scheduling hint instead of collapsing that state back into an immediate-only result.
+  - Added focused regression coverage for initial background scheduling and retry-after-driven rescheduling in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a small in-process control-plane caller above the scheduling seam:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now also exposes an in-process controller that can trigger direct-play refresh work in the background, deduplicate already-pending work per item, and requeue rate-limited follow-up attempts without introducing ARQ or event-backplane wiring.
+  - The caller stays intentionally below the route layer, so `/api/v1/stream/file/*` remains non-blocking by policy while the backend now has a real service-layer path that can invoke the earlier scheduling seam instead of only defining it abstractly.
+  - Added focused regression coverage for background trigger success, pending-work deduplication, and rate-limited in-process rescheduling in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Attached the in-process direct-play refresh controller at the app-resource boundary:
+  - [`../filmu_py/resources.py`](../filmu_py/resources.py) now carries an optional app-scoped playback refresh controller, and [`../filmu_py/app.py`](../filmu_py/app.py) now creates that controller during startup and shuts it down during lifespan teardown.
+  - The app/runtime layer now owns controller reuse and background-task cleanup without wiring the HTTP route to trigger it yet, which keeps this slice below the request surface while giving later route-adjacent work a stable app-scoped attachment point.
+  - Added focused regression coverage for app-scoped controller attachment and shutdown safety in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a small service-boundary helper above the app-scoped controller:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes a helper that triggers direct-play refresh work through app resources without requiring callers to reach into controller internals directly.
+  - That helper no-ops explicitly when no app-scoped controller is attached, which keeps later integration points deterministic while still staying off the HTTP route.
+  - Added focused regression coverage for both the controller-unavailable and attached-controller helper paths in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added a narrow route-adjacent non-blocking trigger for direct-play:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now starts app-scoped direct-play refresh trigger work when a remote direct source is selected and also when direct playback fails closed with `503` selected-lease failure.
+  - The route still does not await provider refresh execution; it only fire-and-forgets the already-built app-scoped trigger helper, preserving the direct-file client contract while finally connecting the route surface to the existing off-route control-plane path.
+  - Added focused regression coverage for both successful remote-direct responses and `503` failed-lease responses triggering that non-blocking route-adjacent hook in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Deepened provider-pressure guardrails and observability for that trigger path:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now avoids spawning duplicate trigger tasks when app-scoped refresh work for the same item is already pending, and it distinguishes that repeated-hit backoff state from a missing-controller state.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) plus [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now surface additive direct-play trigger governance counters through [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py), including starts, already-pending hits, backoff-pending hits, controller-unavailable hits, failures, and active trigger task count.
+  - Added focused regression coverage for duplicate-trigger suppression and missing-controller observability in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first narrow HLS route-adjacent failed-lease refresh trigger slice:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now exposes a small in-process controller plus app-resource helper for selected failed HLS lease refresh work, reusing the existing media-entry refresh seam and provider-aware limiter without widening into ARQ or event-backplane wiring.
+  - [`../filmu_py/resources.py`](../filmu_py/resources.py), [`../filmu_py/app.py`](../filmu_py/app.py), [`../filmu_py/api/models.py`](../filmu_py/api/models.py), and [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now attach that controller at the runtime boundary, start it opportunistically from the HLS playlist/child-file routes when a selected HLS lease fails closed with `503`, suppress duplicate route-trigger work, and expose additive HLS failed-lease trigger governance counters through [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py).
+  - Added focused regression coverage for the new controller, resource helper, HLS route-adjacent trigger, duplicate-trigger suppression, missing-controller observability, and status-surface counters in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the second narrow HLS route-adjacent trigger slice for stale or refreshing selected remote-HLS winners:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now also exposes a parallel in-process controller plus app-resource helper for selected HLS media-entry leases that currently degrade to a `media-entry:restricted-fallback` remote-HLS winner, while intentionally keeping that path separate from the failed-lease controller family.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now preserves the HLS source tuple while carrying `source_key`, then opportunistically starts the new trigger only after route resolution confirms `source_key == "media-entry:restricted-fallback"`, avoiding duplicate service-layer resolution while keeping the route non-blocking.
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) plus [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now expose a parallel additive `hls_restricted_fallback_refresh_trigger_*` governance family through [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py), and focused regression coverage for the new controller, route trigger, duplicate suppression, missing-controller observability, and tuple/source-key contract lives in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Hardened the direct-file serving contract with stable filename propagation:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now derives the best current direct-play filename from resolved attachment metadata and applies an inline `Content-Disposition` header when the response does not already provide one.
+  - This keeps the direct-file route aligned with the current frontend BFF forwarding contract for `content-disposition` without overriding upstream-provided filename headers on proxied remote direct responses.
+  - Added focused regression coverage for local range responses, remote direct responses without upstream disposition, and remote direct responses that already provide upstream `content-disposition` in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Deepened the direct-file link-resolver abstraction behind that contract:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now builds its internal `DirectFileLinkResolution` model from the explicit `DirectPlaybackDecision` seam rather than from raw attachment shape alone, so direct-file classification policy now stays separated from route-facing serving-descriptor synthesis.
+  - That internal resolution model now carries nested provenance including source class, refresh intent, and refresh-recommendation reason while the route-facing [`DirectFileServingDescriptor`](../filmu_py/services/playback.py) continues exposing only the existing filename/provenance subset needed by [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py).
+  - That nested provenance now also carries a debrid-first lifecycle snapshot derived from already-persisted playback attachments and media entries, including owner kind/id, provider family, locator source, restricted-fallback state, match basis, and persisted refresh timestamps/errors, while still remaining internal to the playback service.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now also projects that same lifecycle model onto the internal resolved direct/HLS playback snapshot used by adjacent playback and future VFS-facing read paths, so those consumers can reuse persisted owner/link-state context without adding new reads or widening public route contracts.
+  - [`../filmu_py/services/mount_worker.py`](../filmu_py/services/mount_worker.py) now defines that mount-worker boundary explicitly as a separate module, including a playback-snapshot supplier protocol, an explicit media-entry query contract/result shape, and a concrete persisted-query executor against the existing `media_entries` + `active_streams` model for future mount-facing provider-file identity resolution.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) continues consuming only the typed serving descriptor, so this slice stays internal to the service layer and does not widen the route surface or persistence model.
+  - Added focused regression coverage for the new internal resolution model in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py) while keeping the existing route-contract tests green.
+- Added focused regression coverage for the separate mount-worker contract boundary in [`../tests/test_mount_worker.py`](../tests/test_mount_worker.py).
+- Hardened inline provider-backed direct-play lease resolution further:
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now defines a reusable service-layer [`LinkResolver`](../filmu_py/services/playback.py) plus [`ProviderCircuitBreaker`](../filmu_py/services/playback.py), so persisted media-entry lease refreshes can be resolved behind one boundary that is reusable by both the HTTP compatibility surface and the future mount worker.
+  - That resolver now applies the existing `ratelimit:{provider}:stream_link_refresh` bucket before inline provider refreshes, serves the current cached lease when limiter denial still leaves a usable link, and fails closed with the existing playback-risk signaling when no usable lease remains.
+  - Provider-backed inline refresh execution in [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now also records per-provider circuit-open state and increments [`PROVIDER_CIRCUIT_OPEN_EVENTS`](../filmu_py/services/playback.py) when repeated provider failures trip the breaker instead of repeatedly retrying a degraded upstream.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now performs a short HEAD validation for provider-backed `remote-direct` media-entry winners before starting byte proxying, attempts one resolver-managed refresh on reachability failure, and otherwise preserves the frontend-facing `503` contract with `Retry-After: 10` when no refreshed lease can be obtained.
+  - Added focused regression coverage for inline refresh limiter denial with cached-lease fallback, circuit-open `503` degradation, HEAD-failure refresh success, and HEAD-failure refresh denial in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py), while keeping the full [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py) suite green.
+- Extended that inline resolver path onto HLS transcode inputs:
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now validates `media-entry`-backed `remote-direct` HLS transcode inputs with the same short HEAD probe used by direct-file serving before calling into [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) for local HLS generation.
+  - When that HEAD check fails, the HLS route now attempts one shared [`LinkResolver`](../filmu_py/services/playback.py) inline refresh through the app-scoped [`PlaybackSourceService`](../filmu_py/services/playback.py) instead of creating a parallel resolver or bypassing provider-pressure governance.
+  - Failed HLS transcode-input validation now records a dedicated `transcode_source_unavailable` HLS route failure reason in [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) / [`../filmu_py/api/models.py`](../filmu_py/api/models.py), while still preserving the existing simplified `503` HLS client-facing mapping and keeping the non-blocking failed-lease / restricted-fallback trigger paths unchanged.
+  - Added focused regression coverage for HLS transcode-input HEAD-failure refresh success, HEAD-failure rate-limited denial with `Retry-After: 10`, and healthy-head no-refresh behavior in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the proto-first Rust-sidecar catalog-supplier boundary:
+  - Added the WatchCatalog-oriented protobuf contract at [`../proto/filmuvfs/catalog/v1/catalog.proto`](../proto/filmuvfs/catalog/v1/catalog.proto).
+  - Added the Python catalog snapshot/delta supplier at [`../filmu_py/services/vfs_catalog.py`](../filmu_py/services/vfs_catalog.py), reusing the existing playback-snapshot and mount-query seams.
+  - Attached that supplier at the app runtime boundary in [`../filmu_py/app.py`](../filmu_py/app.py) and [`../filmu_py/resources.py`](../filmu_py/resources.py) without introducing a gRPC server or Rust runtime yet.
+  - Added focused supplier coverage in [`../tests/test_vfs_catalog.py`](../tests/test_vfs_catalog.py).
+- Added the Rust runtime scaffold that consumes the catalog contract:
+  - Added the Rust crate manifest at [`../rust/filmuvfs/Cargo.toml`](../rust/filmuvfs/Cargo.toml) with the agreed stack (`tokio`, `fuse3`, `hyper`, `tonic`, `bytes`, `moka`, `dashmap`, `tracing`, `opentelemetry-otlp`, `tokio-util`) plus the minimal runtime/build dependencies needed to consume the proto cleanly.
+  - Added vendored build-time proto compilation in [`../rust/filmuvfs/build.rs`](../rust/filmuvfs/build.rs) and generated-binding inclusion in [`../rust/filmuvfs/src/proto.rs`](../rust/filmuvfs/src/proto.rs).
+  - Added runtime config/bootstrap and tracing setup in [`../rust/filmuvfs/src/config.rs`](../rust/filmuvfs/src/config.rs), [`../rust/filmuvfs/src/telemetry.rs`](../rust/filmuvfs/src/telemetry.rs), and [`../rust/filmuvfs/src/main.rs`](../rust/filmuvfs/src/main.rs).
+  - Added the WatchCatalog client lifecycle scaffold in [`../rust/filmuvfs/src/catalog/client.rs`](../rust/filmuvfs/src/catalog/client.rs) with subscribe, heartbeat, snapshot/delta application, ack handling, duplicate-event suppression, and reconnect backoff seams.
+  - Added in-memory catalog materialization in [`../rust/filmuvfs/src/catalog/state.rs`](../rust/filmuvfs/src/catalog/state.rs) plus focused Rust unit tests for snapshot/delta behavior.
+  - Added binding-guard tests in [`../rust/filmuvfs/src/proto.rs`](../rust/filmuvfs/src/proto.rs) so Cargo validation can prove the generated Rust bindings still expose `session_id`, `handle_key`, and provider-file identity fields before any mount lifecycle work begins.
+  - Kept FUSE intentionally out of scope by using an explicit disabled boundary in [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs) and by not adding any `open`/`read`/`readdir`/`getattr`/`release` code yet.
+- Validated the Rust scaffold on Windows:
+  - At that stage, `fuse3` was moved to a Linux-only dependency section in [`../rust/filmuvfs/Cargo.toml`](../rust/filmuvfs/Cargo.toml) and its mount-boundary import in [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs) was gated so the non-mount runtime compiled cleanly on Windows before a native Windows adapter existed.
+  - Fixed generated-proto integration mismatches in [`../rust/filmuvfs/src/catalog/state.rs`](../rust/filmuvfs/src/catalog/state.rs), [`../rust/filmuvfs/src/proto.rs`](../rust/filmuvfs/src/proto.rs), and [`../rust/filmuvfs/src/main.rs`](../rust/filmuvfs/src/main.rs).
+  - Verified [`rust:fmt`](../package.json) ✅, [`rust:check`](../package.json) ✅, and [`rust:test`](../package.json) ✅ on this host for [`../rust/filmuvfs`](../rust/filmuvfs).
+- Added the first mount-facing Rust lifecycle slice:
+  - [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs) now resolves catalog-backed `getattr`, `readdir`, `open`, `read`, and `release` behavior over the validated [`../rust/filmuvfs/src/catalog/state.rs`](../rust/filmuvfs/src/catalog/state.rs) store.
+  - The same slice preserves the `/movies` / `/shows` hierarchy in focused tests instead of flattening the catalog.
+  - [`../rust/filmuvfs/src/runtime.rs`](../rust/filmuvfs/src/runtime.rs) now attaches that mount-facing runtime to the shared catalog state instead of only proving the no-FUSE guard.
+- Added the first Linux `fuse3` adapter slice:
+  - [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs) now defines a stable inode model derived from catalog entry IDs plus inode-based lookup helpers above [`../rust/filmuvfs/src/catalog/state.rs`](../rust/filmuvfs/src/catalog/state.rs).
+  - At that stage, the same file included only the Linux `fuse3::raw::Filesystem` adapter plus a `Session::mount(...)` bootstrap seam, while deliberately keeping `read()` on the existing `MountReadPlan` boundary instead of prematurely introducing the chunk engine.
+  - Added focused Rust tests for inode stability and inode/name traversal while keeping the Windows validation gate green.
+  - Added Linux-target compile validation from this Windows host (`x86_64-unknown-linux-gnu`) so the Linux adapter is checked by Cargo for the intended production target.
+- Verified focused quality gates after the serving-runtime expansion:
+  - `ruff check` ✅
+  - `mypy` (strict) ✅
+  - targeted [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py) coverage ✅
+  - targeted [`../tests/test_item_routes.py`](../tests/test_item_routes.py) coverage ✅
+- Fixed the backend migration path for local Docker startup:
+  - [`../filmu_py/db/migrations.py`](../filmu_py/db/migrations.py) now detects async SQLAlchemy URLs deliberately.
+  - [`../filmu_py/db/alembic/env.py`](../filmu_py/db/alembic/env.py) now uses SQLAlchemy's async Alembic connection path for `postgresql+asyncpg` DSNs instead of trying to open them through the sync engine template.
+  - Added regression coverage in [`../tests/test_db_migrations.py`](../tests/test_db_migrations.py).
+  - Reconfirmed the local stack reaches healthy backend startup and frontend availability through [`../docker-compose.local.yml`](../docker-compose.local.yml).
+- Implemented the next concrete frontend-compatibility slice exposed by the first local run:
+  - the first containerized run surfaced `POST /api/v1/items/add` as a real missing route and exposed item-detail lookup pressure on external TMDB/TVDB identifiers
+  - [`../filmu_py/api/models.py`](../filmu_py/api/models.py) now defines `AddMediaItemPayload`
+  - [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) now exposes `POST /api/v1/items/add`
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now supports `request_items_by_identifiers(...)`, namespaced external refs, and broader item-detail identifier matching
+  - focused regression coverage now exists in [`../tests/test_item_routes.py`](../tests/test_item_routes.py)
+  - the live local stack now confirms both `POST /api/v1/items/add` and `GET /api/v1/items/{id}?media_type=movie&extended=true` succeed for newly requested TMDB-backed items
+- Fixed an item-detail API response issue preventing the frontend from recognizing `completed` items:
+  - [`../filmu_py/api/routes/items.py`](../filmu_py/api/routes/items.py) now automatically `.title()`s the `state` property for `ItemDetailResponse` and `ItemSummaryResponse` to match the frontend `Completed` contract.
+  - Test suite updated to match the lowercase source-of-truth in the database.
+- Implemented the next playback-hardening slice after that request/detail fix:
+  - [`../filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) now lets the HLS selector fall back to a `remote-direct` winner when no explicit HLS/local-file candidate exists.
+  - [`../filmu_py/services/playback.py`](../filmu_py/services/playback.py) now resolves that `remote-direct` winner for the HLS route family instead of surfacing the earlier unsupported-transcode seam.
+  - [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py) now treats that winner as a transcode source for the HLS playlist/file routes while preserving the existing route-adjacent refresh triggers.
+  - [`../filmu_py/core/byte_streaming.py`](../filmu_py/core/byte_streaming.py) now records a generated-HLS source marker so cached outputs are reused only when they still belong to the same source input.
+  - focused regression coverage for the new remote-direct HLS fallback and source-aware HLS cache invalidation now exists in [`../tests/test_stream_routes.py`](../tests/test_stream_routes.py).
+- Added the first request-intent domain slice:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now defines persisted [`ItemRequestORM`](../filmu_py/db/models.py) rows linked back to [`MediaItemORM`](../filmu_py/db/models.py) when a request has already materialized into a media row.
+  - [`../filmu_py/db/alembic/versions/20260314_0009_item_requests.py`](../filmu_py/db/alembic/versions/20260314_0009_item_requests.py) adds the backing schema.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now upserts request-intent rows during [`request_item()`](../filmu_py/services/media.py) so repeated `/api/v1/items/add` and scrape-trigger requests no longer live only as incidental `MediaItemORM` mutations.
+  - focused helper/domain coverage now exists in [`../tests/test_item_request_domain.py`](../tests/test_item_request_domain.py), while the existing request-route coverage in [`../tests/test_item_routes.py`](../tests/test_item_routes.py) and [`../tests/test_scrape_routes.py`](../tests/test_scrape_routes.py) remains green.
+- Added the first media-specialization persistence slice:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now defines additive [`MovieORM`](../filmu_py/db/models.py), [`ShowORM`](../filmu_py/db/models.py), [`SeasonORM`](../filmu_py/db/models.py), and [`EpisodeORM`](../filmu_py/db/models.py) rows linked one-to-one to [`MediaItemORM`](../filmu_py/db/models.py).
+  - [`../filmu_py/db/alembic/versions/20260314_0010_media_specializations.py`](../filmu_py/db/alembic/versions/20260314_0010_media_specializations.py) adds the specialization tables and the initial `Episode -> Season -> Show` foreign-key hierarchy.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now creates or updates specialization rows from the request-time media type and metadata inside [`request_item()`](../filmu_py/services/media.py) while keeping `MediaItemORM` as the lifecycle carrier.
+  - focused domain coverage now exists in [`../tests/test_media_specialization_domain.py`](../tests/test_media_specialization_domain.py), and the existing request-route coverage in [`../tests/test_item_routes.py`](../tests/test_item_routes.py) and [`../tests/test_scrape_routes.py`](../tests/test_scrape_routes.py) remains green.
+- Added the first stream-candidate persistence slice:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now defines additive [`StreamORM`](../filmu_py/db/models.py), [`StreamBlacklistRelationORM`](../filmu_py/db/models.py), and [`StreamRelationORM`](../filmu_py/db/models.py) rows linked to [`MediaItemORM`](../filmu_py/db/models.py).
+  - [`../filmu_py/db/alembic/versions/20260314_0011_stream_graph.py`](../filmu_py/db/alembic/versions/20260314_0011_stream_graph.py) adds the backing schema.
+  - focused domain coverage now exists in [`../tests/test_stream_graph_domain.py`](../tests/test_stream_graph_domain.py), and the existing request-route coverage remains green.
+- Added the first parse-stage persistence seam above that stream graph:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now includes parser/value helpers plus [`persist_parsed_stream_candidates()`](../filmu_py/services/media.py), using `guessit` to persist parsed pre-ranking candidates into [`StreamORM`](../filmu_py/db/models.py) exactly once.
+  - [`../filmu_py/api/routes/scrape.py`](../filmu_py/api/routes/scrape.py) now triggers that persistence seam from the manual scrape-session `complete` action using the selected filenames and the session infohash.
+  - focused coverage now exists in [`../tests/test_parse_stage_domain.py`](../tests/test_parse_stage_domain.py) and the expanded [`../tests/test_scrape_routes.py`](../tests/test_scrape_routes.py).
+- Added the first ranking seam above that parse stage:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now defines [`rank_persisted_streams_for_item()`](../filmu_py/services/media.py) and [`rank_stream_candidates()`](../filmu_py/services/media.py), reading persisted `StreamORM` rows, computing TS-compatible Levenshtein similarity from persisted data, applying additive scoring across resolution, quality/source, codec, HDR, and audio via an overridable `RankingModel`, and writing durable `rank` / `lev_ratio` values back onto [`StreamORM`](../filmu_py/db/models.py).
+  - the same seam now also applies a post-score RTN-style fetch-check layer, including attribute-level `fetch: false` rules, trash hard-fail categories, `remove_ranks_under`, and `require` override support while still returning rejected candidates explicitly.
+  - focused coverage now exists in [`../tests/test_rank_stage_domain.py`](../tests/test_rank_stage_domain.py), including resolution ordering, threshold rejection, codec penalties, HDR boosts, `RankingModel` override behavior, trash rejection, score-floor rejection, require overrides, and explicit `fetch:false` rule handling.
+- Added the first container-selection seam above that ranking stage:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now also defines top-level [`select_stream_candidate()`](../filmu_py/services/media.py) plus [`MediaService.select_stream_candidate()`](../filmu_py/services/media.py), selecting the best passing candidate by `rank_score`, then `lev_ratio`, then `stream_id` and persisting exactly one durable winner flag per item.
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now carries `StreamORM.selected`, backed by [`../filmu_py/db/alembic/versions/20260315_0012_stream_selection.py`](../filmu_py/db/alembic/versions/20260315_0012_stream_selection.py).
+  - focused coverage in [`../tests/test_rank_stage_domain.py`](../tests/test_rank_stage_domain.py) now also covers selection score precedence, `lev_ratio` and `stream_id` tie-breaks, no-pass behavior, previous-selection clearing, and durable selected-flag persistence semantics.
+- Wired the first worker-driven scraped-item pipeline on top of those seams:
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now defines [`process_scraped_item()`](../filmu_py/workers/tasks.py), which idempotently backfills any unparsed persisted stream rows, ranks parsed candidates, durably selects a winner, transitions success to `downloaded`, and transitions no-selection outcomes to `failed` with an explicit reason.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now exposes a scraped-state enqueue hook so [`transition_item()`](../filmu_py/services/media.py) can trigger ARQ processing immediately when an item becomes `scraped`, while [`../filmu_py/app.py`](../filmu_py/app.py) wires the shared ARQ client/enqueuer.
+  - focused coverage in [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py) now covers sequence execution, idempotent re-run behavior, failed-selection transition behavior, successful downloaded transitions, stable unique enqueue ids, and the scraped-state enqueue hook.
+- Added the first retry-library recovery path above that scraped-item worker seam:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now defines a recovery scan that re-enqueues failed items once their cooldown expires, recovers orphaned scraped items whose worker job is no longer active, increments durable recovery-attempt counters, and leaves over-threshold items permanently failed with explicit structured logging.
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now carries `MediaItemORM.recovery_attempt_count`, backed by [`../filmu_py/db/alembic/versions/20260315_0013_item_recovery_attempts.py`](../filmu_py/db/alembic/versions/20260315_0013_item_recovery_attempts.py).
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now also defines the scheduled [`recover_incomplete_library`](../filmu_py/workers/tasks.py) ARQ task plus cron registration, reusing the existing deduplicated scraped-item enqueue path.
+  - focused coverage in [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py) now also covers failed-item cooldown gating, post-cooldown recovery, max-attempt enforcement, scraped orphan recovery, and attempt-counter increments.
+- Added the first transactional outbox seam for lifecycle publication:
+  - [`../filmu_py/db/models.py`](../filmu_py/db/models.py) now defines `OutboxEventORM`, backed by [`../filmu_py/db/alembic/versions/20260315_0014_outbox_events.py`](../filmu_py/db/alembic/versions/20260315_0014_outbox_events.py).
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now writes outbox rows in the same transaction as [`transition_item()`](../filmu_py/services/media.py) state changes and drains pending rows through [`publish_outbox_events()`](../filmu_py/services/media.py).
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now includes the scheduled [`publish_outbox_events`](../filmu_py/workers/tasks.py) ARQ task plus 30-second cron registration.
+  - focused coverage in [`../tests/test_outbox_events.py`](../tests/test_outbox_events.py) now covers same-transaction creation, rollback safety, scheduler-driven publishing, retry counting, and terminal failure after the configured attempt threshold.
+- Added the first typed stats and calendar projections for Priority 2 domain work:
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now defines `StatsProjection` plus [`get_stats()`](../filmu_py/services/media.py) and `CalendarProjectionRecord` plus [`get_calendar()`](../filmu_py/services/media.py), backed by persisted media items and specialization rows instead of route-local fabrication.
+  - [`../filmu_py/api/routes/default.py`](../filmu_py/api/routes/default.py) now wires [`/api/v1/stats`](../filmu_py/api/routes/default.py) and [`/api/v1/calendar`](../filmu_py/api/routes/default.py) to those projection methods while preserving the current response contract.
+  - focused coverage in [`../tests/test_projection_queries_domain.py`](../tests/test_projection_queries_domain.py) now verifies DB-backed stats counts, episode air-date ordering, and zero-state behavior, while the updated route coverage in [`../tests/test_dashboard_routes.py`](../tests/test_dashboard_routes.py) and [`../tests/test_calendar_routes.py`](../tests/test_calendar_routes.py) keeps the HTTP contract stable.
+- Added the first explicit dual-surface API split above the shared service layer:
+  - [`../filmu_py/api/routes/default.py`](../filmu_py/api/routes/default.py) now keeps the current `/api/v1/*` stats/calendar responses on the original riven-compatible shapes, including dict-keyed calendar rows and stable legacy field names.
+  - [`../filmu_py/graphql/types.py`](../filmu_py/graphql/types.py), [`../filmu_py/graphql/resolvers.py`](../filmu_py/graphql/resolvers.py), and [`../filmu_py/graphql/schema.py`](../filmu_py/graphql/schema.py) now also expose richer product-facing GraphQL queries for calendar entries, library stats, and media-item stream-candidate detail without copying service-layer logic.
+  - focused GraphQL coverage in [`../tests/test_graphql_projections.py`](../tests/test_graphql_projections.py) now verifies list-shaped `calendarEntries`, typed `libraryStats`, and `mediaItem` stream-candidate detail on top of the same service-layer projections already used by the REST surface.
+- Added the standalone RTN compatibility package above the current persisted parse/rank seams:
+  - [`../filmu_py/rtn/schemas.py`](../filmu_py/rtn/schemas.py), [`../filmu_py/rtn/defaults.py`](../filmu_py/rtn/defaults.py), [`../filmu_py/rtn/parser.py`](../filmu_py/rtn/parser.py), [`../filmu_py/rtn/ranker.py`](../filmu_py/rtn/ranker.py), [`../filmu_py/rtn/rtn.py`](../filmu_py/rtn/rtn.py), and [`../filmu_py/rtn/exceptions.py`](../filmu_py/rtn/exceptions.py) now provide a self-contained RTN-compatible parser/ranker/facade layer that deserializes the original snake_case `settings.json` ranking block directly.
+  - The standalone package now respects `use_custom_rank`, carries `enable_fetch_speed_mode` as a stored-but-unused compatibility field, rejects disabled profiles explicitly, and keeps `bucket_limit` outside the ranking profile itself as a call-time sort parameter.
+  - focused coverage in [`../tests/test_rtn_package.py`](../tests/test_rtn_package.py) now verifies settings deserialization, `use_custom_rank` semantics, disabled-profile handling, fetch-check pipeline behavior, snake_case key fidelity such as `dolby_vision`, and bucket-limited sorting.
+- Added the first downloader runtime model plus provider download-pipeline client methods:
+  - [`../filmu_py/config.py`](../filmu_py/config.py) now includes a structured `downloaders` runtime model matching the original frontend `settings.json` block, including `video_extensions`, movie/episode filesize bounds, `proxy_url`, and provider configs for `real_debrid`, `debrid_link`, and `all_debrid`.
+  - [`../filmu_py/api/routes/settings.py`](../filmu_py/api/routes/settings.py) now shapes the compatibility settings response from that structured runtime model rather than only from scattered top-level provider token fields.
+  - [`../filmu_py/services/debrid.py`](../filmu_py/services/debrid.py) now extends the three built-in provider clients with `add_magnet()`, `get_torrent_info()`, `select_files()`, and `get_download_links()` plus a shared [`filter_torrent_files()`](../filmu_py/services/debrid.py) helper for later container-selection wiring.
+  - focused coverage in [`../tests/test_debrid_download_pipeline.py`](../tests/test_debrid_download_pipeline.py) now verifies downloader-settings round-trip, provider torrent-id/torrent-info mapping, extension and filesize filtering, `-1` max-size semantics, and provider-specific `ratelimit:{provider}:download` limiter usage.
+- Completed the full dual-surface settings schema modeling pass:
+  - [`../filmu_py/config.py`](../filmu_py/config.py) now models every audited compatibility settings section as typed Pydantic objects, including filesystem, updaters, content sources, scraping providers, indexer, database, notifications, post-processing, logging, and stream settings, while preserving the existing downloader and ranking primitives.
+  - [`../filmu_py/config.py`](../filmu_py/config.py) now exposes [`Settings.to_compatibility_dict()`](../filmu_py/config.py) and [`Settings.from_compatibility_dict()`](../filmu_py/config.py) so the backend can keep `/api/v1/settings/*` exactly riven-compatible while maintaining a cleaner internal runtime model for future GraphQL/product evolution.
+  - [`../filmu_py/api/routes/settings.py`](../filmu_py/api/routes/settings.py) now delegates compatibility projection to that shared translation layer instead of maintaining a route-local partial dump implementation.
+  - focused coverage in [`../tests/test_settings_compatibility_model.py`](../tests/test_settings_compatibility_model.py) now verifies full-payload round-tripping, key-path fidelity, per-scraper optional fields, downloader/ranking hydration preservation, and optional library filter rules handling.
+- Added persisted settings storage, startup hydration, and live runtime application:
+  - [`../filmu_py/db/alembic/versions/20260316_0015_settings_table.py`](../filmu_py/db/alembic/versions/20260316_0015_settings_table.py) now adds a single-row `settings` table with a JSONB compatibility blob, `updated_at`, and a `CHECK (id = 1)` constraint.
+  - [`../filmu_py/services/settings_service.py`](../filmu_py/services/settings_service.py) now provides persisted compatibility-blob load/save helpers over that table.
+  - [`../filmu_py/app.py`](../filmu_py/app.py) now hydrates the runtime settings object from persisted compatibility JSON during startup when a row exists and logs which startup path was taken.
+  - [`../filmu_py/api/routes/settings.py`](../filmu_py/api/routes/settings.py) now serves top-level `/api/v1/settings` reads from the active in-memory runtime object, validates and persists full compatibility PUTs, and keeps compatibility path-based updates writing back through the same full-payload persistence layer.
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now resolves persisted compatibility settings for worker-side runtime usage when no explicit settings object was injected into the job context, keeping downloader/ranking behavior aligned after persisted changes.
+  - focused coverage in [`../tests/test_api_settings_routes.py`](../tests/test_api_settings_routes.py), [`../tests/test_app_settings_startup.py`](../tests/test_app_settings_startup.py), [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py), and [`../tests/test_db_migrations.py`](../tests/test_db_migrations.py) now verifies persisted writes, startup hydration, live API key rotation, worker visibility of updated settings, and migration helper behavior.
+- Added request-time TMDB metadata enrichment for item creation:
+  - [`../filmu_py/services/tmdb.py`](../filmu_py/services/tmdb.py) now provides a minimal TMDB metadata client for movie/show title, year, overview, poster, genres, and status lookups.
+  - [`../filmu_py/config.py`](../filmu_py/config.py) now carries top-level [`tmdb_api_key`](../filmu_py/config.py) runtime settings, including compatibility translation and `TMDB_API_KEY` environment loading.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now enriches request-created items with TMDB metadata when available while gracefully falling back to placeholder records when TMDB is unavailable or unconfigured.
+  - End-to-end request orchestration is now confirmed through the live local stack: `request → scrape → parse/rank → debrid → completed` succeeds after the BIGINT persistence fixes in migrations `0017` and `0018`.
+  - The three confirmed BIGINT size columns are now [`scrape_candidates.size_bytes`](../filmu_py/db/models.py), [`media_entries.size_bytes`](../filmu_py/db/models.py), and [`playback_attachments.file_size`](../filmu_py/db/models.py).
+  - `scrape plugin failed` worker warnings are now non-fatal individual scraper/provider failures rather than pipeline-stopping blockers when another scraper path succeeds.
+  - focused coverage in [`../tests/test_tmdb_request_enrichment.py`](../tests/test_tmdb_request_enrichment.py) now verifies successful enrichment, missing-key fallback, TMDB error fallback, and rate-limiter invocation.
+- Tightened TMDB-backed library poster compatibility for the current frontend:
+  - [`../filmu_py/app.py`](../filmu_py/app.py) now wires runtime settings plus a shared [`DistributedRateLimiter`](../filmu_py/core/rate_limiter.py) into [`../filmu_py/services/media.py`](../filmu_py/services/media.py), so request-time TMDB enrichment is actually reachable through the real app startup path.
+  - [`../filmu_py/config.py`](../filmu_py/config.py) now preserves env-only `TMDB_API_KEY` during compatibility hydration when persisted settings rows leave `tmdb_api_key` blank, keeping backend poster enrichment alive even though TMDB is not yet a frontend-editable setting.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now normalizes TMDB-relative poster paths into fully qualified `image.tmdb.org` URLs for item summary/detail responses, which fixes broken library-card image requests in the current frontend.
+  - focused coverage in [`../tests/test_app_settings_startup.py`](../tests/test_app_settings_startup.py), [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py), and [`../tests/test_item_poster_projection.py`](../tests/test_item_poster_projection.py) now verifies startup/runtime TMDB preservation and full poster URL projection behavior.
+- Replaced scrape-route placeholders with real queue-backed orchestration:
+  - [`../filmu_py/api/routes/scrape.py`](../filmu_py/api/routes/scrape.py) now moves [`auto_scrape()`](../filmu_py/api/routes/scrape.py) from a fake success path to real item resolution, scrape-eligibility checks, state transition into `indexed`, and queueing through the existing ARQ scrape-stage helper.
+  - [`../filmu_py/api/routes/scrape.py`](../filmu_py/api/routes/scrape.py) now also converts [`start_manual_session()`](../filmu_py/api/routes/scrape.py) into the same real orchestration entrypoint and adds poll-based session progress through [`get_session_state()`](../filmu_py/api/routes/scrape.py) instead of the earlier synthetic in-memory file-selection flow.
+  - [`../filmu_py/resources.py`](../filmu_py/resources.py) and [`../filmu_py/app.py`](../filmu_py/app.py) now carry the resolved ARQ queue name through app resources so route-level orchestration can enqueue consistently against the same queue naming.
+  - focused coverage in [`../tests/test_scrape_routes.py`](../tests/test_scrape_routes.py) now verifies real queueing, unknown-item handling, terminal-state rejection, and poll-based session state lookup.
+- Replaced the placeholder debrid worker stage with a real provider-backed orchestration slice:
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now enqueues `debrid_item` after successful scraped-item rank/select work and enqueues `finalize_item` after successful debrid execution.
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now also resolves the enabled downloader from runtime settings, constructs the correct provider client, adds the magnet, polls provider torrent info, filters/selects files, resolves download links, and persists provider-backed media entries.
+  - [`../filmu_py/services/media.py`](../filmu_py/services/media.py) now also exposes [`get_latest_item_request_id()`](../filmu_py/services/media.py) plus [`persist_debrid_download_entries()`](../filmu_py/services/media.py) so the worker can persist provider-backed media-entry results through the current domain layer.
+  - focused worker coverage in [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py) now verifies stage chaining into `debrid_item`, real debrid-stage media-entry persistence, failure transition on missing selected stream, and finalize completion after download.
+- Split the old combined scraped-item worker seam into explicit parse and rank stages:
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now defines [`parse_scrape_results()`](../filmu_py/workers/tasks.py) and [`rank_streams()`](../filmu_py/workers/tasks.py) as distinct ARQ stages with stable job/enqueue helpers, while [`process_scraped_item()`](../filmu_py/workers/tasks.py) remains as a compatibility wrapper over those two steps.
+  - The parse stage now performs explicit parsed-candidate validation before ranking, including media-type mismatch, year drift, and season/episode mismatch rejection through the shared parse helpers in [`../filmu_py/services/media.py`](../filmu_py/services/media.py).
+  - The rank stage now constructs RTN from persisted settings compatibility data, applies bucket-limited sorting, and honors `dubbed_anime_only` from the scraping settings block before debrid handoff.
+  - focused worker coverage in [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py) now also verifies parse-stage rejection, rank-stage anime dubbing filtering, and structured `item_id` / `item_request_id` log correlation.
+- Added stage-aware retry-library recovery plus explicit downloader priority:
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now exposes [`retry_library()`](../filmu_py/workers/tasks.py), which re-enqueues `indexed` items into `scrape_item` and `scraped` items into `parse_scrape_results`, while skipping items whose current-stage job is already queued or running.
+  - [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now also uses an explicit provider priority in [`_resolve_enabled_downloader()`](../filmu_py/workers/tasks.py): Real-Debrid first, then AllDebrid, then Debrid-Link, logging a warning when more than one provider is enabled.
+  - focused worker coverage in [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py) now also verifies retry-library stage re-entry, queued-job skipping, and provider-priority selection.
+- Added boot wiring for the first real Plugin SDK capability runtime:
+  - [`../filmu_py/resources.py`](../filmu_py/resources.py) now carries a shared `plugin_registry` alongside the existing GraphQL registry reference.
+  - [`../filmu_py/app.py`](../filmu_py/app.py) now builds a shared [`PluginRegistry`](../filmu_py/plugins/registry.py), constructs a runtime [`PluginContextProvider`](../filmu_py/plugins/context.py), loads non-GraphQL capability plugins during startup, and registers built-in plugins after resources exist.
+  - [`../filmu_py/api/routes/default.py`](../filmu_py/api/routes/default.py) plus [`../filmu_py/api/models.py`](../filmu_py/api/models.py) now expose loaded capability plugins through `GET /api/v1/plugins` for runtime visibility.
+  - [`../filmu_py/plugins/builtin/torrentio.py`](../filmu_py/plugins/builtin/torrentio.py) and [`../filmu_py/plugins/builtins.py`](../filmu_py/plugins/builtins.py) now provide the first built-in `ScraperPlugin` example, parallel to the existing legacy scraper-client surface.
+  - Focused validation now passes for [`../tests/test_app_settings_startup.py`](../tests/test_app_settings_startup.py), [`../tests/test_dashboard_routes.py`](../tests/test_dashboard_routes.py), [`../tests/test_plugin_loader.py`](../tests/test_plugin_loader.py), [`../tests/test_plugin_interfaces.py`](../tests/test_plugin_interfaces.py), and [`../tests/test_torrentio_scraper.py`](../tests/test_torrentio_scraper.py), while broader repo-wide `pytest` / `ruff` / `mypy` gates still have unrelated existing debt outside this plugin slice.
+- Expanded the plugin platform beyond that first capability baseline:
+  - Added plugin-scoped settings registration and locking in [`../filmu_py/plugins/settings.py`](../filmu_py/plugins/settings.py) plus scoped extraction in [`../filmu_py/plugins/context.py`](../filmu_py/plugins/context.py).
+  - Added host datasource injection and richer runtime context composition in [`../filmu_py/plugins/context.py`](../filmu_py/plugins/context.py) and typed capability contracts in [`../filmu_py/plugins/interfaces.py`](../filmu_py/plugins/interfaces.py).
+  - Added typed event hook worker registration/execution in [`../filmu_py/plugins/hooks.py`](../filmu_py/plugins/hooks.py) and namespaced publishable-event governance in [`../filmu_py/core/event_bus.py`](../filmu_py/core/event_bus.py) plus [`../filmu_py/plugins/registry.py`](../filmu_py/plugins/registry.py).
+  - Added runtime event-visibility surface [`GET /api/v1/plugins/events`](../filmu_py/api/routes/default.py) plus the additive response model in [`../filmu_py/api/models.py`](../filmu_py/api/models.py).
+  - At that slice, added built-in MDBList, StremThru, and webhook notification stubs in [`../filmu_py/plugins/builtin/mdblist.py`](../filmu_py/plugins/builtin/mdblist.py), [`../filmu_py/plugins/builtin/stremthru.py`](../filmu_py/plugins/builtin/stremthru.py), and [`../filmu_py/plugins/builtin/notifications.py`](../filmu_py/plugins/builtin/notifications.py).
+  - Added focused coverage in [`../tests/test_plugin_interfaces.py`](../tests/test_plugin_interfaces.py), [`../tests/test_plugin_hooks.py`](../tests/test_plugin_hooks.py), [`../tests/test_dashboard_routes.py`](../tests/test_dashboard_routes.py), [`../tests/test_builtin_scraper_plugins.py`](../tests/test_builtin_scraper_plugins.py), and [`../tests/test_scraped_item_worker.py`](../tests/test_scraped_item_worker.py), then restored full-repo green Python gates for the slice.
+- Closed the immediate plugin-runtime hardening gaps:
+  - undeclared namespaced plugin events are now dropped-and-warned rather than only documented,
+  - hanging hook workers now time out explicitly inside [`../filmu_py/plugins/hooks.py`](../filmu_py/plugins/hooks.py),
+  - at that slice, built-in stubs also emitted explicit `plugin.stub_not_configured` readiness warnings from their initialize/send/poll paths,
+  - worker plugin contexts now hydrate from the persisted plugin settings payload carried through [`../filmu_py/resources.py`](../filmu_py/resources.py) and [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py).
+- Hardened the mounted FilmuVFS runtime/control plane:
+  - [`../proto/filmuvfs/catalog/v1/catalog.proto`](../proto/filmuvfs/catalog/v1/catalog.proto) now includes `RefreshCatalogEntry` beside `WatchCatalog`.
+  - [`../filmu_py/services/vfs_catalog.py`](../filmu_py/services/vfs_catalog.py) now keeps generation-aware snapshot history, fingerprint reuse for unchanged catalogs, and reconnect delta construction.
+  - [`../filmu_py/services/vfs_server.py`](../filmu_py/services/vfs_server.py) now serves reconnect deltas when possible and forces provider-backed URL refresh through `RefreshCatalogEntry`.
+  - [`../rust/filmuvfs/src/mount.rs`](../rust/filmuvfs/src/mount.rs) now retries stale upstream reads inline through the refresh RPC instead of immediately surfacing `ESTALE`.
+  - [`../rust/filmuvfs/src/chunk_engine.rs`](../rust/filmuvfs/src/chunk_engine.rs) now uses `moka::future::Cache`, and [`../rust/filmuvfs/src/catalog/state.rs`](../rust/filmuvfs/src/catalog/state.rs) now preserves stable assigned inodes while allocating fallback inodes when hashes collide.
+  - Added focused coverage in [`../tests/test_vfs_catalog.py`](../tests/test_vfs_catalog.py), [`../tests/test_vfs_server.py`](../tests/test_vfs_server.py), [`../rust/filmuvfs/tests/read_path.rs`](../rust/filmuvfs/tests/read_path.rs), and [`../rust/filmuvfs/tests/catalog_state.rs`](../rust/filmuvfs/tests/catalog_state.rs), plus targeted Rust validation and repo-wide Python gates.
+- Added the first general observability layer across API, workers, cache, and plugins:
+  - [`../filmu_py/api/router.py`](../filmu_py/api/router.py) now emits route counters and latency histograms using route templates instead of raw paths.
+  - [`../filmu_py/workers/retry.py`](../filmu_py/workers/retry.py) plus [`../filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) now bind worker `structlog.contextvars` and emit stage duration, retry, and dead-letter metrics.
+  - [`../filmu_py/core/cache.py`](../filmu_py/core/cache.py) now emits cache hit/miss/invalidation/stale-serve counters.
+  - [`../filmu_py/plugins/loader.py`](../filmu_py/plugins/loader.py) and [`../filmu_py/plugins/hooks.py`](../filmu_py/plugins/hooks.py) now emit plugin load and hook invocation/duration metrics.
+  - At that slice, added dedicated coverage in [`../tests/test_observability.py`](../tests/test_observability.py) and re-verified `ruff check .`, `mypy --strict filmu_py/`, and `pytest -q` (`436 passed` at that time).
+
+## Current priority gaps
+
+- Harden playback toward real end-to-end readiness:
+  - stronger source/link resolution for [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py)
+  - end-to-end validation against the current frontend BFF/player flow now that [`/api/v1/stream/hls/{item_id}/*`](../filmu_py/api/routes/stream.py) has production-grade HTTP governance
+- Continue Phase E beyond the current hardened mount/control-plane baseline:
+  - mount-wired reuse of the shared chunk engine, optional on-disk cache/prefetch, cancellation handling, and deeper stream/VFS metrics
+  - broader Linux and Windows soak/backpressure validation now that reconnect deltas, inline stale-link refresh, async cache access, inode-collision fallback, and the Windows native adapter paths are in place
+- Broaden the plugin platform beyond the current runtime baseline:
+  - packaged entry-point discovery alongside filesystem manifests
+  - explicit plugin compatibility/version policy and stronger manifest/schema validation
+  - ✅ Done — real MDBList, Webhook notification, and StremThru implementations landed; the remaining plugin work is compatibility/version policy, distribution guidance, telemetry depth, and runtime isolation
+- Extend observability beyond the new layer-1 baseline:
+  - rate-limiter pressure and provider-refresh visibility
+  - GraphQL operation metrics
+  - queue/outbox/control-plane lag and replay visibility
+  - mount/VFS data-plane metrics once live mounted reads reuse the chunk engine
+- Harden orchestration semantics beyond the D1 baseline with richer idempotency boundaries and queue-graph breadth now that the first retry-library recovery seam and transactional outbox both exist.
+- Deepen the domain model so active streams, file/link attachments, and richer subtitle/provider read models evolve beyond the newly completed D3 baseline.
+- ✅ Done — Overseerr/Plex content-service intake moved forward with `/api/v1/webhook/overseerr`, partial request tracking, and `poll_content_services` cron.
+- Deepen the domain model beyond the first additive specialization slice so calendar/detail/read-model consumers stop depending on compatibility shims over the flat `MediaItemORM.attributes` blob.
+- ✅ Done — Subtitle entry and provider/downloader visibility landed in Slice D; remaining work is deeper read-model evolution rather than first-class entity creation.
+- Deepen the orchestration model beyond the now-real parse/rank/debrid/finalize worker graph so stage idempotency, enqueue deduplication, and operator-visible queue breadth keep improving without route-local special cases.
+- Deepen the ranking/downloader model beyond the first real provider-backed execution slice so richer RTN-style `failedChecks` visibility, multi-candidate download handling, and downstream container execution are added above the current `downloaded` handoff.
+  - the detail surface and playback service now both prefer persisted playback attachments, persisted media entries, persisted active-stream selections, durable media-entry lease state, provider-backed lease refresh orchestration, fail-closed lease-failure handling, stronger shared HLS lifecycle governance, simplified client-facing HLS failure mapping, richer internal status visibility, Prometheus stream/playback counters, first latency histograms, abort telemetry, request-shape counters, read-size proxy metrics, first session-level read-amplification proxy metrics, first pre-chunk seek/scan-pattern telemetry, degraded-direct fallback awareness, provider-backed direct-source ranking, lease-freshness-aware provider-backed direct ordering, related-entry recovery via provider file identity, explicit active-stream-winner authority semantics, same-file sibling collapse for non-active direct entries, richer-identity-first different-file fallback ordering, generated-local HLS cache/reference integrity checks, and malformed-manifest governance counters, but limiter/circuit-breaker integration and broader stream/file lifecycle semantics still need to be widened beyond the current selection slice
+- Continue GraphQL/settings evolution toward broader upstream parity while keeping the current compatibility slices stable.
+- Add stronger CI/contract coverage for compatibility and playback surfaces.
+
+## Compatibility note
+
+Current API surface is compatibility-first rather than full parity, but it is no longer scaffold-level plumbing; the active frontier is playback/VFS hardening rather than basic route bring-up.
+
+Current playback-specific blockers:
+
+- `/api/v1/stream/file/{item_id}` now has a decision-shaped direct-play serving path, stable filename propagation, route-level metrics, and a mount-facing link-resolution model with persisted debrid/link lifecycle context, and the harness now proves request -> item-state -> mounted-read end-to-end on the live stack; on Windows, the remaining narrowed playback follow-up is direct-stream/remux behavior after the now-verified WinFSP software-transcode path
+- `/api/v1/stream/hls/{item_id}/*` now supports remote playlist/segment proxying, local file-backed generation, `remote-direct` transcode fallback, narrow non-blocking lease-refresh triggers, and first-layer operator metrics, but it still lacks production-grade ffmpeg governance, broader lease/cleanup policy, non-selected remote-HLS trigger policy, and full transcode parity
+- the shared serving core and Rust sidecar now already power a real mounted FilmuVFS path for Plex/Emby/Jellyfin-style consumers, including chunk-engine-backed mounted reads, reconnect-delta handling, serve-time stale-link refresh recovery, adaptive prefetch, optional disk-backed caching, a Linux `fuse3` adapter, and Windows native ProjFS/WinFSP adapters; on Windows, the WinFSP path is now validated through the soak/remux gate, Jellyfin playback, and sampled native Emby checks, but it still needs deeper mounted metrics, broader Plex parity, and continued long-run hardening before it is considered fully production-hardened
+- treat this as a serving-hardening, mount-data-plane, and end-to-end playback-validation gap to resolve before claiming playback readiness
+
+## TS backend re-audit update (March-April 2026)
+
+- Re-audited the current local `riven-ts` backend rather than relying on older assumptions.
+- Confirmed the current TS backend is GraphQL-first on `@apollo/server` + `type-graphql`, uses `xstate` bootstrap/program/main-runner machines, `bullmq` flows/workers, and `@zkochan/fuse-native` for VFS.
+- Confirmed the plugin runtime is broader than a resolver-only model: dependency-based plugin discovery from `apps/riven/package.json`, `PluginSettings`, per-plugin datasource construction, optional `plugin.context` runtime context injection, validator retries, queue-backed hook workers, and publishable-event gating.
+- Corrected one important assumption: current TS plugin discovery is package/dependency-scan based, not a generalized language-level entry-point model.
+- Verified the local checkout split from current upstream reality:
+  - the local `Triven_backend - ts` comparison checkout is now at `e64604a`
+  - upstream `rivenmedia/riven-ts` `main` is now `e64604a`
+  - the local checkout now matches upstream `main` directly
+- Verified the refreshed local working-tree delta:
+  - current local `apps/riven/package.json` already includes `plugin-comet`, `plugin-mdblist`, `plugin-notifications`, and `plugin-stremthru`
+  - the same local workspace still physically retains `packages/plugin-realdebrid`
+  - CPU-heavy-stage files now exist locally under `apps/riven/lib/message-queue/sandboxed-jobs/`
+  - the download flow tree now centers on `find-valid-torrent`, with sandboxed `map-items-to-files` / `validate-torrent-files` jobs alongside it
+  - the local main-runner actor set now includes `bootstrap-sandboxed-workers`, `event-scheduler`, `job-enqueuer`, and `schedule-reindex`
+  - the local VFS tree now also includes `FuseError` handling, `withVfsScope()`, and the newer hardening files while still staying on the in-process `@zkochan/fuse-native` topology
+- The dedicated audit note is tracked in [`RIVEN_TS_AUDIT.md`](RIVEN_TS_AUDIT.md).
+- The commit-by-commit upstream delta note is tracked in [`RIVEN_TS_UPSTREAM_DELTA_2026_04_06.md`](RIVEN_TS_UPSTREAM_DELTA_2026_04_06.md).
+- Current Filmu-vs-`riven-ts` parity work can now use `E:/Dev/Triven_riven-fork/Triven_backend - ts` itself as the exact current upstream comparison baseline.
+
+
+
+
+

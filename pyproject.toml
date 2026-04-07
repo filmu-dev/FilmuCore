@@ -1,0 +1,119 @@
+[project]
+name = "filmu-python"
+version = "0.1.0"
+description = "Python compatibility backend scaffold for Filmu"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116.1",
+  "strawberry-graphql[fastapi]>=0.284.1",
+  "uvicorn[standard]>=0.35.0",
+  "pydantic>=2.12.0",
+  "pydantic-settings>=2.10.1",
+  "python-dotenv>=1.1.1",
+  "orjson>=3.11.2",
+  "msgspec>=0.19.0",
+  "uvloop>=0.21.0; sys_platform != 'win32'",
+  "redis[hiredis]>=5.2.1,<6",
+  "arq>=0.26.3",
+  "sqlalchemy[asyncio]>=2.0.43",
+  "asyncpg>=0.30.0",
+  "tenacity>=9.1.2",
+  "pybreaker>=1.4.1",
+  "cachetools>=6.2.0",
+  "aiocache>=0.12.3",
+  "httpx>=0.28.1",
+  "requests>=2.32.3",
+  "urllib3>=1.26.18,<3",
+  "charset-normalizer>=2.0.0,<4",
+  "chardet>=3.0.2,<6",
+  "stamina>=25.1.0",
+  "authlib>=1.6.4",
+  "structlog>=25.4.0",
+  "apscheduler>=3.11.0",
+  "alembic>=1.16.5",
+  "sqlmodel>=0.0.24",
+  "guessit>=3.8.0",
+  "python-Levenshtein>=0.27.1",
+  "pymediainfo>=7.0.1",
+  "ffmpeg-python>=0.2.0",
+  "subliminal>=2.4.0",
+  "temporalio>=1.18.0",
+  "opentelemetry-api>=1.38.0",
+  "opentelemetry-sdk>=1.38.0",
+  "opentelemetry-instrumentation-fastapi>=0.59b0",
+  "opentelemetry-exporter-otlp>=1.38.0",
+  "prometheus-client>=0.23.1",
+  "sentry-sdk[fastapi]>=2.39.0",
+  "grpcio>=1.78.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.13.2",
+  "mypy>=1.17.1",
+  "types-cachetools>=6.2.0.20250827",
+  "pytest>=8.4.2",
+  "pytest-asyncio>=1.1.0",
+  "pytest-cov>=5.0.0",
+  "grpcio-tools>=1.78.0",
+  "types-grpcio>=1.0.0.20251009",
+  "types-protobuf>=6.32.1.20260221",
+]
+performance = [
+  "httptools>=0.6.4",
+  "aiodns>=3.5.0",
+  "zstandard>=0.24.0",
+  "lz4>=4.4.4",
+  "xxhash>=3.5.0",
+  "psutil>=7.1.0",
+]
+security = [
+  "argon2-cffi>=25.1.0",
+  "python-jose[cryptography]>=3.5.0",
+]
+quality = [
+  "bandit>=1.8.6",
+  "pip-audit>=2.9.0",
+  "pytest-benchmark>=5.1.0",
+]
+
+[project.scripts]
+filmu-py = "filmu_py.main:main"
+filmu-py-generate-protos = "filmu_py.proto_codegen:main"
+filmu-py-worker = "filmu_py.workers.tasks:run_worker_entrypoint"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["filmuvfs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+exclude = ["^filmuvfs/"]
+strict = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["filmuvfs.*"]
+ignore_errors = true
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.12"
+
+[tool.ty.src]
+root = ["."]
+
+[tool.hatch.build.targets.wheel]
+packages = ["filmu_py", "filmuvfs"]

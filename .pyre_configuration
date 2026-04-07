@@ -1,0 +1,18 @@
+{
+  "site_package_search_strategy": "pep561",
+  "search_path": [
+    {"site_package": ".venv/Lib/site-packages"},
+    {"root": "."}
+  ],
+  "ignore_all_errors": [
+    ".venv",
+    ".uv-fix-env",
+    ".uv-fix-env2",
+    ".uv-test-env",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache"
+  ],
+  "python_version": "3.12"
+}

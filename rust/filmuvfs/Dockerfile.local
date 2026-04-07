@@ -1,0 +1,250 @@
+FROM rust:latest AS builder
+
+WORKDIR /workspace
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libfuse3-dev fuse3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /workspace/proto/filmuvfs/catalog/v1 \
+    && cat <<'EOF' > /workspace/proto/filmuvfs/catalog/v1/catalog.proto
+syntax = "proto3";
+
+package filmu.vfs.catalog.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service FilmuVfsCatalogService {
+  rpc WatchCatalog(stream WatchCatalogRequest) returns (stream WatchCatalogEvent);
+  rpc RefreshCatalogEntry(RefreshCatalogEntryRequest) returns (RefreshCatalogEntryResponse);
+}
+
+message WatchCatalogRequest {
+  oneof command {
+    CatalogSubscribe subscribe = 1;
+    CatalogAck ack = 2;
+    CatalogHeartbeat heartbeat = 3;
+  }
+}
+
+message CatalogSubscribe {
+  string daemon_id = 1;
+  optional string daemon_version = 2;
+  optional string last_applied_generation_id = 3;
+  bool want_full_snapshot = 4;
+  CatalogCorrelationKeys correlation = 5;
+}
+
+message CatalogAck {
+  string event_id = 1;
+  optional string generation_id = 2;
+  CatalogCorrelationKeys correlation = 3;
+}
+
+message CatalogHeartbeat {
+  CatalogCorrelationKeys correlation = 1;
+}
+
+message RefreshCatalogEntryRequest {
+  string provider_file_id = 1;
+  string handle_key = 2;
+  string entry_id = 3;
+}
+
+message RefreshCatalogEntryResponse {
+  bool success = 1;
+  string new_url = 2;
+}
+
+message WatchCatalogEvent {
+  string event_id = 1;
+  google.protobuf.Timestamp published_at = 2;
+
+  oneof payload {
+    CatalogSnapshot snapshot = 10;
+    CatalogDelta delta = 11;
+    CatalogHeartbeat heartbeat = 12;
+    CatalogProblem problem = 13;
+  }
+}
+
+message CatalogSnapshot {
+  string generation_id = 1;
+  repeated CatalogEntry entries = 2;
+  CatalogStats stats = 3;
+}
+
+message CatalogDelta {
+  string generation_id = 1;
+  optional string base_generation_id = 2;
+  repeated CatalogEntry upserts = 3;
+  repeated CatalogRemoval removals = 4;
+  CatalogStats stats = 5;
+}
+
+message CatalogStats {
+  uint32 directory_count = 1;
+  uint32 file_count = 2;
+  uint32 blocked_item_count = 3;
+}
+
+message CatalogRemoval {
+  string entry_id = 1;
+  string path = 2;
+  CatalogEntryKind kind = 3;
+  CatalogCorrelationKeys correlation = 4;
+}
+
+message CatalogEntry {
+  string entry_id = 1;
+  optional string parent_entry_id = 2;
+  string path = 3;
+  string name = 4;
+  CatalogEntryKind kind = 5;
+  CatalogCorrelationKeys correlation = 6;
+
+  oneof details {
+    DirectoryEntry directory = 10;
+    FileEntry file = 11;
+  }
+}
+
+message DirectoryEntry {}
+
+message FileEntry {
+  string item_id = 1;
+  string item_title = 2;
+  optional string item_external_ref = 3;
+  string media_entry_id = 4;
+  optional string source_attachment_id = 5;
+  CatalogMediaType media_type = 6;
+  CatalogFileTransport transport = 7;
+  string locator = 8;
+  optional string local_path = 9;
+  optional string restricted_url = 10;
+  optional string unrestricted_url = 11;
+  optional string original_filename = 12;
+  optional int64 size_bytes = 13;
+  CatalogLeaseState lease_state = 14;
+  optional google.protobuf.Timestamp expires_at = 15;
+  optional google.protobuf.Timestamp last_refreshed_at = 16;
+  optional string last_refresh_error = 17;
+  optional string provider = 18;
+  optional string provider_download_id = 19;
+  optional string provider_file_id = 20;
+  optional string provider_file_path = 21;
+  repeated CatalogPlaybackRole active_roles = 22;
+  optional string source_key = 23;
+  optional string query_strategy = 24;
+  CatalogProviderFamily provider_family = 25;
+  CatalogLocatorSource locator_source = 26;
+  CatalogMatchBasis match_basis = 27;
+  bool restricted_fallback = 28;
+}
+
+message CatalogCorrelationKeys {
+  optional string item_id = 1;
+  optional string media_entry_id = 2;
+  optional string source_attachment_id = 3;
+  optional string provider = 4;
+  optional string provider_download_id = 5;
+  optional string provider_file_id = 6;
+  optional string provider_file_path = 7;
+  optional string session_id = 8;
+  optional string handle_key = 9;
+}
+
+message CatalogProblem {
+  string code = 1;
+  string message = 2;
+  optional double retry_after_seconds = 3;
+}
+
+enum CatalogEntryKind {
+  CATALOG_ENTRY_KIND_UNSPECIFIED = 0;
+  CATALOG_ENTRY_KIND_DIRECTORY = 1;
+  CATALOG_ENTRY_KIND_FILE = 2;
+}
+
+enum CatalogMediaType {
+  CATALOG_MEDIA_TYPE_UNSPECIFIED = 0;
+  CATALOG_MEDIA_TYPE_MOVIE = 1;
+  CATALOG_MEDIA_TYPE_SHOW = 2;
+  CATALOG_MEDIA_TYPE_SEASON = 3;
+  CATALOG_MEDIA_TYPE_EPISODE = 4;
+  CATALOG_MEDIA_TYPE_UNKNOWN = 5;
+}
+
+enum CatalogFileTransport {
+  CATALOG_FILE_TRANSPORT_UNSPECIFIED = 0;
+  CATALOG_FILE_TRANSPORT_LOCAL_FILE = 1;
+  CATALOG_FILE_TRANSPORT_REMOTE_DIRECT = 2;
+}
+
+enum CatalogLeaseState {
+  CATALOG_LEASE_STATE_UNSPECIFIED = 0;
+  CATALOG_LEASE_STATE_READY = 1;
+  CATALOG_LEASE_STATE_STALE = 2;
+  CATALOG_LEASE_STATE_REFRESHING = 3;
+  CATALOG_LEASE_STATE_FAILED = 4;
+  CATALOG_LEASE_STATE_UNKNOWN = 5;
+}
+
+enum CatalogPlaybackRole {
+  CATALOG_PLAYBACK_ROLE_UNSPECIFIED = 0;
+  CATALOG_PLAYBACK_ROLE_DIRECT = 1;
+  CATALOG_PLAYBACK_ROLE_HLS = 2;
+}
+
+enum CatalogProviderFamily {
+  CATALOG_PROVIDER_FAMILY_UNSPECIFIED = 0;
+  CATALOG_PROVIDER_FAMILY_NONE = 1;
+  CATALOG_PROVIDER_FAMILY_DEBRID = 2;
+  CATALOG_PROVIDER_FAMILY_PROVIDER = 3;
+}
+
+enum CatalogLocatorSource {
+  CATALOG_LOCATOR_SOURCE_UNSPECIFIED = 0;
+  CATALOG_LOCATOR_SOURCE_LOCAL_PATH = 1;
+  CATALOG_LOCATOR_SOURCE_UNRESTRICTED_URL = 2;
+  CATALOG_LOCATOR_SOURCE_RESTRICTED_URL = 3;
+  CATALOG_LOCATOR_SOURCE_LOCATOR = 4;
+}
+
+enum CatalogMatchBasis {
+  CATALOG_MATCH_BASIS_UNSPECIFIED = 0;
+  CATALOG_MATCH_BASIS_SOURCE_ATTACHMENT_ID = 1;
+  CATALOG_MATCH_BASIS_PROVIDER_FILE_ID = 2;
+  CATALOG_MATCH_BASIS_PROVIDER_FILE_PATH = 3;
+  CATALOG_MATCH_BASIS_LOCAL_PATH = 4;
+  CATALOG_MATCH_BASIS_UNRESTRICTED_URL = 5;
+  CATALOG_MATCH_BASIS_RESTRICTED_URL = 6;
+  CATALOG_MATCH_BASIS_LOCATOR = 7;
+  CATALOG_MATCH_BASIS_FILENAME_AND_SIZE = 8;
+  CATALOG_MATCH_BASIS_PROVIDER_DOWNLOAD_ID_AND_FILENAME = 9;
+  CATALOG_MATCH_BASIS_PROVIDER_DOWNLOAD_ID_AND_PROVIDER_FILE_PATH = 10;
+  CATALOG_MATCH_BASIS_PROVIDER_DOWNLOAD_ID_AND_FILE_SIZE = 11;
+}
+EOF
+
+COPY . ./rust
+
+RUN cargo build --manifest-path ./rust/filmuvfs/Cargo.toml --release
+
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash ca-certificates fuse3 libfuse3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /workspace/rust/filmuvfs/target/release/filmuvfs /usr/local/bin/filmuvfs
+COPY --from=builder /workspace/rust/filmuvfs/scripts/start_persistent_mount.sh /usr/local/bin/start_persistent_mount.sh
+
+RUN chmod +x /usr/local/bin/filmuvfs /usr/local/bin/start_persistent_mount.sh \
+    && mkdir -p /mnt/filmuvfs
+
+ENV FILMUVFS_MOUNTPOINT=/mnt/filmuvfs
+ENV FILMUVFS_GRPC_SERVER=http://filmu-python:50051
+
+ENTRYPOINT ["/bin/bash", "-lc", "exec /usr/local/bin/filmuvfs --mountpoint \"${FILMUVFS_MOUNTPOINT:-/mnt/filmuvfs}\" --allow-other --grpc-server \"${FILMUVFS_GRPC_SERVER:-http://filmu-python:50051}\""]

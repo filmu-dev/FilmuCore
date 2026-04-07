@@ -1,0 +1,39 @@
+name: Platform Stack Validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - "docker-compose.windows.yml"
+      - "package.json"
+      - "README.md"
+      - "QUICK_START.md"
+      - "WINDOWS_README.md"
+      - "LINUX_UNIX_README.md"
+      - "docs/LOCAL_DOCKER_STACK.md"
+      - "start_local_stack.ps1"
+      - "status_local_stack.ps1"
+      - "stop_local_stack.ps1"
+      - "start_windows_stack.ps1"
+      - "check_windows_stack.ps1"
+      - "status_windows_stack.ps1"
+      - "stop_windows_stack.ps1"
+      - "validate_platform_stack.ps1"
+
+concurrency:
+  group: platform-stack-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-platform-stack:
+    name: Validate Platform Stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout backend repo
+        uses: actions/checkout@v4
+
+      - name: Validate split Linux and Windows stack files
+        shell: pwsh
+        run: ./validate_platform_stack.ps1

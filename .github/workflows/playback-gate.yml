@@ -1,0 +1,56 @@
+name: Playback Gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "docker-compose.local.yml"
+      - "package.json"
+      - "scripts/run_playback_proof.ps1"
+      - "scripts/run_playback_proof_stability.ps1"
+      - "run_playback_gate_ci.sh"
+      - "scripts/run_media_server_proof_gate.ps1"
+      - "scripts/run_windows_media_server_gate.ps1"
+      - "scripts/run_windows_vfs_soak.ps1"
+      - "filmu_py/api/routes/stream.py"
+      - "filmu_py/core/byte_streaming.py"
+      - "filmu_py/services/playback.py"
+      - "filmu_py/workers/tasks.py"
+      - "tests/test_stream_routes.py"
+
+concurrency:
+  group: playback-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  playback-gate:
+    name: Playback Gate
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 90
+    env:
+      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+      FILMU_PY_REALDEBRID_API_TOKEN: ${{ secrets.FILMU_PY_REALDEBRID_API_TOKEN }}
+      REAL_DEBRID_API_KEY: ${{ secrets.REAL_DEBRID_API_KEY }}
+      FILMU_PY_ALLDEBRID_API_TOKEN: ${{ secrets.FILMU_PY_ALLDEBRID_API_TOKEN }}
+      ALL_DEBRID_API_KEY: ${{ secrets.ALL_DEBRID_API_KEY }}
+      FILMU_PY_DEBRIDLINK_API_TOKEN: ${{ secrets.FILMU_PY_DEBRIDLINK_API_TOKEN }}
+      DEBRID_LINK_API_KEY: ${{ secrets.DEBRID_LINK_API_KEY }}
+      FILMU_FRONTEND_CONTEXT: ${{ vars.FILMU_FRONTEND_CONTEXT }}
+      FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE: ${{ vars.FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE }}
+      FILMU_FRONTEND_USERNAME: ${{ vars.FILMU_FRONTEND_USERNAME }}
+      FILMU_FRONTEND_PASSWORD: ${{ secrets.FILMU_FRONTEND_PASSWORD }}
+      FILMU_PY_API_KEY: ${{ secrets.FILMU_PY_API_KEY }}
+      FILMU_BACKEND_CONTAINER_NAME: filmu-python
+      PLEX_URL: http://localhost:32401
+      EMBY_URL: http://localhost:8097
+      PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
+      EMBY_API_KEY: ${{ secrets.EMBY_API_KEY }}
+    steps:
+      - name: Checkout backend repo
+        uses: actions/checkout@v4
+
+      - name: Run playback gate
+        run: |
+          chmod +x ./run_playback_gate_ci.sh
+          ./run_playback_gate_ci.sh
+
