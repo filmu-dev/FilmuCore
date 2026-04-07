@@ -25,8 +25,9 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKER_PUBLISH_ENABLED: ${{ vars.DOCKER_PUBLISH_ENABLED }}
         run: |
-          if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
+          if [[ "$DOCKER_PUBLISH_ENABLED" == "true" && -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
             echo "docker_enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "docker_enabled=false" >> "$GITHUB_OUTPUT"
@@ -107,4 +108,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Explain skip
-        run: echo "Skipping Docker publish because DOCKERHUB_USERNAME / DOCKERHUB_TOKEN are not configured."
+        run: echo "Skipping Docker publish because DOCKER_PUBLISH_ENABLED is not true or Docker Hub secrets are not configured."
