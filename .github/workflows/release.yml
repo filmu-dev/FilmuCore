@@ -7,7 +7,10 @@ on:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
   contents: write
@@ -15,24 +18,6 @@ permissions:
   pull-requests: write
 
 jobs:
-  release-preflight:
-    name: Check release configuration
-    runs-on: ubuntu-latest
-    outputs:
-      release_enabled: ${{ steps.check.outputs.release_enabled }}
-    steps:
-      - name: Check release-please token
-        id: check
-        shell: bash
-        env:
-          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-        run: |
-          if [[ -n "$RELEASE_PLEASE_TOKEN" ]]; then
-            echo "release_enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "release_enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
   docker-preflight:
     name: Check Docker release configuration
     runs-on: ubuntu-latest
@@ -55,8 +40,6 @@ jobs:
 
   release:
     name: Release Please
-    needs: release-preflight
-    if: ${{ needs.release-preflight.outputs.release_enabled == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -71,18 +54,12 @@ jobs:
         id: release
         uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          # The action defaults to github.token; keep PAT usage opt-in because
+          # an org-scoped fine-grained PAT that lacks repo approval/permissions
+          # will fail PR/tag creation.
+          token: ${{ vars.RELEASE_PLEASE_USE_PAT == 'true' && secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-  skip-release:
-    name: Skip release automation
-    needs: release-preflight
-    if: ${{ needs.release-preflight.outputs.release_enabled != 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain skip
-        run: echo "Skipping release-please because RELEASE_PLEASE_TOKEN is not configured."
 
   publish-release-images:
     name: Publish release image ${{ matrix.image }}
