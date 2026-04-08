@@ -81,6 +81,17 @@ def _redis_from_settings(settings: Settings) -> Redis:
     return cast(Redis, Redis.from_url(str(settings.redis_url), decode_responses=False))
 
 
+async def _enqueue_arq_job(
+    redis: ArqRedis,
+    function: str,
+    *args: object,
+    **kwargs: object,
+) -> object | None:
+    """Preserve ARQ runtime keyword payloads while containing the local Any cast."""
+
+    return await cast(Any, redis).enqueue_job(function, *args, **kwargs)
+
+
 async def _acquire_worker_rate_limit(
     *,
     limiter: DistributedRateLimiter,
@@ -393,16 +404,18 @@ async def enqueue_scrape_item(
     )
     if defer_by_seconds is not None and defer_by_seconds > 0:
         if missing_seasons:
-            job = await redis.enqueue_job(
+            job = await _enqueue_arq_job(
+                redis,
                 "scrape_item",
                 item_id,
-                missing_seasons,
                 _job_id=resolved_job_id,
                 _queue_name=queue_name,
                 _defer_by=timedelta(seconds=defer_by_seconds),
+                missing_seasons=missing_seasons,
             )
         else:
-            job = await redis.enqueue_job(
+            job = await _enqueue_arq_job(
+                redis,
                 "scrape_item",
                 item_id,
                 _job_id=resolved_job_id,
@@ -411,15 +424,17 @@ async def enqueue_scrape_item(
             )
     else:
         if missing_seasons:
-            job = await redis.enqueue_job(
+            job = await _enqueue_arq_job(
+                redis,
                 "scrape_item",
                 item_id,
-                missing_seasons,
                 _job_id=resolved_job_id,
                 _queue_name=queue_name,
+                missing_seasons=missing_seasons,
             )
         else:
-            job = await redis.enqueue_job(
+            job = await _enqueue_arq_job(
+                redis,
                 "scrape_item",
                 item_id,
                 _job_id=resolved_job_id,
@@ -444,15 +459,17 @@ async def enqueue_rank_streams(
         job_id=rank_streams_job_id(item_id),
     )
     if partial_seasons is not None:
-        job = await redis.enqueue_job(
+        job = await _enqueue_arq_job(
+            redis,
             "rank_streams",
             item_id,
-            partial_seasons,
             _job_id=rank_streams_job_id(item_id),
             _queue_name=queue_name,
+            partial_seasons=partial_seasons,
         )
     else:
-        job = await redis.enqueue_job(
+        job = await _enqueue_arq_job(
+            redis,
             "rank_streams",
             item_id,
             _job_id=rank_streams_job_id(item_id),
