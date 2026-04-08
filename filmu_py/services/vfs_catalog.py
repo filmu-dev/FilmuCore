@@ -61,10 +61,10 @@ _COLLAPSE_WHITESPACE = re.compile(r"\s+")
 # Season-detection patterns applied to media-entry file paths.
 # Ordered from most to least specific to minimise false positives.
 _SEASON_RANGE_PATTERNS = (
-    re.compile(r"\bS(\d{1,2})\s*[-–]\s*S(\d{1,2})\b", re.IGNORECASE),
-    re.compile(r"\bS(\d{1,2})\s*[-–]\s*(\d{1,2})\b", re.IGNORECASE),
-    re.compile(r"\bSeasons?\s*[\._ -]*(\d{1,2})\s*[-–]\s*(\d{1,2})\b", re.IGNORECASE),
-    re.compile(r"\bSeries\s*[\._ -]*(\d{1,2})\s*[-–]\s*(\d{1,2})\b", re.IGNORECASE),
+    re.compile(r"\bS(\d{1,2})\s*[-\u2013]\s*S(\d{1,2})\b", re.IGNORECASE),
+    re.compile(r"\bS(\d{1,2})\s*[-\u2013]\s*(\d{1,2})\b", re.IGNORECASE),
+    re.compile(r"\bSeasons?\s*[\._ -]*(\d{1,2})\s*[-\u2013]\s*(\d{1,2})\b", re.IGNORECASE),
+    re.compile(r"\bSeries\s*[\._ -]*(\d{1,2})\s*[-\u2013]\s*(\d{1,2})\b", re.IGNORECASE),
     re.compile(r"\bSeasons?\s*[\._ -]*(\d{1,2})\s*(?:to|through|thru)\s*(\d{1,2})\b", re.IGNORECASE),
     re.compile(r"\bSeries\s*[\._ -]*(\d{1,2})\s*(?:to|through|thru)\s*(\d{1,2})\b", re.IGNORECASE),
 )
@@ -978,7 +978,6 @@ class FilmuVfsCatalogSupplier:
             "season",
             "parent_season_number",
         )
-        episode_number = FilmuVfsCatalogSupplier._extract_int(attributes, "episode_number", "episode")
         safe_filename = FilmuVfsCatalogSupplier._sanitize_path_segment(filename)
         if media_type in {"season", "episode"} and season_number is not None:
             season_dir = f"Season {season_number:02d}"

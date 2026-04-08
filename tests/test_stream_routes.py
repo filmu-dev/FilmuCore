@@ -7588,6 +7588,7 @@ def test_ensure_local_hls_playlist_returns_when_playlist_becomes_usable_before_f
         def __init__(self) -> None:
             self.returncode: int | None = None
             self.finished = asyncio.Event()
+            self.playlist_writer_task: asyncio.Task[None] | None = None
 
         async def communicate(self) -> tuple[bytes, bytes]:
             await self.finished.wait()
@@ -7616,7 +7617,7 @@ def test_ensure_local_hls_playlist_returns_when_playlist_becomes_usable_before_f
             playlist_path.write_text("#EXTM3U\n#EXTINF:2,\nsegment_00001.ts\n", encoding="utf-8")
             segment_path.write_bytes(b"segment")
 
-        asyncio.create_task(write_initial_playlist())
+        process.playlist_writer_task = asyncio.create_task(write_initial_playlist())
         return process
 
     monkeypatch.setattr(

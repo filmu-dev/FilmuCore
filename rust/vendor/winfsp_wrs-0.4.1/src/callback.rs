@@ -61,7 +61,11 @@ fn append_wrapper_trace(line: &str) {
             .to_string()
     });
 
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(file, "{line}");
     }
 }
@@ -1837,4 +1841,3 @@ impl TrampolineInterface {
         }
     }
 }
-

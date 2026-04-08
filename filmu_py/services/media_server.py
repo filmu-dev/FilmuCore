@@ -27,7 +27,7 @@ class MediaServerNotifier:
         self._settings = settings
 
     async def notify_all(self, item_id: str) -> dict[str, str]:
-        operations: tuple[tuple[str, Callable[[str], Awaitable[None]]], ...] = (
+        operations: tuple[tuple[str, Callable[[str], Awaitable[str]]], ...] = (
             ("plex", self.notify_plex),
             ("jellyfin", self.notify_jellyfin),
             ("emby", self.notify_emby),

@@ -119,7 +119,7 @@ def filter_torrent_files(
         media_type = file.media_type or _infer_media_type(file.file_name)
         size_mb = None
         if file.file_size_bytes is not None:
-            size_bytes: int = file.file_size_bytes  # type: ignore[assignment]
+            size_bytes = file.file_size_bytes
             size_mb = float(size_bytes) / (1024 * 1024)
         if media_type == "episode":
             min_mb = settings.episode_filesize_mb_min
@@ -350,7 +350,7 @@ class RealDebridPlaybackClient:
             download_url = None
             if file_payload.get("selected") == 1 and selected_index < len(links):
                 download_url = links[selected_index]
-                selected_index = selected_index + 1  # type: ignore[operator]
+                selected_index += 1
             normalized = _normalize_torrent_file(
                 file_payload,
                 download_url=download_url,

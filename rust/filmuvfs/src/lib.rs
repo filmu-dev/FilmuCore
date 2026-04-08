@@ -11,6 +11,7 @@ pub mod chunk_engine;
 pub mod chunk_planner;
 pub mod config;
 pub mod hidden_paths;
+pub mod media_path;
 pub mod mount;
 pub mod prefetch;
 pub mod proto;

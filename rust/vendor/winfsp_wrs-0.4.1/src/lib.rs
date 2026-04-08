@@ -21,8 +21,7 @@ pub use flags::{
     FileShareMode,
 };
 pub use info::{
-    CreateFileInfo, DirInfo, FileInfo, OpenFileInfo, VolumeInfo, VolumeLabelNameTooLong,
-    WriteMode,
+    CreateFileInfo, DirInfo, FileInfo, OpenFileInfo, VolumeInfo, VolumeLabelNameTooLong, WriteMode,
 };
 pub use init::{init, InitError};
 pub use security::{PSecurityDescriptor, SecurityDescriptor};

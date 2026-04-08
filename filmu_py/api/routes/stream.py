@@ -1189,7 +1189,7 @@ async def stream_file(
     item_id: Annotated[str, ApiPath(min_length=1)],
     request: Request,
     db: Annotated[DatabaseRuntime, Depends(get_db)],
-) -> FileResponse | StreamingResponse:
+) -> Response | FileResponse | StreamingResponse:
     """Return the earliest direct-play compatible response for one item.
 
     Current compatibility behavior:
@@ -1229,6 +1229,7 @@ async def stream_file(
                         detail=_stable_direct_playback_refresh_detail(descriptor),
                         headers={"Retry-After": "10"},
                     ) from refresh_exc
+        response: Response | FileResponse | StreamingResponse
         if descriptor.transport == "local-file":
             response = byte_streaming.stream_local_file(Path(descriptor.locator), request)
         else:

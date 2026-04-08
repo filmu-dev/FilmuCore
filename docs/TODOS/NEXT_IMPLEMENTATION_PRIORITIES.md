@@ -112,6 +112,9 @@ Recent baseline completed here:
 - mounted show output now normalizes to `Show Title (Year)/Season XX/<sanitized source filename>`
 - provider-path season inference now handles `S05x08`-style filenames for show-level media entries
 - catalog deltas now emit removals when an existing `entry_id` changes visible path, preventing stale root-level mount entries during naming-policy upgrades
+- the Rust sidecar now parses mounted media-semantic path metadata (`path_type`, `tmdb_id`/`tvdb_id`/`imdb_id`, `season`, `episode`), carries it on mounted `getattr` / `readdir` / `open` / `read` surfaces, and resolves mounted semantic aliases like external-ref show folders plus season/episode names onto canonical catalog paths
+- the Rust sidecar now also surfaces those semantic aliases as discoverable mounted directory entries (`tvdb-*`, `tmdb-*`, `Season 01`, `Episode 01.mkv`) instead of keeping them as resolution-only affordances
+- the Rust sidecar now also deduplicates concurrent inline stale-link refreshes per catalog entry and reuses already-refreshed catalog URLs for later mounted stale reads instead of fanning out duplicate refresh RPCs
 
 Build toward:
 
@@ -234,7 +237,7 @@ Next:
 
 Next:
 
-1. Broaden incoming media-semantic path parsing in FUSE beyond the now-implemented normalized show/year + season output layout
+1. Decide whether FilmuVFS should stop at discoverable alias entries or add a fully separate id-keyed browse tree, and how much broader queue-backed/orchestrated resolver workflow is still needed beyond the new mount-side inline refresh dedup
 2. GraphQL rich field expansion — add extended fields to compat subscription types
 3. Dedicated index-item worker stage (TMDB enrichment as ARQ stage, not request-time)
 4. Plex library scan trigger after item reaches `COMPLETED` state

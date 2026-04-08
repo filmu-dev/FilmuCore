@@ -2608,9 +2608,9 @@ class PlaybackSourceService:
         item: MediaItemORM,
         *,
         entry: MediaEntryORM | None,
-        settings: Settings,
+        settings: Settings | None,
     ) -> PlaybackAttachment | None:
-        if entry is None:
+        if entry is None or settings is None:
             return None
 
         local_path = PlaybackSourceService._resolve_mounted_media_entry_local_path(

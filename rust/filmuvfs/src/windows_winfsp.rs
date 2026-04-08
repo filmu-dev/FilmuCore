@@ -400,7 +400,10 @@ impl WinfspFilesystem {
             "winfsp.read.guard"
         );
         if requested_len == 0 {
-            warn!(inode = file_context.inode, handle_id, "winfsp.read zero-length request");
+            warn!(
+                inode = file_context.inode,
+                handle_id, "winfsp.read zero-length request"
+            );
             return Ok(0);
         }
         if file_context.size_bytes > 0 && offset >= file_context.size_bytes {
@@ -416,10 +419,7 @@ impl WinfspFilesystem {
         if requested_len > 32 * 1024 * 1024 {
             warn!(
                 inode = file_context.inode,
-                handle_id,
-                offset,
-                requested_len,
-                "winfsp.read clamping large request"
+                handle_id, offset, requested_len, "winfsp.read clamping large request"
             );
         }
         let effective_len = if file_context.size_bytes > 0 {
@@ -641,7 +641,10 @@ impl FileSystemInterface for WinfspFilesystem {
             create_file_info.allocation_size,
         )?;
         trace_callback(format!("trait.create status=success path={path}"));
-        Ok((Arc::new(context), Self::winfsp_file_info_from_raw(file_info)))
+        Ok((
+            Arc::new(context),
+            Self::winfsp_file_info_from_raw(file_info),
+        ))
     }
 
     fn create_ex(
@@ -668,7 +671,10 @@ impl FileSystemInterface for WinfspFilesystem {
             extra_buffer_is_reparse_point,
         )?;
         trace_callback(format!("trait.create_ex status=success path={path}"));
-        Ok((Arc::new(context), Self::winfsp_file_info_from_raw(file_info)))
+        Ok((
+            Arc::new(context),
+            Self::winfsp_file_info_from_raw(file_info),
+        ))
     }
 
     fn open(
@@ -685,7 +691,10 @@ impl FileSystemInterface for WinfspFilesystem {
         let (context, file_info) =
             WinfspFilesystem::open(self, file_name, create_options.0, granted_access.0)?;
         trace_callback(format!("trait.open status=success path={path}"));
-        Ok((Arc::new(context), Self::winfsp_file_info_from_raw(file_info)))
+        Ok((
+            Arc::new(context),
+            Self::winfsp_file_info_from_raw(file_info),
+        ))
     }
 
     fn close(&self, file_context: Self::FileContext) {
@@ -1078,7 +1087,9 @@ unsafe extern "C" fn winfsp_create(
                     write_file_context(context, file_context);
                     (*file_info.cast::<FSP_FSCTL_OPEN_FILE_INFO>()).FileInfo = info;
                 }
-                trace_callback(format!("create status=success context_ptr=0x{context_ptr:x}"));
+                trace_callback(format!(
+                    "create status=success context_ptr=0x{context_ptr:x}"
+                ));
                 STATUS_SUCCESS
             }
             Err(status) => {

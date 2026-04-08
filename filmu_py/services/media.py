@@ -21,8 +21,8 @@ from arq.connections import ArqRedis
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import attributes as orm_attributes
 from sqlalchemy.orm import selectinload
-from sqlalchemy.orm.attributes import NO_VALUE
 
 from filmu_py.api.playback_resolution import PlaybackAttachment
 from filmu_py.config import Settings, get_settings
@@ -2153,7 +2153,7 @@ def rank_persisted_streams_for_item(
         for audio_key in sorted(_audio_keys(stream.parsed_title)):
             rule = model.audio_scores.get(audio_key)
             if rule is not None:
-                rank_score += rule.rank  # type: ignore[operator]
+                rank_score += rule.rank
                 if not rule.fetch and rejection_reason is None:
                     fetch_allowed = False
                     rejection_reason = f"audio_fetch_disabled:{audio_key}"
@@ -2977,8 +2977,6 @@ async def _evaluate_show_completion(
                     episode_number = episode.episode_number
                     if episode_number is None:
                         continue
-                    if episode.media_item_id is None:
-                        continue
                     season_scope.add(episode_number)
                     inventory.known_episodes.add(episode_number)
                     episode_item_id = str(episode.media_item_id)
@@ -3323,7 +3321,7 @@ class MediaService:
             s_num = season.season_number
             s_num_str = str(s_num)
             
-            in_req_seasons = (req_seasons is not None) and (s_num in req_seasons)  # type: ignore[operator]
+            in_req_seasons = (req_seasons is not None) and (s_num in req_seasons)
             
             for episode in season.episodes:
                 e_num = episode.episode_number
@@ -4779,17 +4777,17 @@ class MediaService:
 
         for item in rows:
             normalized_state = _canonical_state_name(str(item.state))
-            state_counts[normalized_state] += 1  # type: ignore[operator]
-            activity_counts[item.created_at.date().isoformat()] += 1  # type: ignore[operator]
+            state_counts[normalized_state] += 1
+            activity_counts[item.created_at.date().isoformat()] += 1
 
             if item.movie is not None:
-                movies += 1  # type: ignore[operator]
+                movies += 1
             if item.show is not None:
-                shows += 1  # type: ignore[operator]
+                shows += 1
             if item.season is not None:
-                seasons += 1  # type: ignore[operator]
+                seasons += 1
             if item.episode is not None:
-                episodes += 1  # type: ignore[operator]
+                episodes += 1
 
             metadata = cast(dict[str, object], item.attributes or {})
 
@@ -5708,12 +5706,12 @@ class MediaService:
                 try:
                     await self._event_bus.publish(row.event_type, cast(dict[str, Any], row.payload))
                     row.published_at = processed_at
-                    published_count += 1  # type: ignore[operator]
+                    published_count += 1
                 except Exception:
-                    row.attempt_count += 1  # type: ignore[operator]
+                    row.attempt_count += 1
                     if row.attempt_count >= max_outbox_attempts:
                         row.failed_at = processed_at
-                    failed_count += 1  # type: ignore[operator]
+                    failed_count += 1
                     logger.exception(
                         "failed to publish outbox event",
                         extra={"outbox_event_id": row.id, "event_type": row.event_type},
@@ -6100,3 +6098,6 @@ class MediaService:
                 )
 
         return result_record
+
+
+NO_VALUE = cast(Any, vars(orm_attributes)["NO_VALUE"])

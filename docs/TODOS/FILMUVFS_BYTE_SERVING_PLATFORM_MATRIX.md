@@ -87,6 +87,7 @@ What exists today:
 - a Linux-target Cargo compile check now also passes for [`../../rust/filmuvfs`](../../rust/filmuvfs) with `--target x86_64-unknown-linux-gnu`, so the Unix-only adapter is now compile-validated against the intended production target from this Windows host
 - the Python control plane now reuses generation ids for unchanged snapshots, can serve reconnect deltas for known generations, and exposes `RefreshCatalogEntry` for forced provider-link refresh through [`../../filmu_py/services/vfs_catalog.py`](../../filmu_py/services/vfs_catalog.py) and [`../../filmu_py/services/vfs_server.py`](../../filmu_py/services/vfs_server.py)
 - the Rust sidecar now retries stale mounted reads inline through that refresh RPC, uses `moka::future::Cache` in [`../../rust/filmuvfs/src/chunk_engine.rs`](../../rust/filmuvfs/src/chunk_engine.rs), and preserves stable assigned inodes with collision fallback in [`../../rust/filmuvfs/src/catalog/state.rs`](../../rust/filmuvfs/src/catalog/state.rs)
+- the Rust sidecar now also parses mounted media-semantic path metadata, carries it on mounted `getattr` / `readdir` / `open` / `read` surfaces, uses it for alias-aware mounted traversal, exposes discoverable alias browse entries (`tvdb-*`, `tmdb-*`, `Season 01`, `Episode 01.mkv`), and deduplicates concurrent inline stale-refresh RPCs per entry
 
 What does **not** exist yet:
 
@@ -95,7 +96,7 @@ What does **not** exist yet:
 - ~~Adaptive prefetch~~ → ✅ Done — [`VelocityTracker`](../../rust/filmuvfs/src/prefetch.rs) per handle, TCP-slow-start-style window scaling (Slice F).
 - ~~L2 disk cache~~ → ✅ Done — [`HybridCache`](../../rust/filmuvfs/src/cache.rs) trait implementation, opt-in via [`config.cache.l2_enabled`](../../rust/filmuvfs/src/config.rs) (Slice F).
 - ~~GraphQL mutation breadth~~ → ✅ Done — `requestItem`, `itemAction`, and `updateSetting` now ship on [`/graphql`](../../filmu_py/graphql/schema.py) (Slice F).
-- broader long-running soak/backpressure hardening of the Unix-only `fuse3` runtime now that reconnect deltas and inline stale-link refresh are in place
+- broader long-running soak/backpressure hardening of the Unix-only `fuse3` runtime now that reconnect deltas, inline stale-link refresh, and mounted semantic path metadata are in place
 - later HLS governance deepening beyond the new production-grade HTTP baseline, especially any Rust/mount-side reuse and broader resource-policy tuning
 - deeper governance around remote-direct-backed HLS generation remains necessary even after the new transcode fallback baseline, especially around ffmpeg failure policy and end-to-end player validation
 - richer mounted data-plane observability and cross-process correlation once the shared chunk engine is driving real mounted reads

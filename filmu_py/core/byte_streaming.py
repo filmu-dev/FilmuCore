@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import tempfile
-from asyncio.subprocess import DEVNULL, PIPE, Process
+from asyncio.subprocess import DEVNULL, Process
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import UTC, datetime

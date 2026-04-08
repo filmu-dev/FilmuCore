@@ -47,6 +47,13 @@ pub fn file_entry(
     unrestricted_url: &str,
     provider_file_id: &str,
 ) -> CatalogEntry {
+    let item_external_ref = match media_type {
+        CatalogMediaType::Movie => Some("tmdb:101".to_owned()),
+        CatalogMediaType::Episode | CatalogMediaType::Season | CatalogMediaType::Show => {
+            Some("tvdb:202".to_owned())
+        }
+        _ => None,
+    };
     CatalogEntry {
         entry_id: entry_id.to_owned(),
         parent_entry_id: Some(parent_entry_id.to_owned()),
@@ -57,7 +64,7 @@ pub fn file_entry(
         details: Some(CatalogEntryDetails::File(FileEntry {
             item_id: format!("item:{entry_id}"),
             item_title: name.to_owned(),
-            item_external_ref: Some(format!("ext:{entry_id}")),
+            item_external_ref,
             media_entry_id: format!("media:{entry_id}"),
             source_attachment_id: None,
             media_type: media_type as i32,
