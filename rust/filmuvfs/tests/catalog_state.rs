@@ -154,7 +154,10 @@ fn getattr_exposes_semantic_path_metadata_for_files() {
             .map(|value| value.as_str()),
         Some("episode-file")
     );
-    assert_eq!(episode_attributes.semantic_path.tvdb_id.as_deref(), Some("202"));
+    assert_eq!(
+        episode_attributes.semantic_path.tvdb_id.as_deref(),
+        Some("202")
+    );
 }
 
 #[test]
@@ -204,10 +207,7 @@ fn getattr_resolves_external_ref_and_season_alias_paths() {
         .getattr("/shows/tvdb-202")
         .expect("show external-ref alias should resolve");
     assert_eq!(show_alias.path, "/shows/Example Show");
-    assert_eq!(
-        show_alias.semantic_path.tvdb_id.as_deref(),
-        Some("202")
-    );
+    assert_eq!(show_alias.semantic_path.tvdb_id.as_deref(), Some("202"));
 
     let season_alias = runtime
         .getattr("/shows/Example Show/Season 01")
@@ -254,7 +254,10 @@ fn readdir_surfaces_discoverable_alias_entries() {
         .find(|entry| entry.name == "tvdb-202")
         .expect("show alias entry should be listed");
     assert_eq!(show_alias.path, "/shows/tvdb-202");
-    assert_eq!(show_alias.inode, inode_for_entry_id(common::SHOW_DIR_ENTRY_ID));
+    assert_eq!(
+        show_alias.inode,
+        inode_for_entry_id(common::SHOW_DIR_ENTRY_ID)
+    );
 
     let movie_root_entries = runtime
         .readdir_by_inode(inode_for_entry_id(common::MOVIES_ENTRY_ID))
@@ -264,7 +267,10 @@ fn readdir_surfaces_discoverable_alias_entries() {
         .find(|entry| entry.name == "tmdb-101")
         .expect("movie alias entry should be listed");
     assert_eq!(movie_alias.path, "/movies/tmdb-101");
-    assert_eq!(movie_alias.inode, inode_for_entry_id(common::MOVIE_DIR_ENTRY_ID));
+    assert_eq!(
+        movie_alias.inode,
+        inode_for_entry_id(common::MOVIE_DIR_ENTRY_ID)
+    );
 
     let show_entries = runtime
         .readdir_by_inode(inode_for_entry_id(common::SHOW_DIR_ENTRY_ID))
@@ -274,7 +280,10 @@ fn readdir_surfaces_discoverable_alias_entries() {
         .find(|entry| entry.name == "Season 01")
         .expect("season alias entry should be listed");
     assert_eq!(season_alias.path, "/shows/Example Show/Season 01");
-    assert_eq!(season_alias.inode, inode_for_entry_id(common::SHOW_SEASON_ENTRY_ID));
+    assert_eq!(
+        season_alias.inode,
+        inode_for_entry_id(common::SHOW_SEASON_ENTRY_ID)
+    );
 
     let season_entries = runtime
         .readdir_by_inode(inode_for_entry_id(common::SHOW_SEASON_ENTRY_ID))

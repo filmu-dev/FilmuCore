@@ -238,7 +238,12 @@ async fn spawn_repeating_response_server(
         }
     });
 
-    (format!("http://{address}/movie.mkv"), request_count, shutdown_tx, task)
+    (
+        format!("http://{address}/movie.mkv"),
+        request_count,
+        shutdown_tx,
+        task,
+    )
 }
 
 #[test]

@@ -164,7 +164,11 @@ fn infer_season_number(segments: &[&str]) -> Option<u32> {
     segments
         .last()
         .and_then(|segment| parse_filename_token(segment, &["s"], 2))
-        .or_else(|| segments.last().and_then(|segment| parse_x_notation(segment).map(|(season, _)| season)))
+        .or_else(|| {
+            segments
+                .last()
+                .and_then(|segment| parse_x_notation(segment).map(|(season, _)| season))
+        })
 }
 
 fn infer_episode_number(segments: &[&str]) -> Option<u32> {
@@ -183,10 +187,7 @@ fn parse_episode_from_filename(file_name: &str) -> Option<u32> {
 fn parse_season_segment(segment: &str) -> Option<u32> {
     let normalized = sanitize_token(segment);
     if normalized.starts_with("season") {
-        return normalized
-            .trim_start_matches("season")
-            .parse::<u32>()
-            .ok();
+        return normalized.trim_start_matches("season").parse::<u32>().ok();
     }
     if normalized.starts_with('s') && normalized.len() > 1 {
         return normalized[1..].parse::<u32>().ok();
@@ -217,7 +218,9 @@ fn parse_season_episode_token(file_name: &str) -> Option<(u32, u32)> {
             continue;
         };
         let season = normalized[index + 1..season_end].parse::<u32>().ok()?;
-        let episode = normalized[season_end + 1..episode_end].parse::<u32>().ok()?;
+        let episode = normalized[season_end + 1..episode_end]
+            .parse::<u32>()
+            .ok()?;
         return Some((season, episode));
     }
     None
@@ -245,7 +248,9 @@ fn parse_x_notation(file_name: &str) -> Option<(u32, u32)> {
             continue;
         };
         let season = normalized[index..season_end].parse::<u32>().ok()?;
-        let episode = normalized[season_end + 1..episode_end].parse::<u32>().ok()?;
+        let episode = normalized[season_end + 1..episode_end]
+            .parse::<u32>()
+            .ok()?;
         return Some((season, episode));
     }
     None
@@ -270,8 +275,7 @@ fn parse_filename_token(file_name: &str, prefixes: &[&str], max_digits: usize) -
     for prefix in prefixes {
         if let Some(index) = normalized.find(prefix) {
             let number_start = index + prefix.len();
-            let Some(number_end) =
-                consume_digits(normalized.as_bytes(), number_start, max_digits)
+            let Some(number_end) = consume_digits(normalized.as_bytes(), number_start, max_digits)
             else {
                 continue;
             };
@@ -314,9 +318,7 @@ fn is_specials_segment(segment: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_media_semantic_path, MediaSemanticPathInfo, MediaSemanticPathType,
-    };
+    use super::{parse_media_semantic_path, MediaSemanticPathInfo, MediaSemanticPathType};
 
     #[test]
     fn parses_movie_file_path_and_tmdb_external_ref() {

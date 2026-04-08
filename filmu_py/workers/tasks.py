@@ -391,26 +391,40 @@ async def enqueue_scrape_item(
         stage_name="scrape_item",
         job_id=resolved_job_id,
     )
-    kwargs: dict[str, object] = {}
-    if missing_seasons:
-        kwargs["missing_seasons"] = missing_seasons
     if defer_by_seconds is not None and defer_by_seconds > 0:
-        job = await redis.enqueue_job(
-            "scrape_item",
-            item_id,
-            **kwargs,
-            _job_id=resolved_job_id,
-            _queue_name=queue_name,
-            _defer_by=timedelta(seconds=defer_by_seconds),
-        )
+        if missing_seasons:
+            job = await redis.enqueue_job(
+                "scrape_item",
+                item_id,
+                missing_seasons,
+                _job_id=resolved_job_id,
+                _queue_name=queue_name,
+                _defer_by=timedelta(seconds=defer_by_seconds),
+            )
+        else:
+            job = await redis.enqueue_job(
+                "scrape_item",
+                item_id,
+                _job_id=resolved_job_id,
+                _queue_name=queue_name,
+                _defer_by=timedelta(seconds=defer_by_seconds),
+            )
     else:
-        job = await redis.enqueue_job(
-            "scrape_item",
-            item_id,
-            **kwargs,
-            _job_id=resolved_job_id,
-            _queue_name=queue_name,
-        )
+        if missing_seasons:
+            job = await redis.enqueue_job(
+                "scrape_item",
+                item_id,
+                missing_seasons,
+                _job_id=resolved_job_id,
+                _queue_name=queue_name,
+            )
+        else:
+            job = await redis.enqueue_job(
+                "scrape_item",
+                item_id,
+                _job_id=resolved_job_id,
+                _queue_name=queue_name,
+            )
     return job is not None
 
 
@@ -429,17 +443,21 @@ async def enqueue_rank_streams(
         stage_name="rank_streams",
         job_id=rank_streams_job_id(item_id),
     )
-    kwargs: dict[str, object] = {}
     if partial_seasons is not None:
-        kwargs["partial_seasons"] = partial_seasons
-
-    job = await redis.enqueue_job(
-        "rank_streams",
-        item_id,
-        _job_id=rank_streams_job_id(item_id),
-        _queue_name=queue_name,
-        **kwargs,
-    )
+        job = await redis.enqueue_job(
+            "rank_streams",
+            item_id,
+            partial_seasons,
+            _job_id=rank_streams_job_id(item_id),
+            _queue_name=queue_name,
+        )
+    else:
+        job = await redis.enqueue_job(
+            "rank_streams",
+            item_id,
+            _job_id=rank_streams_job_id(item_id),
+            _queue_name=queue_name,
+        )
     return job is not None
 
 
@@ -1545,7 +1563,7 @@ async def retry_library(ctx: dict[str, object]) -> int:
                         "retry_library re-enqueued item",
                         extra={**log_context, "stage": "scrape_item"},
                     )
-                    re_enqueued += 1  # type: ignore[operator]
+                    re_enqueued += 1
             elif recovery_plan.target_stage is RecoveryTargetStage.PARSE:
                 if await is_process_scraped_item_job_active(arq_redis, item_id=item.id):
                     logger.info(
@@ -2674,11 +2692,12 @@ async def _scrape_with_plugins(
 
     # Build one search input per requested season. For full-scope requests,
     # run exactly one broad query with no season override.
-    season_overrides: list[int | None]
-    if partial_seasons:
-        season_overrides = sorted(set(partial_seasons))
-    else:
-        season_overrides = [None]
+    season_overrides: tuple[int | None, ...]
+    season_overrides = (
+        tuple(sorted(set(partial_seasons)))
+        if partial_seasons
+        else (None,)
+    )
 
     search_inputs = [
         _build_scraper_search_input(item, season_override=season_override)
@@ -2757,21 +2776,20 @@ async def poll_ongoing_shows(ctx: dict[str, object]) -> dict[str, int]:
         if item is None or _resolve_item_type(item) != "show":
             continue
 
-        processed_count += 1  # type: ignore[operator]
+        processed_count += 1
         result = await _evaluate_show_completion(item, media_service._db, settings)
         if not result.missing_released:
             continue
 
-        resolved_item = cast("MediaItemRecord", item)  # narrowed: not None past guard
         # Guard: don't double-enqueue if a scrape job is already active for this show
-        if await is_scrape_item_job_active(arq_redis, item_id=resolved_item.id):
+        if await is_scrape_item_job_active(arq_redis, item_id=item.id):
             continue
         await enqueue_scrape_item(
             arq_redis,
-            item_id=resolved_item.id,
+            item_id=item.id,
             queue_name=queue_name,
         )
-        queued_count += 1  # type: ignore[operator]
+        queued_count += 1
 
     return {"processed": processed_count, "queued": queued_count}
 
@@ -2796,7 +2814,7 @@ async def poll_unreleased_items(ctx: dict[str, object]) -> dict[str, int]:
         items = result.scalars().all()
 
         for item in items:
-            processed_count += 1  # type: ignore[operator]
+            processed_count += 1
             aired_at = cast(dict[str, object], item.attributes or {}).get("aired_at")
             release_dt = _parse_calendar_datetime(aired_at) if isinstance(aired_at, str) else None
             if release_dt is None or release_dt > datetime.now(UTC):
@@ -2809,7 +2827,7 @@ async def poll_unreleased_items(ctx: dict[str, object]) -> dict[str, int]:
                 message="unreleased item now available",
             )
             await enqueue_scrape_item(arq_redis, item_id=str(item.id), queue_name=queue_name)
-            transitioned_count += 1  # type: ignore[operator]
+            transitioned_count += 1
 
     return {"processed": processed_count, "transitioned": transitioned_count}
 

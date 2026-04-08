@@ -1,7 +1,6 @@
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-
 LOG_PATH = os.environ.get("PLEX_STUB_LOG_PATH", "")
 
 

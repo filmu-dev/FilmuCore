@@ -247,7 +247,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, "3".parse().expect("valid retry-after header"));
 
-        assert_eq!(retry_delay_for_response(&headers, 1), Duration::from_secs(3));
+        assert_eq!(
+            retry_delay_for_response(&headers, 1),
+            Duration::from_secs(3)
+        );
     }
 
     #[test]

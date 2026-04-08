@@ -522,11 +522,11 @@ impl MountRuntime {
             "." => self.getattr_by_inode(parent_inode),
             ".." => self.getattr_by_inode(self.parent_inode_for_entry(&parent)),
             _ => {
-                let child = self
-                    .lookup_child_entry(&parent, name)
-                    .ok_or_else(|| MountRuntimeError::PathNotFound {
+                let child = self.lookup_child_entry(&parent, name).ok_or_else(|| {
+                    MountRuntimeError::PathNotFound {
                         path: join_child_path(&parent.path, name),
-                    })?;
+                    }
+                })?;
                 let child_inode = self.assigned_inode_for_entry(&child);
                 self.attributes_from_entry(child, child_inode)
             }
@@ -1265,20 +1265,18 @@ impl MountRuntime {
             .filter(|child| !path_should_be_hidden(&child.path) && !is_hidden_path(&child.name))
             .collect();
 
-        directory_entries.extend(
-            visible_children
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(index, child)| {
-                    let child_inode = self.assigned_inode_for_entry(&child);
-                    self.directory_entry_from_catalog_entry(child, child_inode, index as i64 + 3)
-                }),
-        );
+        directory_entries.extend(visible_children.iter().cloned().enumerate().map(
+            |(index, child)| {
+                let child_inode = self.assigned_inode_for_entry(&child);
+                self.directory_entry_from_catalog_entry(child, child_inode, index as i64 + 3)
+            },
+        ));
         let next_offset = directory_entries.len() as i64 + 1;
-        directory_entries.extend(
-            self.alternate_directory_entries(&entry, &visible_children, next_offset),
-        );
+        directory_entries.extend(self.alternate_directory_entries(
+            &entry,
+            &visible_children,
+            next_offset,
+        ));
 
         directory_entries
     }
@@ -1290,7 +1288,10 @@ impl MountRuntime {
         }
 
         let mut current = self.catalog_state.entry_by_path(ROOT_PATH)?;
-        for segment in normalized_path.split('/').filter(|segment| !segment.is_empty()) {
+        for segment in normalized_path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+        {
             current = self.lookup_child_entry(&current, segment)?;
         }
         Some(current)
@@ -2266,7 +2267,9 @@ impl SemanticChildAlias {
             Self::ExternalRef { prefix, value } => runtime
                 .directory_descendant_external_refs(child)
                 .into_iter()
-                .any(|external_ref| external_ref_matches_alias(&external_ref, prefix.as_deref(), value)),
+                .any(|external_ref| {
+                    external_ref_matches_alias(&external_ref, prefix.as_deref(), value)
+                }),
             Self::Season { season_number } => {
                 let child_semantic = runtime.semantic_path_info_for_entry(child);
                 child_semantic.season_number == Some(*season_number)
@@ -2277,8 +2280,7 @@ impl SemanticChildAlias {
             } => {
                 let child_semantic = runtime.semantic_path_info_for_entry(child);
                 child_semantic.episode_number == Some(*episode_number)
-                    && (season_number.is_none()
-                        || child_semantic.season_number == *season_number)
+                    && (season_number.is_none() || child_semantic.season_number == *season_number)
             }
         }
     }
@@ -2311,15 +2313,16 @@ fn current_unrestricted_url(file: &FileEntry) -> Option<String> {
 fn should_attempt_inline_refresh_for_error(error: &ChunkEngineError) -> bool {
     matches!(
         error,
-        ChunkEngineError::Upstream(_)
-            | ChunkEngineError::InvalidChunkPayload { .. }
+        ChunkEngineError::Upstream(_) | ChunkEngineError::InvalidChunkPayload { .. }
     )
 }
 
 fn inline_refresh_reason(error: &ChunkEngineError) -> &'static str {
     match error {
         ChunkEngineError::Upstream(UpstreamReadError::StaleStatus { .. }) => "stale_status",
-        ChunkEngineError::Upstream(UpstreamReadError::UnexpectedStatus { .. }) => "unexpected_status",
+        ChunkEngineError::Upstream(UpstreamReadError::UnexpectedStatus { .. }) => {
+            "unexpected_status"
+        }
         ChunkEngineError::Upstream(UpstreamReadError::InvalidUrl { .. }) => "invalid_url",
         ChunkEngineError::Upstream(UpstreamReadError::BuildRequest { .. }) => "build_request",
         ChunkEngineError::Upstream(UpstreamReadError::Network { .. }) => "network",
@@ -2498,7 +2501,9 @@ fn parse_normalized_season_episode_alias(normalized: &str) -> Option<(u32, u32)>
             continue;
         };
         let season_number = normalized[index + 1..season_end].parse::<u32>().ok()?;
-        let episode_number = normalized[season_end + 1..episode_end].parse::<u32>().ok()?;
+        let episode_number = normalized[season_end + 1..episode_end]
+            .parse::<u32>()
+            .ok()?;
         return Some((season_number, episode_number));
     }
     None
@@ -2525,7 +2530,9 @@ fn parse_normalized_x_notation_alias(normalized: &str) -> Option<(u32, u32)> {
             continue;
         };
         let season_number = normalized[index..season_end].parse::<u32>().ok()?;
-        let episode_number = normalized[season_end + 1..episode_end].parse::<u32>().ok()?;
+        let episode_number = normalized[season_end + 1..episode_end]
+            .parse::<u32>()
+            .ok()?;
         return Some((season_number, episode_number));
     }
     None
@@ -2651,10 +2658,7 @@ mod tests {
             item_id: "item-123".to_owned(),
             item_external_ref: Some("tmdb:123".to_owned()),
             path: "/movies/Test/Test.mkv".to_owned(),
-            semantic_path: parse_media_semantic_path(
-                "/movies/Test/Test.mkv",
-                Some("tmdb:123"),
-            ),
+            semantic_path: parse_media_semantic_path("/movies/Test/Test.mkv", Some("tmdb:123")),
             unrestricted_url: "https://example.invalid/file".to_owned(),
             provider_file_id: provider_file_id.map(str::to_owned),
             offset: 0,
