@@ -120,6 +120,15 @@ def _redis_settings(settings: Settings) -> RedisSettings:
     return RedisSettings.from_dsn(str(settings.redis_url))
 
 
+def _settings_from_worker_context(ctx: dict[str, Any]) -> Settings:
+    """Resolve settings from worker context before falling back to process globals."""
+
+    explicit = ctx.get("settings")
+    if isinstance(explicit, Settings):
+        return explicit
+    return get_settings()
+
+
 def _resolve_limiter(ctx: dict[str, Any]) -> DistributedRateLimiter:
     """Resolve a shared distributed limiter from worker context."""
 
@@ -129,7 +138,7 @@ def _resolve_limiter(ctx: dict[str, Any]) -> DistributedRateLimiter:
 
     redis = ctx.get("redis")
     if not isinstance(redis, Redis):
-        settings = get_settings()
+        settings = _settings_from_worker_context(ctx)
         redis = _redis_from_settings(settings)
         ctx["redis"] = redis
 
@@ -2291,7 +2300,7 @@ def _resolve_media_service(ctx: dict[str, Any]) -> MediaService:
 
     db = ctx.get("db")
     if not isinstance(db, DatabaseRuntime):
-        settings = get_settings()
+        settings = _settings_from_worker_context(ctx)
         db = DatabaseRuntime(settings.postgres_dsn, echo=False)
         ctx["db"] = db
 
@@ -2314,7 +2323,7 @@ def _resolve_worker_cache(ctx: dict[str, Any]) -> CacheManager:
 
     redis = ctx.get("redis")
     if not isinstance(redis, Redis):
-        settings = get_settings()
+        settings = _settings_from_worker_context(ctx)
         redis = _redis_from_settings(settings)
         ctx["redis"] = redis
 
@@ -2329,6 +2338,8 @@ def _build_worker_plugin_context_provider(
     settings: Settings,
 ) -> PluginContextProvider:
     """Build the worker-side plugin context provider from existing runtime objects."""
+
+    ctx.setdefault("settings", settings)
 
     event_bus = ctx.get("event_bus")
     if not isinstance(event_bus, EventBus):
