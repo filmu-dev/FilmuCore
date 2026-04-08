@@ -1,5 +1,7 @@
 mod common;
 
+use std::ffi::OsStr;
+
 use filmuvfs::{
     catalog::state::{inode_for_entry_id, CatalogStateStore, ROOT_INODE},
     mount::{MountRuntime, MountRuntimeError},
@@ -117,4 +119,203 @@ fn url_update_is_visible_to_subsequent_reads_without_reopen() {
         request.unrestricted_url,
         "http://127.0.0.1:18080/movie-b.mkv"
     );
+}
+
+#[test]
+fn getattr_exposes_semantic_path_metadata_for_files() {
+    let state = common::seeded_state(
+        "http://127.0.0.1:18080/movie.mkv",
+        "http://127.0.0.1:18080/episode.mkv",
+    );
+    let runtime = MountRuntime::new(state, "session-test".to_owned());
+
+    let movie_attributes = runtime
+        .getattr_by_inode(common::movie_inode())
+        .expect("movie getattr should succeed");
+    let episode_attributes = runtime
+        .getattr_by_inode(common::episode_inode())
+        .expect("episode getattr should succeed");
+
+    assert_eq!(
+        movie_attributes
+            .semantic_path
+            .path_type
+            .map(|value| value.as_str()),
+        Some("movie-file")
+    );
+    assert_eq!(
+        movie_attributes.semantic_path.tmdb_id.as_deref(),
+        Some("101")
+    );
+    assert_eq!(
+        episode_attributes
+            .semantic_path
+            .path_type
+            .map(|value| value.as_str()),
+        Some("episode-file")
+    );
+    assert_eq!(episode_attributes.semantic_path.tvdb_id.as_deref(), Some("202"));
+}
+
+#[test]
+fn readdir_and_open_surface_semantic_path_metadata() {
+    let state = common::seeded_state(
+        "http://127.0.0.1:18080/movie.mkv",
+        "http://127.0.0.1:18080/episode.mkv",
+    );
+    let runtime = MountRuntime::new(state, "session-test".to_owned());
+
+    let show_entries = runtime
+        .readdir_by_inode(inode_for_entry_id(common::SHOW_DIR_ENTRY_ID))
+        .expect("show directory listing should succeed");
+    let season_directory = show_entries
+        .iter()
+        .find(|entry| entry.entry_id == common::SHOW_SEASON_ENTRY_ID)
+        .expect("season directory should be listed");
+    assert_eq!(
+        season_directory
+            .semantic_path
+            .path_type
+            .map(|value| value.as_str()),
+        Some("show-season-directory")
+    );
+    assert_eq!(season_directory.semantic_path.season_number, Some(1));
+
+    let handle = runtime
+        .open_by_inode(common::episode_inode())
+        .expect("episode open should succeed");
+    assert_eq!(
+        handle.semantic_path.path_type.map(|value| value.as_str()),
+        Some("episode-file")
+    );
+    assert_eq!(handle.semantic_path.season_number, Some(1));
+    assert_eq!(handle.semantic_path.episode_number, Some(1));
+}
+
+#[test]
+fn getattr_resolves_external_ref_and_season_alias_paths() {
+    let state = common::seeded_state(
+        "http://127.0.0.1:18080/movie.mkv",
+        "http://127.0.0.1:18080/episode.mkv",
+    );
+    let runtime = MountRuntime::new(state, "session-test".to_owned());
+
+    let show_alias = runtime
+        .getattr("/shows/tvdb-202")
+        .expect("show external-ref alias should resolve");
+    assert_eq!(show_alias.path, "/shows/Example Show");
+    assert_eq!(
+        show_alias.semantic_path.tvdb_id.as_deref(),
+        Some("202")
+    );
+
+    let season_alias = runtime
+        .getattr("/shows/Example Show/Season 01")
+        .expect("season alias should resolve");
+    assert_eq!(season_alias.path, "/shows/Example Show/S01");
+    assert_eq!(season_alias.semantic_path.season_number, Some(1));
+}
+
+#[test]
+fn open_resolves_episode_alias_path_to_canonical_catalog_file() {
+    let state = common::seeded_state(
+        "http://127.0.0.1:18080/movie.mkv",
+        "http://127.0.0.1:18080/episode.mkv",
+    );
+    let runtime = MountRuntime::new(state, "session-test".to_owned());
+
+    let handle = runtime
+        .open("/shows/Example Show/Season 01/Episode 01.mkv")
+        .expect("episode alias path should resolve");
+
+    assert_eq!(handle.path, "/shows/Example Show/S01/E01.mkv");
+    assert_eq!(
+        handle.semantic_path.path_type.map(|value| value.as_str()),
+        Some("episode-file")
+    );
+    assert_eq!(handle.semantic_path.tvdb_id.as_deref(), Some("202"));
+    assert_eq!(handle.semantic_path.season_number, Some(1));
+    assert_eq!(handle.semantic_path.episode_number, Some(1));
+}
+
+#[test]
+fn readdir_surfaces_discoverable_alias_entries() {
+    let state = common::seeded_state(
+        "http://127.0.0.1:18080/movie.mkv",
+        "http://127.0.0.1:18080/episode.mkv",
+    );
+    let runtime = MountRuntime::new(state, "session-test".to_owned());
+
+    let show_root_entries = runtime
+        .readdir_by_inode(inode_for_entry_id(common::SHOWS_ENTRY_ID))
+        .expect("shows root listing should succeed");
+    let show_alias = show_root_entries
+        .iter()
+        .find(|entry| entry.name == "tvdb-202")
+        .expect("show alias entry should be listed");
+    assert_eq!(show_alias.path, "/shows/tvdb-202");
+    assert_eq!(show_alias.inode, inode_for_entry_id(common::SHOW_DIR_ENTRY_ID));
+
+    let movie_root_entries = runtime
+        .readdir_by_inode(inode_for_entry_id(common::MOVIES_ENTRY_ID))
+        .expect("movies root listing should succeed");
+    let movie_alias = movie_root_entries
+        .iter()
+        .find(|entry| entry.name == "tmdb-101")
+        .expect("movie alias entry should be listed");
+    assert_eq!(movie_alias.path, "/movies/tmdb-101");
+    assert_eq!(movie_alias.inode, inode_for_entry_id(common::MOVIE_DIR_ENTRY_ID));
+
+    let show_entries = runtime
+        .readdir_by_inode(inode_for_entry_id(common::SHOW_DIR_ENTRY_ID))
+        .expect("show directory listing should succeed");
+    let season_alias = show_entries
+        .iter()
+        .find(|entry| entry.name == "Season 01")
+        .expect("season alias entry should be listed");
+    assert_eq!(season_alias.path, "/shows/Example Show/Season 01");
+    assert_eq!(season_alias.inode, inode_for_entry_id(common::SHOW_SEASON_ENTRY_ID));
+
+    let season_entries = runtime
+        .readdir_by_inode(inode_for_entry_id(common::SHOW_SEASON_ENTRY_ID))
+        .expect("season directory listing should succeed");
+    let episode_alias = season_entries
+        .iter()
+        .find(|entry| entry.name == "Episode 01.mkv")
+        .expect("episode alias entry should be listed");
+    assert_eq!(episode_alias.path, "/shows/Example Show/S01/Episode 01.mkv");
+    assert_eq!(episode_alias.inode, common::episode_inode());
+}
+
+#[test]
+fn lookup_by_inode_name_accepts_listed_aliases() {
+    let state = common::seeded_state(
+        "http://127.0.0.1:18080/movie.mkv",
+        "http://127.0.0.1:18080/episode.mkv",
+    );
+    let runtime = MountRuntime::new(state, "session-test".to_owned());
+
+    let show_alias = runtime
+        .lookup_by_inode_name(
+            inode_for_entry_id(common::SHOWS_ENTRY_ID),
+            OsStr::new("tvdb-202"),
+        )
+        .expect("show alias lookup should resolve");
+    assert_eq!(show_alias.path, "/shows/Example Show");
+
+    let season_alias = runtime
+        .lookup_by_inode_name(
+            inode_for_entry_id(common::SHOW_DIR_ENTRY_ID),
+            OsStr::new("Season 01"),
+        )
+        .expect("season alias lookup should resolve");
+    assert_eq!(season_alias.path, "/shows/Example Show/S01");
+
+    let episode_alias = runtime
+        .lookup_by_inode_name(
+            inode_for_entry_id(common::SHOW_SEASON_ENTRY_ID),
+            OsStr::new("Episode 01.mkv"),
+        )
+        .expect("episode alias lookup should resolve");
+    assert_eq!(episode_alias.path, "/shows/Example Show/S01/E01.mkv");
 }

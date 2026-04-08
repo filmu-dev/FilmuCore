@@ -68,6 +68,10 @@ Remaining VFS gap:
 
 - Media-semantic path parsing (`tmdbId`/`season`/`episode` from FUSE path)
 
+Later update:
+
+- ✅ Closed in later Rust-sidecar slices: mounted media-semantic path metadata now exists, is carried on `getattr` / `readdir` / `open` / `read`, drives alias-aware mounted traversal onto canonical catalog entries, exposes those aliases as discoverable browse entries, and now deduplicates concurrent inline stale-refresh RPCs per entry; the remaining follow-up gap is whether to add a fully separate id-keyed tree or broader queue-backed resolver orchestration, not first parsing.
+
 Next session scope:
 
 - Media-semantic FUSE path schema

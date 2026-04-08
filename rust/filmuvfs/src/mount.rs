@@ -1,9 +1,10 @@
 use std::{
+    collections::{HashMap, HashSet},
     ffi::OsStr,
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
     time::{Duration, Instant},
 };
@@ -37,6 +38,7 @@ use crate::{
     chunk_planner::ChunkPlannerConfig,
     config::{PrefetchConfig, ResolvedMountAdapterKind, SidecarConfig},
     hidden_paths::{is_hidden_path, is_ignored_path},
+    media_path::{parse_media_semantic_path, MediaSemanticPathInfo},
     prefetch::VelocityTracker,
     proto::{
         catalog_entry::Details as CatalogEntryDetails,
@@ -135,6 +137,7 @@ pub struct MountAttributes {
     pub name: String,
     pub kind: MountNodeKind,
     pub size_bytes: u64,
+    pub semantic_path: MediaSemanticPathInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +149,7 @@ pub struct MountDirectoryEntry {
     pub kind: MountNodeKind,
     pub size_bytes: u64,
     pub offset: i64,
+    pub semantic_path: MediaSemanticPathInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +160,7 @@ pub struct MountHandle {
     pub entry_id: String,
     pub path: String,
     pub size_bytes: Option<u64>,
+    pub semantic_path: MediaSemanticPathInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +170,9 @@ pub struct MountReadRequest {
     pub inode: u64,
     pub entry_id: String,
     pub item_id: String,
+    pub item_external_ref: Option<String>,
     pub path: String,
+    pub semantic_path: MediaSemanticPathInfo,
     pub unrestricted_url: String,
     pub provider_file_id: Option<String>,
     pub offset: u64,
@@ -179,6 +186,43 @@ struct MountHandleState {
     inode: u64,
     handle_key: String,
     invalidated: bool,
+}
+
+#[derive(Debug)]
+struct InlineRefreshFlight {
+    notify: Notify,
+    result: Mutex<Option<Option<String>>>,
+}
+
+impl InlineRefreshFlight {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            result: Mutex::new(None),
+        }
+    }
+
+    fn finish(&self, result: Option<String>) {
+        *self
+            .result
+            .lock()
+            .expect("inline refresh flight lock poisoned") = Some(result);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) -> Option<String> {
+        loop {
+            if let Some(result) = self
+                .result
+                .lock()
+                .expect("inline refresh flight lock poisoned")
+                .clone()
+            {
+                return result;
+            }
+            self.notify.notified().await;
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -264,6 +308,7 @@ pub struct MountRuntime {
     prefetch_config: PrefetchConfig,
     scan_chunk_size_bytes: u32,
     refresh_client: Arc<RwLock<Option<Arc<dyn CatalogEntryRefreshClient>>>>,
+    inline_refresh_flights: Arc<DashMap<String, Arc<InlineRefreshFlight>>>,
     handles: Arc<DashMap<u64, MountHandleState>>,
     handle_velocity: Arc<DashMap<u64, VelocityTracker>>,
     next_handle_id: Arc<AtomicU64>,
@@ -350,6 +395,7 @@ impl MountRuntime {
             prefetch_config,
             scan_chunk_size_bytes,
             refresh_client: Arc::new(RwLock::new(None)),
+            inline_refresh_flights: Arc::new(DashMap::new()),
             handles: Arc::new(DashMap::new()),
             handle_velocity: Arc::new(DashMap::new()),
             next_handle_id: Arc::new(AtomicU64::new(1)),
@@ -431,20 +477,19 @@ impl MountRuntime {
         let normalized_path = normalize_path(path);
         reject_hidden_runtime_path(&normalized_path)?;
         let entry = self
-            .catalog_state
-            .entry_by_path(&normalized_path)
+            .resolve_entry_by_runtime_path(&normalized_path)
             .ok_or_else(|| MountRuntimeError::PathNotFound {
                 path: normalized_path.clone(),
             })?;
         let inode = self.assigned_inode_for_entry(&entry);
-        attributes_from_entry(entry, inode)
+        self.attributes_from_entry(entry, inode)
     }
 
     pub fn getattr_by_inode(&self, inode: u64) -> Result<MountAttributes, MountRuntimeError> {
         let entry = self
             .entry_for_inode(inode)
             .ok_or(MountRuntimeError::InodeNotFound { inode })?;
-        attributes_from_entry(entry, inode)
+        self.attributes_from_entry(entry, inode)
     }
 
     pub fn lookup_by_inode_name(
@@ -478,15 +523,12 @@ impl MountRuntime {
             ".." => self.getattr_by_inode(self.parent_inode_for_entry(&parent)),
             _ => {
                 let child = self
-                    .catalog_state
-                    .children_of(&parent.entry_id)
-                    .into_iter()
-                    .find(|entry| entry.name == name)
+                    .lookup_child_entry(&parent, name)
                     .ok_or_else(|| MountRuntimeError::PathNotFound {
                         path: join_child_path(&parent.path, name),
                     })?;
                 let child_inode = self.assigned_inode_for_entry(&child);
-                attributes_from_entry(child, child_inode)
+                self.attributes_from_entry(child, child_inode)
             }
         }
     }
@@ -495,8 +537,7 @@ impl MountRuntime {
         let normalized_path = normalize_path(path);
         reject_hidden_runtime_path(&normalized_path)?;
         let entry = self
-            .catalog_state
-            .entry_by_path(&normalized_path)
+            .resolve_entry_by_runtime_path(&normalized_path)
             .ok_or_else(|| MountRuntimeError::PathNotFound {
                 path: normalized_path.clone(),
             })?;
@@ -529,8 +570,7 @@ impl MountRuntime {
         let normalized_path = normalize_path(path);
         reject_hidden_runtime_path(&normalized_path)?;
         let entry = self
-            .catalog_state
-            .entry_by_path(&normalized_path)
+            .resolve_entry_by_runtime_path(&normalized_path)
             .ok_or_else(|| MountRuntimeError::PathNotFound {
                 path: normalized_path.clone(),
             })?;
@@ -597,7 +637,12 @@ impl MountRuntime {
             inode,
             entry_id: entry.entry_id.clone(),
             item_id: file.item_id.clone(),
+            item_external_ref: file.item_external_ref.clone(),
             path: entry.path.clone(),
+            semantic_path: parse_media_semantic_path(
+                &entry.path,
+                file.item_external_ref.as_deref(),
+            ),
             unrestricted_url,
             provider_file_id: file.provider_file_id.clone(),
             offset,
@@ -619,6 +664,12 @@ impl MountRuntime {
             handle_id = request.handle_id,
             inode = request.inode,
             path = %request.path,
+            path_type = request.semantic_path.path_type.map(|value| value.as_str()).unwrap_or(""),
+            tmdb_id = request.semantic_path.tmdb_id.as_deref().unwrap_or(""),
+            tvdb_id = request.semantic_path.tvdb_id.as_deref().unwrap_or(""),
+            imdb_id = request.semantic_path.imdb_id.as_deref().unwrap_or(""),
+            season_number = ?request.semantic_path.season_number,
+            episode_number = ?request.semantic_path.episode_number,
             offset = request.offset,
             requested_length = length,
             adjusted_length = request.length,
@@ -663,6 +714,12 @@ impl MountRuntime {
             provider_file_id = request.provider_file_id.as_deref().unwrap_or(""),
             entry_id = %request.entry_id,
             path = %request.path,
+            path_type = request.semantic_path.path_type.map(|value| value.as_str()).unwrap_or(""),
+            tmdb_id = request.semantic_path.tmdb_id.as_deref().unwrap_or(""),
+            tvdb_id = request.semantic_path.tvdb_id.as_deref().unwrap_or(""),
+            imdb_id = request.semantic_path.imdb_id.as_deref().unwrap_or(""),
+            season_number = ?request.semantic_path.season_number,
+            episode_number = ?request.semantic_path.episode_number,
             inode = request.inode,
             offset = request.offset,
             size = request.length,
@@ -894,8 +951,19 @@ impl MountRuntime {
             return None;
         }
 
+        if let Some(refreshed_url) = self.refreshed_catalog_url_for_request(request) {
+            record_inline_refresh("reused_catalog_url");
+            return Some(refreshed_url);
+        }
+
         let refresh_client = self.refresh_client()?;
-        match tokio::time::timeout(
+        let (flight, is_leader) = self.inline_refresh_flight(&request.entry_id);
+        if !is_leader {
+            record_inline_refresh("dedup_wait");
+            return flight.wait().await;
+        }
+
+        let result = match tokio::time::timeout(
             INLINE_REFRESH_TIMEOUT,
             refresh_client.refresh_catalog_entry(
                 provider_file_id,
@@ -924,7 +992,10 @@ impl MountRuntime {
                 record_inline_refresh("timeout");
                 None
             }
-        }
+        };
+        flight.finish(result.clone());
+        self.inline_refresh_flights.remove(&request.entry_id);
+        result
     }
 
     async fn try_backend_proxy_read(
@@ -996,6 +1067,10 @@ impl MountRuntime {
             entry_id,
             path,
             size_bytes,
+            semantic_path: current_entry
+                .as_ref()
+                .map(|entry| self.semantic_path_info_for_entry(entry))
+                .unwrap_or_default(),
         })
     }
 
@@ -1015,6 +1090,7 @@ impl MountRuntime {
             },
         );
         self.chunk_engine.register_handle(&handle_key);
+        let semantic_path = self.semantic_path_info_for_entry(&entry);
 
         Ok(MountHandle {
             handle_id,
@@ -1023,6 +1099,7 @@ impl MountRuntime {
             entry_id: entry.entry_id,
             path: entry.path,
             size_bytes,
+            semantic_path,
         })
     }
 
@@ -1148,6 +1225,11 @@ impl MountRuntime {
             .as_ref()
             .map(|parent| parent.path.clone())
             .unwrap_or_else(|| ROOT_PATH.to_owned());
+        let current_semantic_path = self.semantic_path_info_for_entry(&entry);
+        let parent_semantic_path = parent_entry
+            .as_ref()
+            .map(|entry| self.semantic_path_info_for_entry(entry))
+            .unwrap_or_else(|| parse_media_semantic_path(&parent_path, None));
 
         let mut directory_entries = vec![
             MountDirectoryEntry {
@@ -1158,6 +1240,7 @@ impl MountRuntime {
                 kind: MountNodeKind::Directory,
                 size_bytes: 0,
                 offset: 1,
+                semantic_path: current_semantic_path,
             },
             MountDirectoryEntry {
                 inode: parent_inode,
@@ -1171,22 +1254,351 @@ impl MountRuntime {
                 kind: MountNodeKind::Directory,
                 size_bytes: 0,
                 offset: 2,
+                semantic_path: parent_semantic_path,
             },
         ];
 
+        let visible_children: Vec<CatalogEntry> = self
+            .catalog_state
+            .children_of(&entry.entry_id)
+            .into_iter()
+            .filter(|child| !path_should_be_hidden(&child.path) && !is_hidden_path(&child.name))
+            .collect();
+
         directory_entries.extend(
-            self.catalog_state
-                .children_of(&entry.entry_id)
-                .into_iter()
-                .filter(|child| !path_should_be_hidden(&child.path) && !is_hidden_path(&child.name))
+            visible_children
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(index, child)| {
                     let child_inode = self.assigned_inode_for_entry(&child);
-                    directory_entry_from_catalog_entry(child, child_inode, index as i64 + 3)
+                    self.directory_entry_from_catalog_entry(child, child_inode, index as i64 + 3)
                 }),
+        );
+        let next_offset = directory_entries.len() as i64 + 1;
+        directory_entries.extend(
+            self.alternate_directory_entries(&entry, &visible_children, next_offset),
         );
 
         directory_entries
+    }
+
+    fn resolve_entry_by_runtime_path(&self, path: &str) -> Option<CatalogEntry> {
+        let normalized_path = normalize_path(path);
+        if normalized_path == ROOT_PATH {
+            return self.catalog_state.entry_by_path(ROOT_PATH);
+        }
+
+        let mut current = self.catalog_state.entry_by_path(ROOT_PATH)?;
+        for segment in normalized_path.split('/').filter(|segment| !segment.is_empty()) {
+            current = self.lookup_child_entry(&current, segment)?;
+        }
+        Some(current)
+    }
+
+    fn lookup_child_entry(&self, parent: &CatalogEntry, name: &str) -> Option<CatalogEntry> {
+        let children = self.catalog_state.children_of(&parent.entry_id);
+        if let Some(exact_child) = children.iter().find(|entry| entry.name == name) {
+            return Some(exact_child.clone());
+        }
+        self.semantic_child_match(parent, name, &children)
+    }
+
+    fn semantic_child_match(
+        &self,
+        parent: &CatalogEntry,
+        name: &str,
+        children: &[CatalogEntry],
+    ) -> Option<CatalogEntry> {
+        let requested_alias = SemanticChildAlias::from_parent_and_name(
+            self.semantic_path_info_for_entry(parent),
+            parent,
+            name,
+        )?;
+        let mut matches = children
+            .iter()
+            .filter(|child| requested_alias.matches(self, child))
+            .cloned();
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    fn directory_descendant_external_refs(&self, entry: &CatalogEntry) -> Vec<String> {
+        let mut refs = Vec::new();
+        self.collect_descendant_external_refs(entry, &mut refs);
+        refs.sort();
+        refs.dedup();
+        refs
+    }
+
+    fn collect_descendant_external_refs(&self, entry: &CatalogEntry, refs: &mut Vec<String>) {
+        if let Some(CatalogEntryDetails::File(file)) = entry.details.as_ref() {
+            if let Some(external_ref) = file.item_external_ref.as_ref() {
+                let trimmed = external_ref.trim();
+                if !trimmed.is_empty() {
+                    refs.push(trimmed.to_owned());
+                }
+            }
+            return;
+        }
+
+        for child in self.catalog_state.children_of(&entry.entry_id) {
+            self.collect_descendant_external_refs(&child, refs);
+        }
+    }
+
+    fn attributes_from_entry(
+        &self,
+        entry: CatalogEntry,
+        inode: u64,
+    ) -> Result<MountAttributes, MountRuntimeError> {
+        let kind = entry.kind();
+        let size_bytes = match kind {
+            CatalogEntryKind::Directory => 0,
+            CatalogEntryKind::File => file_details(&entry, &entry.path)?
+                .size_bytes
+                .and_then(|size| u64::try_from(size).ok())
+                .unwrap_or(0),
+            CatalogEntryKind::Unspecified => {
+                return Err(MountRuntimeError::MissingDetails {
+                    entry_id: entry.entry_id,
+                });
+            }
+        };
+        let semantic_path = self.semantic_path_info_for_entry(&entry);
+
+        Ok(MountAttributes {
+            inode,
+            entry_id: entry.entry_id,
+            path: entry.path,
+            name: entry.name,
+            kind: match kind {
+                CatalogEntryKind::Directory => MountNodeKind::Directory,
+                CatalogEntryKind::File | CatalogEntryKind::Unspecified => MountNodeKind::File,
+            },
+            size_bytes,
+            semantic_path,
+        })
+    }
+
+    fn directory_entry_from_catalog_entry(
+        &self,
+        entry: CatalogEntry,
+        inode: u64,
+        offset: i64,
+    ) -> MountDirectoryEntry {
+        let kind = entry.kind();
+        let size_bytes = match kind {
+            CatalogEntryKind::Directory => 0,
+            CatalogEntryKind::File => file_details(&entry, &entry.path)
+                .ok()
+                .and_then(|file| file.size_bytes.and_then(|size| u64::try_from(size).ok()))
+                .unwrap_or(0),
+            CatalogEntryKind::Unspecified => 0,
+        };
+        let semantic_path = self.semantic_path_info_for_entry(&entry);
+
+        MountDirectoryEntry {
+            inode,
+            entry_id: entry.entry_id,
+            path: entry.path,
+            name: entry.name,
+            kind: match kind {
+                CatalogEntryKind::Directory => MountNodeKind::Directory,
+                CatalogEntryKind::File | CatalogEntryKind::Unspecified => MountNodeKind::File,
+            },
+            size_bytes,
+            offset,
+            semantic_path,
+        }
+    }
+
+    fn alias_directory_entry_from_catalog_entry(
+        &self,
+        parent: &CatalogEntry,
+        entry: CatalogEntry,
+        inode: u64,
+        alias_name: String,
+        offset: i64,
+    ) -> MountDirectoryEntry {
+        let kind = entry.kind();
+        let size_bytes = match kind {
+            CatalogEntryKind::Directory => 0,
+            CatalogEntryKind::File => file_details(&entry, &entry.path)
+                .ok()
+                .and_then(|file| file.size_bytes.and_then(|size| u64::try_from(size).ok()))
+                .unwrap_or(0),
+            CatalogEntryKind::Unspecified => 0,
+        };
+        let semantic_path = self.semantic_path_info_for_entry(&entry);
+
+        MountDirectoryEntry {
+            inode,
+            entry_id: entry.entry_id,
+            path: join_child_path(&parent.path, &alias_name),
+            name: alias_name,
+            kind: match kind {
+                CatalogEntryKind::Directory => MountNodeKind::Directory,
+                CatalogEntryKind::File | CatalogEntryKind::Unspecified => MountNodeKind::File,
+            },
+            size_bytes,
+            offset,
+            semantic_path,
+        }
+    }
+
+    fn semantic_path_info_for_entry(&self, entry: &CatalogEntry) -> MediaSemanticPathInfo {
+        let inherited_external_ref = match entry.details.as_ref() {
+            Some(CatalogEntryDetails::File(file)) => file.item_external_ref.clone(),
+            _ => {
+                let descendant_refs = self.directory_descendant_external_refs(entry);
+                if descendant_refs.len() == 1 {
+                    descendant_refs.into_iter().next()
+                } else {
+                    None
+                }
+            }
+        };
+
+        parse_media_semantic_path(&entry.path, inherited_external_ref.as_deref())
+    }
+
+    fn refreshed_catalog_url_for_request(&self, request: &MountReadRequest) -> Option<String> {
+        let entry = self.catalog_state.entry(&request.entry_id)?;
+        let file = file_details(&entry, &entry.path).ok()?;
+        let current_url = current_unrestricted_url(file)?;
+        if current_url == request.unrestricted_url {
+            return None;
+        }
+        Some(current_url)
+    }
+
+    fn inline_refresh_flight(&self, entry_id: &str) -> (Arc<InlineRefreshFlight>, bool) {
+        match self.inline_refresh_flights.entry(entry_id.to_owned()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => (Arc::clone(entry.get()), false),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let flight = Arc::new(InlineRefreshFlight::new());
+                entry.insert(Arc::clone(&flight));
+                (flight, true)
+            }
+        }
+    }
+
+    fn alternate_directory_entries(
+        &self,
+        parent: &CatalogEntry,
+        children: &[CatalogEntry],
+        starting_offset: i64,
+    ) -> Vec<MountDirectoryEntry> {
+        if children.is_empty() {
+            return Vec::new();
+        }
+
+        let canonical_names: HashSet<String> =
+            children.iter().map(|child| child.name.clone()).collect();
+        let alias_sets: Vec<Vec<String>> = children
+            .iter()
+            .map(|child| self.child_alias_names(parent, child))
+            .collect();
+        let mut alias_counts: HashMap<String, usize> = HashMap::new();
+        for aliases in &alias_sets {
+            for alias in aliases {
+                if canonical_names.contains(alias) {
+                    continue;
+                }
+                *alias_counts.entry(alias.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut alias_entries = Vec::new();
+        let mut offset = starting_offset;
+        for (child, aliases) in children.iter().zip(alias_sets.into_iter()) {
+            for alias in aliases {
+                if canonical_names.contains(&alias) {
+                    continue;
+                }
+                if alias_counts.get(&alias).copied() != Some(1) {
+                    continue;
+                }
+                let child_inode = self.assigned_inode_for_entry(child);
+                alias_entries.push(self.alias_directory_entry_from_catalog_entry(
+                    parent,
+                    child.clone(),
+                    child_inode,
+                    alias,
+                    offset,
+                ));
+                offset += 1;
+            }
+        }
+
+        alias_entries
+    }
+
+    fn child_alias_names(&self, parent: &CatalogEntry, child: &CatalogEntry) -> Vec<String> {
+        let parent_semantic = self.semantic_path_info_for_entry(parent);
+        let child_semantic = self.semantic_path_info_for_entry(child);
+        let mut aliases = Vec::new();
+
+        if matches!(parent.path.as_str(), "/shows" | "/movies") {
+            if let Some(alias) = self.external_ref_alias_for_entry(child) {
+                aliases.push(alias);
+            }
+        }
+
+        if matches!(
+            parent_semantic.path_type,
+            Some(crate::media_path::MediaSemanticPathType::ShowDirectory)
+        ) {
+            match child_semantic.path_type {
+                Some(crate::media_path::MediaSemanticPathType::ShowSeasonDirectory) => {
+                    if let Some(season_number) = child_semantic.season_number {
+                        aliases.push(format!("Season {:02}", season_number));
+                    }
+                }
+                Some(crate::media_path::MediaSemanticPathType::ShowSpecialsDirectory) => {
+                    aliases.push("Specials".to_owned());
+                }
+                _ => {}
+            }
+        }
+
+        if matches!(
+            parent_semantic.path_type,
+            Some(crate::media_path::MediaSemanticPathType::ShowSeasonDirectory)
+                | Some(crate::media_path::MediaSemanticPathType::ShowSpecialsDirectory)
+        ) {
+            if let Some(episode_number) = child_semantic.episode_number {
+                aliases.push(self.episode_alias_name(child, episode_number));
+            }
+        }
+
+        aliases.sort();
+        aliases.dedup();
+        aliases.retain(|alias| alias != &child.name && !is_hidden_path(alias));
+        aliases
+    }
+
+    fn external_ref_alias_for_entry(&self, entry: &CatalogEntry) -> Option<String> {
+        let descendant_refs = self.directory_descendant_external_refs(entry);
+        if descendant_refs.len() != 1 {
+            return None;
+        }
+        format_external_ref_alias(descendant_refs.first()?)
+    }
+
+    fn episode_alias_name(&self, entry: &CatalogEntry, episode_number: u32) -> String {
+        let extension = Path::new(&entry.name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .filter(|extension| !extension.is_empty());
+        match extension {
+            Some(extension) => format!("Episode {:02}.{extension}", episode_number),
+            None => format!("Episode {:02}", episode_number),
+        }
     }
 }
 
@@ -1792,63 +2204,84 @@ fn normalize_path(path: &str) -> String {
     format!("/{}", normalized_segments.join("/"))
 }
 
-fn directory_entry_from_catalog_entry(
-    entry: CatalogEntry,
-    inode: u64,
-    offset: i64,
-) -> MountDirectoryEntry {
-    let kind = entry.kind();
-    let size_bytes = match kind {
-        CatalogEntryKind::Directory => 0,
-        CatalogEntryKind::File => file_details(&entry, &entry.path)
-            .ok()
-            .and_then(|file| file.size_bytes.and_then(|size| u64::try_from(size).ok()))
-            .unwrap_or(0),
-        CatalogEntryKind::Unspecified => 0,
-    };
-    MountDirectoryEntry {
-        inode,
-        entry_id: entry.entry_id,
-        path: entry.path,
-        name: entry.name,
-        kind: match kind {
-            CatalogEntryKind::Directory => MountNodeKind::Directory,
-            CatalogEntryKind::File | CatalogEntryKind::Unspecified => MountNodeKind::File,
-        },
-        size_bytes,
-        offset,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SemanticChildAlias {
+    ExternalRef {
+        prefix: Option<String>,
+        value: String,
+    },
+    Season {
+        season_number: u32,
+    },
+    Episode {
+        season_number: Option<u32>,
+        episode_number: u32,
+    },
 }
 
-fn attributes_from_entry(
-    entry: CatalogEntry,
-    inode: u64,
-) -> Result<MountAttributes, MountRuntimeError> {
-    let kind = entry.kind();
-    let size_bytes = match kind {
-        CatalogEntryKind::Directory => 0,
-        CatalogEntryKind::File => file_details(&entry, &entry.path)?
-            .size_bytes
-            .and_then(|size| u64::try_from(size).ok())
-            .unwrap_or(0),
-        CatalogEntryKind::Unspecified => {
-            return Err(MountRuntimeError::MissingDetails {
-                entry_id: entry.entry_id,
-            });
+impl SemanticChildAlias {
+    fn from_parent_and_name(
+        parent_semantic: MediaSemanticPathInfo,
+        parent: &CatalogEntry,
+        name: &str,
+    ) -> Option<Self> {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return None;
         }
-    };
 
-    Ok(MountAttributes {
-        inode,
-        entry_id: entry.entry_id,
-        path: entry.path,
-        name: entry.name,
-        kind: match kind {
-            CatalogEntryKind::Directory => MountNodeKind::Directory,
-            CatalogEntryKind::File | CatalogEntryKind::Unspecified => MountNodeKind::File,
-        },
-        size_bytes,
-    })
+        if parent.path == "/shows" || parent.path == "/movies" {
+            if let Some((prefix, value)) = parse_external_ref_alias(trimmed_name) {
+                return Some(Self::ExternalRef { prefix, value });
+            }
+        }
+
+        if matches!(
+            parent_semantic.path_type,
+            Some(crate::media_path::MediaSemanticPathType::ShowDirectory)
+        ) {
+            if let Some(season_number) = parse_season_alias(trimmed_name) {
+                return Some(Self::Season { season_number });
+            }
+        }
+
+        if matches!(
+            parent_semantic.path_type,
+            Some(crate::media_path::MediaSemanticPathType::ShowSeasonDirectory)
+                | Some(crate::media_path::MediaSemanticPathType::ShowSpecialsDirectory)
+        ) {
+            if let Some(episode_number) = parse_episode_alias(trimmed_name) {
+                return Some(Self::Episode {
+                    season_number: parent_semantic.season_number,
+                    episode_number,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn matches(&self, runtime: &MountRuntime, child: &CatalogEntry) -> bool {
+        match self {
+            Self::ExternalRef { prefix, value } => runtime
+                .directory_descendant_external_refs(child)
+                .into_iter()
+                .any(|external_ref| external_ref_matches_alias(&external_ref, prefix.as_deref(), value)),
+            Self::Season { season_number } => {
+                let child_semantic = runtime.semantic_path_info_for_entry(child);
+                child_semantic.season_number == Some(*season_number)
+            }
+            Self::Episode {
+                season_number,
+                episode_number,
+            } => {
+                let child_semantic = runtime.semantic_path_info_for_entry(child);
+                child_semantic.episode_number == Some(*episode_number)
+                    && (season_number.is_none()
+                        || child_semantic.season_number == *season_number)
+            }
+        }
+    }
 }
 
 fn file_details<'a>(
@@ -1965,6 +2398,181 @@ fn path_should_be_hidden(path: &str) -> bool {
         .any(is_hidden_path)
 }
 
+fn parse_external_ref_alias(name: &str) -> Option<(Option<String>, String)> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((prefix, value)) = trimmed.split_once('-') {
+        let normalized_prefix = prefix.trim().to_ascii_lowercase();
+        if matches!(normalized_prefix.as_str(), "tmdb" | "tvdb" | "imdb") {
+            let normalized_value = value.trim();
+            if !normalized_value.is_empty() {
+                return Some((Some(normalized_prefix), normalized_value.to_owned()));
+            }
+        }
+    }
+
+    Some((None, trimmed.to_owned()))
+}
+
+fn external_ref_matches_alias(
+    external_ref: &str,
+    expected_prefix: Option<&str>,
+    expected_value: &str,
+) -> bool {
+    let trimmed = external_ref.trim();
+    let Some((prefix, value)) = trimmed.split_once(':') else {
+        return false;
+    };
+    let normalized_prefix = prefix.trim().to_ascii_lowercase();
+    let normalized_value = value.trim();
+    if normalized_value.is_empty() {
+        return false;
+    }
+
+    if let Some(expected_prefix) = expected_prefix {
+        return normalized_prefix == expected_prefix && normalized_value == expected_value;
+    }
+    normalized_value == expected_value
+}
+
+fn format_external_ref_alias(external_ref: &str) -> Option<String> {
+    let trimmed = external_ref.trim();
+    let (prefix, value) = trimmed.split_once(':')?;
+    let normalized_prefix = prefix.trim().to_ascii_lowercase();
+    let normalized_value = value.trim();
+    if normalized_value.is_empty() {
+        return None;
+    }
+    if !matches!(normalized_prefix.as_str(), "tmdb" | "tvdb" | "imdb") {
+        return None;
+    }
+    Some(format!("{normalized_prefix}-{normalized_value}"))
+}
+
+fn parse_season_alias(name: &str) -> Option<u32> {
+    let normalized = normalize_alias_token(name);
+    if normalized == "specials" {
+        return Some(0);
+    }
+    if let Some(value) = parse_prefixed_alias_number(&normalized, &["season", "s"], 2) {
+        return Some(value);
+    }
+    None
+}
+
+fn parse_episode_alias(name: &str) -> Option<u32> {
+    let normalized = normalize_alias_token(name);
+    if let Some((_, episode_number)) = parse_normalized_season_episode_alias(&normalized) {
+        return Some(episode_number);
+    }
+    if let Some((_, episode_number)) = parse_normalized_x_notation_alias(&normalized) {
+        return Some(episode_number);
+    }
+    if let Some(value) = parse_prefixed_alias_number(&normalized, &["episode", "ep", "e"], 3) {
+        return Some(value);
+    }
+    None
+}
+
+fn parse_normalized_season_episode_alias(normalized: &str) -> Option<(u32, u32)> {
+    let bytes = normalized.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b's' {
+            index += 1;
+            continue;
+        }
+        let Some(season_end) = consume_alias_digits(bytes, index + 1, 2) else {
+            index += 1;
+            continue;
+        };
+        if season_end >= bytes.len() || bytes[season_end] != b'e' {
+            index += 1;
+            continue;
+        }
+        let Some(episode_end) = consume_alias_digits(bytes, season_end + 1, 3) else {
+            index += 1;
+            continue;
+        };
+        let season_number = normalized[index + 1..season_end].parse::<u32>().ok()?;
+        let episode_number = normalized[season_end + 1..episode_end].parse::<u32>().ok()?;
+        return Some((season_number, episode_number));
+    }
+    None
+}
+
+fn parse_normalized_x_notation_alias(normalized: &str) -> Option<(u32, u32)> {
+    let bytes = normalized.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let Some(season_end) = consume_alias_digits(bytes, index, 2) else {
+            index += 1;
+            continue;
+        };
+        if season_end >= bytes.len() || bytes[season_end] != b'x' {
+            index += 1;
+            continue;
+        }
+        let Some(episode_end) = consume_alias_digits(bytes, season_end + 1, 3) else {
+            index += 1;
+            continue;
+        };
+        let season_number = normalized[index..season_end].parse::<u32>().ok()?;
+        let episode_number = normalized[season_end + 1..episode_end].parse::<u32>().ok()?;
+        return Some((season_number, episode_number));
+    }
+    None
+}
+
+fn normalize_alias_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn parse_prefixed_alias_number(
+    normalized: &str,
+    prefixes: &[&str],
+    max_digits: usize,
+) -> Option<u32> {
+    for prefix in prefixes {
+        let Some(remainder) = normalized.strip_prefix(prefix) else {
+            continue;
+        };
+        let digit_end = consume_alias_digits(remainder.as_bytes(), 0, max_digits)?;
+        return remainder[..digit_end].parse::<u32>().ok();
+    }
+    None
+}
+
+fn consume_alias_digits(bytes: &[u8], start: usize, max_digits: usize) -> Option<usize> {
+    if start >= bytes.len() || !bytes[start].is_ascii_digit() {
+        return None;
+    }
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() && end - start < max_digits {
+        end += 1;
+    }
+    Some(end)
+}
+
 #[cfg(target_os = "linux")]
 fn file_type_from_node_kind(kind: MountNodeKind) -> fuse3::FileType {
     match kind {
@@ -2032,7 +2640,7 @@ fn is_windows_drive_mountpoint(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_chunk_read_request, MountReadRequest};
+    use super::{build_chunk_read_request, parse_media_semantic_path, MountReadRequest};
 
     fn sample_request(provider_file_id: Option<&str>) -> MountReadRequest {
         MountReadRequest {
@@ -2041,7 +2649,12 @@ mod tests {
             inode: 42,
             entry_id: "entry-123".to_owned(),
             item_id: "item-123".to_owned(),
+            item_external_ref: Some("tmdb:123".to_owned()),
             path: "/movies/Test/Test.mkv".to_owned(),
+            semantic_path: parse_media_semantic_path(
+                "/movies/Test/Test.mkv",
+                Some("tmdb:123"),
+            ),
             unrestricted_url: "https://example.invalid/file".to_owned(),
             provider_file_id: provider_file_id.map(str::to_owned),
             offset: 0,
@@ -2068,5 +2681,15 @@ mod tests {
             chunk_request.provider_file_id.as_deref(),
             Some("provider-abc")
         );
+    }
+
+    #[test]
+    fn semantic_path_is_carried_on_sample_read_request() {
+        let request = sample_request(Some("provider-abc"));
+        assert_eq!(
+            request.semantic_path.path_type.map(|value| value.as_str()),
+            Some("movie-file")
+        );
+        assert_eq!(request.semantic_path.tmdb_id.as_deref(), Some("123"));
     }
 }

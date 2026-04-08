@@ -311,7 +311,7 @@ No undocumented requirements are assumed.
 
 - Stronger direct-file source/link resolution and broader HLS governance on top of the current substrate.
 - Mount/HTTP convergence on the shared chunk engine semantics for mounted reads.
-- Broader incoming media-semantic path parsing beyond the now-implemented normalized show/year + season output layout.
+- Decide whether the current canonical-plus-alias mounted browse policy should stop here or grow into a fully separate id-keyed tree, and what broader queue-backed/orchestrated resolver workflow should exist above the current mount-side inline refresh dedup.
 - Optional disk/persistent cache and smarter prefetch evolution above the now-async Rust cache.
 - Broader long-running soak/backpressure validation and mounted data-plane observability.
 - VFS rollout controls.

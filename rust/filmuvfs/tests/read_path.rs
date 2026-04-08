@@ -17,6 +17,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::oneshot,
+    time::{sleep, Duration},
 };
 
 fn runtime_with_movie_url(url: String) -> (MountRuntime, u64, u64) {
@@ -185,6 +186,61 @@ async fn spawn_single_response_server(
     (format!("http://{address}/movie.mkv"), task)
 }
 
+async fn spawn_repeating_response_server(
+    status_line: &str,
+    body: &'static [u8],
+) -> (
+    String,
+    Arc<AtomicUsize>,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener address should resolve");
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let payload = Arc::new(body.to_vec());
+    let status_line = status_line.to_owned();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+    let task = tokio::spawn({
+        let payload = Arc::clone(&payload);
+        let request_count = Arc::clone(&request_count);
+        async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let (mut socket, _) = accepted.expect("server should accept a client");
+                        let mut request_buffer = vec![0_u8; 4096];
+                        let _ = socket.read(&mut request_buffer).await;
+
+                        request_count.fetch_add(1, Ordering::SeqCst);
+
+                        let response = format!(
+                            "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        );
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("response head should write");
+                        socket
+                            .write_all(&payload)
+                            .await
+                            .expect("response body should write");
+                    }
+                }
+            }
+        }
+    });
+
+    (format!("http://{address}/movie.mkv"), request_count, shutdown_tx, task)
+}
+
 #[test]
 fn range_request_construction_uses_offset_and_size() {
     let request = RangeRequest::new("http://127.0.0.1:18080/movie.mkv".to_owned(), 128, 512);
@@ -234,6 +290,7 @@ async fn stale_http_statuses_map_to_estale() {
 struct FakeRefreshClient {
     refreshed_url: String,
     calls: Arc<AtomicUsize>,
+    delay: Duration,
 }
 
 #[tonic::async_trait]
@@ -248,6 +305,9 @@ impl CatalogEntryRefreshClient for FakeRefreshClient {
         assert_eq!(handle_key, "session-read-tests:1");
         assert_eq!(entry_id, common::MOVIE_FILE_ENTRY_ID);
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.delay.is_zero() {
+            sleep(self.delay).await;
+        }
         Ok(Some(self.refreshed_url.clone()))
     }
 }
@@ -293,6 +353,7 @@ async fn stale_http_status_triggers_inline_refresh_and_read_succeeds() {
     let refresh_client = Arc::new(FakeRefreshClient {
         refreshed_url: fresh_url.clone(),
         calls: Arc::clone(&refresh_calls),
+        delay: Duration::ZERO,
     });
 
     let state = common::seeded_state(&stale_url, "http://127.0.0.1:18080/episode.mkv");
@@ -321,6 +382,56 @@ async fn stale_http_status_triggers_inline_refresh_and_read_succeeds() {
         .await
         .expect("stale server task should finish cleanly");
     let _ = shutdown_tx.send(());
+    fresh_server_task
+        .await
+        .expect("fresh server task should finish cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_stale_reads_share_one_inline_refresh() {
+    let fresh_body = patterned_bytes(1_024);
+    let expected = Bytes::copy_from_slice(&fresh_body[..64]);
+    let (stale_url, stale_request_count, stale_shutdown_tx, stale_server_task) =
+        spawn_repeating_response_server("401 Unauthorized", b"stale").await;
+    let (fresh_url, _fresh_request_count, fresh_shutdown_tx, fresh_server_task) =
+        spawn_range_response_server(fresh_body).await;
+
+    let refresh_calls = Arc::new(AtomicUsize::new(0));
+    let refresh_client = Arc::new(FakeRefreshClient {
+        refreshed_url: fresh_url.clone(),
+        calls: Arc::clone(&refresh_calls),
+        delay: Duration::from_millis(100),
+    });
+
+    let state = common::seeded_state(&stale_url, "http://127.0.0.1:18080/episode.mkv");
+    let runtime = MountRuntime::new(Arc::clone(&state), "session-read-tests".to_owned());
+    runtime.set_refresh_client(refresh_client);
+    let movie_inode = common::movie_inode();
+    let first_handle = runtime
+        .open_by_inode(movie_inode)
+        .expect("first open_by_inode should succeed");
+    let second_handle = runtime
+        .open_by_inode(movie_inode)
+        .expect("second open_by_inode should succeed");
+
+    let (first_result, second_result) = tokio::join!(
+        runtime.read_bytes(first_handle.handle_id, movie_inode, 0, 64),
+        runtime.read_bytes(second_handle.handle_id, movie_inode, 0, 64),
+    );
+
+    let first_bytes = first_result.expect("first stale read should succeed after refresh");
+    let second_bytes = second_result.expect("second stale read should succeed after refresh");
+
+    assert_eq!(first_bytes, expected);
+    assert_eq!(second_bytes, expected);
+    assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(stale_request_count.load(Ordering::SeqCst), 2);
+
+    let _ = stale_shutdown_tx.send(());
+    stale_server_task
+        .await
+        .expect("stale server task should finish cleanly");
+    let _ = fresh_shutdown_tx.send(());
     fresh_server_task
         .await
         .expect("fresh server task should finish cleanly");

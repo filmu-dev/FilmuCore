@@ -51,7 +51,7 @@ Today the Python backend has:
 
 - content-source intake (Overseerr/Plex webhooks)
 - dedicated `index-item` metadata enrichment stage
-- queue-backed link-resolver dedup for VFS
+- queue-backed link-resolver dedup for VFS beyond the new mount-side inline refresh dedup baseline
 - broader queue-lag/operator visibility and stronger enqueue-dedup/idempotency boundaries across the widened worker graph
 
 ---
