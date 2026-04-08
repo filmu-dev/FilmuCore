@@ -89,7 +89,8 @@ async def _enqueue_arq_job(
 ) -> object | None:
     """Preserve ARQ runtime keyword payloads while containing the local Any cast."""
 
-    return await cast(Any, redis).enqueue_job(function, *args, **kwargs)
+    enqueued_job = await cast(Any, redis).enqueue_job(function, *args, **kwargs)
+    return cast(object | None, enqueued_job)
 
 
 async def _acquire_worker_rate_limit(

@@ -6100,4 +6100,4 @@ class MediaService:
         return result_record
 
 
-NO_VALUE = cast(Any, orm_attributes.NO_VALUE)
+NO_VALUE = cast(Any, vars(orm_attributes)["NO_VALUE"])
