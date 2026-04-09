@@ -352,6 +352,8 @@ dependencies = [
  "prost",
  "prost-types",
  "protoc-bin-vendored",
+ "serde",
+ "serde_json",
  "sled",
  "tempfile",
  "thiserror 2.0.18",

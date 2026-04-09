@@ -19,6 +19,7 @@ from arq.connections import ArqRedis, RedisSettings, create_pool
 from arq.cron import cron
 from arq.jobs import Job, JobStatus
 from arq.worker import Worker
+from prometheus_client import Counter, Histogram
 from redis.asyncio import Redis
 from sqlalchemy import select
 
@@ -73,6 +74,27 @@ DEBRID_RETRY_POLICY = RetryPolicy(max_attempts=5, base_delay_seconds=3, max_dela
 FINALIZE_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=2, max_delay_seconds=20)
 RECOVERY_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=30, max_delay_seconds=300)
 OUTBOX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=5, max_delay_seconds=60)
+WORKER_ENQUEUE_DECISIONS_TOTAL = Counter(
+    "filmu_py_worker_enqueue_decisions_total",
+    "Downstream worker enqueue decisions by stage",
+    ["stage", "decision"],
+)
+WORKER_JOB_STATUS_TOTAL = Counter(
+    "filmu_py_worker_job_status_total",
+    "Observed ARQ job statuses while coordinating worker stages",
+    ["stage", "status"],
+)
+WORKER_CLEANUP_TOTAL = Counter(
+    "filmu_py_worker_cleanup_total",
+    "Cleanup actions taken before replaying or deduplicating worker stages",
+    ["stage", "action"],
+)
+WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
+    "filmu_py_worker_enqueue_defer_seconds",
+    "Deferred worker enqueue delays in seconds",
+    ["stage"],
+    buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
+)
 
 
 def _redis_from_settings(settings: Settings) -> Redis:
@@ -256,6 +278,18 @@ def _worker_stage_logger() -> Any:
     return structlog.get_logger(__name__)
 
 
+def _record_enqueue_decision(stage_name: str, decision: str) -> None:
+    WORKER_ENQUEUE_DECISIONS_TOTAL.labels(stage=stage_name, decision=decision).inc()
+
+
+def _record_job_status(stage_name: str, status: JobStatus) -> None:
+    WORKER_JOB_STATUS_TOTAL.labels(stage=stage_name, status=_job_status_name(status)).inc()
+
+
+def _record_cleanup_action(stage_name: str, action: str) -> None:
+    WORKER_CLEANUP_TOTAL.labels(stage=stage_name, action=action).inc()
+
+
 async def _clear_stale_downstream_job(
     redis: object,
     *,
@@ -270,6 +304,7 @@ async def _clear_stale_downstream_job(
     try:
         deleted = await cast(Any, redis).delete(result_key)
     except Exception as exc:
+        _record_cleanup_action(stage_name, "stale_result_delete_failed")
         _worker_stage_logger().warning(
             "downstream stage stale result cleanup failed",
             item_id=item_id,
@@ -280,6 +315,7 @@ async def _clear_stale_downstream_job(
         )
     else:
         if deleted:
+            _record_cleanup_action(stage_name, "stale_result_deleted")
             _worker_stage_logger().warning(
                 "downstream stage stale result cleared",
                 item_id=item_id,
@@ -295,6 +331,7 @@ async def _clear_stale_downstream_job(
     try:
         status = await job.status()
     except Exception as exc:
+        _record_cleanup_action(stage_name, "stale_job_status_failed")
         _worker_stage_logger().warning(
             "downstream stage stale job inspection failed",
             item_id=item_id,
@@ -303,6 +340,7 @@ async def _clear_stale_downstream_job(
             error=str(exc),
         )
         return
+    _record_job_status(stage_name, status)
 
     if status not in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}:
         return
@@ -310,6 +348,7 @@ async def _clear_stale_downstream_job(
     try:
         aborted = await job.abort(timeout=0)
     except Exception as exc:
+        _record_cleanup_action(stage_name, "stale_job_abort_failed")
         _worker_stage_logger().warning(
             "downstream stage stale job abort failed",
             item_id=item_id,
@@ -319,6 +358,7 @@ async def _clear_stale_downstream_job(
             error=str(exc),
         )
         return
+    _record_cleanup_action(stage_name, "stale_job_aborted")
 
     _worker_stage_logger().warning(
         "downstream stage stale job cleared",
@@ -335,6 +375,7 @@ def _log_downstream_enqueue_result(
 ) -> None:
     worker_logger = _worker_stage_logger()
     if enqueued:
+        _record_enqueue_decision(stage_name, "enqueued")
         worker_logger.info(
             "downstream stage enqueued",
             item_id=item_id,
@@ -342,6 +383,7 @@ def _log_downstream_enqueue_result(
             job_id=job_id,
         )
     else:
+        _record_enqueue_decision(stage_name, "suppressed")
         worker_logger.warning(
             "downstream stage enqueue suppressed",
             item_id=item_id,
@@ -413,6 +455,7 @@ async def enqueue_scrape_item(
         job_id=resolved_job_id,
     )
     if defer_by_seconds is not None and defer_by_seconds > 0:
+        WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="scrape_item").observe(float(defer_by_seconds))
         if missing_seasons:
             job = await _enqueue_arq_job(
                 redis,
@@ -565,6 +608,7 @@ async def is_process_scraped_item_job_active(redis: ArqRedis, *, item_id: str) -
     """Backward-compatible alias for parse-scrape-results queue activity."""
 
     status = await Job(parse_scrape_results_job_id(item_id), redis=redis).status()
+    _record_job_status("parse_scrape_results", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
@@ -572,6 +616,7 @@ async def is_rank_streams_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     """Return whether the rank-streams stage job is already queued or running."""
 
     status = await Job(rank_streams_job_id(item_id), redis=redis).status()
+    _record_job_status("rank_streams", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
@@ -579,6 +624,7 @@ async def is_scrape_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     """Return whether the scrape-item stage job is already queued or running."""
 
     status = await Job(scrape_item_job_id(item_id), redis=redis).status()
+    _record_job_status("scrape_item", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
@@ -798,6 +844,7 @@ async def _maybe_enqueue_next_stage(
 ) -> bool:
     arq_redis = ctx.get("arq_redis")
     if arq_redis is None or not hasattr(arq_redis, "enqueue_job"):
+        _record_enqueue_decision(stage_name, "arq_unavailable")
         logger.warning(
             "downstream stage enqueue skipped",
             extra={
@@ -836,6 +883,7 @@ async def _maybe_enqueue_parse_stage(
 ) -> None:
     arq_redis = ctx.get("arq_redis")
     if arq_redis is None or not hasattr(arq_redis, "enqueue_job"):
+        _record_enqueue_decision("parse_scrape_results", "arq_unavailable")
         logger.warning(
             "downstream stage enqueue skipped",
             extra={
@@ -1612,6 +1660,7 @@ async def retry_library(ctx: dict[str, object]) -> int:
                 finalize_status = await Job(
                     finalize_item_job_id(item.id), redis=arq_redis
                 ).status()
+                _record_job_status("finalize_item", finalize_status)
                 if finalize_status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}:
                     logger.info(
                         "retry_library skipped already-queued item",

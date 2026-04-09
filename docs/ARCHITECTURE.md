@@ -4,6 +4,25 @@
 
 Create a Python backend that preserves frontend compatibility with `/api/v1/*` while adopting stronger runtime primitives (distributed rate limits, durable orchestration, resilience policies, caching, and observability).
 
+## Strategic quality bar
+
+Filmu is not only trying to become compatible with `riven-ts`.
+Filmu should be built as an **enterprise-grade, state-of-the-art platform** across:
+
+- backend architecture
+- identity and authorization
+- orchestration and recovery
+- plugin trust and isolation
+- observability and operations
+- playback and VFS data plane
+- release engineering and disaster recovery
+
+Parity with current `riven-ts` is the floor, not the target.
+The current audit and the newly elevated gaps are tracked in:
+
+- [`ENTERPRISE_GRADE_AUDIT_2026_04_09.md`](ENTERPRISE_GRADE_AUDIT_2026_04_09.md)
+- [`TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md`](TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md)
+
 ## filmu-ts → Python mapping (updated)
 
 | filmu-ts component                | Python equivalent (target)                        |

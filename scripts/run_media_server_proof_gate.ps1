@@ -1,5 +1,6 @@
 param(
     [string[]] $Providers = @('plex', 'emby'),
+    [int] $RepeatCount = 1,
     [string] $TmdbId = '603',
     [string] $Title = 'The Matrix',
     [ValidateSet('movie', 'tv')]
@@ -14,6 +15,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if ($RepeatCount -lt 1) {
+    throw 'RepeatCount must be at least 1.'
+}
 
 $scriptRoot = $PSScriptRoot
 $proofScript = Join-Path $scriptRoot 'run_playback_proof.ps1'
@@ -44,6 +49,7 @@ if ($Providers.Count -eq 0) {
 $results = [System.Collections.Generic.List[object]]::new()
 $sharedReuse = $ReuseExistingItem
 $sharedSkipStart = $SkipStart
+$stopRequested = $false
 
 foreach ($provider in $Providers) {
     $knownProviders = @('plex', 'emby')
@@ -51,63 +57,73 @@ foreach ($provider in $Providers) {
         throw ("Unsupported provider '{0}'." -f $provider)
     }
 
-    $before = @()
-    if (Test-Path -LiteralPath $artifactsRoot) {
-        $before = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
+    for ($runIndex = 1; $runIndex -le $RepeatCount; $runIndex++) {
+        $before = @()
+        if (Test-Path -LiteralPath $artifactsRoot) {
+            $before = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
+        }
+
+        $argList = [System.Collections.Generic.List[string]]::new()
+        $argList.Add('-NoProfile')
+        $argList.Add('-File')
+        $argList.Add($proofScript)
+        $argList.Add('-MediaServerProvider')
+        $argList.Add($provider)
+        $argList.Add('-TmdbId')
+        $argList.Add($TmdbId)
+        $argList.Add('-Title')
+        $argList.Add($Title)
+        $argList.Add('-MediaType')
+        $argList.Add($MediaType)
+        if ($sharedReuse) { $argList.Add('-ReuseExistingItem') }
+        if ($sharedSkipStart) { $argList.Add('-SkipStart') }
+        if ($ProofStaleDirectRefresh) { $argList.Add('-ProofStaleDirectRefresh') }
+        if ($DryRun) { $argList.Add('-DryRun') }
+
+        Write-Host ("[media-server-gate] Running provider '{0}' ({1}/{2})..." -f $provider, $runIndex, $RepeatCount)
+        & $shellExecutable @argList
+        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int] $LASTEXITCODE }
+
+        $after = @()
+        if (Test-Path -LiteralPath $artifactsRoot) {
+            $after = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
+        }
+        $artifactDir = $after | Where-Object { $before -notcontains $_ } | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace([string] $artifactDir) -and $after.Count -gt 0) {
+            $artifactDir = $after[0]
+        }
+
+        $result = [pscustomobject]@{
+            provider     = $provider
+            run          = $runIndex
+            exit_code    = $exitCode
+            status       = if ($exitCode -eq 0) { 'passed' } else { 'failed' }
+            artifact_dir = $artifactDir
+        }
+        $results.Add($result)
+
+        if ($exitCode -ne 0 -and $FailFast) {
+            $stopRequested = $true
+            break
+        }
+
+        $sharedReuse = $true
+        $sharedSkipStart = $true
     }
 
-    $argList = [System.Collections.Generic.List[string]]::new()
-    $argList.Add('-NoProfile')
-    $argList.Add('-File')
-    $argList.Add($proofScript)
-    $argList.Add('-MediaServerProvider')
-    $argList.Add($provider)
-    $argList.Add('-TmdbId')
-    $argList.Add($TmdbId)
-    $argList.Add('-Title')
-    $argList.Add($Title)
-    $argList.Add('-MediaType')
-    $argList.Add($MediaType)
-    if ($sharedReuse) { $argList.Add('-ReuseExistingItem') }
-    if ($sharedSkipStart) { $argList.Add('-SkipStart') }
-    if ($ProofStaleDirectRefresh) { $argList.Add('-ProofStaleDirectRefresh') }
-    if ($DryRun) { $argList.Add('-DryRun') }
-
-    Write-Host ("[media-server-gate] Running provider '{0}'..." -f $provider)
-    & $shellExecutable @argList
-    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int] $LASTEXITCODE }
-
-    $after = @()
-    if (Test-Path -LiteralPath $artifactsRoot) {
-        $after = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
-    }
-    $artifactDir = $after | Where-Object { $before -notcontains $_ } | Select-Object -First 1
-    if ([string]::IsNullOrWhiteSpace([string] $artifactDir) -and $after.Count -gt 0) {
-        $artifactDir = $after[0]
-    }
-
-    $result = [pscustomobject]@{
-        provider     = $provider
-        exit_code    = $exitCode
-        status       = if ($exitCode -eq 0) { 'passed' } else { 'failed' }
-        artifact_dir = $artifactDir
-    }
-    $results.Add($result)
-
-    if ($exitCode -ne 0 -and $FailFast) {
+    if ($stopRequested) {
         break
     }
-
-    $sharedReuse = $true
-    $sharedSkipStart = $true
 }
 
 $summary = [pscustomobject]@{
     timestamp  = (Get-Date).ToString('o')
     providers  = $Providers
+    repeat_count = $RepeatCount
     tmdb_id    = $TmdbId
     title      = $Title
     media_type = $MediaType
+    all_green  = (@($results | Where-Object { $_.exit_code -ne 0 })).Count -eq 0
     results    = $results
 }
 $summary | ConvertTo-Json -Depth 8 | Set-Content -Path $summaryPath -Encoding UTF8

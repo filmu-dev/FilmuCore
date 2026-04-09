@@ -471,6 +471,8 @@ class TooNewQuery:
     assert report.loaded == []
     assert len(report.failed) == 1
     assert report.failed[0].reason == "host_version_incompatible"
+    assert report.failed[0].plugin_name == "too-new-plugin"
+    assert report.failed[0].source == "entry_point"
 
 
 def test_packaged_plugin_without_min_host_version_loads_normally(monkeypatch: Any) -> None:
@@ -567,3 +569,68 @@ class OlderQuery:
         "older-version-plugin",
     }
     assert report.failed == []
+
+
+def test_filesystem_plugin_with_newer_api_version_is_marked_incompatible(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    _write_plugin(
+        plugins_dir / "future-api-plugin",
+        manifest={
+            "name": "future-api-plugin",
+            "version": "1.0.0",
+            "api_version": "2",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["FutureApiQuery"]},
+        },
+        module_source="""import strawberry
+
+@strawberry.type
+class FutureApiQuery:
+    @strawberry.field
+    def never_loaded(self) -> str:
+        return "nope"
+""",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(plugins_dir, registry, host_version="0.1.0")
+
+    assert report.loaded == []
+    assert len(report.failed) == 1
+    assert report.failed[0].plugin_name == "future-api-plugin"
+    assert report.failed[0].reason == "api_version_incompatible"
+    assert report.failed[0].source == "filesystem"
+
+
+def test_filesystem_plugin_with_max_host_version_below_runtime_is_marked_incompatible(
+    tmp_path: Path,
+) -> None:
+    plugins_dir = tmp_path / "plugins"
+    _write_plugin(
+        plugins_dir / "legacy-plugin",
+        manifest={
+            "name": "legacy-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "max_host_version": "0.0.9",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["LegacyQuery"]},
+        },
+        module_source="""import strawberry
+
+@strawberry.type
+class LegacyQuery:
+    @strawberry.field
+    def never_loaded(self) -> str:
+        return "nope"
+""",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(plugins_dir, registry, host_version="0.1.0")
+
+    assert report.loaded == []
+    assert len(report.failed) == 1
+    assert report.failed[0].plugin_name == "legacy-plugin"
+    assert report.failed[0].reason == "host_version_incompatible"
+    assert report.failed[0].source == "filesystem"

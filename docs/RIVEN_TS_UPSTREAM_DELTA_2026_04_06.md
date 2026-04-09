@@ -56,9 +56,14 @@ So Filmu should still treat the current TS VFS behavior as the behavioral baseli
 
 Verified from `origin/main`:
 
-- chalk logging + richer logger formatting/schema files landed in `apps/riven/lib/utilities/logger/`
-- a local Elastic stack now exists under `elastic-local/` with Elasticsearch, Kibana, and Filebeat wiring
-- the app package now depends on `@elastic/ecs-winston-format`
+- the current logger is a real Winston transport stack in `apps/riven/lib/utilities/logger/logger.ts`, not just console output
+- `loggingEnabled`, `enabledLogTransports`, `logLevel`, `logDirectory`, and `logShowStackTraces` are first-class runtime settings in `apps/riven/lib/riven-settings.schema.ts`
+- when logging is enabled, upstream always writes ECS-formatted NDJSON to `logs/ecs.json`, and can also write `combined.log`, `error.log`, and `exceptions.log`
+- the logger enriches records with Sentry trace/span metadata via `apps/riven/lib/utilities/logger/formatters/sentry-meta.format.ts`
+- validation errors are normalized into dedicated metadata fields via `apps/riven/lib/utilities/logger/formatters/validation-error-meta.format.ts`
+- the console formatter in `apps/riven/lib/utilities/logger/formatters/console.format.ts` now includes timestamp plus structured source tags like `riven.log.source` and `riven.worker.id`
+- a local Elastic stack now exists under `elastic-local/` with Elasticsearch, Kibana, and Filebeat wiring, and Filebeat ships `logs/ecs.json` as NDJSON into Elasticsearch
+- Sentry Spotlight bootstrapping in `apps/riven/lib/sentry.ts` forwards log events from the Winston logger into Sentry when enabled
 
 ## Filmu implications
 
@@ -69,3 +74,7 @@ Verified from `origin/main`:
 3. Treat sandboxed heavy-stage execution and scheduled re-indexing as part of the current upstream orchestration bar.
 
 4. Keep the current TS VFS as the behavior baseline, but note that upstream `main` is still on the Node/FUSE topology and has only hardened that path so far.
+
+5. Stop describing the current upstream logging story as if it were only “chalk logging plus Elastic-local”.
+   The real current bar is a structured operator log pipeline:
+   ECS files, durable local file transports, trace/span-enriched records, queue/VFS source tagging, and a ready-made local shipper stack.

@@ -65,6 +65,13 @@ Variables:
 - `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`
 - optional `FILMU_FRONTEND_USERNAME`
 
+Required-check promotion note:
+
+- the workflow code path is already in place for `pull_request`, `push` to `main`, and `merge_group`
+- once the target self-hosted runner and secrets are available and the workflow has produced green runs on the protected branch path, mark the GitHub required check for this workflow, typically shown as `Playback Gate / Playback Gate`
+- this remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
+- the workflow and [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now also emit the canonical required-check name into the CI artifact bundle so the repo-settings step can key off the exact check label instead of manual memory
+
 ## 3. CI behavior
 
 [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now does this:
@@ -74,16 +81,19 @@ Variables:
 3. runs the full Jellyfin/preferred-client playback gate
 4. starts Plex + Emby containers
 5. runs the provider parity gate automatically when `PLEX_TOKEN` and `EMBY_API_KEY` are present
+6. repeats that provider parity gate twice with fail-fast behavior so the parity path is treated as a stability gate instead of a single-run probe
+7. writes `playback-proof-artifacts/ci-execution-summary.json` with the canonical required-check name plus whether provider parity actually ran on that workflow execution
 
 So the expected rollout order is:
 
 1. make `proof:playback:gate` green on the runner
 2. add `PLEX_TOKEN` and `EMBY_API_KEY`
 3. confirm provider parity gate runs green in CI
-4. mark the workflow required for playback-path changes
+4. mark the `Playback Gate / Playback Gate` check required for playback-path changes
 
 ## 4. What still remains after runner rollout
 
 - keep `proof:windows:vfs:gate` green on the native Windows path
 - keep `proof:playback:providers:gate` green for Docker Plex + native Windows Emby parity
-- later, add real native Windows Plex evidence through [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1) once a local Plex Media Server exists against `C:\FilmuCoreVFS`
+- keep the explicit thresholded Windows soak profiles green on `C:\FilmuCoreVFS` (`proof:windows:vfs:soak:continuous`, `proof:windows:vfs:soak:seek`, `proof:windows:vfs:soak:concurrent`, and `proof:windows:vfs:soak:full`)
+- native Windows Plex evidence is already present through [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1); the remaining work is repeatability and policy promotion, not first bring-up

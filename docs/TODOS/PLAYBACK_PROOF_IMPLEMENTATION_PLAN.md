@@ -62,9 +62,10 @@ The first implementation slice for this plan is now in the repository.
 - [x] Docker Plex now reaches real mounted playback/transcode startup against the WSL host mount after fixing WSL host-mount visibility, stale host-binary reuse, entry-id refresh collisions, and duplicate foreground chunk fetches
 - [x] true preferred-client playback proof now passes through the real authenticated frontend client against the live local stack
 - [x] repeated green runs now pass through [`../../scripts/run_playback_proof_stability.ps1`](../../scripts/run_playback_proof_stability.ps1) and [`../../package.json`](../../package.json) `proof:playback:gate`
-- [x] first self-hosted Linux CI wiring now exists in [`.github/workflows/playback-gate.yml`](../../.github/workflows/playback-gate.yml) via [`../../run_playback_gate_ci.sh`](../../run_playback_gate_ci.sh)
+- [x] self-hosted Linux CI playback-gate wiring now exists in [`.github/workflows/playback-gate.yml`](../../.github/workflows/playback-gate.yml) via [`../../run_playback_gate_ci.sh`](../../run_playback_gate_ci.sh), with fail-fast runner readiness validation, enforced provider-gate secrets, and artifact upload
 - [x] the proof runner now supports portable host-browser execution through an explicit browser path / env var while keeping the container-browser fallback available
 - [x] media-center parity gate entrypoint added in [`../../package.json`](../../package.json) as `proof:playback:providers:gate`, backed by [`../../scripts/run_media_server_proof_gate.ps1`](../../scripts/run_media_server_proof_gate.ps1), and live-validated for Docker Plex + native Windows Emby
+- [x] direct provider proof reran green on April 9, 2026 for Docker Plex (`docker_wsl`) plus native Windows Emby through [`../../scripts/run_media_server_proof_gate.ps1`](../../scripts/run_media_server_proof_gate.ps1)
 - [x] the proof runner no longer depends on WSL-only mounted-read execution; it now falls back to host bash or backend-container shell execution as needed
 - [x] Windows-native VFS soak/regression runner implemented in [../../scripts/run_windows_vfs_soak.ps1](../../scripts/run_windows_vfs_soak.ps1)
 - [x] package entrypoints added in [../../package.json](../../package.json) as proof:windows:vfs:soak and proof:windows:vfs:gate
@@ -76,9 +77,10 @@ The first implementation slice for this plan is now in the repository.
 - [x] harness completion hang removal so successful proof runs now emit `summary.json` and exit cleanly
 - [ ] promotion of the harness from a locally green gate into an enforced playback-path merge requirement
 - [ ] runner provisioning / secrets rollout for the new self-hosted CI execution path, including `PLEX_TOKEN` and `EMBY_API_KEY` so the Linux CI helper can activate the provider parity gate automatically; [`../../scripts/check_playback_gate_runner.ps1`](../../scripts/check_playback_gate_runner.ps1) is now the authoritative readiness check and should fail only for real runner gaps
-- [ ] keep the new Windows-native soak gate green on `C:\FilmuCoreVFS` under long playback, seek/resume, and concurrent-reader pressure
+- [ ] keep the new Windows-native soak gate green on `C:\FilmuCoreVFS` under long playback, seek/resume, and concurrent-reader pressure; the explicit thresholded soak profiles now exist in [`../../scripts/run_windows_vfs_soak.ps1`](../../scripts/run_windows_vfs_soak.ps1) and are exposed as `proof:windows:vfs:soak:continuous`, `proof:windows:vfs:soak:seek`, `proof:windows:vfs:soak:concurrent`, and `proof:windows:vfs:soak:full`
 - [x] add a real Docker Plex playback-start proof stage to [`../../scripts/run_playback_proof.ps1`](../../scripts/run_playback_proof.ps1) so the currently operator-validated path becomes repeatable artifacted evidence
-- [ ] add native Windows Plex proof on top of the same `C:\FilmuCoreVFS` path when a real local Plex Media Server target exists so all three first-class native Windows media centers have equivalent recorded evidence through [`../../scripts/run_windows_media_server_gate.ps1`](../../scripts/run_windows_media_server_gate.ps1)
+- [x] turn the remaining Docker Plex proof warnings into explicit pass/fail evidence instead of artifact-only warnings: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility
+- [x] finish native Windows Plex proof on top of the same `C:\FilmuCoreVFS` path now that a real local Plex Media Server is installed; [`../../scripts/run_windows_media_server_gate.ps1`](../../scripts/run_windows_media_server_gate.ps1) now targets `http://127.0.0.1:32400` with the local admin token and reran green on April 9, 2026
 
 ### Next concrete step
 
@@ -86,7 +88,7 @@ The next step from this plan is:
 
 1. keep [`../../scripts/run_playback_proof.ps1`](../../scripts/run_playback_proof.ps1) and [`../../scripts/run_playback_proof_stability.ps1`](../../scripts/run_playback_proof_stability.ps1) green as the playback-path regression harness
 2. provision the self-hosted Linux runner and secrets required by [`.github/workflows/playback-gate.yml`](../../.github/workflows/playback-gate.yml), validate them with [`../../scripts/check_playback_gate_runner.ps1`](../../scripts/check_playback_gate_runner.ps1) and [`../PLAYBACK_GATE_RUNNER_SETUP.md`](../PLAYBACK_GATE_RUNNER_SETUP.md), then promote it into an enforced merge requirement for playback-path changes
-3. keep the new provider-parity gate green for Docker Plex + native Windows Emby while CI/merge-policy promotion is prepared, then close native Windows Plex parity when a real local PMS target exists
+3. keep the new provider-parity gate green for Docker Plex + native Windows Emby + native Windows Plex while CI/merge-policy promotion is prepared, keep the newly explicit Docker Plex evidence checks green in repeated runs, and keep the native Windows Plex gate green through repeatable reruns
 
 Implemented baseline:
 
@@ -132,14 +134,31 @@ Current verified status of this slice:
 - native Windows Emby now also has recorded visibility/playback-info/stream-open success across a sampled set of mounted titles on `C:\FilmuCoreVFS`
 - the proof harness no longer produces false Emby failures from a malformed fallback stream URL, and the native Windows chunk engine now coalesces in-flight foreground chunk fetches to reduce duplicate upstream work during media-server playback
 - Docker Plex now also has operator-validated mounted playback/transcode startup against the shared WSL host mount, so its remaining gap is harness/gate promotion rather than first playback bring-up
+- the direct provider gate reran green on April 9, 2026 for Docker Plex plus native Windows Emby, and the stricter Windows-only wrapper is now also green for native Windows Plex through the real local PMS at `http://127.0.0.1:32400`
 - route-level stale-link recovery is now also proven live by forcing the selected direct media entry stale and verifying that [`/api/v1/stream/file/{item_id}`](../../filmu_py/api/routes/stream.py) still serves `206 Partial Content`
-- that stale-link proof currently demonstrates **route recovery, not yet durable persisted lease repair**: live item detail can still report the stale `unrestricted_url` even after the route recovers and serves bytes
+- that stale-link proof now also demonstrates **durable persisted lease repair**: selected direct media-entry refreshes persist the repaired lease across fresh DB sessions and mirror the repaired URL/state back onto the linked `source_attachment`, so later requests and detail projections can observe the refreshed `unrestricted_url`
+- selected media-entry-backed remote-HLS winners now also recover more deliberately on real upstream breakage: when the resolved playlist URL or child-stream open fails, the route can force one inline lease refresh, persist the repaired playlist URL/state, and retry the remote HLS open once before failing the request
+- that inline remote-HLS repair path is now also operator-visible: [`/api/v1/stream/status`](../../filmu_py/api/routes/stream.py) exposes additive `inline_remote_hls_refresh_attempts`, `inline_remote_hls_refresh_recovered`, `inline_remote_hls_refresh_no_action`, and `inline_remote_hls_refresh_failures` counters so the recovery seam is measurable in proof artifacts and live status snapshots
+- failed inline remote-HLS repair is no longer a route-local dead end for media-entry-backed winners: when the one-shot repair loses to provider pressure or otherwise cannot recover the selected playlist/segment source, the route now persists that selected HLS media entry back to `stale`, mirrors the state onto the linked `source_attachment`, and hands off to the existing restricted-fallback background refresh controller so recovery can continue under scheduled retry/backoff semantics
+- the selected-HLS failed-lease and restricted-fallback background controllers now also share one provider-pressure-aware service execution seam, so those adjacent paths no longer diverge on retry/backoff behavior as they evolve
+- provider circuit pressure now also behaves like deliberate deferred work on those selected-HLS background paths instead of looking like a fresh terminal lease failure: an already-open provider circuit now yields `run_later` plus retry-after semantics and lets the in-process controller reschedule the attempt
+- the direct background refresh plane now also follows that same provider-pressure contract: an already-open provider circuit on direct background refresh work now preserves the prior retryable state and yields deferred retry-after work instead of hardening the entry/attachment into another immediate failed refresh
+- `/api/v1/stream/status` now also exposes additive playback-governance counters for those background HLS provider-pressure deferrals: `hls_failed_lease_refresh_rate_limited`, `hls_failed_lease_refresh_provider_circuit_open`, `hls_restricted_fallback_refresh_rate_limited`, and `hls_restricted_fallback_refresh_provider_circuit_open`
+- `/api/v1/stream/status` now also exposes direct background refresh provider-pressure deferrals through `direct_playback_refresh_rate_limited` and `direct_playback_refresh_provider_circuit_open`
 - the harness now distinguishes persisted vs unpersisted stale-refresh recovery, and the late-stage completion hang has been fixed so successful proof runs now write `summary.json` and print the final PASS line again
 - true preferred-client playback is now live-green through the real authenticated frontend client: a Chrome-backed host-browser run reached the real playing state end-to-end against the local stack, and a standalone Edge-backed run also passed after the runner was hardened for explicit host-browser CDP attachment
 - repeated local gate validation is now also live-green: [`../../scripts/run_playback_proof_stability.ps1`](../../scripts/run_playback_proof_stability.ps1) passed `2/2` repeated runs with `-ProofStaleDirectRefresh -RequirePreferredClientPlayback -ReuseExistingItem -RequireCompletedState`
-- a first CI execution path now exists for self-hosted Linux runners, with explicit prerequisites for Docker, `pwsh`, a real browser executable, debrid/TMDB secrets, and a reachable frontend source tree
+- the provider/media-server parity gate is no longer single-shot only: [`../../scripts/run_media_server_proof_gate.ps1`](../../scripts/run_media_server_proof_gate.ps1) now supports `-RepeatCount`, and the stricter package/workflow gate path now runs that provider parity surface twice with fail-fast behavior
+- a first CI execution path now exists for self-hosted Linux runners, with explicit prerequisites for Docker, `pwsh`, a real browser executable, debrid/TMDB secrets, and a reachable frontend source tree; that workflow now covers `pull_request`, `push` to `main`, and `merge_group` traffic and emits an explicit job summary alongside the artifact bundle
 - the runner is now less machine-shaped: explicit host browser selection comes from `-PreferredClientBrowserExecutable` or `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`, mounted-read proof no longer depends on WSL alone, and the container-browser path remains available as a fallback
-- the remaining playback-proof gap is no longer first preferred-client playback, first native Windows Emby proof, or first Docker Plex playback-start evidence. It is promoting the locally green gates into CI/merge policy, continuing longer-running stability hardening, and later closing native Windows Plex parity.
+- Windows-native soak proof is now more decision-shaped too: [`../../scripts/run_windows_vfs_soak.ps1`](../../scripts/run_windows_vfs_soak.ps1) emits threshold checks and named diagnostics for reconnect churn, stale-refresh failures, cache cold-fetch churn, provider-pressure mentions, and mounted-read fatal classifications directly into the existing artifact family rather than leaving the soak rubric as prose-only guidance
+- that same soak artifact family now also captures backend `/api/v1/stream/status` snapshots before and after the run when the backend is reachable, including a focused `backend_vfs_governance_delta` block for FilmuVFS watch-session churn, reconnect outcomes, bridge failure classes, and provider-backed refresh outcomes, so mounted proof evidence and live operator status now share one vocabulary
+- the native Windows evidence path now also captures the Rust sidecar's own structured runtime snapshot: `filmuvfs-runtime-status.json` records mounted-read totals/results, upstream fetch totals, chunk-cache and prefetch activity, inline-refresh outcomes, active-handle/active-read/cache gauges, and Windows callback summaries, and [`../../scripts/run_windows_vfs_soak.ps1`](../../scripts/run_windows_vfs_soak.ps1) now includes before/after capture plus a focused `runtime_status_delta` block in `summary.json`
+- `/api/v1/stream/status` now also ingests that Rust runtime snapshot through the managed Windows stack state path or an explicit `FILMU_PY_VFS_RUNTIME_STATUS_PATH` override, so operators and proof artifacts can read additive `vfs_runtime_*` counters for mounted-read totals/results, upstream fetch volume/duration, cache churn, prefetch pressure, inline refresh outcomes, and Windows callback failures from the same backend status surface instead of correlating two separate vocabularies by hand
+- that same runtime snapshot now also carries first-class upstream failure and retryable provider-pressure taxonomy, and the Windows soak gate now converts those runtime deltas into threshold checks for cold-fetch churn, provider pressure, unrecovered stale reads, and fatal mounted-read failures when the snapshot is available, so proof PASS/FAIL is less dependent on log-pattern inference alone
+- backend HTTP fallback is now part of that same evidence family: the mounted runtime snapshot records fallback attempts, successes, and failures split by `direct_read_failure`, `inline_refresh_unavailable`, and `post_inline_refresh_failure`, and the soak artifact now preserves those fallback counters inside `runtime_status_delta` / `runtime_diagnostics` so post-run diagnosis does not have to infer fallback behavior from log lines alone
+- mounted startup latency is now part of that same evidence family too: the Rust mount runtime records handle-open to first completed read outcomes plus average/max latency, `filmuvfs-runtime-status.json` carries that `handle_startup` block, `/api/v1/stream/status` exposes additive `vfs_runtime_handle_startup_*` counters, and the Windows soak artifact now preserves the same startup metrics inside `runtime_status_delta` / `runtime_diagnostics`
+- the remaining playback-proof gap is no longer first preferred-client playback, first native Windows Emby proof, first Docker Plex playback-start evidence, native Plex targeting, first route-to-controller handoff for failed inline remote-HLS repair, first selected-HLS provider-pressure deferral visibility, first widening of those same semantics into direct background refresh work, or first repeated provider-parity gate coverage. It is promoting the now-wired CI playback gates into actual branch-protection / merge policy, keeping the newly explicit Docker Plex evidence checks green on the shared WSL/Docker topology, keeping the new native Windows Plex gate green through repeatable reruns, and continuing longer-running stability hardening.
 
 ## Post-proof operational hardening gate
 
@@ -198,12 +217,14 @@ The playback proof artifacts should continue to include:
 - worker logs
 - filmuvfs logs
 - `/api/v1/stream/status` snapshots
+- `plex-wsl-evidence.json` plus the matching per-check `summary.json` fields whenever the provider is Plex on `docker_wsl`
 
 For the hardening gate they should additionally include:
 
 - soak duration achieved
 - reconnect incident count
 - stale-refresh incident count and recovery outcome
+- mounted startup latency summary (first completed read average/max and any startup failures)
 - any mounted-read failure classification observed during the run
 
 ---
@@ -579,6 +600,12 @@ It is executing that harness against the live stack and closing the remaining op
 - preferred-client playback proof
 - stale-link and failure-mode validation
 - repeated green runs and eventual CI gate promotion
+
+
+
+
+
+
 
 
 

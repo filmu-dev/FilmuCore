@@ -7,9 +7,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import tempfile
 from asyncio.subprocess import PIPE
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -36,6 +38,7 @@ from filmu_py.core.event_bus import EventBus
 from filmu_py.core.log_stream import LogStreamBroker
 from filmu_py.db.models import MediaItemORM
 from filmu_py.db.runtime import DatabaseRuntime
+from filmu_py.resources import AppResources
 from filmu_py.services.playback import (
     PLAYBACK_RISK_EVENTS,
     DirectFileServingDescriptor,
@@ -44,6 +47,7 @@ from filmu_py.services.playback import (
     trigger_hls_failed_lease_refresh_from_resources,
     trigger_hls_restricted_fallback_refresh_from_resources,
 )
+from filmu_py.services.vfs_server import build_empty_vfs_catalog_governance_snapshot
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -62,6 +66,17 @@ REMOTE_HLS_RECOVERY_EVENTS = Counter(
     "Count of remote-HLS retry/cooldown recovery events by kind.",
     labelnames=("event",),
 )
+INLINE_REMOTE_HLS_REFRESH_EVENTS = Counter(
+    "filmu_py_stream_inline_remote_hls_refresh_total",
+    "Count of inline remote-HLS media-entry repair attempts by outcome.",
+    labelnames=("event",),
+)
+_MANAGED_WINDOWS_VFS_STATE_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "playback-proof-artifacts"
+    / "windows-native-stack"
+    / "filmuvfs-windows-state.json"
+)
 
 _HLS_ROUTE_FAILURE_GOVERNANCE = {
     "generation_failed": 0,
@@ -79,6 +94,12 @@ _REMOTE_HLS_RETRY_GOVERNANCE = {
     "retry_attempts": 0,
     "cooldown_starts": 0,
     "cooldown_hits": 0,
+}
+_INLINE_REMOTE_HLS_REFRESH_GOVERNANCE = {
+    "attempts": 0,
+    "recovered": 0,
+    "no_action": 0,
+    "failures": 0,
 }
 _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE = {
     "starts": 0,
@@ -217,6 +238,14 @@ _ATTACHMENT_RESTRICTED_URL_KEYS = (
 )
 
 
+@dataclass(frozen=True)
+class InlineRemoteHlsRefreshOutcome:
+    """Result of one inline remote-HLS media-entry repair attempt."""
+
+    outcome: str
+    source: tuple[str, str, str] | None = None
+
+
 def _record_stream_route_result(*, route: str, status_code: int) -> None:
     STREAM_ROUTE_RESULTS.labels(route=route, status_code=str(status_code)).inc()
 
@@ -301,7 +330,24 @@ def _remote_hls_recovery_governance_snapshot() -> dict[str, int]:
         "remote_hls_cooldown_starts": _REMOTE_HLS_RETRY_GOVERNANCE["cooldown_starts"],
         "remote_hls_cooldown_hits": _REMOTE_HLS_RETRY_GOVERNANCE["cooldown_hits"],
         "remote_hls_cooldowns_active": active_cooldowns,
+        "inline_remote_hls_refresh_attempts": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE["attempts"],
+        "inline_remote_hls_refresh_recovered": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[
+            "recovered"
+        ],
+        "inline_remote_hls_refresh_no_action": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[
+            "no_action"
+        ],
+        "inline_remote_hls_refresh_failures": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[
+            "failures"
+        ],
     }
+
+
+def _record_inline_remote_hls_refresh(*, event: str) -> None:
+    """Record one inline remote-HLS media-entry repair event."""
+
+    INLINE_REMOTE_HLS_REFRESH_EVENTS.labels(event=event).inc()
+    _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[event] += 1
 
 
 def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
@@ -325,6 +371,361 @@ def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
         "direct_playback_refresh_trigger_failures": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["failures"],
         "direct_playback_refresh_trigger_tasks_active": active_tasks,
     }
+
+
+def _empty_vfs_runtime_governance_snapshot() -> dict[str, int]:
+    """Return the default Rust runtime governance payload for /stream/status."""
+
+    return {
+        "vfs_runtime_snapshot_available": 0,
+        "vfs_runtime_open_handles": 0,
+        "vfs_runtime_active_reads": 0,
+        "vfs_runtime_chunk_cache_weighted_bytes": 0,
+        "vfs_runtime_handle_startup_total": 0,
+        "vfs_runtime_handle_startup_ok": 0,
+        "vfs_runtime_handle_startup_error": 0,
+        "vfs_runtime_handle_startup_estale": 0,
+        "vfs_runtime_handle_startup_average_duration_ms": 0,
+        "vfs_runtime_handle_startup_max_duration_ms": 0,
+        "vfs_runtime_mounted_reads_total": 0,
+        "vfs_runtime_mounted_reads_ok": 0,
+        "vfs_runtime_mounted_reads_error": 0,
+        "vfs_runtime_mounted_reads_estale": 0,
+        "vfs_runtime_mounted_reads_average_duration_ms": 0,
+        "vfs_runtime_mounted_reads_max_duration_ms": 0,
+        "vfs_runtime_upstream_fetch_operations": 0,
+        "vfs_runtime_upstream_fetch_bytes_total": 0,
+        "vfs_runtime_upstream_fetch_average_duration_ms": 0,
+        "vfs_runtime_upstream_fetch_max_duration_ms": 0,
+        "vfs_runtime_upstream_fail_invalid_url": 0,
+        "vfs_runtime_upstream_fail_build_request": 0,
+        "vfs_runtime_upstream_fail_network": 0,
+        "vfs_runtime_upstream_fail_stale_status": 0,
+        "vfs_runtime_upstream_fail_unexpected_status": 0,
+        "vfs_runtime_upstream_fail_unexpected_status_too_many_requests": 0,
+        "vfs_runtime_upstream_fail_unexpected_status_server_error": 0,
+        "vfs_runtime_upstream_fail_read_body": 0,
+        "vfs_runtime_upstream_retryable_network": 0,
+        "vfs_runtime_upstream_retryable_read_body": 0,
+        "vfs_runtime_upstream_retryable_status_too_many_requests": 0,
+        "vfs_runtime_upstream_retryable_status_server_error": 0,
+        "vfs_runtime_backend_fallback_attempts": 0,
+        "vfs_runtime_backend_fallback_success": 0,
+        "vfs_runtime_backend_fallback_failure": 0,
+        "vfs_runtime_backend_fallback_attempts_direct_read_failure": 0,
+        "vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable": 0,
+        "vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure": 0,
+        "vfs_runtime_backend_fallback_success_direct_read_failure": 0,
+        "vfs_runtime_backend_fallback_success_inline_refresh_unavailable": 0,
+        "vfs_runtime_backend_fallback_success_post_inline_refresh_failure": 0,
+        "vfs_runtime_backend_fallback_failure_direct_read_failure": 0,
+        "vfs_runtime_backend_fallback_failure_inline_refresh_unavailable": 0,
+        "vfs_runtime_backend_fallback_failure_post_inline_refresh_failure": 0,
+        "vfs_runtime_chunk_cache_hits": 0,
+        "vfs_runtime_chunk_cache_misses": 0,
+        "vfs_runtime_chunk_cache_inserts": 0,
+        "vfs_runtime_chunk_cache_prefetch_hits": 0,
+        "vfs_runtime_prefetch_background_spawned": 0,
+        "vfs_runtime_prefetch_background_backpressure": 0,
+        "vfs_runtime_prefetch_background_error": 0,
+        "vfs_runtime_inline_refresh_success": 0,
+        "vfs_runtime_inline_refresh_no_url": 0,
+        "vfs_runtime_inline_refresh_error": 0,
+        "vfs_runtime_inline_refresh_timeout": 0,
+        "vfs_runtime_windows_callbacks_error": 0,
+        "vfs_runtime_windows_callbacks_estale": 0,
+    }
+
+
+def _as_int(value: object) -> int:
+    """Normalize Rust runtime JSON numbers into additive integer counters."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return 0
+        try:
+            return int(stripped)
+        except ValueError:
+            try:
+                return round(float(stripped))
+            except ValueError:
+                return 0
+    return 0
+
+
+def _nested_mapping_value(payload: object, *keys: str) -> object | None:
+    """Safely walk nested JSON objects loaded from the Rust runtime status file."""
+
+    current = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _candidate_vfs_runtime_status_paths() -> list[Path]:
+    """Return the preferred Rust runtime snapshot locations in precedence order."""
+
+    paths: list[Path] = []
+    env_path = os.getenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH")
+    if env_path and env_path.strip():
+        paths.append(Path(env_path.strip()))
+    try:
+        state_payload = json.loads(_MANAGED_WINDOWS_VFS_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state_payload = None
+    if isinstance(state_payload, dict):
+        runtime_status_path = state_payload.get("runtime_status_path")
+        if isinstance(runtime_status_path, str) and runtime_status_path.strip():
+            paths.append(Path(runtime_status_path.strip()))
+    paths.append(_MANAGED_WINDOWS_VFS_STATE_PATH.parent / "filmuvfs-runtime-status.json")
+    unique_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        normalized = path.expanduser()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_paths.append(normalized)
+    return unique_paths
+
+
+def _load_vfs_runtime_status_payload() -> dict[str, object] | None:
+    """Load the first readable Rust runtime status JSON payload, if any."""
+
+    for path in _candidate_vfs_runtime_status_paths():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return cast(dict[str, object], payload)
+    return None
+
+
+def _vfs_runtime_governance_snapshot() -> dict[str, int]:
+    """Return additive governance counters extracted from the Rust runtime snapshot."""
+
+    payload = _load_vfs_runtime_status_payload()
+    governance = _empty_vfs_runtime_governance_snapshot()
+    if payload is None:
+        return governance
+    governance["vfs_runtime_snapshot_available"] = 1
+    governance["vfs_runtime_open_handles"] = _as_int(_nested_mapping_value(payload, "runtime", "open_handles"))
+    governance["vfs_runtime_active_reads"] = _as_int(_nested_mapping_value(payload, "runtime", "active_reads"))
+    governance["vfs_runtime_chunk_cache_weighted_bytes"] = _as_int(
+        _nested_mapping_value(payload, "runtime", "chunk_cache_weighted_bytes")
+    )
+    governance["vfs_runtime_handle_startup_total"] = _as_int(
+        _nested_mapping_value(payload, "handle_startup", "total")
+    )
+    governance["vfs_runtime_handle_startup_ok"] = _as_int(
+        _nested_mapping_value(payload, "handle_startup", "ok")
+    )
+    governance["vfs_runtime_handle_startup_error"] = _as_int(
+        _nested_mapping_value(payload, "handle_startup", "error")
+    )
+    governance["vfs_runtime_handle_startup_estale"] = _as_int(
+        _nested_mapping_value(payload, "handle_startup", "estale")
+    )
+    governance["vfs_runtime_handle_startup_average_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "handle_startup", "average_duration_ms")
+    )
+    governance["vfs_runtime_handle_startup_max_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "handle_startup", "max_duration_ms")
+    )
+    governance["vfs_runtime_mounted_reads_total"] = _as_int(
+        _nested_mapping_value(payload, "mounted_reads", "total")
+    )
+    governance["vfs_runtime_mounted_reads_ok"] = _as_int(
+        _nested_mapping_value(payload, "mounted_reads", "ok")
+    )
+    governance["vfs_runtime_mounted_reads_error"] = _as_int(
+        _nested_mapping_value(payload, "mounted_reads", "error")
+    )
+    governance["vfs_runtime_mounted_reads_estale"] = _as_int(
+        _nested_mapping_value(payload, "mounted_reads", "estale")
+    )
+    governance["vfs_runtime_mounted_reads_average_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "mounted_reads", "average_duration_ms")
+    )
+    governance["vfs_runtime_mounted_reads_max_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "mounted_reads", "max_duration_ms")
+    )
+    governance["vfs_runtime_upstream_fetch_operations"] = _as_int(
+        _nested_mapping_value(payload, "upstream_fetch", "operations")
+    )
+    governance["vfs_runtime_upstream_fetch_bytes_total"] = _as_int(
+        _nested_mapping_value(payload, "upstream_fetch", "bytes_total")
+    )
+    governance["vfs_runtime_upstream_fetch_average_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "upstream_fetch", "average_duration_ms")
+    )
+    governance["vfs_runtime_upstream_fetch_max_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "upstream_fetch", "max_duration_ms")
+    )
+    governance["vfs_runtime_upstream_fail_invalid_url"] = _as_int(
+        _nested_mapping_value(payload, "upstream_failures", "invalid_url")
+    )
+    governance["vfs_runtime_upstream_fail_build_request"] = _as_int(
+        _nested_mapping_value(payload, "upstream_failures", "build_request")
+    )
+    governance["vfs_runtime_upstream_fail_network"] = _as_int(
+        _nested_mapping_value(payload, "upstream_failures", "network")
+    )
+    governance["vfs_runtime_upstream_fail_stale_status"] = _as_int(
+        _nested_mapping_value(payload, "upstream_failures", "stale_status")
+    )
+    governance["vfs_runtime_upstream_fail_unexpected_status"] = _as_int(
+        _nested_mapping_value(payload, "upstream_failures", "unexpected_status")
+    )
+    governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "upstream_failures",
+            "unexpected_status_too_many_requests",
+        )
+    )
+    governance["vfs_runtime_upstream_fail_unexpected_status_server_error"] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "upstream_failures",
+            "unexpected_status_server_error",
+        )
+    )
+    governance["vfs_runtime_upstream_fail_read_body"] = _as_int(
+        _nested_mapping_value(payload, "upstream_failures", "read_body")
+    )
+    governance["vfs_runtime_upstream_retryable_network"] = _as_int(
+        _nested_mapping_value(payload, "upstream_retryable_events", "network")
+    )
+    governance["vfs_runtime_upstream_retryable_read_body"] = _as_int(
+        _nested_mapping_value(payload, "upstream_retryable_events", "read_body")
+    )
+    governance["vfs_runtime_upstream_retryable_status_too_many_requests"] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "upstream_retryable_events",
+            "status_too_many_requests",
+        )
+    )
+    governance["vfs_runtime_upstream_retryable_status_server_error"] = _as_int(
+        _nested_mapping_value(payload, "upstream_retryable_events", "status_server_error")
+    )
+    governance["vfs_runtime_backend_fallback_attempts"] = _as_int(
+        _nested_mapping_value(payload, "backend_fallback", "attempts")
+    )
+    governance["vfs_runtime_backend_fallback_success"] = _as_int(
+        _nested_mapping_value(payload, "backend_fallback", "success")
+    )
+    governance["vfs_runtime_backend_fallback_failure"] = _as_int(
+        _nested_mapping_value(payload, "backend_fallback", "failure")
+    )
+    governance["vfs_runtime_backend_fallback_attempts_direct_read_failure"] = _as_int(
+        _nested_mapping_value(payload, "backend_fallback", "attempts_direct_read_failure")
+    )
+    governance["vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable"] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "backend_fallback",
+            "attempts_inline_refresh_unavailable",
+        )
+    )
+    governance[
+        "vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure"
+    ] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "backend_fallback",
+            "attempts_post_inline_refresh_failure",
+        )
+    )
+    governance["vfs_runtime_backend_fallback_success_direct_read_failure"] = _as_int(
+        _nested_mapping_value(payload, "backend_fallback", "success_direct_read_failure")
+    )
+    governance["vfs_runtime_backend_fallback_success_inline_refresh_unavailable"] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "backend_fallback",
+            "success_inline_refresh_unavailable",
+        )
+    )
+    governance[
+        "vfs_runtime_backend_fallback_success_post_inline_refresh_failure"
+    ] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "backend_fallback",
+            "success_post_inline_refresh_failure",
+        )
+    )
+    governance["vfs_runtime_backend_fallback_failure_direct_read_failure"] = _as_int(
+        _nested_mapping_value(payload, "backend_fallback", "failure_direct_read_failure")
+    )
+    governance["vfs_runtime_backend_fallback_failure_inline_refresh_unavailable"] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "backend_fallback",
+            "failure_inline_refresh_unavailable",
+        )
+    )
+    governance[
+        "vfs_runtime_backend_fallback_failure_post_inline_refresh_failure"
+    ] = _as_int(
+        _nested_mapping_value(
+            payload,
+            "backend_fallback",
+            "failure_post_inline_refresh_failure",
+        )
+    )
+    governance["vfs_runtime_chunk_cache_hits"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "hits")
+    )
+    governance["vfs_runtime_chunk_cache_misses"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "misses")
+    )
+    governance["vfs_runtime_chunk_cache_inserts"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "inserts")
+    )
+    governance["vfs_runtime_chunk_cache_prefetch_hits"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "prefetch_hits")
+    )
+    governance["vfs_runtime_prefetch_background_spawned"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "background_spawned")
+    )
+    governance["vfs_runtime_prefetch_background_backpressure"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "background_backpressure")
+    )
+    governance["vfs_runtime_prefetch_background_error"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "background_error")
+    )
+    governance["vfs_runtime_inline_refresh_success"] = _as_int(
+        _nested_mapping_value(payload, "inline_refresh", "success")
+    )
+    governance["vfs_runtime_inline_refresh_no_url"] = _as_int(
+        _nested_mapping_value(payload, "inline_refresh", "no_url")
+    )
+    governance["vfs_runtime_inline_refresh_error"] = _as_int(
+        _nested_mapping_value(payload, "inline_refresh", "error")
+    )
+    governance["vfs_runtime_inline_refresh_timeout"] = _as_int(
+        _nested_mapping_value(payload, "inline_refresh", "timeout")
+    )
+    governance["vfs_runtime_windows_callbacks_error"] = _as_int(
+        _nested_mapping_value(payload, "windows_projfs", "callbacks_error")
+    )
+    governance["vfs_runtime_windows_callbacks_estale"] = _as_int(
+        _nested_mapping_value(payload, "windows_projfs", "callbacks_estale")
+    )
+    return governance
 
 
 def _hls_failed_lease_trigger_governance_snapshot() -> dict[str, int]:
@@ -621,39 +1022,84 @@ async def _head_remote_direct_url(url: str) -> None:
         )
 
 
-async def _run_direct_playback_refresh_trigger(*, request: Request, item_identifier: str) -> None:
-    """Trigger app-scoped direct-play refresh work without blocking the route response path."""
+def _control_plane_follow_up_result(control_plane_result: Any) -> Any:
+    """Return the scheduling/refresh result payload carried by one control-plane trigger result."""
+
+    return getattr(control_plane_result, "scheduling_result", None) or getattr(
+        control_plane_result,
+        "refresh_result",
+        None,
+    )
+
+
+def _record_route_refresh_trigger_pending(
+    *,
+    governance: dict[str, int],
+    item_identifier: str,
+    controller: Any,
+) -> bool:
+    """Record duplicate-trigger/backoff governance when route-adjacent work is already pending."""
+
+    if not controller.has_pending(item_identifier):
+        return False
+
+    governance["already_pending"] += 1
+    last_result = controller.get_last_result(item_identifier)
+    if last_result is not None and last_result.retry_after_seconds is not None:
+        governance["backoff_pending"] += 1
+    return True
+
+
+async def _run_app_scoped_refresh_trigger(
+    *,
+    request: Request,
+    item_identifier: str,
+    governance: dict[str, int],
+    trigger: Callable[[Any, str], Awaitable[Any]],
+) -> None:
+    """Trigger one app-scoped refresh controller and record shared route governance."""
 
     try:
         resources = get_resources(request)
     except RuntimeError:
-        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
+        governance["controller_unavailable"] += 1
         return
 
     try:
-        result = await trigger_direct_playback_refresh_from_resources(resources, item_identifier)
+        result = await trigger(resources, item_identifier)
     except Exception:
-        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["failures"] += 1
+        governance["failures"] += 1
         return
 
     if result.outcome == "controller_unavailable":
-        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
+        governance["controller_unavailable"] += 1
         return
 
     control_plane_result = result.control_plane_result
     if control_plane_result is None:
-        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["no_action"] += 1
+        governance["no_action"] += 1
         return
 
     if control_plane_result.outcome == "already_pending":
-        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["already_pending"] += 1
-        scheduling_result = control_plane_result.scheduling_result
-        if scheduling_result is not None and scheduling_result.retry_after_seconds is not None:
-            _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["backoff_pending"] += 1
+        governance["already_pending"] += 1
+        follow_up_result = _control_plane_follow_up_result(control_plane_result)
+        if follow_up_result is not None and follow_up_result.retry_after_seconds is not None:
+            governance["backoff_pending"] += 1
         return
 
     if control_plane_result.outcome == "no_action":
-        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["no_action"] += 1
+        governance["no_action"] += 1
+
+
+async def _run_direct_playback_refresh_trigger(*, request: Request, item_identifier: str) -> None:
+    """Trigger app-scoped direct-play refresh work without blocking the route response path."""
+
+    await _run_app_scoped_refresh_trigger(
+        request=request,
+        item_identifier=item_identifier,
+        governance=_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE,
+        trigger=trigger_direct_playback_refresh_from_resources,
+    )
 
 
 def _is_selected_hls_failed_lease_error(exc: HTTPException) -> bool:
@@ -668,36 +1114,12 @@ def _is_selected_hls_failed_lease_error(exc: HTTPException) -> bool:
 async def _run_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier: str) -> None:
     """Trigger app-scoped selected-HLS failed-lease refresh work without blocking the route response path."""
 
-    try:
-        resources = get_resources(request)
-    except RuntimeError:
-        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
-        return
-
-    try:
-        result = await trigger_hls_failed_lease_refresh_from_resources(resources, item_identifier)
-    except Exception:
-        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["failures"] += 1
-        return
-
-    if result.outcome == "controller_unavailable":
-        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
-        return
-
-    control_plane_result = result.control_plane_result
-    if control_plane_result is None:
-        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["no_action"] += 1
-        return
-
-    if control_plane_result.outcome == "already_pending":
-        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["already_pending"] += 1
-        refresh_result = control_plane_result.refresh_result
-        if refresh_result is not None and refresh_result.retry_after_seconds is not None:
-            _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["backoff_pending"] += 1
-        return
-
-    if control_plane_result.outcome == "no_action":
-        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["no_action"] += 1
+    await _run_app_scoped_refresh_trigger(
+        request=request,
+        item_identifier=item_identifier,
+        governance=_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE,
+        trigger=trigger_hls_failed_lease_refresh_from_resources,
+    )
 
 
 async def _run_hls_restricted_fallback_refresh_trigger(
@@ -705,39 +1127,12 @@ async def _run_hls_restricted_fallback_refresh_trigger(
 ) -> None:
     """Trigger app-scoped selected-HLS restricted-fallback refresh work without blocking the route response path."""
 
-    try:
-        resources = get_resources(request)
-    except RuntimeError:
-        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
-        return
-
-    try:
-        result = await trigger_hls_restricted_fallback_refresh_from_resources(
-            resources,
-            item_identifier,
-        )
-    except Exception:
-        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["failures"] += 1
-        return
-
-    if result.outcome == "controller_unavailable":
-        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
-        return
-
-    control_plane_result = result.control_plane_result
-    if control_plane_result is None:
-        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["no_action"] += 1
-        return
-
-    if control_plane_result.outcome == "already_pending":
-        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["already_pending"] += 1
-        refresh_result = control_plane_result.refresh_result
-        if refresh_result is not None and refresh_result.retry_after_seconds is not None:
-            _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["backoff_pending"] += 1
-        return
-
-    if control_plane_result.outcome == "no_action":
-        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["no_action"] += 1
+    await _run_app_scoped_refresh_trigger(
+        request=request,
+        item_identifier=item_identifier,
+        governance=_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE,
+        trigger=trigger_hls_restricted_fallback_refresh_from_resources,
+    )
 
 
 def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier: str) -> None:
@@ -754,11 +1149,11 @@ def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    if controller.has_pending(item_identifier):
-        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["already_pending"] += 1
-        last_result = controller.get_last_result(item_identifier)
-        if last_result is not None and last_result.retry_after_seconds is not None:
-            _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["backoff_pending"] += 1
+    if _record_route_refresh_trigger_pending(
+        governance=_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE,
+        item_identifier=item_identifier,
+        controller=controller,
+    ):
         return
 
     try:
@@ -790,11 +1185,11 @@ def _start_hls_restricted_fallback_refresh_trigger(
         _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    if controller.has_pending(item_identifier):
-        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["already_pending"] += 1
-        last_result = controller.get_last_result(item_identifier)
-        if last_result is not None and last_result.retry_after_seconds is not None:
-            _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["backoff_pending"] += 1
+    if _record_route_refresh_trigger_pending(
+        governance=_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE,
+        item_identifier=item_identifier,
+        controller=controller,
+    ):
         return
 
     try:
@@ -827,11 +1222,11 @@ def _start_direct_playback_refresh_trigger(*, request: Request, item_identifier:
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    if controller.has_pending(item_identifier):
-        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["already_pending"] += 1
-        last_result = controller.get_last_result(item_identifier)
-        if last_result is not None and last_result.retry_after_seconds is not None:
-            _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["backoff_pending"] += 1
+    if _record_route_refresh_trigger_pending(
+        governance=_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE,
+        item_identifier=item_identifier,
+        controller=controller,
+    ):
         return
 
     try:
@@ -944,6 +1339,7 @@ async def _resolve_hls_source(
     item_identifier: str,
     *,
     request: Request | None = None,
+    force_refresh: bool = False,
 ) -> tuple[str, str, str]:
     """Resolve one HLS-capable playback source for the requested item.
 
@@ -954,7 +1350,8 @@ async def _resolve_hls_source(
     """
 
     attachment = await _resolve_playback_service(request=request, db=db).resolve_hls_attachment(
-        item_identifier
+        item_identifier,
+        force_refresh=force_refresh,
     )
     if attachment.kind == "remote-hls":
         return ("remote_playlist", attachment.locator, attachment.source_key)
@@ -966,6 +1363,58 @@ async def _resolve_hls_source(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Unsupported HLS source kind",
     )
+
+
+async def _refresh_remote_hls_source(
+    *,
+    db: DatabaseRuntime,
+    item_id: str,
+    request: Request,
+    source_key: str,
+) -> InlineRemoteHlsRefreshOutcome:
+    """Force-refresh one media-entry-backed remote-HLS source after an upstream failure."""
+
+    if not source_key.startswith("media-entry"):
+        _record_inline_remote_hls_refresh(event="no_action")
+        return InlineRemoteHlsRefreshOutcome(outcome="no_action")
+
+    _record_inline_remote_hls_refresh(event="attempts")
+    try:
+        refreshed_kind, refreshed_value, refreshed_key = await _resolve_hls_source(
+            db,
+            item_id,
+            request=request,
+            force_refresh=True,
+        )
+    except HTTPException:
+        return InlineRemoteHlsRefreshOutcome(outcome="failed")
+    if refreshed_kind not in {"remote_playlist", "local_file", "transcode_source"}:
+        _record_inline_remote_hls_refresh(event="no_action")
+        return InlineRemoteHlsRefreshOutcome(outcome="no_action")
+    return InlineRemoteHlsRefreshOutcome(
+        outcome="retry_with_refreshed_source",
+        source=(refreshed_kind, refreshed_value, refreshed_key),
+    )
+
+
+async def _handoff_failed_inline_remote_hls_refresh(
+    *,
+    db: DatabaseRuntime,
+    item_id: str,
+    request: Request,
+    source_key: str,
+) -> None:
+    """Mark one selected media-entry-backed HLS source stale and trigger background recovery."""
+
+    if not source_key.startswith("media-entry"):
+        return
+
+    playback_service = _resolve_playback_service(request=request, db=db)
+    if await playback_service.mark_selected_hls_media_entry_stale(item_id):
+        _start_hls_restricted_fallback_refresh_trigger(
+            request=request,
+            item_identifier=item_id,
+        )
 
 
 async def _resolve_validated_hls_transcode_source(
@@ -1007,6 +1456,109 @@ async def _resolve_validated_hls_transcode_source(
             ),
             headers={"Retry-After": "10"},
         ) from exc
+
+
+async def _serve_hls_playlist_from_resolved_source(
+    *,
+    db: DatabaseRuntime,
+    item_id: str,
+    request: Request,
+    source_kind: str,
+    source_value: str,
+    source_key: str,
+    local_hls_transcode_profile: byte_streaming.LocalHlsTranscodeProfile | None,
+) -> Response:
+    """Serve one HLS playlist from a local-file or transcode source."""
+
+    if source_kind not in {"local_file", "transcode_source"}:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unsupported HLS source kind",
+        )
+
+    if source_kind == "transcode_source":
+        _start_direct_playback_refresh_trigger(request=request, item_identifier=item_id)
+        source_value = await _resolve_validated_hls_transcode_source(
+            db=db,
+            item_id=item_id,
+            request=request,
+            source_value=source_value,
+            source_key=source_key,
+        )
+
+    playlist_path = (
+        await byte_streaming.ensure_local_hls_playlist(
+            source_value,
+            item_id,
+            transcode_profile=local_hls_transcode_profile,
+        )
+        if local_hls_transcode_profile is not None
+        else await byte_streaming.ensure_local_hls_playlist(source_value, item_id)
+    )
+    playlist_text = playlist_path.read_text(encoding="utf-8")
+    byte_streaming.mark_local_hls_activity(playlist_path)
+    response = Response(
+        content=byte_streaming.rewrite_local_hls_playlist(
+            playlist_text=playlist_text,
+            item_id=item_id,
+            query_string=request.url.query,
+        ),
+        media_type="application/vnd.apple.mpegurl",
+    )
+    _apply_hls_playlist_cache_headers(response)
+    return response
+
+
+async def _serve_hls_child_from_resolved_source(
+    *,
+    db: DatabaseRuntime,
+    item_id: str,
+    file_path: str,
+    request: Request,
+    source_kind: str,
+    source_value: str,
+    source_key: str,
+    local_hls_transcode_profile: byte_streaming.LocalHlsTranscodeProfile | None,
+) -> FileResponse | StreamingResponse:
+    """Serve one HLS child file from a local-file or transcode source."""
+
+    if source_kind not in {"local_file", "transcode_source"}:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unsupported HLS source kind",
+        )
+
+    if source_kind == "transcode_source":
+        _start_direct_playback_refresh_trigger(request=request, item_identifier=item_id)
+        source_value = await _resolve_validated_hls_transcode_source(
+            db=db,
+            item_id=item_id,
+            request=request,
+            source_value=source_value,
+            source_key=source_key,
+        )
+
+    playlist_path = (
+        await byte_streaming.ensure_local_hls_playlist(
+            source_value,
+            item_id,
+            transcode_profile=local_hls_transcode_profile,
+        )
+        if local_hls_transcode_profile is not None
+        else await byte_streaming.ensure_local_hls_playlist(source_value, item_id)
+    )
+    candidate = byte_streaming.resolve_safe_child_path(playlist_path.parent, file_path)
+    referenced_files = byte_streaming.referenced_local_hls_files(playlist_path)
+
+    if candidate.resolve() not in referenced_files or not candidate.is_file():
+        _record_hls_route_failure(reason="generated_missing")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Generated HLS file is missing",
+        )
+
+    byte_streaming.mark_local_hls_activity(candidate)
+    return byte_streaming.stream_local_file(candidate, request, owner="http-hls")
 
 
 def _normalize_hls_route_error(exc: HTTPException) -> HTTPException:
@@ -1124,11 +1676,17 @@ async def get_event_types(
 @router.get("/status", operation_id="stream.status", response_model=ServingStatusResponse)
 async def get_stream_status(
     db: Annotated[DatabaseRuntime, Depends(get_db)],
+    resources: Annotated[AppResources, Depends(get_resources)],
 ) -> ServingStatusResponse:
     """Return internal serving-session/accounting state for the shared serving core."""
 
     byte_streaming.cleanup_expired_serving_runtime()
     playback_governance = await PlaybackSourceService(db).build_playback_governance_snapshot()
+    vfs_governance = (
+        resources.vfs_catalog_server.build_governance_snapshot()
+        if resources.vfs_catalog_server is not None
+        else build_empty_vfs_catalog_governance_snapshot()
+    )
     sessions = [
         ServingSessionResponse(
             session_id=session.session_id,
@@ -1179,6 +1737,8 @@ async def get_stream_status(
                 **_hls_failed_lease_trigger_governance_snapshot(),
                 **_hls_restricted_fallback_trigger_governance_snapshot(),
                 **playback_governance,
+                **vfs_governance,
+                **_vfs_runtime_governance_snapshot(),
             }
         ),
     )
@@ -1319,55 +1879,94 @@ async def get_hls_playlist(
     if source_kind == "remote_playlist" and source_key == "media-entry:restricted-fallback":
         _start_hls_restricted_fallback_refresh_trigger(request=request, item_identifier=item_id)
     if source_kind in {"local_file", "transcode_source"}:
-        if source_kind == "transcode_source":
-            _start_direct_playback_refresh_trigger(request=request, item_identifier=item_id)
-            try:
-                source_value = await _resolve_validated_hls_transcode_source(
-                    db=db,
-                    item_id=item_id,
-                    request=request,
-                    source_value=source_value,
-                    source_key=source_key,
-                )
-            except HTTPException as exc:
-                raise _normalize_hls_route_error(exc) from exc
         try:
-            playlist_path = await byte_streaming.ensure_local_hls_playlist(
-                source_value,
-                item_id,
-                transcode_profile=local_hls_transcode_profile,
-            ) if local_hls_transcode_profile is not None else await byte_streaming.ensure_local_hls_playlist(
-                source_value,
-                item_id,
+            response = await _serve_hls_playlist_from_resolved_source(
+                db=db,
+                item_id=item_id,
+                request=request,
+                source_kind=source_kind,
+                source_value=source_value,
+                source_key=source_key,
+                local_hls_transcode_profile=local_hls_transcode_profile,
             )
-            playlist_text = playlist_path.read_text(encoding="utf-8")
-            byte_streaming.mark_local_hls_activity(playlist_path)
         except HTTPException as exc:
             raise _normalize_hls_route_error(exc) from exc
-        response = Response(
-            content=byte_streaming.rewrite_local_hls_playlist(
-                playlist_text=playlist_text,
-                item_id=item_id,
-                query_string=request.url.query,
-            ),
-            media_type="application/vnd.apple.mpegurl",
-        )
-        _apply_hls_playlist_cache_headers(response)
         _record_stream_route_result(route="hls_playlist", status_code=response.status_code)
         return response
 
     try:
+        remote_playlist_stage = "download"
         playlist_text, headers = await _download_remote_hls_playlist(source_value)
-    except HTTPException as exc:
-        _record_hls_route_failure(reason="upstream_failed")
-        _record_stream_route_result(route="hls_playlist", status_code=exc.status_code)
-        raise
-    try:
+        remote_playlist_stage = "validate"
         _validate_upstream_hls_playlist(playlist_text)
     except HTTPException as exc:
-        _record_hls_route_failure(reason="upstream_manifest_invalid")
-        _record_stream_route_result(route="hls_playlist", status_code=exc.status_code)
-        raise
+        refresh_outcome = await _refresh_remote_hls_source(
+            db=db,
+            item_id=item_id,
+            request=request,
+            source_key=source_key,
+        )
+        if refresh_outcome.outcome != "retry_with_refreshed_source" or refresh_outcome.source is None:
+            if refresh_outcome.outcome == "failed":
+                await _handoff_failed_inline_remote_hls_refresh(
+                    db=db,
+                    item_id=item_id,
+                    request=request,
+                    source_key=source_key,
+                )
+                _record_inline_remote_hls_refresh(event="failures")
+            _record_hls_route_failure(
+                reason=(
+                    "upstream_failed"
+                    if remote_playlist_stage == "download"
+                    else "upstream_manifest_invalid"
+                )
+            )
+            _record_stream_route_result(route="hls_playlist", status_code=exc.status_code)
+            raise
+        refreshed_kind, refreshed_value, refreshed_source_key = refresh_outcome.source
+        if refreshed_kind != "remote_playlist":
+            try:
+                response = await _serve_hls_playlist_from_resolved_source(
+                    db=db,
+                    item_id=item_id,
+                    request=request,
+                    source_kind=refreshed_kind,
+                    source_value=refreshed_value,
+                    source_key=refreshed_source_key,
+                    local_hls_transcode_profile=local_hls_transcode_profile,
+                )
+            except HTTPException as refreshed_exc:
+                _record_inline_remote_hls_refresh(event="failures")
+                raise _normalize_hls_route_error(refreshed_exc) from refreshed_exc
+            _record_inline_remote_hls_refresh(event="recovered")
+            _record_stream_route_result(route="hls_playlist", status_code=response.status_code)
+            return response
+        source_value = refreshed_value
+        source_key = refreshed_source_key
+        try:
+            remote_playlist_stage = "download"
+            playlist_text, headers = await _download_remote_hls_playlist(source_value)
+            remote_playlist_stage = "validate"
+            _validate_upstream_hls_playlist(playlist_text)
+        except HTTPException as refreshed_exc:
+            await _handoff_failed_inline_remote_hls_refresh(
+                db=db,
+                item_id=item_id,
+                request=request,
+                source_key=source_key,
+            )
+            _record_inline_remote_hls_refresh(event="failures")
+            _record_hls_route_failure(
+                reason=(
+                    "upstream_failed"
+                    if remote_playlist_stage == "download"
+                    else "upstream_manifest_invalid"
+                )
+            )
+            _record_stream_route_result(route="hls_playlist", status_code=refreshed_exc.status_code)
+            raise
+        _record_inline_remote_hls_refresh(event="recovered")
     response = Response(
         content=_rewrite_hls_playlist(playlist_text=playlist_text, item_id=item_id),
         media_type=headers.get("content-type", "application/vnd.apple.mpegurl"),
@@ -1413,42 +2012,19 @@ async def get_hls_file(
         if source_kind == "remote_playlist" and source_key == "media-entry:restricted-fallback":
             _start_hls_restricted_fallback_refresh_trigger(request=request, item_identifier=item_id)
         if source_kind in {"local_file", "transcode_source"}:
-            if source_kind == "transcode_source":
-                _start_direct_playback_refresh_trigger(request=request, item_identifier=item_id)
-                try:
-                    source_value = await _resolve_validated_hls_transcode_source(
-                        db=db,
-                        item_id=item_id,
-                        request=request,
-                        source_value=source_value,
-                        source_key=source_key,
-                    )
-                except HTTPException as exc:
-                    raise _normalize_hls_route_error(exc) from exc
             try:
-                playlist_path = (
-                    await byte_streaming.ensure_local_hls_playlist(
-                        source_value,
-                        item_id,
-                        transcode_profile=local_hls_transcode_profile,
-                    )
-                    if local_hls_transcode_profile is not None
-                    else await byte_streaming.ensure_local_hls_playlist(source_value, item_id)
+                response = await _serve_hls_child_from_resolved_source(
+                    db=db,
+                    item_id=item_id,
+                    file_path=file_path,
+                    request=request,
+                    source_kind=source_kind,
+                    source_value=source_value,
+                    source_key=source_key,
+                    local_hls_transcode_profile=local_hls_transcode_profile,
                 )
             except HTTPException as exc:
                 raise _normalize_hls_route_error(exc) from exc
-            candidate = byte_streaming.resolve_safe_child_path(playlist_path.parent, file_path)
-            referenced_files = byte_streaming.referenced_local_hls_files(playlist_path)
-
-            if candidate.resolve() not in referenced_files or not candidate.is_file():
-                _record_hls_route_failure(reason="generated_missing")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Generated HLS file is missing",
-                )
-
-            byte_streaming.mark_local_hls_activity(candidate)
-            response = byte_streaming.stream_local_file(candidate, request, owner="http-hls")
         else:
             playlist_url = source_value
             if file_path.startswith("proxy/"):
@@ -1463,8 +2039,66 @@ async def get_hls_file(
                     request=request,
                 )
             except HTTPException:
-                _record_hls_route_failure(reason="upstream_failed")
-                raise
+                refresh_outcome = await _refresh_remote_hls_source(
+                    db=db,
+                    item_id=item_id,
+                    request=request,
+                    source_key=source_key,
+                )
+                if (
+                    refresh_outcome.outcome != "retry_with_refreshed_source"
+                    or refresh_outcome.source is None
+                ):
+                    if refresh_outcome.outcome == "failed":
+                        await _handoff_failed_inline_remote_hls_refresh(
+                            db=db,
+                            item_id=item_id,
+                            request=request,
+                            source_key=source_key,
+                        )
+                        _record_inline_remote_hls_refresh(event="failures")
+                    _record_hls_route_failure(reason="upstream_failed")
+                    raise
+                refreshed_kind, refreshed_value, refreshed_source_key = refresh_outcome.source
+                if refreshed_kind != "remote_playlist":
+                    try:
+                        response = await _serve_hls_child_from_resolved_source(
+                            db=db,
+                            item_id=item_id,
+                            file_path=file_path,
+                            request=request,
+                            source_kind=refreshed_kind,
+                            source_value=refreshed_value,
+                            source_key=refreshed_source_key,
+                            local_hls_transcode_profile=local_hls_transcode_profile,
+                        )
+                    except HTTPException as refreshed_exc:
+                        _record_inline_remote_hls_refresh(event="failures")
+                        raise _normalize_hls_route_error(refreshed_exc) from refreshed_exc
+                    _record_inline_remote_hls_refresh(event="recovered")
+                else:
+                    source_key = refreshed_source_key
+                    if file_path.startswith("proxy/"):
+                        upstream_url = unquote(file_path.removeprefix("proxy/"))
+                    else:
+                        upstream_url = urljoin(refreshed_value, file_path)
+                    try:
+                        response = await _open_remote_hls_child_stream(
+                            playlist_url=refreshed_value,
+                            upstream_url=upstream_url,
+                            request=request,
+                        )
+                    except HTTPException:
+                        await _handoff_failed_inline_remote_hls_refresh(
+                            db=db,
+                            item_id=item_id,
+                            request=request,
+                            source_key=source_key,
+                        )
+                        _record_inline_remote_hls_refresh(event="failures")
+                        _record_hls_route_failure(reason="upstream_failed")
+                        raise
+                    _record_inline_remote_hls_refresh(event="recovered")
     except HTTPException as exc:
         _record_stream_route_result(route="hls_file", status_code=exc.status_code)
         raise

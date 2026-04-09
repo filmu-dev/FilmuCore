@@ -323,7 +323,113 @@ def _build_active_stream(
     )
 
 
-def _build_client(*, items: list[MediaItemORM] | None = None) -> tuple[TestClient, AppResources]:
+def _clone_item_graph(item: MediaItemORM) -> MediaItemORM:
+    cloned_item = _build_item(item_id=item.id, attributes=dict(item.attributes or {}))
+    cloned_item.external_ref = item.external_ref
+    cloned_item.title = item.title
+    cloned_item.state = item.state
+    cloned_item.created_at = item.created_at
+    cloned_item.updated_at = item.updated_at
+
+    cloned_attachments = [
+        _build_playback_attachment(
+            attachment_id=attachment.id,
+            item_id=attachment.item_id,
+            kind=attachment.kind,
+            locator=attachment.locator,
+            is_preferred=attachment.is_preferred,
+            provider=attachment.provider,
+            provider_download_id=attachment.provider_download_id,
+            provider_file_id=attachment.provider_file_id,
+            provider_file_path=attachment.provider_file_path,
+            original_filename=attachment.original_filename,
+            file_size=attachment.file_size,
+            local_path=attachment.local_path,
+            restricted_url=attachment.restricted_url,
+            unrestricted_url=attachment.unrestricted_url,
+            preference_rank=attachment.preference_rank,
+            refresh_state=attachment.refresh_state,
+            expires_at=attachment.expires_at,
+            last_refreshed_at=attachment.last_refreshed_at,
+            last_refresh_error=attachment.last_refresh_error,
+        )
+        for attachment in item.playback_attachments
+    ]
+    attachment_by_id = {attachment.id: attachment for attachment in cloned_attachments}
+
+    cloned_entries = [
+        _build_media_entry(
+            media_entry_id=entry.id,
+            item_id=entry.item_id,
+            kind=entry.kind,
+            entry_type=entry.entry_type,
+            source_attachment_id=entry.source_attachment_id,
+            original_filename=entry.original_filename,
+            local_path=entry.local_path,
+            download_url=entry.download_url,
+            unrestricted_url=entry.unrestricted_url,
+            provider=entry.provider,
+            provider_download_id=entry.provider_download_id,
+            provider_file_id=entry.provider_file_id,
+            provider_file_path=entry.provider_file_path,
+            size_bytes=entry.size_bytes,
+            refresh_state=entry.refresh_state,
+            expires_at=entry.expires_at,
+            last_refreshed_at=entry.last_refreshed_at,
+            last_refresh_error=entry.last_refresh_error,
+        )
+        for entry in item.media_entries
+    ]
+    for entry in cloned_entries:
+        if entry.source_attachment_id is not None:
+            entry.source_attachment = attachment_by_id.get(entry.source_attachment_id)
+
+    cloned_item.playback_attachments = cloned_attachments
+    cloned_item.media_entries = cloned_entries
+    cloned_item.active_streams = [
+        _build_active_stream(
+            active_stream_id=active_stream.id,
+            item_id=active_stream.item_id,
+            media_entry_id=active_stream.media_entry_id,
+            role=active_stream.role,
+        )
+        for active_stream in item.active_streams
+    ]
+    return cloned_item
+
+
+class _PersistentFakeSession:
+    def __init__(self, runtime: PersistentDummyDatabaseRuntime) -> None:
+        self._runtime = runtime
+        self._items = [_clone_item_graph(item) for item in runtime.items]
+
+    async def execute(self, stmt: object) -> FakeResult:
+        _ = stmt
+        return FakeResult(self._items)
+
+    async def commit(self) -> None:
+        self._runtime.items = [_clone_item_graph(item) for item in self._items]
+
+
+class PersistentDummyDatabaseRuntime:
+    """Session-isolated DB stub that only persists changes on commit."""
+
+    def __init__(self, items: list[MediaItemORM] | None = None) -> None:
+        self.items = [_clone_item_graph(item) for item in (items or [])]
+
+    @asynccontextmanager
+    async def session(self) -> AsyncGenerator[_PersistentFakeSession, None]:
+        yield _PersistentFakeSession(self)
+
+    async def dispose(self) -> None:  # pragma: no cover
+        return None
+
+
+def _build_client(
+    *,
+    items: list[MediaItemORM] | None = None,
+    db: object | None = None,
+) -> tuple[TestClient, AppResources]:
     """Create a lightweight FastAPI app exposing compatibility API routes for tests."""
 
     settings = _build_settings()
@@ -337,7 +443,7 @@ def _build_client(*, items: list[MediaItemORM] | None = None) -> tuple[TestClien
         chunk_cache=ChunkCache(max_bytes=256 * 1024 * 1024),
         rate_limiter=DistributedRateLimiter(redis=redis),  # type: ignore[arg-type]
         event_bus=EventBus(),
-        db=DummyDatabaseRuntime(items=items),  # type: ignore[arg-type]
+        db=(db if db is not None else DummyDatabaseRuntime(items=items)),  # type: ignore[arg-type]
         media_service=FakeMediaService(),  # type: ignore[arg-type]
         graphql_plugin_registry=None,  # type: ignore[arg-type]
     )
@@ -491,6 +597,12 @@ def test_stream_status_route_exposes_serving_governance_snapshot() -> None:
     assert payload["governance"]["selected_hls_streams_needing_refresh"] == 0
     assert payload["governance"]["selected_direct_streams_failed"] == 0
     assert payload["governance"]["selected_hls_streams_failed"] == 0
+    assert payload["governance"]["direct_playback_refresh_rate_limited"] == 0
+    assert payload["governance"]["direct_playback_refresh_provider_circuit_open"] == 0
+    assert payload["governance"]["hls_failed_lease_refresh_rate_limited"] == 0
+    assert payload["governance"]["hls_failed_lease_refresh_provider_circuit_open"] == 0
+    assert payload["governance"]["hls_restricted_fallback_refresh_rate_limited"] == 0
+    assert payload["governance"]["hls_restricted_fallback_refresh_provider_circuit_open"] == 0
     assert payload["governance"]["direct_playback_refresh_trigger_starts"] == 0
     assert payload["governance"]["direct_playback_refresh_trigger_no_action"] == 0
     assert payload["governance"]["direct_playback_refresh_trigger_controller_unavailable"] == 0
@@ -514,6 +626,10 @@ def test_stream_status_route_exposes_serving_governance_snapshot() -> None:
     assert payload["governance"]["hls_restricted_fallback_refresh_trigger_backoff_pending"] == 0
     assert payload["governance"]["hls_restricted_fallback_refresh_trigger_failures"] == 0
     assert payload["governance"]["hls_restricted_fallback_refresh_trigger_tasks_active"] == 0
+    assert payload["governance"]["inline_remote_hls_refresh_attempts"] == 0
+    assert payload["governance"]["inline_remote_hls_refresh_recovered"] == 0
+    assert payload["governance"]["inline_remote_hls_refresh_no_action"] == 0
+    assert payload["governance"]["inline_remote_hls_refresh_failures"] == 0
 
 
 def test_stream_status_route_exposes_playback_governance_snapshot() -> None:
@@ -1773,7 +1889,7 @@ def test_in_process_hls_failed_lease_refresh_controller_reschedules_rate_limited
     item.active_streams = [
         _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
     ]
-    _, resources = _build_client(items=[item])
+    client, resources = _build_client(items=[item])
 
     slept_for: list[float] = []
 
@@ -1823,6 +1939,7 @@ def test_in_process_hls_failed_lease_refresh_controller_reschedules_rate_limited
     async def fake_sleep(delay: float) -> None:
         slept_for.append(delay)
 
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
     controller = InProcessHlsFailedLeaseRefreshController(
         PlaybackSourceService(resources.db),
         executors={"realdebrid": fake_executor},
@@ -1837,11 +1954,90 @@ def test_in_process_hls_failed_lease_refresh_controller_reschedules_rate_limited
 
     asyncio.run(exercise())
 
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
     last_result = controller.get_last_result(item.id)
     assert last_result is not None
     assert last_result.outcome == "completed"
     assert slept_for == pytest.approx([7.5], rel=0.0, abs=0.05)
     assert selected_entry.refresh_state == "ready"
+    assert (
+        governance["hls_failed_lease_refresh_rate_limited"]
+        == before["hls_failed_lease_refresh_rate_limited"] + 1
+    )
+
+
+def test_in_process_hls_failed_lease_refresh_controller_reschedules_provider_circuit_open_work() -> (
+    None
+):
+    item = _build_item(item_id="item-in-process-hls-failed-lease-refresh-controller-circuit-open")
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-in-process-hls-failed-lease-refresh-controller-circuit-open",
+        item_id=item.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-in-process-hls-failed-lease-refresh-controller-circuit-open.m3u8",
+        unrestricted_url="https://cdn.example.com/in-process-hls-failed-lease-refresh-controller-circuit-open.m3u8",
+        refresh_state="failed",
+        last_refresh_error="provider unavailable",
+        provider="realdebrid",
+        provider_download_id="download-in-process-hls-failed-lease-refresh-controller-circuit-open",
+    )
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+    client, resources = _build_client(items=[item])
+
+    current_time = {"value": 10.0}
+    slept_for: list[float] = []
+    provider_circuit_breaker = ProviderCircuitBreaker(
+        failure_threshold=1,
+        reset_timeout_seconds=5.0,
+        clock=lambda: current_time["value"],
+    )
+    assert provider_circuit_breaker.record_failure("realdebrid") is True
+
+    async def fake_executor(
+        request: PlaybackAttachmentRefreshRequest,
+    ) -> PlaybackAttachmentRefreshResult:
+        assert request.item_id == item.id
+        return PlaybackAttachmentRefreshResult(
+            ok=True,
+            locator="https://cdn.example.com/in-process-hls-failed-lease-refresh-controller-circuit-open-fresh.m3u8",
+            restricted_url="https://api.example.com/restricted-in-process-hls-failed-lease-refresh-controller-circuit-open-fresh.m3u8",
+            unrestricted_url="https://cdn.example.com/in-process-hls-failed-lease-refresh-controller-circuit-open-fresh.m3u8",
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        slept_for.append(delay)
+        current_time["value"] += delay
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    controller = InProcessHlsFailedLeaseRefreshController(
+        PlaybackSourceService(
+            resources.db,
+            provider_circuit_breaker=provider_circuit_breaker,
+        ),
+        executors={"realdebrid": fake_executor},
+        sleep=fake_sleep,
+    )
+
+    async def exercise() -> None:
+        result = await controller.trigger(item.id)
+        assert result.outcome == "scheduled"
+        await controller.wait_for_item(item.id)
+
+    asyncio.run(exercise())
+
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    last_result = controller.get_last_result(item.id)
+    assert last_result is not None
+    assert last_result.outcome == "completed"
+    assert slept_for == pytest.approx([5.0], rel=0.0, abs=0.05)
+    assert selected_entry.refresh_state == "ready"
+    assert (
+        governance["hls_failed_lease_refresh_provider_circuit_open"]
+        == before["hls_failed_lease_refresh_provider_circuit_open"] + 1
+    )
 
 
 def test_in_process_hls_restricted_fallback_refresh_controller_triggers_background_refresh() -> (
@@ -1923,7 +2119,7 @@ def test_in_process_hls_restricted_fallback_refresh_controller_reschedules_rate_
     item.active_streams = [
         _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
     ]
-    _, resources = _build_client(items=[item])
+    client, resources = _build_client(items=[item])
 
     slept_for: list[float] = []
 
@@ -1973,6 +2169,7 @@ def test_in_process_hls_restricted_fallback_refresh_controller_reschedules_rate_
     async def fake_sleep(delay: float) -> None:
         slept_for.append(delay)
 
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
     controller = InProcessHlsRestrictedFallbackRefreshController(
         PlaybackSourceService(resources.db),
         executors={"realdebrid": fake_executor},
@@ -1987,11 +2184,91 @@ def test_in_process_hls_restricted_fallback_refresh_controller_reschedules_rate_
 
     asyncio.run(exercise())
 
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
     last_result = controller.get_last_result(item.id)
     assert last_result is not None
     assert last_result.outcome == "completed"
     assert slept_for == pytest.approx([7.5], rel=0.0, abs=0.05)
     assert selected_entry.refresh_state == "ready"
+    assert (
+        governance["hls_restricted_fallback_refresh_rate_limited"]
+        == before["hls_restricted_fallback_refresh_rate_limited"] + 1
+    )
+
+
+def test_in_process_hls_restricted_fallback_refresh_controller_reschedules_provider_circuit_open_work() -> (
+    None
+):
+    item = _build_item(
+        item_id="item-in-process-hls-restricted-fallback-refresh-controller-circuit-open"
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-in-process-hls-restricted-fallback-refresh-controller-circuit-open",
+        item_id=item.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-in-process-hls-restricted-fallback-refresh-controller-circuit-open.m3u8",
+        unrestricted_url="https://cdn.example.com/in-process-hls-restricted-fallback-refresh-controller-circuit-open.m3u8",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-in-process-hls-restricted-fallback-refresh-controller-circuit-open",
+    )
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+    client, resources = _build_client(items=[item])
+
+    current_time = {"value": 10.0}
+    slept_for: list[float] = []
+    provider_circuit_breaker = ProviderCircuitBreaker(
+        failure_threshold=1,
+        reset_timeout_seconds=5.0,
+        clock=lambda: current_time["value"],
+    )
+    assert provider_circuit_breaker.record_failure("realdebrid") is True
+
+    async def fake_executor(
+        request: PlaybackAttachmentRefreshRequest,
+    ) -> PlaybackAttachmentRefreshResult:
+        assert request.item_id == item.id
+        return PlaybackAttachmentRefreshResult(
+            ok=True,
+            locator="https://cdn.example.com/in-process-hls-restricted-fallback-refresh-controller-circuit-open-fresh.m3u8",
+            restricted_url="https://api.example.com/restricted-in-process-hls-restricted-fallback-refresh-controller-circuit-open-fresh.m3u8",
+            unrestricted_url="https://cdn.example.com/in-process-hls-restricted-fallback-refresh-controller-circuit-open-fresh.m3u8",
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        slept_for.append(delay)
+        current_time["value"] += delay
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    controller = InProcessHlsRestrictedFallbackRefreshController(
+        PlaybackSourceService(
+            resources.db,
+            provider_circuit_breaker=provider_circuit_breaker,
+        ),
+        executors={"realdebrid": fake_executor},
+        sleep=fake_sleep,
+    )
+
+    async def exercise() -> None:
+        result = await controller.trigger(item.id)
+        assert result.outcome == "scheduled"
+        await controller.wait_for_item(item.id)
+
+    asyncio.run(exercise())
+
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    last_result = controller.get_last_result(item.id)
+    assert last_result is not None
+    assert last_result.outcome == "completed"
+    assert slept_for == pytest.approx([5.0], rel=0.0, abs=0.05)
+    assert selected_entry.refresh_state == "ready"
+    assert (
+        governance["hls_restricted_fallback_refresh_provider_circuit_open"]
+        == before["hls_restricted_fallback_refresh_provider_circuit_open"] + 1
+    )
 
 
 def test_hls_playlist_route_starts_non_blocking_refresh_trigger_for_selected_failed_lease() -> None:
@@ -2284,6 +2561,541 @@ def test_hls_file_route_starts_non_blocking_refresh_trigger_for_selected_restric
     assert triggered == [item.id]
 
 
+def test_hls_playlist_route_refreshes_media_entry_backed_remote_hls_after_upstream_failure(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-hls-remote-playlist-inline-refresh-success")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-hls-remote-playlist-inline-refresh-success",
+        item_id=item.id,
+        kind="remote-hls",
+        locator="https://cdn.example.com/hls-inline-refresh-stale/index.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-refresh-stale/index.m3u8",
+        restricted_url="https://api.example.com/restricted-hls-inline-refresh-success.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-refresh-success",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-playlist-inline-refresh-success",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-hls-inline-refresh-success.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-refresh-stale/index.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-refresh-success",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    client, resources = _build_client(db=database)
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            return RateLimitDecision(allowed=True, remaining_tokens=0.0, retry_after_seconds=0.0)
+
+    class FakeProviderClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def unrestrict_link(
+            self,
+            link: str,
+            *,
+            request: PlaybackAttachmentRefreshRequest,
+        ) -> PlaybackAttachmentProviderUnrestrictedLink | None:
+            self.calls.append(link)
+            return PlaybackAttachmentProviderUnrestrictedLink(
+                download_url="https://cdn.example.com/hls-inline-refresh-fresh/index.m3u8",
+                restricted_url=link,
+                expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+            )
+
+    provider_client = FakeProviderClient()
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        provider_clients={"realdebrid": cast(PlaybackAttachmentProviderClient, provider_client)},
+        rate_limiter=FakeRateLimiter(),
+    )
+
+    playlist_calls: list[str] = []
+
+    async def fake_download_remote_hls_playlist(url: str) -> tuple[str, httpx.Headers]:
+        playlist_calls.append(url)
+        if url == "https://cdn.example.com/hls-inline-refresh-stale/index.m3u8":
+            raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+        assert url == "https://cdn.example.com/hls-inline-refresh-fresh/index.m3u8"
+        return (
+            "#EXTM3U\nsegment_00001.ts\n",
+            httpx.Headers({"content-type": "application/vnd.apple.mpegurl"}),
+        )
+
+    monkeypatch.setattr(stream_routes, "_download_remote_hls_playlist", fake_download_remote_hls_playlist)
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/index.m3u8", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 200
+    assert f"/api/stream/{item.id}/hls/segment_00001.ts" in response.text
+    assert playlist_calls == [
+        "https://cdn.example.com/hls-inline-refresh-stale/index.m3u8",
+        "https://cdn.example.com/hls-inline-refresh-fresh/index.m3u8",
+    ]
+    assert provider_client.calls == ["https://api.example.com/restricted-hls-inline-refresh-success.m3u8"]
+    assert (
+        governance["inline_remote_hls_refresh_attempts"]
+        == before["inline_remote_hls_refresh_attempts"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_recovered"]
+        == before["inline_remote_hls_refresh_recovered"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_failures"]
+        == before["inline_remote_hls_refresh_failures"]
+    )
+    assert (
+        governance["inline_remote_hls_refresh_no_action"]
+        == before["inline_remote_hls_refresh_no_action"]
+    )
+
+    persisted_item = asyncio.run(PlaybackSourceService(resources.db)._list_items())[0]
+    persisted_entry = persisted_item.media_entries[0]
+    persisted_attachment = persisted_item.playback_attachments[0]
+    assert (
+        persisted_entry.unrestricted_url
+        == "https://cdn.example.com/hls-inline-refresh-fresh/index.m3u8"
+    )
+    assert (
+        persisted_attachment.unrestricted_url
+        == "https://cdn.example.com/hls-inline-refresh-fresh/index.m3u8"
+    )
+
+
+def test_hls_file_route_refreshes_media_entry_backed_remote_hls_after_upstream_failure(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-hls-remote-file-inline-refresh-success")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-hls-remote-file-inline-refresh-success",
+        item_id=item.id,
+        kind="remote-hls",
+        locator="https://cdn.example.com/hls-inline-file-refresh-stale/index.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-file-refresh-stale/index.m3u8",
+        restricted_url="https://api.example.com/restricted-hls-inline-file-refresh-success.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-file-refresh-success",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-file-inline-refresh-success",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-hls-inline-file-refresh-success.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-file-refresh-stale/index.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-file-refresh-success",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    client, resources = _build_client(db=database)
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            return RateLimitDecision(allowed=True, remaining_tokens=0.0, retry_after_seconds=0.0)
+
+    class FakeProviderClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def unrestrict_link(
+            self,
+            link: str,
+            *,
+            request: PlaybackAttachmentRefreshRequest,
+        ) -> PlaybackAttachmentProviderUnrestrictedLink | None:
+            self.calls.append(link)
+            return PlaybackAttachmentProviderUnrestrictedLink(
+                download_url="https://cdn.example.com/hls-inline-file-refresh-fresh/index.m3u8",
+                restricted_url=link,
+                expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+            )
+
+    provider_client = FakeProviderClient()
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        provider_clients={"realdebrid": cast(PlaybackAttachmentProviderClient, provider_client)},
+        rate_limiter=FakeRateLimiter(),
+    )
+
+    open_calls: list[tuple[str, str]] = []
+
+    async def fake_open_remote_hls_child_stream(
+        *,
+        playlist_url: str,
+        upstream_url: str,
+        request: Any,
+    ) -> StreamingResponse:
+        _ = request
+        open_calls.append((playlist_url, upstream_url))
+        if playlist_url == "https://cdn.example.com/hls-inline-file-refresh-stale/index.m3u8":
+            raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+        assert playlist_url == "https://cdn.example.com/hls-inline-file-refresh-fresh/index.m3u8"
+        assert upstream_url == "https://cdn.example.com/hls-inline-file-refresh-fresh/segment_00001.ts"
+
+        async def iterator() -> AsyncGenerator[bytes, None]:
+            yield b"hls-inline-file-refresh-success"
+
+        return StreamingResponse(iterator(), media_type="video/mp2t")
+
+    monkeypatch.setattr(stream_routes, "_open_remote_hls_child_stream", fake_open_remote_hls_child_stream)
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/segment_00001.ts", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 200
+    assert response.content == b"hls-inline-file-refresh-success"
+    assert open_calls == [
+        (
+            "https://cdn.example.com/hls-inline-file-refresh-stale/index.m3u8",
+            "https://cdn.example.com/hls-inline-file-refresh-stale/segment_00001.ts",
+        ),
+        (
+            "https://cdn.example.com/hls-inline-file-refresh-fresh/index.m3u8",
+            "https://cdn.example.com/hls-inline-file-refresh-fresh/segment_00001.ts",
+        ),
+    ]
+    assert provider_client.calls == [
+        "https://api.example.com/restricted-hls-inline-file-refresh-success.m3u8"
+    ]
+    assert (
+        governance["inline_remote_hls_refresh_attempts"]
+        == before["inline_remote_hls_refresh_attempts"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_recovered"]
+        == before["inline_remote_hls_refresh_recovered"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_failures"]
+        == before["inline_remote_hls_refresh_failures"]
+    )
+    assert (
+        governance["inline_remote_hls_refresh_no_action"]
+        == before["inline_remote_hls_refresh_no_action"]
+    )
+
+    persisted_item = asyncio.run(PlaybackSourceService(resources.db)._list_items())[0]
+    persisted_entry = persisted_item.media_entries[0]
+    persisted_attachment = persisted_item.playback_attachments[0]
+    assert (
+        persisted_entry.unrestricted_url
+        == "https://cdn.example.com/hls-inline-file-refresh-fresh/index.m3u8"
+    )
+    assert (
+        persisted_attachment.unrestricted_url
+        == "https://cdn.example.com/hls-inline-file-refresh-fresh/index.m3u8"
+    )
+
+
+def test_hls_playlist_route_recovers_via_transcode_source_when_remote_hls_refresh_changes_kind(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    playlist_dir = tmp_path / "generated-hls-remote-hls-refresh-to-direct"
+    playlist_dir.mkdir()
+    playlist_path = playlist_dir / "index.m3u8"
+    playlist_path.write_text("#EXTM3U\n#EXTINF:6,\nsegment_00001.ts\n", encoding="utf-8")
+
+    item = _build_item(item_id="item-hls-remote-playlist-refresh-to-direct")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-hls-remote-playlist-refresh-to-direct",
+        item_id=item.id,
+        kind="remote-hls",
+        locator="https://cdn.example.com/hls-refresh-to-direct-stale/index.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-refresh-to-direct-stale/index.m3u8",
+        restricted_url="https://api.example.com/restricted-hls-refresh-to-direct.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-refresh-to-direct",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-playlist-refresh-to-direct",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-hls-refresh-to-direct.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-refresh-to-direct-stale/index.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-refresh-to-direct",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    client, resources = _build_client(db=database)
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            return RateLimitDecision(allowed=True, remaining_tokens=0.0, retry_after_seconds=0.0)
+
+    class FakeProviderClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def unrestrict_link(
+            self,
+            link: str,
+            *,
+            request: PlaybackAttachmentRefreshRequest,
+        ) -> PlaybackAttachmentProviderUnrestrictedLink | None:
+            self.calls.append(link)
+            return PlaybackAttachmentProviderUnrestrictedLink(
+                download_url="https://cdn.example.com/hls-refresh-to-direct-fresh.mkv",
+                restricted_url=link,
+                expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+            )
+
+    provider_client = FakeProviderClient()
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        provider_clients={"realdebrid": cast(PlaybackAttachmentProviderClient, provider_client)},
+        rate_limiter=FakeRateLimiter(),
+    )
+
+    playlist_calls: list[str] = []
+    head_calls: list[str] = []
+
+    async def fake_download_remote_hls_playlist(url: str) -> tuple[str, httpx.Headers]:
+        playlist_calls.append(url)
+        assert url == "https://cdn.example.com/hls-refresh-to-direct-stale/index.m3u8"
+        raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+
+    async def fake_head(url: str) -> None:
+        head_calls.append(url)
+        assert url == "https://cdn.example.com/hls-refresh-to-direct-fresh.mkv"
+
+    async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
+        assert source_path == "https://cdn.example.com/hls-refresh-to-direct-fresh.mkv"
+        assert item_id == item.id
+        return playlist_path
+
+    monkeypatch.setattr(stream_routes, "_download_remote_hls_playlist", fake_download_remote_hls_playlist)
+    monkeypatch.setattr(stream_routes, "_head_remote_direct_url", fake_head)
+    monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
+    monkeypatch.setattr(
+        stream_routes,
+        "_start_direct_playback_refresh_trigger",
+        lambda *args, **kwargs: None,
+    )
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/index.m3u8", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 200
+    assert f"/api/stream/{item.id}/hls/segment_00001.ts" in response.text
+    assert playlist_calls == ["https://cdn.example.com/hls-refresh-to-direct-stale/index.m3u8"]
+    assert head_calls == ["https://cdn.example.com/hls-refresh-to-direct-fresh.mkv"]
+    assert provider_client.calls == ["https://api.example.com/restricted-hls-refresh-to-direct.m3u8"]
+    assert (
+        governance["inline_remote_hls_refresh_attempts"]
+        == before["inline_remote_hls_refresh_attempts"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_recovered"]
+        == before["inline_remote_hls_refresh_recovered"] + 1
+    )
+
+
+def test_hls_file_route_recovers_via_transcode_source_when_remote_hls_refresh_changes_kind(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    playlist_dir = tmp_path / "generated-hls-remote-hls-file-refresh-to-direct"
+    playlist_dir.mkdir()
+    playlist_path = playlist_dir / "index.m3u8"
+    playlist_path.write_text("#EXTM3U\n#EXTINF:6,\nsegment_00001.ts\n", encoding="utf-8")
+    segment_path = playlist_dir / "segment_00001.ts"
+    segment_path.write_bytes(b"hls-file-refresh-to-direct")
+
+    item = _build_item(item_id="item-hls-remote-file-refresh-to-direct")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-hls-remote-file-refresh-to-direct",
+        item_id=item.id,
+        kind="remote-hls",
+        locator="https://cdn.example.com/hls-file-refresh-to-direct-stale/index.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-file-refresh-to-direct-stale/index.m3u8",
+        restricted_url="https://api.example.com/restricted-hls-file-refresh-to-direct.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-file-refresh-to-direct",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-file-refresh-to-direct",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-hls-file-refresh-to-direct.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-file-refresh-to-direct-stale/index.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-file-refresh-to-direct",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    client, resources = _build_client(db=database)
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            return RateLimitDecision(allowed=True, remaining_tokens=0.0, retry_after_seconds=0.0)
+
+    class FakeProviderClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def unrestrict_link(
+            self,
+            link: str,
+            *,
+            request: PlaybackAttachmentRefreshRequest,
+        ) -> PlaybackAttachmentProviderUnrestrictedLink | None:
+            self.calls.append(link)
+            return PlaybackAttachmentProviderUnrestrictedLink(
+                download_url="https://cdn.example.com/hls-file-refresh-to-direct-fresh.mkv",
+                restricted_url=link,
+                expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+            )
+
+    provider_client = FakeProviderClient()
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        provider_clients={"realdebrid": cast(PlaybackAttachmentProviderClient, provider_client)},
+        rate_limiter=FakeRateLimiter(),
+    )
+
+    open_calls: list[tuple[str, str]] = []
+    head_calls: list[str] = []
+
+    async def fake_open_remote_hls_child_stream(
+        *,
+        playlist_url: str,
+        upstream_url: str,
+        request: Any,
+    ) -> StreamingResponse:
+        _ = request
+        open_calls.append((playlist_url, upstream_url))
+        assert playlist_url == "https://cdn.example.com/hls-file-refresh-to-direct-stale/index.m3u8"
+        raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+
+    async def fake_head(url: str) -> None:
+        head_calls.append(url)
+        assert url == "https://cdn.example.com/hls-file-refresh-to-direct-fresh.mkv"
+
+    async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
+        assert source_path == "https://cdn.example.com/hls-file-refresh-to-direct-fresh.mkv"
+        assert item_id == item.id
+        return playlist_path
+
+    monkeypatch.setattr(stream_routes, "_open_remote_hls_child_stream", fake_open_remote_hls_child_stream)
+    monkeypatch.setattr(stream_routes, "_head_remote_direct_url", fake_head)
+    monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
+    monkeypatch.setattr(
+        stream_routes,
+        "_start_direct_playback_refresh_trigger",
+        lambda *args, **kwargs: None,
+    )
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/segment_00001.ts", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 200
+    assert response.content == b"hls-file-refresh-to-direct"
+    assert open_calls == [
+        (
+            "https://cdn.example.com/hls-file-refresh-to-direct-stale/index.m3u8",
+            "https://cdn.example.com/hls-file-refresh-to-direct-stale/segment_00001.ts",
+        )
+    ]
+    assert head_calls == ["https://cdn.example.com/hls-file-refresh-to-direct-fresh.mkv"]
+    assert provider_client.calls == [
+        "https://api.example.com/restricted-hls-file-refresh-to-direct.m3u8"
+    ]
+    assert (
+        governance["inline_remote_hls_refresh_attempts"]
+        == before["inline_remote_hls_refresh_attempts"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_recovered"]
+        == before["inline_remote_hls_refresh_recovered"] + 1
+    )
+
+
 def test_hls_playlist_route_skips_duplicate_restricted_fallback_trigger_when_refresh_is_already_pending() -> (
     None
 ):
@@ -2370,6 +3182,309 @@ def test_hls_playlist_route_skips_duplicate_restricted_fallback_trigger_when_ref
         governance["hls_restricted_fallback_refresh_trigger_starts"]
         == before["hls_restricted_fallback_refresh_trigger_starts"]
     )
+
+
+def test_hls_playlist_route_records_inline_remote_hls_refresh_no_action_for_attribute_backed_source(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(attributes={"hls_url": "https://example.com/master.m3u8"})
+    client, _ = _build_client(items=[item])
+
+    playlist_calls: list[str] = []
+
+    async def fake_download_remote_hls_playlist(url: str) -> tuple[str, httpx.Headers]:
+        playlist_calls.append(url)
+        raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+
+    monkeypatch.setattr(stream_routes, "_download_remote_hls_playlist", fake_download_remote_hls_playlist)
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/index.m3u8", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 502
+    assert playlist_calls == ["https://example.com/master.m3u8"]
+    assert (
+        governance["inline_remote_hls_refresh_attempts"]
+        == before["inline_remote_hls_refresh_attempts"]
+    )
+    assert (
+        governance["inline_remote_hls_refresh_recovered"]
+        == before["inline_remote_hls_refresh_recovered"]
+    )
+    assert (
+        governance["inline_remote_hls_refresh_no_action"]
+        == before["inline_remote_hls_refresh_no_action"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_failures"]
+        == before["inline_remote_hls_refresh_failures"]
+    )
+
+
+def test_hls_playlist_route_records_inline_remote_hls_refresh_failure_when_repair_fails(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-hls-remote-playlist-inline-refresh-failure")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-hls-remote-playlist-inline-refresh-failure",
+        item_id=item.id,
+        kind="remote-hls",
+        locator="https://cdn.example.com/hls-inline-refresh-failure/index.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-refresh-failure/index.m3u8",
+        restricted_url="https://api.example.com/restricted-hls-inline-refresh-failure.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-refresh-failure",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-playlist-inline-refresh-failure",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-hls-inline-refresh-failure.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-refresh-failure/index.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-refresh-failure",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+
+    client, resources = _build_client(items=[item])
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            return RateLimitDecision(allowed=False, remaining_tokens=0.0, retry_after_seconds=6.0)
+
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        rate_limiter=FakeRateLimiter(),
+    )
+
+    async def fake_download_remote_hls_playlist(url: str) -> tuple[str, httpx.Headers]:
+        assert url == "https://cdn.example.com/hls-inline-refresh-failure/index.m3u8"
+        raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+
+    monkeypatch.setattr(stream_routes, "_download_remote_hls_playlist", fake_download_remote_hls_playlist)
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/index.m3u8", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 502
+    assert (
+        governance["inline_remote_hls_refresh_attempts"]
+        == before["inline_remote_hls_refresh_attempts"] + 1
+    )
+    assert (
+        governance["inline_remote_hls_refresh_recovered"]
+        == before["inline_remote_hls_refresh_recovered"]
+    )
+    assert (
+        governance["inline_remote_hls_refresh_no_action"]
+        == before["inline_remote_hls_refresh_no_action"]
+    )
+    assert (
+        governance["inline_remote_hls_refresh_failures"]
+        == before["inline_remote_hls_refresh_failures"] + 1
+    )
+
+
+def test_hls_playlist_route_handoffs_failed_inline_remote_hls_refresh_to_background_controller(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-hls-remote-playlist-inline-refresh-handoff")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-hls-remote-playlist-inline-refresh-handoff",
+        item_id=item.id,
+        kind="remote-hls",
+        locator="https://cdn.example.com/hls-inline-refresh-handoff/index.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-refresh-handoff/index.m3u8",
+        restricted_url="https://api.example.com/restricted-hls-inline-refresh-handoff.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-refresh-handoff",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-playlist-inline-refresh-handoff",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-hls-inline-refresh-handoff.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-refresh-handoff/index.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-refresh-handoff",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    client, resources = _build_client(db=database)
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            return RateLimitDecision(allowed=False, remaining_tokens=0.0, retry_after_seconds=6.0)
+
+    class FakeController:
+        def has_pending(self, item_identifier: str) -> bool:
+            assert item_identifier == item.id
+            return False
+
+        async def trigger(self, item_identifier: str, *, at: datetime | None = None) -> Any:
+            assert item_identifier == item.id
+            _ = at
+            return type("TriggerResult", (), {"outcome": "scheduled"})()
+
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        rate_limiter=FakeRateLimiter(),
+    )
+    resources.hls_restricted_fallback_refresh_controller = cast(Any, FakeController())
+
+    async def fake_download_remote_hls_playlist(url: str) -> tuple[str, httpx.Headers]:
+        assert url == "https://cdn.example.com/hls-inline-refresh-handoff/index.m3u8"
+        raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+
+    monkeypatch.setattr(stream_routes, "_download_remote_hls_playlist", fake_download_remote_hls_playlist)
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/index.m3u8", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 502
+    assert (
+        governance["hls_restricted_fallback_refresh_trigger_starts"]
+        == before["hls_restricted_fallback_refresh_trigger_starts"] + 1
+    )
+
+    persisted_item = asyncio.run(PlaybackSourceService(resources.db)._list_items())[0]
+    persisted_entry = persisted_item.media_entries[0]
+    persisted_attachment = persisted_item.playback_attachments[0]
+    assert persisted_entry.refresh_state == "stale"
+    assert persisted_attachment.refresh_state == "stale"
+
+
+def test_hls_file_route_handoffs_failed_inline_remote_hls_refresh_to_background_controller(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-hls-remote-file-inline-refresh-handoff")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-hls-remote-file-inline-refresh-handoff",
+        item_id=item.id,
+        kind="remote-hls",
+        locator="https://cdn.example.com/hls-inline-file-refresh-handoff/index.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-file-refresh-handoff/index.m3u8",
+        restricted_url="https://api.example.com/restricted-hls-inline-file-refresh-handoff.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-file-refresh-handoff",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-file-inline-refresh-handoff",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-hls",
+        download_url="https://api.example.com/restricted-hls-inline-file-refresh-handoff.m3u8",
+        unrestricted_url="https://cdn.example.com/hls-inline-file-refresh-handoff/index.m3u8",
+        provider="realdebrid",
+        provider_download_id="download-hls-inline-file-refresh-handoff",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="hls")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    client, resources = _build_client(db=database)
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            return RateLimitDecision(allowed=False, remaining_tokens=0.0, retry_after_seconds=6.0)
+
+    class FakeController:
+        def has_pending(self, item_identifier: str) -> bool:
+            assert item_identifier == item.id
+            return False
+
+        async def trigger(self, item_identifier: str, *, at: datetime | None = None) -> Any:
+            assert item_identifier == item.id
+            _ = at
+            return type("TriggerResult", (), {"outcome": "scheduled"})()
+
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        rate_limiter=FakeRateLimiter(),
+    )
+    resources.hls_restricted_fallback_refresh_controller = cast(Any, FakeController())
+
+    async def fake_open_remote_hls_child_stream(
+        *,
+        playlist_url: str,
+        upstream_url: str,
+        request: Any,
+    ) -> StreamingResponse:
+        _ = request
+        assert playlist_url == "https://cdn.example.com/hls-inline-file-refresh-handoff/index.m3u8"
+        assert upstream_url == "https://cdn.example.com/hls-inline-file-refresh-handoff/segment_00001.ts"
+        raise HTTPException(status_code=502, detail="Upstream HLS request failed with status 502")
+
+    monkeypatch.setattr(stream_routes, "_open_remote_hls_child_stream", fake_open_remote_hls_child_stream)
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/segment_00001.ts", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 502
+    assert (
+        governance["hls_restricted_fallback_refresh_trigger_starts"]
+        == before["hls_restricted_fallback_refresh_trigger_starts"] + 1
+    )
+
+    persisted_item = asyncio.run(PlaybackSourceService(resources.db)._list_items())[0]
+    persisted_entry = persisted_item.media_entries[0]
+    persisted_attachment = persisted_item.playback_attachments[0]
+    assert persisted_entry.refresh_state == "stale"
+    assert persisted_attachment.refresh_state == "stale"
 
 
 def test_hls_playlist_route_records_missing_restricted_fallback_controller_when_trigger_is_unavailable() -> (
@@ -4281,6 +5396,7 @@ def test_playback_source_service_rate_limits_direct_refresh_dispatch_and_exposes
 
     assert execution is not None
     assert execution.rate_limited is True
+    assert execution.deferred_reason == "refresh_rate_limited"
     assert execution.retry_after_seconds == 7.5
     assert execution.limiter_bucket_key == "ratelimit:realdebrid:stream_link_refresh"
     assert execution.media_entry_execution is None
@@ -4368,6 +5484,7 @@ def test_playback_source_service_reschedules_scheduled_direct_refresh_after_limi
     assert result.outcome == "scheduled"
     assert result.execution is not None
     assert result.execution.rate_limited is True
+    assert result.execution.deferred_reason == "refresh_rate_limited"
     assert result.execution.retry_after_seconds == 7.5
     assert result.execution.limiter_bucket_key == "ratelimit:realdebrid:stream_link_refresh"
     assert result.retry_after_seconds == 7.5
@@ -4640,7 +5757,7 @@ def test_in_process_direct_playback_refresh_controller_reschedules_rate_limited_
     item.active_streams = [
         _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="direct")
     ]
-    _, resources = _build_client(items=[item])
+    client, resources = _build_client(items=[item])
 
     slept_for: list[float] = []
     decisions = iter(
@@ -4704,13 +5821,103 @@ def test_in_process_direct_playback_refresh_controller_reschedules_rate_limited_
         assert last_result.execution.media_entry_execution is not None
         assert last_result.execution.media_entry_execution.ok is True
 
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
     asyncio.run(exercise())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
 
     assert slept_for == pytest.approx([7.5], rel=0.0, abs=0.05)
     assert selected_entry.refresh_state == "ready"
     assert (
         selected_entry.unrestricted_url
         == "https://cdn.example.com/in-process-direct-refresh-controller-rate-limited-fresh"
+    )
+    assert (
+        governance["direct_playback_refresh_rate_limited"]
+        == before["direct_playback_refresh_rate_limited"] + 1
+    )
+
+
+def test_in_process_direct_playback_refresh_controller_reschedules_provider_circuit_open_work() -> (
+    None
+):
+    item = _build_item(item_id="item-in-process-direct-refresh-controller-circuit-open")
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-in-process-direct-refresh-controller-circuit-open",
+        item_id=item.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/restricted-in-process-direct-refresh-controller-circuit-open",
+        unrestricted_url="https://cdn.example.com/in-process-direct-refresh-controller-circuit-open",
+        refresh_state="failed",
+        last_refresh_error="provider unavailable",
+        provider="realdebrid",
+        provider_download_id="download-in-process-direct-refresh-controller-circuit-open",
+    )
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="direct")
+    ]
+    client, resources = _build_client(items=[item])
+
+    current_time = {"value": 10.0}
+    slept_for: list[float] = []
+    provider_circuit_breaker = ProviderCircuitBreaker(
+        failure_threshold=1,
+        reset_timeout_seconds=5.0,
+        clock=lambda: current_time["value"],
+    )
+    assert provider_circuit_breaker.record_failure("realdebrid") is True
+
+    async def fake_sleep(seconds: float) -> None:
+        slept_for.append(seconds)
+        current_time["value"] += seconds + 0.1
+        await asyncio.sleep(0)
+
+    async def fake_executor(
+        request: PlaybackAttachmentRefreshRequest,
+    ) -> PlaybackAttachmentRefreshResult:
+        assert (
+            request.provider_download_id
+            == "download-in-process-direct-refresh-controller-circuit-open"
+        )
+        return PlaybackAttachmentRefreshResult(
+            ok=True,
+            locator="https://cdn.example.com/in-process-direct-refresh-controller-circuit-open-fresh",
+            restricted_url="https://api.example.com/restricted-in-process-direct-refresh-controller-circuit-open-fresh",
+            unrestricted_url="https://cdn.example.com/in-process-direct-refresh-controller-circuit-open-fresh",
+            expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+        )
+
+    async def exercise() -> None:
+        controller = InProcessDirectPlaybackRefreshController(
+            PlaybackSourceService(
+                resources.db,
+                provider_circuit_breaker=provider_circuit_breaker,
+            ),
+            executors={"realdebrid": fake_executor},
+            sleep=fake_sleep,
+        )
+
+        trigger_result = await controller.trigger(item.id)
+        assert trigger_result.outcome == "scheduled"
+
+        await controller.wait_for_item(item.id)
+
+        last_result = controller.get_last_result(item.id)
+        assert last_result is not None
+        assert last_result.outcome == "completed"
+        assert last_result.execution is not None
+        assert last_result.execution.media_entry_execution is not None
+        assert last_result.execution.media_entry_execution.ok is True
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    asyncio.run(exercise())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert slept_for == pytest.approx([5.0], rel=0.0, abs=0.05)
+    assert selected_entry.refresh_state == "ready"
+    assert (
+        governance["direct_playback_refresh_provider_circuit_open"]
+        == before["direct_playback_refresh_provider_circuit_open"] + 1
     )
 
 
@@ -8173,6 +9380,216 @@ def test_stream_status_route_exposes_hls_route_failure_counters() -> None:
     assert governance["hls_route_failures_upstream_failed"] >= 0
 
 
+def test_stream_status_route_exposes_vfs_catalog_governance_snapshot() -> None:
+    client, resources = _build_client()
+
+    class _StubVfsCatalogServer:
+        def build_governance_snapshot(self) -> dict[str, int]:
+            return {
+                "vfs_catalog_watch_sessions_started": 3,
+                "vfs_catalog_watch_sessions_completed": 2,
+                "vfs_catalog_watch_sessions_active": 1,
+                "vfs_catalog_reconnect_requested": 4,
+                "vfs_catalog_reconnect_delta_served": 3,
+                "vfs_catalog_reconnect_snapshot_fallback": 1,
+                "vfs_catalog_reconnect_failures": 0,
+                "vfs_catalog_snapshots_served": 5,
+                "vfs_catalog_deltas_served": 7,
+                "vfs_catalog_heartbeats_served": 9,
+                "vfs_catalog_problem_events": 0,
+                "vfs_catalog_request_stream_failures": 0,
+                "vfs_catalog_snapshot_build_failures": 0,
+                "vfs_catalog_delta_build_failures": 0,
+                "vfs_catalog_refresh_attempts": 6,
+                "vfs_catalog_refresh_succeeded": 5,
+                "vfs_catalog_refresh_provider_failures": 1,
+                "vfs_catalog_refresh_empty_results": 0,
+                "vfs_catalog_refresh_validation_failed": 1,
+                "vfs_catalog_refresh_skipped_no_provider": 0,
+                "vfs_catalog_refresh_skipped_no_restricted_url": 0,
+                "vfs_catalog_refresh_skipped_no_client": 0,
+                "vfs_catalog_refresh_skipped_fresh": 2,
+                "vfs_catalog_inline_refresh_requests": 2,
+                "vfs_catalog_inline_refresh_succeeded": 1,
+                "vfs_catalog_inline_refresh_failed": 1,
+                "vfs_catalog_inline_refresh_not_found": 0,
+            }
+
+    resources.vfs_catalog_server = cast(Any, _StubVfsCatalogServer())
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["vfs_catalog_watch_sessions_started"] == 3
+    assert governance["vfs_catalog_watch_sessions_active"] == 1
+    assert governance["vfs_catalog_reconnect_delta_served"] == 3
+    assert governance["vfs_catalog_refresh_attempts"] == 6
+    assert governance["vfs_catalog_refresh_validation_failed"] == 1
+    assert governance["vfs_catalog_inline_refresh_failed"] == 1
+
+
+def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 4,
+                    "active_reads": 2,
+                    "chunk_cache_weighted_bytes": 8192,
+                },
+                "handle_startup": {
+                    "total": 5,
+                    "ok": 3,
+                    "error": 1,
+                    "estale": 1,
+                    "average_duration_ms": 104.8,
+                    "max_duration_ms": 412.2,
+                },
+                "mounted_reads": {
+                    "total": 8,
+                    "ok": 6,
+                    "error": 1,
+                    "estale": 1,
+                    "average_duration_ms": 12.6,
+                    "max_duration_ms": 48.4,
+                },
+                "upstream_fetch": {
+                    "operations": 5,
+                    "bytes_total": 65536,
+                    "average_duration_ms": 23.2,
+                    "max_duration_ms": 71.9,
+                },
+                "upstream_failures": {
+                    "invalid_url": 1,
+                    "build_request": 0,
+                    "network": 2,
+                    "stale_status": 3,
+                    "unexpected_status": 4,
+                    "unexpected_status_too_many_requests": 2,
+                    "unexpected_status_server_error": 1,
+                    "read_body": 5,
+                },
+                "upstream_retryable_events": {
+                    "network": 6,
+                    "read_body": 7,
+                    "status_too_many_requests": 8,
+                    "status_server_error": 9,
+                },
+                "backend_fallback": {
+                    "attempts": 10,
+                    "success": 7,
+                    "failure": 3,
+                    "attempts_direct_read_failure": 4,
+                    "attempts_inline_refresh_unavailable": 3,
+                    "attempts_post_inline_refresh_failure": 3,
+                    "success_direct_read_failure": 2,
+                    "success_inline_refresh_unavailable": 3,
+                    "success_post_inline_refresh_failure": 2,
+                    "failure_direct_read_failure": 2,
+                    "failure_inline_refresh_unavailable": 0,
+                    "failure_post_inline_refresh_failure": 1,
+                },
+                "chunk_cache": {
+                    "hits": 9,
+                    "misses": 3,
+                    "inserts": 2,
+                    "prefetch_hits": 1,
+                },
+                "prefetch": {
+                    "background_spawned": 7,
+                    "background_backpressure": 2,
+                    "background_error": 1,
+                },
+                "inline_refresh": {
+                    "success": 3,
+                    "no_url": 1,
+                    "error": 2,
+                    "timeout": 1,
+                },
+                "windows_projfs": {
+                    "callbacks_error": 4,
+                    "callbacks_estale": 2,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    client, _ = _build_client()
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["vfs_runtime_snapshot_available"] == 1
+    assert governance["vfs_runtime_open_handles"] == 4
+    assert governance["vfs_runtime_active_reads"] == 2
+    assert governance["vfs_runtime_chunk_cache_weighted_bytes"] == 8192
+    assert governance["vfs_runtime_handle_startup_total"] == 5
+    assert governance["vfs_runtime_handle_startup_ok"] == 3
+    assert governance["vfs_runtime_handle_startup_error"] == 1
+    assert governance["vfs_runtime_handle_startup_estale"] == 1
+    assert governance["vfs_runtime_handle_startup_average_duration_ms"] == 105
+    assert governance["vfs_runtime_handle_startup_max_duration_ms"] == 412
+    assert governance["vfs_runtime_mounted_reads_total"] == 8
+    assert governance["vfs_runtime_mounted_reads_ok"] == 6
+    assert governance["vfs_runtime_mounted_reads_error"] == 1
+    assert governance["vfs_runtime_mounted_reads_estale"] == 1
+    assert governance["vfs_runtime_mounted_reads_average_duration_ms"] == 13
+    assert governance["vfs_runtime_mounted_reads_max_duration_ms"] == 48
+    assert governance["vfs_runtime_upstream_fetch_operations"] == 5
+    assert governance["vfs_runtime_upstream_fetch_bytes_total"] == 65536
+    assert governance["vfs_runtime_upstream_fetch_average_duration_ms"] == 23
+    assert governance["vfs_runtime_upstream_fetch_max_duration_ms"] == 72
+    assert governance["vfs_runtime_upstream_fail_invalid_url"] == 1
+    assert governance["vfs_runtime_upstream_fail_build_request"] == 0
+    assert governance["vfs_runtime_upstream_fail_network"] == 2
+    assert governance["vfs_runtime_upstream_fail_stale_status"] == 3
+    assert governance["vfs_runtime_upstream_fail_unexpected_status"] == 4
+    assert governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"] == 2
+    assert governance["vfs_runtime_upstream_fail_unexpected_status_server_error"] == 1
+    assert governance["vfs_runtime_upstream_fail_read_body"] == 5
+    assert governance["vfs_runtime_upstream_retryable_network"] == 6
+    assert governance["vfs_runtime_upstream_retryable_read_body"] == 7
+    assert governance["vfs_runtime_upstream_retryable_status_too_many_requests"] == 8
+    assert governance["vfs_runtime_upstream_retryable_status_server_error"] == 9
+    assert governance["vfs_runtime_backend_fallback_attempts"] == 10
+    assert governance["vfs_runtime_backend_fallback_success"] == 7
+    assert governance["vfs_runtime_backend_fallback_failure"] == 3
+    assert governance["vfs_runtime_backend_fallback_attempts_direct_read_failure"] == 4
+    assert governance["vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable"] == 3
+    assert (
+        governance["vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure"] == 3
+    )
+    assert governance["vfs_runtime_backend_fallback_success_direct_read_failure"] == 2
+    assert governance["vfs_runtime_backend_fallback_success_inline_refresh_unavailable"] == 3
+    assert (
+        governance["vfs_runtime_backend_fallback_success_post_inline_refresh_failure"] == 2
+    )
+    assert governance["vfs_runtime_backend_fallback_failure_direct_read_failure"] == 2
+    assert governance["vfs_runtime_backend_fallback_failure_inline_refresh_unavailable"] == 0
+    assert (
+        governance["vfs_runtime_backend_fallback_failure_post_inline_refresh_failure"] == 1
+    )
+    assert governance["vfs_runtime_chunk_cache_hits"] == 9
+    assert governance["vfs_runtime_chunk_cache_misses"] == 3
+    assert governance["vfs_runtime_chunk_cache_inserts"] == 2
+    assert governance["vfs_runtime_chunk_cache_prefetch_hits"] == 1
+    assert governance["vfs_runtime_prefetch_background_spawned"] == 7
+    assert governance["vfs_runtime_prefetch_background_backpressure"] == 2
+    assert governance["vfs_runtime_prefetch_background_error"] == 1
+    assert governance["vfs_runtime_inline_refresh_success"] == 3
+    assert governance["vfs_runtime_inline_refresh_no_url"] == 1
+    assert governance["vfs_runtime_inline_refresh_error"] == 2
+    assert governance["vfs_runtime_inline_refresh_timeout"] == 1
+    assert governance["vfs_runtime_windows_callbacks_error"] == 4
+    assert governance["vfs_runtime_windows_callbacks_estale"] == 2
+
+
 def test_hls_route_failure_governance_counts_generation_timeout(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -8950,6 +10367,149 @@ def test_stream_file_refreshes_remote_direct_url_after_head_validation_failure(
     ]
     assert provider_client.calls == ["https://api.example.com/restricted-head-refresh-success"]
     assert selected_entry.unrestricted_url == "https://cdn.example.com/head-refresh-fresh"
+
+
+def test_stream_file_persists_repaired_media_entry_lease_across_requests(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-stream-file-durable-head-refresh-success")
+    source_attachment = _build_playback_attachment(
+        attachment_id="attachment-stream-file-durable-head-refresh-success",
+        item_id=item.id,
+        kind="remote-direct",
+        locator="https://cdn.example.com/durable-head-refresh-stale",
+        restricted_url="https://api.example.com/restricted-durable-head-refresh-success",
+        unrestricted_url="https://cdn.example.com/durable-head-refresh-stale",
+        refresh_state="ready",
+        provider="realdebrid",
+        provider_download_id="download-durable-head-refresh-success",
+    )
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-stream-file-durable-head-refresh-success",
+        item_id=item.id,
+        source_attachment_id=source_attachment.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/restricted-durable-head-refresh-success",
+        unrestricted_url="https://cdn.example.com/durable-head-refresh-stale",
+        refresh_state="ready",
+        expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+        provider="realdebrid",
+        provider_download_id="download-durable-head-refresh-success",
+    )
+    selected_entry.source_attachment = source_attachment
+    item.playback_attachments = [source_attachment]
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="direct")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    client, resources = _build_client(db=database)
+
+    class FakeRateLimiter:
+        async def acquire(
+            self,
+            bucket_key: str,
+            capacity: float,
+            refill_rate_per_second: float,
+            requested_tokens: float = 1.0,
+            now_seconds: float | None = None,
+            expiry_seconds: int | None = None,
+        ) -> RateLimitDecision:
+            assert bucket_key == "ratelimit:realdebrid:stream_link_refresh"
+            assert capacity == 1.0
+            assert refill_rate_per_second == 1.0
+            return RateLimitDecision(allowed=True, remaining_tokens=0.0, retry_after_seconds=0.0)
+
+    class FakeProviderClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def unrestrict_link(
+            self,
+            link: str,
+            *,
+            request: PlaybackAttachmentRefreshRequest,
+        ) -> PlaybackAttachmentProviderUnrestrictedLink | None:
+            self.calls.append(link)
+            return PlaybackAttachmentProviderUnrestrictedLink(
+                download_url="https://cdn.example.com/durable-head-refresh-fresh",
+                restricted_url=link,
+                expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+            )
+
+    provider_client = FakeProviderClient()
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        provider_clients={"realdebrid": cast(PlaybackAttachmentProviderClient, provider_client)},
+        rate_limiter=FakeRateLimiter(),
+    )
+
+    head_calls: list[str] = []
+
+    async def fake_head(url: str) -> None:
+        head_calls.append(url)
+        if url == "https://cdn.example.com/durable-head-refresh-stale":
+            raise HTTPException(
+                status_code=503,
+                detail="Playback source temporarily unavailable",
+            )
+        assert url == "https://cdn.example.com/durable-head-refresh-fresh"
+
+    async def fake_stream_remote(
+        url: str,
+        request: Any,
+        *,
+        owner: str = "http-direct",
+    ) -> StreamingResponse:
+        assert url == "https://cdn.example.com/durable-head-refresh-fresh"
+        assert owner == "http-direct"
+
+        async def iterator() -> AsyncGenerator[bytes, None]:
+            yield b"durable-head-refresh-success"
+
+        return StreamingResponse(iterator(), media_type="application/octet-stream")
+
+    monkeypatch.setattr(stream_routes, "_head_remote_direct_url", fake_head)
+    monkeypatch.setattr(
+        stream_routes,
+        "_start_direct_playback_refresh_trigger",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(byte_streaming, "stream_remote", fake_stream_remote)
+
+    first_response = client.get(f"/api/v1/stream/file/{item.id}", headers=_headers())
+    second_response = client.get(f"/api/v1/stream/file/{item.id}", headers=_headers())
+
+    assert first_response.status_code == 200
+    assert first_response.content == b"durable-head-refresh-success"
+    assert second_response.status_code == 200
+    assert second_response.content == b"durable-head-refresh-success"
+    assert head_calls == [
+        "https://cdn.example.com/durable-head-refresh-stale",
+        "https://cdn.example.com/durable-head-refresh-fresh",
+        "https://cdn.example.com/durable-head-refresh-fresh",
+    ]
+    assert provider_client.calls == [
+        "https://api.example.com/restricted-durable-head-refresh-success"
+    ]
+
+    persisted_item = asyncio.run(PlaybackSourceService(resources.db)._list_items())[0]
+    persisted_entry = persisted_item.media_entries[0]
+    persisted_attachment = persisted_item.playback_attachments[0]
+    assert (
+        persisted_entry.unrestricted_url
+        == "https://cdn.example.com/durable-head-refresh-fresh"
+    )
+    assert persisted_entry.refresh_state == "ready"
+    assert persisted_entry.last_refresh_error is None
+    assert (
+        persisted_attachment.unrestricted_url
+        == "https://cdn.example.com/durable-head-refresh-fresh"
+    )
+    assert persisted_attachment.locator == "https://cdn.example.com/durable-head-refresh-fresh"
+    assert persisted_attachment.refresh_state == "ready"
+    assert persisted_attachment.last_refresh_error is None
 
 
 def test_stream_file_returns_503_when_head_validation_refresh_is_denied(

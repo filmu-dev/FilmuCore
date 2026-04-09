@@ -109,6 +109,7 @@ def _build_client(
     arq_enabled: bool = False,
     temporal_enabled: bool = False,
     plugin_registry: PluginRegistry | None = None,
+    plugin_load_report: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
@@ -128,6 +129,7 @@ def _build_client(
         graphql_plugin_registry=registry,
         plugin_registry=plugin_registry,
     )
+    app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
 
     return TestClient(app)
@@ -209,8 +211,34 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
 
     assert response.status_code == 200
     assert response.json() == [
-        {"name": "discord-notifier", "capabilities": ["notification"]},
-        {"name": "torrentio", "capabilities": ["scraper"]},
+        {
+            "name": "discord-notifier",
+            "capabilities": ["notification"],
+            "status": "loaded",
+            "ready": True,
+            "configured": None,
+            "version": None,
+            "api_version": None,
+            "min_host_version": None,
+            "max_host_version": None,
+            "source": None,
+            "warnings": [],
+            "error": None,
+        },
+        {
+            "name": "torrentio",
+            "capabilities": ["scraper"],
+            "status": "loaded",
+            "ready": True,
+            "configured": None,
+            "version": None,
+            "api_version": None,
+            "min_host_version": None,
+            "max_host_version": None,
+            "source": None,
+            "warnings": [],
+            "error": None,
+        },
     ]
 
 
@@ -263,6 +291,83 @@ def test_plugin_events_route_returns_declared_events_and_hook_subscriptions() ->
             "publishable_events": ["torrentio.scan.completed"],
             "hook_subscriptions": [],
         },
+    ]
+
+
+def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness() -> None:
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "stremthru",
+                "version": "1.2.3",
+                "api_version": "1",
+                "distribution": "builtin",
+                "entry_module": "plugin.py",
+                "downloader": "StremThruDownloader",
+                "min_host_version": "0.1.0",
+            }
+        )
+    )
+    plugin_registry.register_capability(
+        plugin_name="stremthru",
+        kind=PluginCapabilityKind.DOWNLOADER,
+        implementation=object(),
+    )
+
+    client = _build_client(plugin_registry=plugin_registry)
+    response = client.get("/api/v1/plugins", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "name": "stremthru",
+            "capabilities": ["downloader"],
+            "status": "loaded",
+            "ready": False,
+            "configured": False,
+            "version": "1.2.3",
+            "api_version": "1",
+            "min_host_version": "0.1.0",
+            "max_host_version": None,
+            "source": "builtin",
+            "warnings": [],
+            "error": None,
+        }
+    ]
+
+
+def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
+    class _Failure:
+        plugin_name = "future-plugin"
+        plugin_dir = "plugins/future-plugin"
+        source = "entry_point"
+        reason = "api_version_incompatible"
+
+    class _Report:
+        def __init__(self) -> None:
+            self.loaded: list[object] = []
+            self.failed = [_Failure()]
+
+    client = _build_client(plugin_registry=PluginRegistry(), plugin_load_report=_Report())
+    response = client.get("/api/v1/plugins", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "name": "future-plugin",
+            "capabilities": [],
+            "status": "load_failed",
+            "ready": False,
+            "configured": None,
+            "version": None,
+            "api_version": None,
+            "min_host_version": None,
+            "max_host_version": None,
+            "source": "entry_point",
+            "warnings": [],
+            "error": "api_version_incompatible",
+        }
     ]
 
 

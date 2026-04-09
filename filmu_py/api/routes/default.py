@@ -34,6 +34,47 @@ API_KEY_ROTATION_WARNING = (
 )
 
 
+def _plugin_load_report_maps(request: Request) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return plugin-load successes and failures keyed by plugin name when available."""
+
+    report = getattr(request.app.state, "plugin_load_report", None)
+    loaded: dict[str, Any] = {}
+    failed: dict[str, Any] = {}
+    if report is None:
+        return loaded, failed
+
+    for success in getattr(report, "loaded", []):
+        plugin_name = getattr(success, "plugin_name", None)
+        if isinstance(plugin_name, str) and plugin_name:
+            loaded[plugin_name] = success
+    for failure in getattr(report, "failed", []):
+        plugin_name = getattr(failure, "plugin_name", None)
+        if isinstance(plugin_name, str) and plugin_name:
+            failed[plugin_name] = failure
+    return loaded, failed
+
+
+def _plugin_runtime_health(
+    plugin_name: str,
+    resources: Any,
+) -> tuple[bool, bool | None, list[str]]:
+    """Return operator-facing readiness for built-in/runtime-managed plugins."""
+
+    warnings: list[str] = []
+    configured: bool | None = None
+
+    if plugin_name == "stremthru":
+        stremthru = resources.settings.downloaders.stremthru
+        configured = bool(stremthru.enabled and stremthru.token.strip())
+        if stremthru.enabled and not stremthru.token.strip():
+            warnings.append("enabled but token is missing")
+        if stremthru.token.strip() and not stremthru.enabled:
+            warnings.append("token is configured but the plugin is disabled")
+        return configured, configured, warnings
+
+    return True, configured, warnings
+
+
 def _generate_api_key() -> str:
     """Return a strong API key candidate for compatibility-driven admin flows.
 
@@ -108,16 +149,69 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
 
     resources = request.app.state.resources
     plugin_registry = resources.plugin_registry
+    loaded_report, failed_report = _plugin_load_report_maps(request)
     if plugin_registry is None:
-        return []
+        return [
+            PluginCapabilityStatusResponse(
+                name=plugin_name,
+                capabilities=[],
+                status="load_failed",
+                ready=False,
+                source=getattr(failure, "source", None),
+                error=getattr(failure, "reason", None),
+            )
+            for plugin_name, failure in sorted(failed_report.items())
+        ]
 
-    return [
-        PluginCapabilityStatusResponse(
-            name=plugin_name,
-            capabilities=sorted({registration.kind.value for registration in registrations}),
+    responses: list[PluginCapabilityStatusResponse] = []
+    registrations_by_plugin = plugin_registry.by_plugin()
+    all_plugin_names = plugin_registry.all_plugin_names() | set(failed_report)
+    for plugin_name in sorted(all_plugin_names):
+        manifest = plugin_registry.manifest(plugin_name)
+        registrations = registrations_by_plugin.get(plugin_name, [])
+        success = loaded_report.get(plugin_name)
+        failure = failed_report.get(plugin_name)
+        ready, configured, warnings = _plugin_runtime_health(plugin_name, resources)
+        if success is not None:
+            warnings.extend(list(getattr(success, "skipped", ())))
+        if failure is not None and not registrations:
+            responses.append(
+                PluginCapabilityStatusResponse(
+                    name=plugin_name,
+                    capabilities=[],
+                    status="load_failed",
+                    ready=False,
+                    version=manifest.version if manifest is not None else None,
+                    api_version=manifest.api_version if manifest is not None else None,
+                    min_host_version=manifest.min_host_version if manifest is not None else None,
+                    max_host_version=manifest.max_host_version if manifest is not None else None,
+                    source=getattr(failure, "source", None),
+                    warnings=warnings,
+                    error=getattr(failure, "reason", None),
+                )
+            )
+            continue
+
+        responses.append(
+            PluginCapabilityStatusResponse(
+                name=plugin_name,
+                capabilities=sorted({registration.kind.value for registration in registrations}),
+                status="loaded",
+                ready=ready,
+                configured=configured,
+                version=manifest.version if manifest is not None else None,
+                api_version=manifest.api_version if manifest is not None else None,
+                min_host_version=manifest.min_host_version if manifest is not None else None,
+                max_host_version=manifest.max_host_version if manifest is not None else None,
+                source=(
+                    manifest.distribution
+                    if manifest is not None
+                    else getattr(success, "source", None)
+                ),
+                warnings=warnings,
+            )
         )
-        for plugin_name, registrations in sorted(plugin_registry.by_plugin().items())
-    ]
+    return responses
 
 
 @router.get(

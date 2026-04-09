@@ -66,6 +66,8 @@ class PluginManifest(BaseModel):
     version: str = Field(min_length=1)
     api_version: str = Field(default="1", min_length=1)
     min_host_version: str | None = Field(default=None)
+    max_host_version: str | None = Field(default=None)
+    distribution: str = Field(default="filesystem", min_length=1)
     capabilities: frozenset[str] = Field(default_factory=frozenset)
     entry_module: str = Field(min_length=1)
     graphql: GraphQLResolverExports = Field(default_factory=GraphQLResolverExports)
@@ -100,7 +102,7 @@ class PluginManifest(BaseModel):
             raise ValueError("capabilities must not contain empty values")
         return normalized
 
-    @field_validator("version", "api_version", "min_host_version")
+    @field_validator("version", "api_version", "min_host_version", "max_host_version")
     @classmethod
     def validate_version_strings(cls, value: str | None) -> str | None:
         """Normalize optional version-like fields without imposing packaging deps yet."""
@@ -110,6 +112,16 @@ class PluginManifest(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("version fields must not be empty when provided")
+        return normalized
+
+    @field_validator("distribution")
+    @classmethod
+    def validate_distribution(cls, value: str) -> str:
+        """Restrict manifest distribution declarations to known host policies."""
+
+        normalized = value.strip().lower()
+        if normalized not in {"filesystem", "entry_point", "builtin"}:
+            raise ValueError("distribution must be one of: filesystem, entry_point, builtin")
         return normalized
 
     @field_validator(
@@ -187,17 +199,38 @@ class PluginManifest(BaseModel):
                 declared.add(capability)
         return tuple(sorted(declared))
 
-    def ensure_host_compatibility(self, host_version: str) -> None:
-        """Raise when the manifest requires a newer host version than is running."""
+    @staticmethod
+    def _compare_versions(left: str, right: str) -> int:
+        """Compare two version-like strings using numeric components only."""
 
-        if self.min_host_version is None:
-            return
-        required = _version_parts(self.min_host_version)
-        current = _version_parts(host_version)
+        required = _version_parts(left)
+        current = _version_parts(right)
         width = max(len(required), len(current))
         padded_required = (*required, *([0] * (width - len(required))))
         padded_current = (*current, *([0] * (width - len(current))))
         if padded_required > padded_current:
+            return 1
+        if padded_required < padded_current:
+            return -1
+        return 0
+
+    def ensure_host_compatibility(
+        self,
+        host_version: str,
+        *,
+        supported_api_versions: tuple[str, ...] = ("1",),
+    ) -> None:
+        """Raise when the running host falls outside the declared compatibility contract."""
+
+        if self.api_version not in supported_api_versions:
+            raise ValueError("api_version_incompatible")
+        if self.min_host_version is not None and self._compare_versions(
+            self.min_host_version, host_version
+        ) > 0:
+            raise ValueError("host_version_incompatible")
+        if self.max_host_version is not None and self._compare_versions(
+            self.max_host_version, host_version
+        ) < 0:
             raise ValueError("host_version_incompatible")
 
     def declares_publishable_event(self, event_type: str) -> bool:

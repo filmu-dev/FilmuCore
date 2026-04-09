@@ -17,6 +17,7 @@ This plan is constrained to currently documented state in:
 For the current detailed work breakdowns, use:
 
 - [`NEXT_IMPLEMENTATION_PRIORITIES.md`](TODOS/NEXT_IMPLEMENTATION_PRIORITIES.md) - current top-level priority reference
+- [`ENTERPRISE_GRADE_GAP_MATRIX.md`](TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md) - top-level enterprise/state-of-the-art gaps that must not be treated as optional follow-up work
 - [`PHASE_C_ROUTE_SURFACE_MATRIX.md`](TODOS/PHASE_C_ROUTE_SURFACE_MATRIX.md) - route-surface breakdown
 - [`DOMAIN_MODEL_EXPANSION_MATRIX.md`](TODOS/DOMAIN_MODEL_EXPANSION_MATRIX.md) - domain-backing gaps for compatibility routes
 - [`ORCHESTRATION_BREADTH_MATRIX.md`](TODOS/ORCHESTRATION_BREADTH_MATRIX.md) - orchestration/decomposition gaps
@@ -49,6 +50,7 @@ No undocumented requirements are assumed.
 3. Improve reliability incrementally (ARQ first, durable orchestration bridge second).
 4. Keep schema evolution safe and reversible via explicit migration policy.
 5. Enforce local + CI quality gates continuously per phase.
+6. Build Filmu to be enterprise-grade and state-of-the-art across identity, security, operations, plugins, orchestration, and VFS, not merely parity-complete with current `riven-ts`.
 
 ### Architectural stance
 

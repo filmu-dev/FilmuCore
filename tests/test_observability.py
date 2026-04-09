@@ -31,6 +31,7 @@ from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.media import StatsProjection, StatsYearReleaseRecord
 from filmu_py.workers import retry as retry_helpers
+from filmu_py.workers import tasks as worker_tasks
 
 
 class DummyRedis:
@@ -282,6 +283,11 @@ def test_plugin_load_metrics_track_success_failure_and_version_skip() -> None:
         plugin_name="future-plugin",
         result="skipped_version",
     )
+    api_skip_before = _counter_value(
+        PLUGIN_LOAD_TOTAL,
+        plugin_name="future-api-plugin",
+        result="skipped_api_version",
+    )
 
     import json
     from pathlib import Path
@@ -335,6 +341,21 @@ def test_plugin_load_metrics_track_success_failure_and_version_skip() -> None:
         )
         (future_dir / "plugin.py").write_text("", encoding="utf-8")
 
+        future_api_dir = plugins_dir / "future-api-plugin"
+        future_api_dir.mkdir()
+        (future_api_dir / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "name": "future-api-plugin",
+                    "version": "1.0.0",
+                    "api_version": "2",
+                    "entry_module": "plugin.py",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (future_api_dir / "plugin.py").write_text("", encoding="utf-8")
+
         from filmu_py.plugins.loader import load_plugins
 
         load_plugins(plugins_dir, PluginRegistry(), host_version="0.1.0")
@@ -350,6 +371,11 @@ def test_plugin_load_metrics_track_success_failure_and_version_skip() -> None:
         plugin_name="future-plugin",
         result="skipped_version",
     ) == version_skip_before + 1.0
+    assert _counter_value(
+        PLUGIN_LOAD_TOTAL,
+        plugin_name="future-api-plugin",
+        result="skipped_api_version",
+    ) == api_skip_before + 1.0
 
 
 def test_plugin_hook_metrics_track_success_and_timeout_outcomes() -> None:
@@ -456,3 +482,91 @@ def test_worker_retry_metrics_track_retry_dead_letter_and_stage_duration() -> No
         stage="scrape_item",
         outcome="success",
     ) == duration_before + 1.0
+
+
+def test_worker_queue_metrics_track_status_cleanup_and_enqueue_decisions(monkeypatch: Any) -> None:
+    status_before = _counter_value(
+        worker_tasks.WORKER_JOB_STATUS_TOTAL,
+        stage="scrape_item",
+        status="queued",
+    )
+    cleanup_before = _counter_value(
+        worker_tasks.WORKER_CLEANUP_TOTAL,
+        stage="scrape_item",
+        action="stale_result_deleted",
+    )
+    decision_before = _counter_value(
+        worker_tasks.WORKER_ENQUEUE_DECISIONS_TOTAL,
+        stage="scrape_item",
+        decision="enqueued",
+    )
+    defer_before = _histogram_count(
+        worker_tasks.WORKER_ENQUEUE_DEFER_SECONDS,
+        stage="scrape_item",
+    )
+
+    class FakeJob:
+        def __init__(self, _job_id: str, redis: object) -> None:
+            _ = redis
+
+        async def status(self) -> Any:
+            from arq.jobs import JobStatus
+
+            return JobStatus.queued
+
+    monkeypatch.setattr(worker_tasks, "Job", FakeJob)
+    redis = DummyRedis()
+    class FakeArqRedis:
+        async def delete(self, key: str) -> int:
+            return await redis.delete(key)
+
+        async def enqueue_job(self, *args: Any, **kwargs: Any) -> object:
+            _ = (args, kwargs)
+            return object()
+
+    fake_arq = FakeArqRedis()
+    redis.values["arq:result:scrape-item:item-1"] = b"stale"
+
+    asyncio.run(worker_tasks.is_scrape_item_job_active(fake_arq, item_id="item-1"))
+    asyncio.run(
+        worker_tasks._clear_stale_downstream_job(
+            fake_arq,
+            item_id="item-1",
+            stage_name="scrape_item",
+            job_id="scrape-item:item-1",
+        )
+    )
+    asyncio.run(
+        worker_tasks.enqueue_scrape_item(
+            fake_arq,
+            item_id="item-1",
+            queue_name="filmu-py",
+            defer_by_seconds=30,
+        )
+    )
+    worker_tasks._log_downstream_enqueue_result(
+        item_id="item-1",
+        stage_name="scrape_item",
+        job_id="scrape-item:item-1",
+        enqueued=True,
+    )
+
+    assert _counter_value(
+        worker_tasks.WORKER_JOB_STATUS_TOTAL,
+        stage="scrape_item",
+        status="queued",
+    ) == status_before + 1.0
+    assert _counter_value(
+        worker_tasks.WORKER_CLEANUP_TOTAL,
+        stage="scrape_item",
+        action="stale_result_deleted",
+    ) == cleanup_before + 1.0
+    assert _counter_value(
+        worker_tasks.WORKER_ENQUEUE_DECISIONS_TOTAL,
+        stage="scrape_item",
+        decision="enqueued",
+    ) == decision_before + 1.0
+    assert _histogram_count(
+        worker_tasks.WORKER_ENQUEUE_DEFER_SECONDS,
+        stage="scrape_item",
+    ) == defer_before + 1.0

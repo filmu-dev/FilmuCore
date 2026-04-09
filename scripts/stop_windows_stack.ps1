@@ -144,6 +144,9 @@ else {
         Write-Host ("      ✓ Windows filmuvfs process {0} stopped" -f $managedPid) -ForegroundColor Green
     }
     Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+    if ($state.PSObject.Properties.Match('runtime_status_path').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$state.runtime_status_path)) {
+        Remove-Item -LiteralPath ([string]$state.runtime_status_path) -Force -ErrorAction SilentlyContinue
+    }
 
     if (
         (-not [string]::IsNullOrWhiteSpace([string]$state.drive_letter)) -and

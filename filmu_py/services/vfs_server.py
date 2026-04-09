@@ -14,6 +14,7 @@ from uuid import uuid4
 import grpc
 import httpx
 from google.protobuf.timestamp_pb2 import Timestamp
+from prometheus_client import Counter, Gauge
 
 from filmuvfs.catalog.v1 import catalog_pb2, catalog_pb2_grpc
 
@@ -33,6 +34,44 @@ _FRESH_URL_SAFETY_MARGIN = timedelta(minutes=10)
 _INLINE_REFRESH_URL_VALIDATION_ATTEMPTS = 3
 _INLINE_REFRESH_URL_VALIDATION_DELAY = 0.75
 _INLINE_REFRESH_URL_VALIDATION_TIMEOUT = 3.0
+VFS_CATALOG_GOVERNANCE_EVENTS = Counter(
+    "filmu_py_vfs_catalog_governance_total",
+    "Count of FilmuVFS catalog gRPC governance events by event kind.",
+    labelnames=("event",),
+)
+VFS_CATALOG_ACTIVE_WATCH_SESSIONS = Gauge(
+    "filmu_py_vfs_catalog_watch_sessions_active",
+    "Current number of active FilmuVFS WatchCatalog sessions.",
+)
+_VFS_CATALOG_GOVERNANCE_TEMPLATE = {
+    "vfs_catalog_watch_sessions_started": 0,
+    "vfs_catalog_watch_sessions_completed": 0,
+    "vfs_catalog_watch_sessions_active": 0,
+    "vfs_catalog_reconnect_requested": 0,
+    "vfs_catalog_reconnect_delta_served": 0,
+    "vfs_catalog_reconnect_snapshot_fallback": 0,
+    "vfs_catalog_reconnect_failures": 0,
+    "vfs_catalog_snapshots_served": 0,
+    "vfs_catalog_deltas_served": 0,
+    "vfs_catalog_heartbeats_served": 0,
+    "vfs_catalog_problem_events": 0,
+    "vfs_catalog_request_stream_failures": 0,
+    "vfs_catalog_snapshot_build_failures": 0,
+    "vfs_catalog_delta_build_failures": 0,
+    "vfs_catalog_refresh_attempts": 0,
+    "vfs_catalog_refresh_succeeded": 0,
+    "vfs_catalog_refresh_provider_failures": 0,
+    "vfs_catalog_refresh_empty_results": 0,
+    "vfs_catalog_refresh_validation_failed": 0,
+    "vfs_catalog_refresh_skipped_no_provider": 0,
+    "vfs_catalog_refresh_skipped_no_restricted_url": 0,
+    "vfs_catalog_refresh_skipped_no_client": 0,
+    "vfs_catalog_refresh_skipped_fresh": 0,
+    "vfs_catalog_inline_refresh_requests": 0,
+    "vfs_catalog_inline_refresh_succeeded": 0,
+    "vfs_catalog_inline_refresh_failed": 0,
+    "vfs_catalog_inline_refresh_not_found": 0,
+}
 
 _ENTRY_KIND_VALUES = {
     "directory": catalog_pb2.CATALOG_ENTRY_KIND_DIRECTORY,
@@ -362,6 +401,12 @@ def _resolve_bound_address(bind_address: str, port: int) -> str:
     return f"{host}:{port}"
 
 
+def build_empty_vfs_catalog_governance_snapshot() -> dict[str, int]:
+    """Return the additive zero-value governance payload for FilmuVFS gRPC state."""
+
+    return dict(_VFS_CATALOG_GOVERNANCE_TEMPLATE)
+
+
 @dataclass(slots=True)
 class _WatchCatalogRequestState:
     subscribe: catalog_pb2.CatalogSubscribe | None = None
@@ -387,6 +432,21 @@ class FilmuVfsCatalogGrpcServicer:
         self._playback_clients = playback_clients or {}
         self._poll_interval = poll_interval
         self._heartbeat_interval = heartbeat_interval
+        self._governance = build_empty_vfs_catalog_governance_snapshot()
+
+    def _record_governance_event(self, event: str, *, value: int = 1) -> None:
+        self._governance[event] += value
+        VFS_CATALOG_GOVERNANCE_EVENTS.labels(event=event).inc(value)
+
+    def _change_active_watch_sessions(self, delta: int) -> None:
+        current = max(self._governance["vfs_catalog_watch_sessions_active"] + delta, 0)
+        self._governance["vfs_catalog_watch_sessions_active"] = current
+        VFS_CATALOG_ACTIVE_WATCH_SESSIONS.set(float(current))
+
+    def build_governance_snapshot(self) -> dict[str, int]:
+        """Return a copy of the current FilmuVFS gRPC governance counters."""
+
+        return dict(self._governance)
 
     async def _resolve_fresh_url(
         self,
@@ -400,6 +460,7 @@ class FilmuVfsCatalogGrpcServicer:
         if entry.transport != "remote-direct":
             return stored_url
         if not entry.provider:
+            self._record_governance_event("vfs_catalog_refresh_skipped_no_provider")
             logger.debug(
                 "vfs.catalog.grpc.entry.refresh.skipped.no_provider",
                 extra={"media_entry_id": entry.media_entry_id},
@@ -408,6 +469,7 @@ class FilmuVfsCatalogGrpcServicer:
 
         restricted_url = entry.restricted_url
         if not restricted_url:
+            self._record_governance_event("vfs_catalog_refresh_skipped_no_restricted_url")
             logger.debug(
                 "vfs.catalog.grpc.entry.refresh.skipped.no_restricted_url",
                 extra={"media_entry_id": entry.media_entry_id, "provider": entry.provider},
@@ -416,6 +478,7 @@ class FilmuVfsCatalogGrpcServicer:
 
         client = self._playback_clients.get(entry.provider)
         if client is None:
+            self._record_governance_event("vfs_catalog_refresh_skipped_no_client")
             logger.debug(
                 "vfs.catalog.grpc.entry.refresh.skipped.no_client",
                 extra={"media_entry_id": entry.media_entry_id, "provider": entry.provider},
@@ -428,6 +491,7 @@ class FilmuVfsCatalogGrpcServicer:
                 now + _FRESH_URL_SAFETY_MARGIN
             )
             if not needs_refresh:
+                self._record_governance_event("vfs_catalog_refresh_skipped_fresh")
                 logger.debug(
                     "vfs.catalog.grpc.entry.refresh.skipped.fresh",
                     extra={
@@ -467,9 +531,11 @@ class FilmuVfsCatalogGrpcServicer:
 
         max_attempts = _INLINE_REFRESH_URL_VALIDATION_ATTEMPTS if force else 1
         for attempt in range(1, max_attempts + 1):
+            self._record_governance_event("vfs_catalog_refresh_attempts")
             try:
                 result = await client.unrestrict_link(restricted_url, request=request)
             except Exception as exc:  # pragma: no cover - defensive provider failure fallback
+                self._record_governance_event("vfs_catalog_refresh_provider_failures")
                 logger.warning(
                     "vfs.catalog.grpc.entry.refresh.failed",
                     extra={
@@ -486,6 +552,7 @@ class FilmuVfsCatalogGrpcServicer:
                 return stored_url if allow_stale_fallback else None
 
             if result is None:
+                self._record_governance_event("vfs_catalog_refresh_empty_results")
                 logger.warning(
                     "vfs.catalog.grpc.entry.refresh.empty_result",
                     extra={
@@ -502,6 +569,7 @@ class FilmuVfsCatalogGrpcServicer:
 
             download_url = result.download_url
             if download_url and (not force or await _probe_remote_direct_url(download_url)):
+                self._record_governance_event("vfs_catalog_refresh_succeeded")
                 logger.info(
                     "vfs.catalog.grpc.entry.refresh.succeeded",
                     extra={
@@ -514,6 +582,7 @@ class FilmuVfsCatalogGrpcServicer:
                 )
                 return download_url
 
+            self._record_governance_event("vfs_catalog_refresh_validation_failed")
             logger.warning(
                 "vfs.catalog.grpc.entry.refresh.validation_failed",
                 extra={
@@ -565,10 +634,13 @@ class FilmuVfsCatalogGrpcServicer:
         provider_file_id = request.provider_file_id.strip()
         if entry_id == "" and provider_file_id == "":
             return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
+        self._record_governance_event("vfs_catalog_inline_refresh_requests")
 
         try:
             snapshot = await self._supplier.build_snapshot()
         except Exception as exc:  # pragma: no cover - defensive transport safety net
+            self._record_governance_event("vfs_catalog_snapshot_build_failures")
+            self._record_governance_event("vfs_catalog_problem_events")
             logger.exception("vfs.catalog.grpc.entry.inline_refresh.snapshot.failed")
             await context.abort(grpc.StatusCode.INTERNAL, str(exc))
             raise RuntimeError("unreachable after context.abort") from exc
@@ -606,6 +678,7 @@ class FilmuVfsCatalogGrpcServicer:
                     "handle_key": request.handle_key or None,
                 },
             )
+            self._record_governance_event("vfs_catalog_inline_refresh_not_found")
             return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
 
         refreshed_url = await self._resolve_fresh_url(
@@ -623,6 +696,7 @@ class FilmuVfsCatalogGrpcServicer:
                     "media_entry_id": matched_entry.media_entry_id,
                 },
             )
+            self._record_governance_event("vfs_catalog_inline_refresh_failed")
             return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
 
         logger.info(
@@ -634,6 +708,7 @@ class FilmuVfsCatalogGrpcServicer:
                 "media_entry_id": matched_entry.media_entry_id,
             },
         )
+        self._record_governance_event("vfs_catalog_inline_refresh_succeeded")
         return catalog_pb2.RefreshCatalogEntryResponse(success=True, new_url=refreshed_url)
 
     async def WatchCatalog(
@@ -644,6 +719,8 @@ class FilmuVfsCatalogGrpcServicer:
             catalog_pb2.WatchCatalogEvent,
         ],
     ) -> AsyncIterator[catalog_pb2.WatchCatalogEvent]:
+        self._record_governance_event("vfs_catalog_watch_sessions_started")
+        self._change_active_watch_sessions(1)
         request_state = _WatchCatalogRequestState()
         request_task = asyncio.create_task(
             self._consume_requests(request_iterator, request_state, context)
@@ -659,15 +736,20 @@ class FilmuVfsCatalogGrpcServicer:
                 request_state.subscribe.last_applied_generation_id if request_state.subscribe else None
             )
             if reconnect_generation_id is not None:
+                self._record_governance_event("vfs_catalog_reconnect_requested")
                 try:
                     reconnect_delta = await self._supplier.build_delta_since(reconnect_generation_id)
                 except Exception as exc:  # pragma: no cover - defensive safety net
+                    self._record_governance_event("vfs_catalog_reconnect_failures")
+                    self._record_governance_event("vfs_catalog_problem_events")
                     logger.exception("vfs.catalog.grpc.reconnect_delta.failed")
                     yield _problem_event("reconnect_delta_failed", str(exc))
                     return
 
                 if reconnect_delta is not None:
+                    self._record_governance_event("vfs_catalog_reconnect_delta_served")
                     resolved_urls = await self._resolve_all_file_urls(reconnect_delta.upserts)
+                    self._record_governance_event("vfs_catalog_deltas_served")
                     yield _delta_event(reconnect_delta, resolved_urls=resolved_urls)
                     last_server_event_at = monotonic()
                     reconnect_delta_served = True
@@ -676,17 +758,22 @@ class FilmuVfsCatalogGrpcServicer:
                         active_snapshot = await self._supplier.snapshot_for_generation(
                             current_generation_id
                         )
+                else:
+                    self._record_governance_event("vfs_catalog_reconnect_snapshot_fallback")
 
             if active_snapshot is None:
                 try:
                     active_snapshot = await self._supplier.build_snapshot()
                 except Exception as exc:  # pragma: no cover - defensive safety net
+                    self._record_governance_event("vfs_catalog_snapshot_build_failures")
+                    self._record_governance_event("vfs_catalog_problem_events")
                     logger.exception("vfs.catalog.grpc.snapshot.failed")
                     yield _problem_event("snapshot_build_failed", str(exc))
                     return
 
                 if not reconnect_delta_served:
                     resolved_urls = await self._resolve_all_file_urls(active_snapshot.entries)
+                    self._record_governance_event("vfs_catalog_snapshots_served")
                     yield _snapshot_event(active_snapshot, resolved_urls=resolved_urls)
                     last_server_event_at = monotonic()
 
@@ -700,6 +787,8 @@ class FilmuVfsCatalogGrpcServicer:
                 try:
                     delta = await self._supplier.build_delta(snapshot)
                 except Exception as exc:  # pragma: no cover - defensive safety net
+                    self._record_governance_event("vfs_catalog_delta_build_failures")
+                    self._record_governance_event("vfs_catalog_problem_events")
                     logger.exception("vfs.catalog.grpc.delta.failed")
                     yield _problem_event("delta_build_failed", str(exc))
                     return
@@ -707,9 +796,11 @@ class FilmuVfsCatalogGrpcServicer:
                 if delta.generation_id != snapshot.generation_id or delta.upserts or delta.removals:
                     snapshot = _apply_delta(snapshot, delta)
                     resolved_urls = await self._resolve_all_file_urls(delta.upserts)
+                    self._record_governance_event("vfs_catalog_deltas_served")
                     yield _delta_event(delta, resolved_urls=resolved_urls)
                     last_server_event_at = monotonic()
                 elif monotonic() - last_server_event_at >= self._heartbeat_interval.total_seconds():
+                    self._record_governance_event("vfs_catalog_heartbeats_served")
                     yield _heartbeat_event()
                     last_server_event_at = monotonic()
 
@@ -718,6 +809,8 @@ class FilmuVfsCatalogGrpcServicer:
             request_task.cancel()
             with suppress(asyncio.CancelledError):
                 await request_task
+            self._change_active_watch_sessions(-1)
+            self._record_governance_event("vfs_catalog_watch_sessions_completed")
 
     async def _consume_requests(
         self,
@@ -743,6 +836,7 @@ class FilmuVfsCatalogGrpcServicer:
             raise
         except Exception:
             if not context.done():
+                self._record_governance_event("vfs_catalog_request_stream_failures")
                 logger.exception("vfs.catalog.grpc.request_stream.failed")
         finally:
             request_state.stream_closed.set()
@@ -804,6 +898,11 @@ class FilmuVfsCatalogGrpcServer:
     @property
     def target(self) -> str:
         return self.bound_address or self._bind_address
+
+    def build_governance_snapshot(self) -> dict[str, int]:
+        """Return the current FilmuVFS catalog gRPC governance snapshot."""
+
+        return self._servicer.build_governance_snapshot()
 
     async def start(self) -> None:
         """Start serving the FilmuVFS catalog stream on the configured bind address."""

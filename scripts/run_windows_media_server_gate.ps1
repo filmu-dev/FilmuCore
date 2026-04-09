@@ -39,6 +39,24 @@ function Get-DefaultMountPath {
     Join-Path $systemDrive 'FilmuCoreVFS'
 }
 
+function Get-NativePlexUrl {
+    return 'http://127.0.0.1:32400'
+}
+
+function Get-NativePlexLocalAdminToken {
+    $localAppData = [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return ''
+    }
+
+    $tokenPath = Join-Path $localAppData 'Plex Media Server\.LocalAdminToken'
+    if (-not (Test-Path -LiteralPath $tokenPath)) {
+        return ''
+    }
+
+    return [string] (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+}
+
 function Test-ProviderConfigured {
     param(
         [Parameter(Mandatory = $true)][string] $Provider,
@@ -53,7 +71,7 @@ function Test-ProviderConfigured {
             return -not [string]::IsNullOrWhiteSpace([string] $env:EMBY_API_KEY) -or ($DotEnv.ContainsKey('EMBY_API_KEY') -and -not [string]::IsNullOrWhiteSpace([string] $DotEnv['EMBY_API_KEY']))
         }
         'plex' {
-            return -not [string]::IsNullOrWhiteSpace([string] $env:PLEX_TOKEN) -or ($DotEnv.ContainsKey('PLEX_TOKEN') -and -not [string]::IsNullOrWhiteSpace([string] $DotEnv['PLEX_TOKEN']))
+            return -not [string]::IsNullOrWhiteSpace([string] $env:PLEX_TOKEN) -or ($DotEnv.ContainsKey('PLEX_TOKEN') -and -not [string]::IsNullOrWhiteSpace([string] $DotEnv['PLEX_TOKEN'])) -or (-not [string]::IsNullOrWhiteSpace((Get-NativePlexLocalAdminToken)))
         }
         default {
             throw ("Unsupported provider '{0}'." -f $Provider)
@@ -128,6 +146,15 @@ foreach ($provider in $Providers) {
     $argList.Add($Title)
     $argList.Add('-MediaType')
     $argList.Add($MediaType)
+    if ($provider -eq 'plex') {
+        $argList.Add('-MediaServerUrl')
+        $argList.Add((Get-NativePlexUrl))
+        $nativePlexToken = Get-NativePlexLocalAdminToken
+        if (-not [string]::IsNullOrWhiteSpace($nativePlexToken)) {
+            $argList.Add('-MediaServerToken')
+            $argList.Add($nativePlexToken)
+        }
+    }
     if ($sharedReuse) { $argList.Add('-ReuseExistingItem') }
     if ($sharedSkipStart) { $argList.Add('-SkipStart') }
 
@@ -155,6 +182,12 @@ foreach ($provider in $Providers) {
             }
             if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'playback_start_details') {
                 $details = [string] $artifactSummary.media_server.playback_start_details
+            }
+            if ([string]::IsNullOrWhiteSpace($details) -and ($artifactSummary.PSObject.Properties.Name -contains 'steps')) {
+                $failedStep = @($artifactSummary.steps) | Where-Object { [string] $_.status -eq 'failed' } | Select-Object -Last 1
+                if (($null -ne $failedStep) -and ($failedStep.PSObject.Properties.Name -contains 'details')) {
+                    $details = [string] $failedStep.details
+                }
             }
         }
     }

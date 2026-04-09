@@ -48,7 +48,7 @@ def register_builtin_plugins(
 
 
 def _manifest(**payload: object) -> PluginManifest:
-    return PluginManifest.model_validate(payload)
+    return PluginManifest.model_validate({"distribution": "builtin", **payload})
 
 
 def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCapabilityKind, object]]:

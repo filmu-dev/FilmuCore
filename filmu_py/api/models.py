@@ -19,6 +19,16 @@ class PluginCapabilityStatusResponse(BaseModel):
 
     name: str
     capabilities: list[str]
+    status: Literal["loaded", "load_failed"] = "loaded"
+    ready: bool = True
+    configured: bool | None = None
+    version: str | None = None
+    api_version: str | None = None
+    min_host_version: str | None = None
+    max_host_version: str | None = None
+    source: str | None = None
+    warnings: list[str] = []
+    error: str | None = None
 
 
 class PluginEventStatusResponse(BaseModel):
@@ -133,6 +143,10 @@ class ServingGovernanceResponse(BaseModel):
     remote_hls_cooldown_starts: int
     remote_hls_cooldown_hits: int
     remote_hls_cooldowns_active: int
+    inline_remote_hls_refresh_attempts: int
+    inline_remote_hls_refresh_recovered: int
+    inline_remote_hls_refresh_no_action: int
+    inline_remote_hls_refresh_failures: int
     direct_playback_refresh_trigger_starts: int
     direct_playback_refresh_trigger_no_action: int
     direct_playback_refresh_trigger_controller_unavailable: int
@@ -169,6 +183,96 @@ class ServingGovernanceResponse(BaseModel):
     selected_hls_streams_needing_refresh: int
     selected_direct_streams_failed: int
     selected_hls_streams_failed: int
+    direct_playback_refresh_rate_limited: int
+    direct_playback_refresh_provider_circuit_open: int
+    hls_failed_lease_refresh_rate_limited: int
+    hls_failed_lease_refresh_provider_circuit_open: int
+    hls_restricted_fallback_refresh_rate_limited: int
+    hls_restricted_fallback_refresh_provider_circuit_open: int
+    vfs_catalog_watch_sessions_started: int
+    vfs_catalog_watch_sessions_completed: int
+    vfs_catalog_watch_sessions_active: int
+    vfs_catalog_reconnect_requested: int
+    vfs_catalog_reconnect_delta_served: int
+    vfs_catalog_reconnect_snapshot_fallback: int
+    vfs_catalog_reconnect_failures: int
+    vfs_catalog_snapshots_served: int
+    vfs_catalog_deltas_served: int
+    vfs_catalog_heartbeats_served: int
+    vfs_catalog_problem_events: int
+    vfs_catalog_request_stream_failures: int
+    vfs_catalog_snapshot_build_failures: int
+    vfs_catalog_delta_build_failures: int
+    vfs_catalog_refresh_attempts: int
+    vfs_catalog_refresh_succeeded: int
+    vfs_catalog_refresh_provider_failures: int
+    vfs_catalog_refresh_empty_results: int
+    vfs_catalog_refresh_validation_failed: int
+    vfs_catalog_refresh_skipped_no_provider: int
+    vfs_catalog_refresh_skipped_no_restricted_url: int
+    vfs_catalog_refresh_skipped_no_client: int
+    vfs_catalog_refresh_skipped_fresh: int
+    vfs_catalog_inline_refresh_requests: int
+    vfs_catalog_inline_refresh_succeeded: int
+    vfs_catalog_inline_refresh_failed: int
+    vfs_catalog_inline_refresh_not_found: int
+    vfs_runtime_snapshot_available: int
+    vfs_runtime_open_handles: int
+    vfs_runtime_active_reads: int
+    vfs_runtime_chunk_cache_weighted_bytes: int
+    vfs_runtime_handle_startup_total: int
+    vfs_runtime_handle_startup_ok: int
+    vfs_runtime_handle_startup_error: int
+    vfs_runtime_handle_startup_estale: int
+    vfs_runtime_handle_startup_average_duration_ms: int
+    vfs_runtime_handle_startup_max_duration_ms: int
+    vfs_runtime_mounted_reads_total: int
+    vfs_runtime_mounted_reads_ok: int
+    vfs_runtime_mounted_reads_error: int
+    vfs_runtime_mounted_reads_estale: int
+    vfs_runtime_mounted_reads_average_duration_ms: int
+    vfs_runtime_mounted_reads_max_duration_ms: int
+    vfs_runtime_upstream_fetch_operations: int
+    vfs_runtime_upstream_fetch_bytes_total: int
+    vfs_runtime_upstream_fetch_average_duration_ms: int
+    vfs_runtime_upstream_fetch_max_duration_ms: int
+    vfs_runtime_upstream_fail_invalid_url: int
+    vfs_runtime_upstream_fail_build_request: int
+    vfs_runtime_upstream_fail_network: int
+    vfs_runtime_upstream_fail_stale_status: int
+    vfs_runtime_upstream_fail_unexpected_status: int
+    vfs_runtime_upstream_fail_unexpected_status_too_many_requests: int
+    vfs_runtime_upstream_fail_unexpected_status_server_error: int
+    vfs_runtime_upstream_fail_read_body: int
+    vfs_runtime_upstream_retryable_network: int
+    vfs_runtime_upstream_retryable_read_body: int
+    vfs_runtime_upstream_retryable_status_too_many_requests: int
+    vfs_runtime_upstream_retryable_status_server_error: int
+    vfs_runtime_backend_fallback_attempts: int
+    vfs_runtime_backend_fallback_success: int
+    vfs_runtime_backend_fallback_failure: int
+    vfs_runtime_backend_fallback_attempts_direct_read_failure: int
+    vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable: int
+    vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure: int
+    vfs_runtime_backend_fallback_success_direct_read_failure: int
+    vfs_runtime_backend_fallback_success_inline_refresh_unavailable: int
+    vfs_runtime_backend_fallback_success_post_inline_refresh_failure: int
+    vfs_runtime_backend_fallback_failure_direct_read_failure: int
+    vfs_runtime_backend_fallback_failure_inline_refresh_unavailable: int
+    vfs_runtime_backend_fallback_failure_post_inline_refresh_failure: int
+    vfs_runtime_chunk_cache_hits: int
+    vfs_runtime_chunk_cache_misses: int
+    vfs_runtime_chunk_cache_inserts: int
+    vfs_runtime_chunk_cache_prefetch_hits: int
+    vfs_runtime_prefetch_background_spawned: int
+    vfs_runtime_prefetch_background_backpressure: int
+    vfs_runtime_prefetch_background_error: int
+    vfs_runtime_inline_refresh_success: int
+    vfs_runtime_inline_refresh_no_url: int
+    vfs_runtime_inline_refresh_error: int
+    vfs_runtime_inline_refresh_timeout: int
+    vfs_runtime_windows_callbacks_error: int
+    vfs_runtime_windows_callbacks_estale: int
 
 
 class ServingStatusResponse(BaseModel):

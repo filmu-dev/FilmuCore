@@ -145,6 +145,8 @@ pub struct SidecarConfig {
     pub chunk_size_scan_kb: usize,
     pub chunk_size_random_kb: usize,
     pub windows_projfs_summary_interval: Duration,
+    pub runtime_status_path: Option<PathBuf>,
+    pub runtime_status_interval: Duration,
 }
 
 impl SidecarConfig {
@@ -205,6 +207,12 @@ impl SidecarConfig {
             "FILMUVFS_WINDOWS_PROJFS_SUMMARY_INTERVAL_SECONDS",
             default_windows_projfs_summary_interval_seconds(),
         )?;
+        let runtime_status_path = env::var("FILMUVFS_RUNTIME_STATUS_PATH")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from);
+        let runtime_status_interval_seconds =
+            parse_u64("FILMUVFS_RUNTIME_STATUS_INTERVAL_SECONDS", 0)?;
 
         let args: Vec<String> = env::args().skip(1).collect();
         let mut index = 0;
@@ -396,6 +404,8 @@ impl SidecarConfig {
             windows_projfs_summary_interval: Duration::from_secs(
                 windows_projfs_summary_interval_seconds,
             ),
+            runtime_status_path,
+            runtime_status_interval: Duration::from_secs(runtime_status_interval_seconds),
         })
     }
 }
