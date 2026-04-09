@@ -88,7 +88,7 @@ impl VelocityTracker {
             };
         }
 
-        if self.sequential_streak > 0 && self.sequential_streak % 4 == 0 {
+        if self.sequential_streak > 0 && self.sequential_streak.is_multiple_of(4) {
             self.prefetch_chunks = self
                 .prefetch_chunks
                 .saturating_mul(2)
@@ -125,9 +125,7 @@ impl PrefetchScheduler {
     }
 
     pub fn register_handle(&self, handle_key: &str) {
-        self.handle_tokens
-            .entry(handle_key.to_owned())
-            .or_insert_with(CancellationToken::new);
+        self.handle_tokens.entry(handle_key.to_owned()).or_default();
     }
 
     pub fn cancel_handle(&self, handle_key: &str) {
@@ -152,7 +150,7 @@ impl PrefetchScheduler {
         let token = self
             .handle_tokens
             .entry(handle_key.to_owned())
-            .or_insert_with(CancellationToken::new)
+            .or_default()
             .clone();
         let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
             return false;

@@ -56,7 +56,7 @@ const WINDOWS_PROJFS_SLOW_CALLBACK_WARN_MS: u128 = 250;
 const WINDOWS_PROJFS_CALLBACK_WRITE_CHUNK_BYTES: u32 = 8 * 1024 * 1024;
 const WINDOWS_PROJFS_LARGE_REQUEST_THRESHOLD_BYTES: u32 = 512 * 1024 * 1024;
 const WINDOWS_PROJFS_LARGE_REQUEST_WRITE_CHUNK_BYTES: u32 = 64 * 1024 * 1024;
-const WINDOWS_PROJFS_BOOTSTRAP_CHUNK_BYTES: u32 = 1 * 1024 * 1024;
+const WINDOWS_PROJFS_BOOTSTRAP_CHUNK_BYTES: u32 = 1024 * 1024;
 const WINDOWS_PROJFS_SENTINEL_LENGTH_FLOOR: u32 = 0xFFFF_0000;
 const WINDOWS_PROJFS_SENTINEL_MAX_SERVICE_BYTES: u64 = 512 * 1024;
 const WINDOWS_PROJFS_TAIL_PREFETCH_BYTES: u32 = 4 * 1024 * 1024;
@@ -643,7 +643,7 @@ impl WindowsProjfsInstance {
             let mut read_offset = next_offset;
             let mut read_length = request_length;
             let mut leading_aligned_bytes = 0u32;
-            if next_offset % WINDOWS_PROJFS_WRITE_ALIGNMENT_BYTES != 0 {
+            if !next_offset.is_multiple_of(WINDOWS_PROJFS_WRITE_ALIGNMENT_BYTES) {
                 let aligned_offset = next_offset & !(WINDOWS_PROJFS_WRITE_ALIGNMENT_BYTES - 1);
                 let prefix = (next_offset - aligned_offset) as u32;
                 read_offset = aligned_offset;
@@ -753,8 +753,8 @@ impl WindowsProjfsInstance {
                     requested_length = read_length,
                     delivered_length = bytes.len(),
                     full_requested_length = length,
-                    offset_aligned_4k = read_offset % 4096 == 0,
-                    length_aligned_4k = bytes.len() % 4096 == 0,
+                    offset_aligned_4k = read_offset.is_multiple_of(4096),
+                    length_aligned_4k = bytes.len().is_multiple_of(4096),
                     write_end_exclusive,
                     known_file_size = handle.size_bytes,
                     write_past_known_size,
@@ -1412,10 +1412,11 @@ fn placeholder_info_for_path(
     content_seed: &str,
     file_basic_info: PRJ_FILE_BASIC_INFO,
 ) -> PRJ_PLACEHOLDER_INFO {
-    let mut placeholder = PRJ_PLACEHOLDER_INFO::default();
-    placeholder.FileBasicInfo = file_basic_info;
-    placeholder.VersionInfo = placeholder_version(provider_seed, content_seed);
-    placeholder
+    PRJ_PLACEHOLDER_INFO {
+        FileBasicInfo: file_basic_info,
+        VersionInfo: placeholder_version(provider_seed, content_seed),
+        ..Default::default()
+    }
 }
 
 fn fixed_identifier(seed: &str) -> [u8; 128] {
@@ -1484,10 +1485,7 @@ fn hresult_from_win32(code: u32) -> HRESULT {
 }
 
 fn io_error_from_hresult(hr: HRESULT, context: &str) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("{context}: {}", format_hresult(hr)),
-    )
+    std::io::Error::other(format!("{context}: {}", format_hresult(hr)))
 }
 
 fn format_hresult(hr: HRESULT) -> String {

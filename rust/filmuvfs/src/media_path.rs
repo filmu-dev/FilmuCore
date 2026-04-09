@@ -257,17 +257,7 @@ fn parse_x_notation(file_name: &str) -> Option<(u32, u32)> {
 }
 
 fn parse_episode_word_number(file_name: &str) -> Option<u32> {
-    let normalized = sanitize_token(file_name);
-    for needle in ["episode", "ep", "e"] {
-        if let Some(start) = normalized.find(needle) {
-            let number_start = start + needle.len();
-            let Some(number_end) = consume_digits(normalized.as_bytes(), number_start, 3) else {
-                continue;
-            };
-            return normalized[number_start..number_end].parse::<u32>().ok();
-        }
-    }
-    None
+    parse_prefixed_number_from_words(file_name, &["episode", "ep", "e"], 3)
 }
 
 fn parse_filename_token(file_name: &str, prefixes: &[&str], max_digits: usize) -> Option<u32> {
@@ -312,13 +302,72 @@ fn sanitize_token(value: &str) -> String {
         .join("")
 }
 
+fn sanitize_token_with_separators(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+fn parse_prefixed_number_from_words(
+    value: &str,
+    prefixes: &[&str],
+    max_digits: usize,
+) -> Option<u32> {
+    let normalized = sanitize_token_with_separators(value);
+    let bytes = normalized.as_bytes();
+
+    for prefix in prefixes {
+        let prefix_bytes = prefix.as_bytes();
+        if prefix_bytes.is_empty() || prefix_bytes.len() > bytes.len() {
+            continue;
+        }
+
+        let mut index = 0;
+        while index + prefix_bytes.len() <= bytes.len() {
+            if !normalized[index..].starts_with(prefix) {
+                index += 1;
+                continue;
+            }
+
+            if index > 0 && !bytes[index - 1].is_ascii_whitespace() {
+                index += 1;
+                continue;
+            }
+
+            let mut number_start = index + prefix_bytes.len();
+            while number_start < bytes.len() && bytes[number_start].is_ascii_whitespace() {
+                number_start += 1;
+            }
+
+            let Some(number_end) = consume_digits(bytes, number_start, max_digits) else {
+                index += 1;
+                continue;
+            };
+
+            return normalized[number_start..number_end].parse::<u32>().ok();
+        }
+    }
+
+    None
+}
+
 fn is_specials_segment(segment: &str) -> bool {
     sanitize_token(segment).contains("specials")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_media_semantic_path, MediaSemanticPathInfo, MediaSemanticPathType};
+    use super::{
+        parse_episode_from_filename, parse_media_semantic_path, MediaSemanticPathInfo,
+        MediaSemanticPathType,
+    };
 
     #[test]
     fn parses_movie_file_path_and_tmdb_external_ref() {
@@ -387,5 +436,15 @@ mod tests {
         assert!(info.tmdb_id.is_none());
         assert!(info.tvdb_id.is_none());
         assert!(info.imdb_id.is_none());
+    }
+
+    #[test]
+    fn fallback_episode_parser_ignores_embedded_e_false_positives() {
+        assert_eq!(parse_episode_from_filename("The100.mkv"), None);
+    }
+
+    #[test]
+    fn fallback_episode_parser_scans_later_e_prefixes() {
+        assert_eq!(parse_episode_from_filename("revenge_e03.mkv"), Some(3));
     }
 }

@@ -239,13 +239,6 @@ pub fn inode_for_entry_id(entry_id: &str) -> u64 {
     hash
 }
 
-fn build_state(
-    entries: Vec<CatalogEntry>,
-    generation_id: Option<String>,
-) -> Result<CatalogStateInner, CatalogStateError> {
-    build_state_with_existing(entries, generation_id, None)
-}
-
 fn build_state_with_existing(
     entries: Vec<CatalogEntry>,
     generation_id: Option<String>,

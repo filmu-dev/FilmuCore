@@ -12,7 +12,7 @@ use crate::{
 #[derive(Debug)]
 pub enum WindowsMountedFilesystem {
     Projfs(WindowsProjfsMountedFilesystem),
-    Winfsp(WindowsWinfspMountedFilesystem),
+    Winfsp(Box<WindowsWinfspMountedFilesystem>),
 }
 
 impl WindowsMountedFilesystem {
@@ -48,7 +48,7 @@ impl MountRuntime {
             ResolvedMountAdapterKind::Winfsp => self
                 .mount_winfsp_filesystem(&mount_path, service_name, allow_other)
                 .await
-                .map(WindowsMountedFilesystem::Winfsp),
+                .map(|filesystem| WindowsMountedFilesystem::Winfsp(Box::new(filesystem))),
             ResolvedMountAdapterKind::Fuse => Err(Error::new(
                 ErrorKind::Unsupported,
                 "the Linux fuse adapter is not supported on Windows hosts",
