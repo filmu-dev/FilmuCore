@@ -505,6 +505,13 @@ fn ensure_positive_u32(value: u32, name: &str) -> Result<()> {
     Ok(())
 }
 
+fn mebibytes_to_bytes(value: usize) -> Result<u64> {
+    let value = u64::try_from(value).context("cache size exceeds u64")?;
+    value
+        .checked_mul(1024 * 1024)
+        .context("cache size overflowed u64 when converting mebibytes to bytes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -579,11 +586,4 @@ mod tests {
             ResolvedMountAdapterKind::Fuse
         );
     }
-}
-
-fn mebibytes_to_bytes(value: usize) -> Result<u64> {
-    let value = u64::try_from(value).context("cache size exceeds u64")?;
-    value
-        .checked_mul(1024 * 1024)
-        .context("cache size overflowed u64 when converting mebibytes to bytes")
 }

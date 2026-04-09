@@ -49,7 +49,7 @@ const FILE_SYSTEM_NAME: &str = "FILMUVFS";
 const WINFSP_DISK_DEVICE_NAME: &str = "WinFsp.Disk";
 
 enum WinfspBackendHandle {
-    Wrapper(FileSystem),
+    Wrapper(Box<FileSystem>),
     Raw {
         file_system: *mut FSP_FILE_SYSTEM,
         context: *mut WinfspFilesystem,
@@ -234,9 +234,8 @@ impl WinfspFilesystem {
             .map_err(ntstatus_from_mount_error)?;
         self.runtime
             .spawn_startup_prefetch(&handle, &self.runtime_handle);
-        let file_info = self.mount_file_info(handle.inode).map_err(|error| {
+        let file_info = self.mount_file_info(handle.inode).inspect_err(|_| {
             let _ = self.runtime.release(handle.handle_id);
-            error
         })?;
         Ok((
             WinfspFileContext {
@@ -993,6 +992,10 @@ unsafe extern "C" fn winfsp_get_security_by_name(
     })
 }
 
+#[expect(
+    dead_code,
+    reason = "CreateEx is kept as the planned extended WinFSP callback, but the interface table still uses Create only"
+)]
 unsafe extern "C" fn winfsp_create_ex(
     file_system: *mut FSP_FILE_SYSTEM,
     file_name: PWSTR,
@@ -1201,7 +1204,7 @@ unsafe extern "C" fn winfsp_read(
                 bytes_transferred.write(0);
             }
         }
-        match fs.read(&file_context, buffer, offset) {
+        match fs.read(file_context, buffer, offset) {
             Ok(read) => {
                 if !bytes_transferred.is_null() {
                     unsafe {
@@ -1591,21 +1594,18 @@ impl MountRuntime {
             let file_system =
                 FileSystem::start(params, Some(mountpoint.as_ucstr()), context.clone()).map_err(
                     |status| {
-                        Error::new(
-                            ErrorKind::Other,
-                            format!(
-                                "failed to start WinFSP wrapper mount at {}: 0x{:08X}",
-                                mount_path.display(),
-                                status as u32
-                            ),
-                        )
+                        Error::other(format!(
+                            "failed to start WinFSP wrapper mount at {}: 0x{:08X}",
+                            mount_path.display(),
+                            status as u32
+                        ))
                     },
                 )?;
             trace_callback(format!(
                 "dispatcher_mountpoint path={} mountpoint={mountpoint_spec}",
                 mount_path.display()
             ));
-            Ok(WinfspBackendHandle::Wrapper(file_system))
+            Ok(WinfspBackendHandle::Wrapper(Box::new(file_system)))
         };
 
         let start_raw_backend = || -> Result<WinfspBackendHandle> {
@@ -1631,19 +1631,16 @@ impl MountRuntime {
                     drop(Box::from_raw(context_ptr));
                     drop(Box::from_raw(interface));
                 }
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "failed to create raw WinFSP filesystem at {}: 0x{:08X}",
-                        mount_path.display(),
-                        create_status as u32
-                    ),
-                ));
+                return Err(Error::other(format!(
+                    "failed to create raw WinFSP filesystem at {}: 0x{:08X}",
+                    mount_path.display(),
+                    create_status as u32
+                )));
             }
 
             unsafe {
                 (*file_system).UserContext = context_ptr.cast();
-                FspDebugLogSetHandle(GetStdHandle(STD_ERROR_HANDLE) as *mut std::ffi::c_void);
+                FspDebugLogSetHandle(GetStdHandle(STD_ERROR_HANDLE));
                 FspFileSystemSetDebugLogF(file_system, u32::MAX);
                 FspFileSystemSetOperationGuardStrategyF(
                     file_system,
@@ -1659,14 +1656,11 @@ impl MountRuntime {
                     drop(Box::from_raw(context_ptr));
                     drop(Box::from_raw(interface));
                 }
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "failed to set raw WinFSP mountpoint at {}: 0x{:08X}",
-                        mount_path.display(),
-                        mount_status as u32
-                    ),
-                ));
+                return Err(Error::other(format!(
+                    "failed to set raw WinFSP mountpoint at {}: 0x{:08X}",
+                    mount_path.display(),
+                    mount_status as u32
+                )));
             }
 
             let dispatch_status = unsafe { FspFileSystemStartDispatcher(file_system, 0) };
@@ -1677,14 +1671,11 @@ impl MountRuntime {
                     drop(Box::from_raw(context_ptr));
                     drop(Box::from_raw(interface));
                 }
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "failed to start raw WinFSP dispatcher at {}: 0x{:08X}",
-                        mount_path.display(),
-                        dispatch_status as u32
-                    ),
-                ));
+                return Err(Error::other(format!(
+                    "failed to start raw WinFSP dispatcher at {}: 0x{:08X}",
+                    mount_path.display(),
+                    dispatch_status as u32
+                )));
             }
 
             trace_callback(format!(
@@ -1720,12 +1711,9 @@ impl MountRuntime {
                         );
                         start_wrapper_backend()
                     } else {
-                        Err(Error::new(
-                            ErrorKind::Other,
-                            format!(
-                                "raw WinFSP host backend failed and wrapper fallback is disabled (set FILMUVFS_WINFSP_ALLOW_WRAPPER_FALLBACK=1 to re-enable fallback): {raw_error}"
-                            ),
-                        ))
+                        Err(Error::other(format!(
+                            "raw WinFSP host backend failed and wrapper fallback is disabled (set FILMUVFS_WINFSP_ALLOW_WRAPPER_FALLBACK=1 to re-enable fallback): {raw_error}"
+                        )))
                     }
                 }
             }
@@ -1921,10 +1909,7 @@ fn winfsp_read_only_volume() -> bool {
         return true;
     };
     let parsed = raw.to_string_lossy().trim().to_ascii_lowercase();
-    match parsed.as_str() {
-        "0" | "false" | "no" | "off" => false,
-        _ => true,
-    }
+    !matches!(parsed.as_str(), "0" | "false" | "no" | "off")
 }
 
 fn winfsp_volume_params_version() -> u16 {

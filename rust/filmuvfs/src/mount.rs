@@ -212,6 +212,7 @@ impl InlineRefreshFlight {
 
     async fn wait(&self) -> Option<String> {
         loop {
+            let notified = self.notify.notified();
             if let Some(result) = self
                 .result
                 .lock()
@@ -220,7 +221,7 @@ impl InlineRefreshFlight {
             {
                 return result;
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 }
@@ -1609,8 +1610,10 @@ fn build_default_chunk_engine(
 ) -> Arc<ChunkEngine> {
     let cache: Arc<dyn CacheEngine> =
         Arc::new(MemoryCache::new(crate::config::DEFAULT_L1_MAX_BYTES));
-    let mut planner = ChunkPlannerConfig::default();
-    planner.sequential_prefetch_chunks = prefetch_config.min_chunks as usize;
+    let planner = ChunkPlannerConfig {
+        sequential_prefetch_chunks: prefetch_config.min_chunks as usize,
+        ..ChunkPlannerConfig::default()
+    };
     Arc::new(
         ChunkEngine::new(
             cache,
@@ -2647,7 +2650,10 @@ fn is_windows_drive_mountpoint(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_chunk_read_request, parse_media_semantic_path, MountReadRequest};
+    use super::{
+        build_chunk_read_request, parse_media_semantic_path, InlineRefreshFlight, MountReadRequest,
+    };
+    use tokio::time::{timeout, Duration};
 
     fn sample_request(provider_file_id: Option<&str>) -> MountReadRequest {
         MountReadRequest {
@@ -2695,5 +2701,53 @@ mod tests {
             Some("movie-file")
         );
         assert_eq!(request.semantic_path.tmdb_id.as_deref(), Some("123"));
+    }
+
+    #[tokio::test]
+    async fn inline_refresh_wait_returns_finished_value() {
+        let flight = InlineRefreshFlight::new();
+        flight.finish(Some("https://example.invalid/refreshed".to_owned()));
+
+        let result = timeout(Duration::from_secs(1), flight.wait())
+            .await
+            .expect("wait should complete");
+
+        assert_eq!(result.as_deref(), Some("https://example.invalid/refreshed"));
+    }
+
+    #[tokio::test]
+    async fn inline_refresh_finish_wakes_multiple_waiters() {
+        let flight = std::sync::Arc::new(InlineRefreshFlight::new());
+        let waiter_a = {
+            let flight = flight.clone();
+            tokio::spawn(async move {
+                timeout(Duration::from_secs(1), flight.wait())
+                    .await
+                    .expect("first waiter should complete")
+            })
+        };
+        let waiter_b = {
+            let flight = flight.clone();
+            tokio::spawn(async move {
+                timeout(Duration::from_secs(1), flight.wait())
+                    .await
+                    .expect("second waiter should complete")
+            })
+        };
+
+        tokio::task::yield_now().await;
+        flight.finish(Some("https://example.invalid/refreshed".to_owned()));
+
+        let result_a = waiter_a.await.expect("first waiter task should join");
+        let result_b = waiter_b.await.expect("second waiter task should join");
+
+        assert_eq!(
+            result_a.as_deref(),
+            Some("https://example.invalid/refreshed")
+        );
+        assert_eq!(
+            result_b.as_deref(),
+            Some("https://example.invalid/refreshed")
+        );
     }
 }
