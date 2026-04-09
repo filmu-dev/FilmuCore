@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import count
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import perf_counter
 from typing import Final, Literal
 
@@ -1415,6 +1415,38 @@ def referenced_local_hls_files(playlist_path: Path) -> set[Path]:
             detail="Generated HLS playlist has no media segments",
         )
     return referenced
+
+
+def resolve_referenced_local_hls_file(playlist_path: Path, child_path: str) -> Path:
+    """Resolve one HLS child path by matching against the trusted playlist file set."""
+
+    requested = PurePosixPath(child_path)
+    if requested.is_absolute() or ".." in requested.parts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid HLS file path",
+        )
+
+    normalized_child = requested.as_posix().lstrip("./")
+    if not normalized_child or normalized_child.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid HLS file path",
+        )
+
+    playlist_root = playlist_path.parent.resolve()
+    for referenced in referenced_local_hls_files(playlist_path):
+        try:
+            relative = referenced.relative_to(playlist_root).as_posix()
+        except ValueError:
+            continue
+        if relative == normalized_child:
+            return referenced
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Generated HLS file is missing",
+    )
 
 
 def is_complete_local_hls_playlist(playlist_path: Path) -> bool:

@@ -1614,10 +1614,14 @@ async def _serve_hls_child_from_resolved_source(
         if local_hls_transcode_profile is not None
         else await byte_streaming.ensure_local_hls_playlist(source_value, local_hls_item_key)
     )
-    candidate = byte_streaming.resolve_safe_child_path(playlist_path.parent, file_path)
-    referenced_files = byte_streaming.referenced_local_hls_files(playlist_path)
+    try:
+        candidate = byte_streaming.resolve_referenced_local_hls_file(playlist_path, file_path)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            _record_hls_route_failure(reason="generated_missing")
+        raise
 
-    if candidate.resolve() not in referenced_files or not candidate.is_file():
+    if not candidate.is_file():
         _record_hls_route_failure(reason="generated_missing")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
