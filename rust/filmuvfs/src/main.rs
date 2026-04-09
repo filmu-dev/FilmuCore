@@ -3,7 +3,7 @@ use filmuvfs::{
     capabilities::BinaryCapabilities,
     config::SidecarConfig,
     runtime::SidecarRuntime,
-    telemetry::{log_windows_projfs_summary, TelemetryGuard},
+    telemetry::{log_windows_projfs_summary, write_runtime_status_snapshot, TelemetryGuard},
 };
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant, MissedTickBehavior};
@@ -27,6 +27,12 @@ async fn main() -> Result<()> {
         TelemetryGuard::init(&config, runtime.catalog_state(), runtime.mount_runtime())?;
     let cancel = CancellationToken::new();
     let summary_task = spawn_windows_projfs_summary_task(&config, cancel.clone());
+    let runtime_status_task = spawn_runtime_status_task(&config, cancel.clone());
+    if let Some(path) = config.runtime_status_path.as_deref() {
+        if let Err(error) = write_runtime_status_snapshot(path, &config) {
+            error!(path = %path.display(), error = %error, "failed to write initial runtime status snapshot");
+        }
+    }
 
     let runtime_task: JoinHandle<Result<()>> = {
         let cancel = cancel.clone();
@@ -83,6 +89,19 @@ async fn main() -> Result<()> {
             );
         }
     }
+    if let Some(runtime_status_task) = runtime_status_task {
+        if let Err(join_error) = runtime_status_task.await {
+            error!(
+                error = %join_error,
+                "runtime status task exited unexpectedly"
+            );
+        }
+    }
+    if let Some(path) = config.runtime_status_path.as_deref() {
+        if let Err(error) = write_runtime_status_snapshot(path, &config) {
+            error!(path = %path.display(), error = %error, "failed to write final runtime status snapshot");
+        }
+    }
 
     log_windows_projfs_summary();
 
@@ -136,6 +155,46 @@ fn spawn_windows_projfs_summary_task(
                 _ = cancel.cancelled() => break,
                 _ = ticker.tick() => {
                     log_windows_projfs_summary();
+                }
+            }
+        }
+    }))
+}
+
+fn spawn_runtime_status_task(
+    config: &SidecarConfig,
+    cancel: CancellationToken,
+) -> Option<JoinHandle<()>> {
+    let Some(path) = config.runtime_status_path.clone() else {
+        return None;
+    };
+    let interval = config.runtime_status_interval;
+    if interval.is_zero() {
+        return None;
+    }
+
+    info!(
+        interval_seconds = interval.as_secs(),
+        path = %path.display(),
+        "starting runtime status snapshot task"
+    );
+
+    let config = config.clone();
+    Some(tokio::spawn(async move {
+        let mut ticker = time::interval_at(Instant::now() + interval, interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = ticker.tick() => {
+                    if let Err(error) = write_runtime_status_snapshot(&path, &config) {
+                        error!(
+                            path = %path.display(),
+                            error = %error,
+                            "failed to write runtime status snapshot"
+                        );
+                    }
                 }
             }
         }

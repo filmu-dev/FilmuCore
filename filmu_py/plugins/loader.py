@@ -30,6 +30,8 @@ PLUGIN_LOAD_TOTAL = Counter(
 def _plugin_load_result(reason: str) -> str:
     if reason == "host_version_incompatible":
         return "skipped_version"
+    if reason == "api_version_incompatible":
+        return "skipped_api_version"
     if "plugin.json" in reason or "manifest" in reason:
         return "skipped_manifest"
     return "failed"
@@ -42,6 +44,11 @@ class PluginLoadSuccess:
     plugin_name: str
     version: str
     plugin_dir: Path
+    source: str
+    api_version: str
+    distribution: str
+    min_host_version: str | None
+    max_host_version: str | None
     registered_query_resolvers: int
     registered_mutation_resolvers: int
     registered_subscription_resolvers: int
@@ -53,7 +60,9 @@ class PluginLoadSuccess:
 class PluginLoadFailure:
     """Failure record for one plugin directory that could not be loaded."""
 
+    plugin_name: str
     plugin_dir: Path
+    source: str
     reason: str
 
 
@@ -170,7 +179,7 @@ def _register_plugin(
         if isinstance(manifest_data, PluginManifest)
         else PluginManifest.model_validate(manifest_data)
     )
-    manifest.ensure_host_compatibility(host_version)
+    manifest.ensure_host_compatibility(host_version, supported_api_versions=("1",))
     registry.register_manifest(manifest)
 
     skipped_messages: list[str] = []
@@ -240,6 +249,11 @@ def _register_plugin(
         plugin_name=manifest.name,
         version=manifest.version,
         plugin_dir=manifest_source,
+        source=manifest.distribution,
+        api_version=manifest.api_version,
+        distribution=manifest.distribution,
+        min_host_version=manifest.min_host_version,
+        max_host_version=manifest.max_host_version,
         registered_query_resolvers=registered_counts[GraphQLResolverKind.QUERY],
         registered_mutation_resolvers=registered_counts[GraphQLResolverKind.MUTATION],
         registered_subscription_resolvers=registered_counts[GraphQLResolverKind.SUBSCRIPTION],
@@ -279,6 +293,8 @@ def load_plugins(
                 manifest = PluginManifest.model_validate_json(
                     manifest_path.read_text(encoding="utf-8")
                 )
+                if manifest.distribution == "filesystem":
+                    manifest = manifest.model_copy(update={"distribution": "filesystem"})
                 module = _load_plugin_module(plugin_dir, manifest)
                 success = _register_plugin(
                     manifest_source=plugin_dir,
@@ -292,8 +308,15 @@ def load_plugins(
                 )
             except Exception as exc:
                 reason = str(exc)
-                report.failed.append(PluginLoadFailure(plugin_dir=plugin_dir, reason=reason))
                 plugin_name = plugin_dir.name
+                report.failed.append(
+                    PluginLoadFailure(
+                        plugin_name=plugin_name,
+                        plugin_dir=plugin_dir,
+                        source="filesystem",
+                        reason=reason,
+                    )
+                )
                 PLUGIN_LOAD_TOTAL.labels(
                     plugin_name=plugin_name,
                     result=_plugin_load_result(reason),
@@ -325,6 +348,10 @@ def load_plugins(
         synthetic_plugin_dir = _packaged_plugin_dir(entry_point.name)
         try:
             manifest_data, loaded_module = _load_packaged_plugin(entry_point)
+            if isinstance(manifest_data, PluginManifest):
+                manifest_data = manifest_data.model_copy(update={"distribution": "entry_point"})
+            elif isinstance(manifest_data, dict):
+                manifest_data = {**manifest_data, "distribution": manifest_data.get("distribution", "entry_point")}
             success = _register_plugin(
                 manifest_source=synthetic_plugin_dir,
                 manifest_data=manifest_data,
@@ -337,7 +364,14 @@ def load_plugins(
             )
         except Exception as exc:
             reason = str(exc)
-            report.failed.append(PluginLoadFailure(plugin_dir=synthetic_plugin_dir, reason=reason))
+            report.failed.append(
+                PluginLoadFailure(
+                    plugin_name=entry_point.name,
+                    plugin_dir=synthetic_plugin_dir,
+                    source="entry_point",
+                    reason=reason,
+                )
+            )
             PLUGIN_LOAD_TOTAL.labels(
                 plugin_name=entry_point.name,
                 result=_plugin_load_result(reason),

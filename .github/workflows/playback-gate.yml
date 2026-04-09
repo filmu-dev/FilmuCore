@@ -2,6 +2,23 @@ name: Playback Gate
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "docker-compose.local.yml"
+      - "package.json"
+      - "scripts/run_playback_proof.ps1"
+      - "scripts/run_playback_proof_stability.ps1"
+      - "run_playback_gate_ci.sh"
+      - "scripts/run_media_server_proof_gate.ps1"
+      - "scripts/run_windows_media_server_gate.ps1"
+      - "scripts/run_windows_vfs_soak.ps1"
+      - "filmu_py/api/routes/stream.py"
+      - "filmu_py/core/byte_streaming.py"
+      - "filmu_py/services/playback.py"
+      - "filmu_py/workers/tasks.py"
+      - "tests/test_stream_routes.py"
   pull_request:
     paths:
       - "docker-compose.local.yml"
@@ -17,10 +34,14 @@ on:
       - "filmu_py/services/playback.py"
       - "filmu_py/workers/tasks.py"
       - "tests/test_stream_routes.py"
+  merge_group:
 
 concurrency:
-  group: playback-gate-${{ github.ref }}
+  group: playback-gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   playback-gate:
@@ -41,16 +62,65 @@ jobs:
       FILMU_FRONTEND_PASSWORD: ${{ secrets.FILMU_FRONTEND_PASSWORD }}
       FILMU_PY_API_KEY: ${{ secrets.FILMU_PY_API_KEY }}
       FILMU_BACKEND_CONTAINER_NAME: filmu-python
+      FILMU_PLAYBACK_REQUIRED_CHECK_NAME: Playback Gate / Playback Gate
       PLEX_URL: http://localhost:32401
       EMBY_URL: http://localhost:8097
       PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
       EMBY_API_KEY: ${{ secrets.EMBY_API_KEY }}
+      FILMU_REQUIRE_PROVIDER_GATE: "1"
     steps:
       - name: Checkout backend repo
         uses: actions/checkout@v4
+
+      - name: Validate runner readiness
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
+          ./scripts/check_playback_gate_runner.ps1 -RequireProviderGate -AsJson | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
 
       - name: Run playback gate
         run: |
           chmod +x ./run_playback_gate_ci.sh
           ./run_playback_gate_ci.sh
+
+      - name: Upload playback gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playback-gate-artifacts-${{ github.run_id }}
+          path: |
+            playback-proof-artifacts/**
+            filmuvfs_logs_tail.txt
+            compose_logs.txt
+            compose_ps.txt
+            frontend_logs*.txt
+            worker_logs*.txt
+            api_logs*.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Write playback gate summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Playback Gate"
+            echo
+            echo "- Event: \`${{ github.event_name }}\`"
+            echo "- Ref: \`${{ github.ref }}\`"
+            echo "- Required check name: \`${FILMU_PLAYBACK_REQUIRED_CHECK_NAME}\`"
+            echo "- Provider parity gate required: \`${FILMU_REQUIRE_PROVIDER_GATE}\`"
+            echo "- Artifacts: \`playback-gate-artifacts-${{ github.run_id }}\`"
+            echo
+            if [[ -f playback-proof-artifacts/runner-readiness.json ]]; then
+              echo "Runner readiness artifact captured."
+            else
+              echo "Runner readiness artifact missing."
+            fi
+            if [[ -f playback-proof-artifacts/ci-execution-summary.json ]]; then
+              echo "CI execution summary artifact captured."
+            else
+              echo "CI execution summary artifact missing."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
 

@@ -100,8 +100,8 @@ What does **not** exist yet:
 - later HLS governance deepening beyond the new production-grade HTTP baseline, especially any Rust/mount-side reuse and broader resource-policy tuning
 - deeper governance around remote-direct-backed HLS generation remains necessary even after the new transcode fallback baseline, especially around ffmpeg failure policy and end-to-end player validation
 - richer mounted data-plane observability and cross-process correlation once the shared chunk engine is driving real mounted reads
-- repeatable Docker Plex playback-proof coverage on top of the now-working `/mnt/filmuvfs` path
-- later native Windows Plex parity evidence once a real local PMS target exists against `C:\FilmuCoreVFS`
+- repeatable Docker Plex playback-proof coverage on top of the now-working `/mnt/filmuvfs` path, with the new `plex-wsl-evidence.json` artifact and per-check summary fields driven to green
+- keep native Windows Plex parity evidence green against `C:\FilmuCoreVFS` through repeatable reruns now that the local PMS path is live-green
 
 ---
 
@@ -119,9 +119,9 @@ The original TS backend already has a real native VFS path, including:
 
 For FilmuCore, the equivalent Python target is specifically a FUSE mount that can surface Real-Debrid-backed content as browseable/readable files for media-server clients.
 
-The local Compose stack now also provisions isolated real Plex and real Emby containers for parity testing on top of that mount. Docker Plex parity is now materially working on the Linux/WSL topology after fixing host-mount visibility, stale host-binary reuse, entry-id refresh collisions, and duplicate foreground fetches. Native Windows validation is now live-green for Jellyfin and sampled Emby on `C:\FilmuCoreVFS`; the remaining native Windows media-server parity gap is still Plex.
+The local Compose stack now also provisions isolated real Plex and real Emby containers for parity testing on top of that mount. Docker Plex parity is now materially working on the Linux/WSL topology after fixing host-mount visibility, stale host-binary reuse, entry-id refresh collisions, and duplicate foreground fetches, and the direct provider gate reran green on April 9, 2026. Native Windows validation is now live-green for Jellyfin, Emby, and Plex on `C:\FilmuCoreVFS`, with Plex now proven through the real local PMS rather than just a planned target.
 
-This is the implementation breadth Python still needs to plan toward if the goal is to outperform it.
+This is the implementation breadth Python still needs to plan toward if the goal is to outperform it. The Docker/WSL Plex proof path now also emits explicit artifacted mount-visibility, host-binary-freshness, refresh-identity, and foreground-fetch evidence checks, and those reran green twice on April 9, 2026.
 
 ---
 
@@ -281,3 +281,7 @@ Priority 5 should be considered meaningfully advanced when:
 - The HLS route family now also keeps generated playlists/segments alive while they are actively being served and exposes the new `generation_capacity_exceeded` failure class through [`/api/v1/stream/status`](../../filmu_py/api/routes/stream.py).
 - Internal session/handle/path/governance visibility is now exposed through [`/api/v1/stream/status`](../../filmu_py/api/routes/stream.py).
 - This is still below full FilmuVFS readiness, but it is now a real reusable serving substrate rather than only route-local helpers.
+
+
+
+

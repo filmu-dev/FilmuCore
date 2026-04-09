@@ -26,6 +26,27 @@ async fn test_memory_cache_miss_returns_none() {
 }
 
 #[tokio::test]
+async fn test_memory_cache_snapshot_tracks_layer_stats() {
+    let cache = MemoryCache::new(1024);
+
+    cache
+        .insert("movie:0:1024".to_owned(), Bytes::from_static(b"payload"))
+        .await;
+    assert!(cache.get("movie:0:1024").await.is_some());
+    assert!(cache.get("missing").await.is_none());
+
+    let snapshot = cache.snapshot();
+
+    assert_eq!(snapshot.backend, "memory");
+    assert_eq!(snapshot.memory_max_bytes, 1024);
+    assert!(snapshot.memory_bytes > 0);
+    assert_eq!(snapshot.memory_hits, 1);
+    assert_eq!(snapshot.memory_misses, 1);
+    assert_eq!(snapshot.disk_bytes, 0);
+    assert_eq!(snapshot.disk_hits, 0);
+}
+
+#[tokio::test]
 async fn test_memory_cache_evicts_on_capacity() {
     let cache = MemoryCache::new(3);
 
@@ -86,6 +107,38 @@ async fn test_hybrid_cache_invalidate_clears_both_layers() {
     let cache = HybridCache::new(1024 * 1024, cache_path, 16 * 1024 * 1024)
         .expect("hybrid cache should reopen");
     assert!(cache.get("movie:0:1024").await.is_none());
+}
+
+#[tokio::test]
+async fn test_hybrid_cache_snapshot_tracks_memory_and_disk_layers() {
+    let tempdir = tempdir().expect("temp dir should create");
+    let cache_path = tempdir.path().join("hybrid-cache");
+
+    let cache =
+        HybridCache::new(1024, cache_path.clone(), 2048).expect("hybrid cache should initialize");
+    cache
+        .insert("movie:0:1024".to_owned(), Bytes::from_static(b"payload"))
+        .await;
+    drop(cache);
+
+    let cache = HybridCache::new(1024, cache_path, 2048).expect("hybrid cache should reopen");
+    assert_eq!(cache.l1_size_bytes(), 0);
+    assert_eq!(
+        cache.get("movie:0:1024").await,
+        Some(Bytes::from_static(b"payload"))
+    );
+    assert!(cache.get("missing").await.is_none());
+
+    let snapshot = cache.snapshot();
+
+    assert_eq!(snapshot.backend, "hybrid");
+    assert_eq!(snapshot.memory_max_bytes, 1024);
+    assert_eq!(snapshot.disk_max_bytes, 2048);
+    assert!(snapshot.memory_bytes > 0);
+    assert!(snapshot.disk_bytes > 0);
+    assert_eq!(snapshot.disk_hits, 1);
+    assert_eq!(snapshot.disk_misses, 1);
+    assert_eq!(snapshot.disk_writes, 0);
 }
 
 #[tokio::test]

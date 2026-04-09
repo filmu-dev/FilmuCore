@@ -69,6 +69,11 @@ PLAYBACK_RESOLUTION_DURATION_SECONDS = Histogram(
     "Time spent resolving direct and HLS playback attachments by surface and result.",
     labelnames=("surface", "result"),
 )
+SELECTED_HLS_REFRESH_DEFERRALS = Counter(
+    "filmu_py_playback_selected_hls_refresh_deferrals_total",
+    "Count of selected-HLS background refresh deferrals by trigger path and reason.",
+    labelnames=("trigger", "reason"),
+)
 logger = logging.getLogger(__name__)
 _ATTACHMENT_REFRESH_STATES: tuple[str, ...] = (
     "ready",
@@ -80,6 +85,16 @@ _MEDIA_ENTRY_REFRESH_STATES = _ATTACHMENT_REFRESH_STATES
 _DEBRID_PROVIDER_KEYS: frozenset[str] = frozenset({"realdebrid", "alldebrid", "debridlink"})
 _PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3
 _PROVIDER_CIRCUIT_BREAKER_RESET_TIMEOUT_SECONDS = 30.0
+_SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE: dict[str, int] = {
+    "hls_failed_lease_refresh_rate_limited": 0,
+    "hls_failed_lease_refresh_provider_circuit_open": 0,
+    "hls_restricted_fallback_refresh_rate_limited": 0,
+    "hls_restricted_fallback_refresh_provider_circuit_open": 0,
+}
+_DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE: dict[str, int] = {
+    "direct_playback_refresh_rate_limited": 0,
+    "direct_playback_refresh_provider_circuit_open": 0,
+}
 
 
 @dataclass(frozen=True)
@@ -243,6 +258,7 @@ AppScopedDirectPlaybackRefreshTriggerOutcome = Literal[
     "controller_unavailable",
     "triggered",
 ]
+PlaybackRefreshDeferredReason = Literal["refresh_rate_limited", "provider_circuit_open"]
 HlsFailedLeaseRefreshOutcome = Literal["no_action", "completed", "run_later"]
 HlsFailedLeaseRefreshControlPlaneOutcome = Literal[
     "no_action",
@@ -340,6 +356,7 @@ class DirectPlaybackRefreshDispatchExecution:
     rate_limited: bool = False
     retry_after_seconds: float | None = None
     limiter_bucket_key: str | None = None
+    deferred_reason: PlaybackRefreshDeferredReason | None = None
 
 
 @dataclass(frozen=True)
@@ -454,6 +471,17 @@ class DirectFileLinkResolution:
 
 
 @dataclass(frozen=True)
+class SelectedHlsRefreshExecutionResult:
+    """Shared internal outcome for one selected-HLS background refresh execution."""
+
+    outcome: Literal["no_action", "completed", "run_later"]
+    execution: MediaEntryLeaseRefreshExecution | None = None
+    retry_after_seconds: float | None = None
+    limiter_bucket_key: str | None = None
+    deferred_reason: PlaybackRefreshDeferredReason | None = None
+
+
+@dataclass(frozen=True)
 class HlsFailedLeaseRefreshResult:
     """Execution result for one background-triggered selected HLS failed-lease refresh."""
 
@@ -462,6 +490,7 @@ class HlsFailedLeaseRefreshResult:
     execution: MediaEntryLeaseRefreshExecution | None = None
     retry_after_seconds: float | None = None
     limiter_bucket_key: str | None = None
+    deferred_reason: PlaybackRefreshDeferredReason | None = None
 
 
 @dataclass(frozen=True)
@@ -492,6 +521,7 @@ class HlsRestrictedFallbackRefreshResult:
     execution: MediaEntryLeaseRefreshExecution | None = None
     retry_after_seconds: float | None = None
     limiter_bucket_key: str | None = None
+    deferred_reason: PlaybackRefreshDeferredReason | None = None
 
 
 @dataclass(frozen=True)
@@ -837,6 +867,7 @@ class LinkResolver:
             result,
             at=requested_at,
         )
+        await self._playback_service._persist_media_entry_projection(updated_entry)
         if not result.ok:
             error_text = updated_entry.last_refresh_error or "refresh failed"
             if "circuit open" in error_text.casefold():
@@ -1487,6 +1518,171 @@ class PlaybackSourceService:
             )
 
     @staticmethod
+    def _result_scalars_all(result: object) -> list[object]:
+        scalars = getattr(result, "scalars", None)
+        if not callable(scalars):
+            return []
+        scalar_result = scalars()
+        all_method = getattr(scalar_result, "all", None)
+        if not callable(all_method):
+            return []
+        return list(all_method())
+
+    @classmethod
+    def _find_media_entry_in_scalars(
+        cls,
+        scalars: list[object],
+        *,
+        media_entry_id: str,
+    ) -> MediaEntryORM | None:
+        for candidate in scalars:
+            if isinstance(candidate, MediaEntryORM) and candidate.id == media_entry_id:
+                return candidate
+            if isinstance(candidate, MediaItemORM):
+                for entry in candidate.media_entries:
+                    if entry.id == media_entry_id:
+                        return entry
+        return None
+
+    @classmethod
+    def _find_attachment_in_scalars(
+        cls,
+        scalars: list[object],
+        *,
+        attachment_id: str,
+    ) -> PlaybackAttachmentORM | None:
+        for candidate in scalars:
+            if isinstance(candidate, PlaybackAttachmentORM) and candidate.id == attachment_id:
+                return candidate
+            if isinstance(candidate, MediaItemORM):
+                for attachment in candidate.playback_attachments:
+                    if attachment.id == attachment_id:
+                        return attachment
+        return None
+
+    @staticmethod
+    def _copy_attachment_refresh_projection(
+        target: PlaybackAttachmentORM,
+        source: PlaybackAttachmentORM,
+    ) -> PlaybackAttachmentORM:
+        target.locator = source.locator
+        target.local_path = source.local_path
+        target.restricted_url = source.restricted_url
+        target.unrestricted_url = source.unrestricted_url
+        target.provider_file_id = source.provider_file_id
+        target.provider_file_path = source.provider_file_path
+        target.original_filename = source.original_filename
+        target.file_size = source.file_size
+        target.refresh_state = source.refresh_state
+        target.expires_at = source.expires_at
+        target.last_refreshed_at = source.last_refreshed_at
+        target.last_refresh_error = source.last_refresh_error
+        target.updated_at = source.updated_at
+        return target
+
+    @staticmethod
+    def _sync_source_attachment_from_media_entry(
+        entry: MediaEntryORM,
+        *,
+        at: datetime | None = None,
+    ) -> None:
+        source_attachment = entry.source_attachment
+        if source_attachment is None:
+            return
+
+        refreshed_at = at or entry.updated_at or datetime.now(UTC)
+        if entry.refresh_state == "failed":
+            PlaybackSourceService.fail_attachment_refresh(
+                source_attachment,
+                error=entry.last_refresh_error or "media entry refresh failed",
+                at=refreshed_at,
+            )
+            return
+        if entry.refresh_state == "refreshing":
+            PlaybackSourceService.start_attachment_refresh(source_attachment, at=refreshed_at)
+            return
+        if entry.refresh_state == "stale":
+            PlaybackSourceService.mark_attachment_stale(source_attachment, at=refreshed_at)
+            return
+
+        locator = (
+            entry.local_path
+            or entry.unrestricted_url
+            or entry.download_url
+            or source_attachment.locator
+        )
+        PlaybackSourceService.complete_attachment_refresh(
+            source_attachment,
+            locator=locator,
+            restricted_url=entry.download_url,
+            unrestricted_url=entry.unrestricted_url,
+            expires_at=entry.expires_at,
+            provider_file_id=entry.provider_file_id,
+            provider_file_path=entry.provider_file_path,
+            original_filename=entry.original_filename,
+            file_size=entry.size_bytes,
+            at=refreshed_at,
+        )
+
+    @classmethod
+    def _copy_media_entry_refresh_projection(
+        cls,
+        target: MediaEntryORM,
+        source: MediaEntryORM,
+    ) -> MediaEntryORM:
+        target.local_path = source.local_path
+        target.download_url = source.download_url
+        target.unrestricted_url = source.unrestricted_url
+        target.provider_file_id = source.provider_file_id
+        target.provider_file_path = source.provider_file_path
+        target.original_filename = source.original_filename
+        target.size_bytes = source.size_bytes
+        target.refresh_state = source.refresh_state
+        target.expires_at = source.expires_at
+        target.last_refreshed_at = source.last_refreshed_at
+        target.last_refresh_error = source.last_refresh_error
+        target.updated_at = source.updated_at
+        cls._sync_source_attachment_from_media_entry(target, at=target.updated_at)
+        return target
+
+    async def _persist_media_entry_projection(self, entry: MediaEntryORM) -> None:
+        async with self._db.session() as session:
+            if not hasattr(session, "execute") or not hasattr(session, "commit"):
+                return
+            result = await session.execute(
+                select(MediaEntryORM)
+                .options(selectinload(MediaEntryORM.source_attachment))
+                .where(MediaEntryORM.id == entry.id)
+            )
+            persisted_entry = self._find_media_entry_in_scalars(
+                self._result_scalars_all(result),
+                media_entry_id=entry.id,
+            )
+            if persisted_entry is None:
+                return
+            self._copy_media_entry_refresh_projection(persisted_entry, entry)
+            await session.commit()
+
+    async def _persist_attachment_projection(
+        self,
+        attachment: PlaybackAttachmentORM,
+    ) -> None:
+        async with self._db.session() as session:
+            if not hasattr(session, "execute") or not hasattr(session, "commit"):
+                return
+            result = await session.execute(
+                select(PlaybackAttachmentORM).where(PlaybackAttachmentORM.id == attachment.id)
+            )
+            persisted_attachment = self._find_attachment_in_scalars(
+                self._result_scalars_all(result),
+                attachment_id=attachment.id,
+            )
+            if persisted_attachment is None:
+                return
+            self._copy_attachment_refresh_projection(persisted_attachment, attachment)
+            await session.commit()
+
+    @staticmethod
     def _build_attachment_from_media_entry(
         entry: MediaEntryORM,
         *,
@@ -1597,9 +1793,9 @@ class PlaybackSourceService:
         final_locator = unrestricted_url or restricted_url
         if final_locator is None:
             return None, False
-        final_kind: PlaybackAttachmentKind = kind
-        if kind != "remote-hls" and is_hls_playlist_url(final_locator):
-            final_kind = "remote-hls"
+        final_kind: PlaybackAttachmentKind = (
+            "remote-hls" if is_hls_playlist_url(final_locator) else "remote-direct"
+        )
         return (
             PlaybackAttachment(
                 kind=final_kind,
@@ -2152,6 +2348,7 @@ class PlaybackSourceService:
             )
             result = await executor(attachment_request)
             updated = self.apply_media_entry_refresh_result(entry, result, at=requested_at)
+            await self._persist_media_entry_projection(updated)
             executed.append(
                 MediaEntryLeaseRefreshExecution(
                     media_entry_id=updated.id,
@@ -2181,6 +2378,24 @@ class PlaybackSourceService:
             "selected_hls_streams_needing_refresh": 0,
             "selected_direct_streams_failed": 0,
             "selected_hls_streams_failed": 0,
+            "direct_playback_refresh_rate_limited": _DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE[
+                "direct_playback_refresh_rate_limited"
+            ],
+            "direct_playback_refresh_provider_circuit_open": _DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE[
+                "direct_playback_refresh_provider_circuit_open"
+            ],
+            "hls_failed_lease_refresh_rate_limited": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
+                "hls_failed_lease_refresh_rate_limited"
+            ],
+            "hls_failed_lease_refresh_provider_circuit_open": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
+                "hls_failed_lease_refresh_provider_circuit_open"
+            ],
+            "hls_restricted_fallback_refresh_rate_limited": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
+                "hls_restricted_fallback_refresh_rate_limited"
+            ],
+            "hls_restricted_fallback_refresh_provider_circuit_open": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
+                "hls_restricted_fallback_refresh_provider_circuit_open"
+            ],
         }
 
         for item in items:
@@ -2511,6 +2726,7 @@ class PlaybackSourceService:
                 continue
             result = await executor(request)
             updated = self.apply_refresh_result(attachment, result, at=requested_at)
+            await self._persist_attachment_projection(updated)
             executed.append(
                 PlaybackAttachmentRefreshExecution(
                     attachment_id=updated.id,
@@ -2552,6 +2768,7 @@ class PlaybackSourceService:
             )
             result = await executor(request)
             updated = self.apply_refresh_result(attachment, result, at=requested_at)
+            await self._persist_attachment_projection(updated)
             executed.append(
                 PlaybackAttachmentRefreshExecution(
                     attachment_id=updated.id,
@@ -3089,6 +3306,22 @@ class PlaybackSourceService:
                 return DirectPlaybackRefreshDispatchExecution(
                     recommendation=dispatch.recommendation
                 )
+            provider = media_entry_request.provider
+            if provider is not None and self._provider_circuit_breaker.is_open(provider):
+                retry_after = self._provider_circuit_breaker.retry_after_seconds(provider)
+                PLAYBACK_RISK_EVENTS.labels(
+                    surface=_ACTIVE_STREAM_ROLE_DIRECT,
+                    reason="provider_circuit_open",
+                ).inc()
+                self._record_direct_playback_refresh_deferral(
+                    reason="provider_circuit_open",
+                )
+                return DirectPlaybackRefreshDispatchExecution(
+                    recommendation=dispatch.recommendation,
+                    rate_limited=True,
+                    retry_after_seconds=retry_after,
+                    deferred_reason="provider_circuit_open",
+                )
             attachment_request = self._as_attachment_refresh_request(media_entry_request)
             bucket_key, rate_limit_decision = await self._acquire_playback_refresh_rate_limit(
                 attachment_request,
@@ -3096,12 +3329,20 @@ class PlaybackSourceService:
                 rate_limiter=rate_limiter,
             )
             if rate_limit_decision is not None and not rate_limit_decision.allowed:
+                self._record_direct_playback_refresh_deferral(
+                    reason="refresh_rate_limited",
+                )
                 return DirectPlaybackRefreshDispatchExecution(
                     recommendation=dispatch.recommendation,
                     rate_limited=True,
                     retry_after_seconds=rate_limit_decision.retry_after_seconds,
                     limiter_bucket_key=bucket_key,
+                    deferred_reason="refresh_rate_limited",
                 )
+            previous_refresh_state = entry.refresh_state
+            previous_last_refresh_error = entry.last_refresh_error
+            previous_last_refreshed_at = entry.last_refreshed_at
+            previous_updated_at = entry.updated_at
             self.start_media_entry_refresh(entry, at=requested_at)
             executor = self.select_refresh_executor(
                 attachment_request,
@@ -3109,7 +3350,35 @@ class PlaybackSourceService:
                 provider_clients=resolved_provider_clients,
             )
             result = await executor(attachment_request)
+            if (
+                not result.ok
+                and provider is not None
+                and result.error is not None
+                and "circuit open" in result.error.casefold()
+            ):
+                entry.refresh_state = previous_refresh_state
+                entry.last_refresh_error = previous_last_refresh_error
+                entry.last_refreshed_at = previous_last_refreshed_at
+                entry.updated_at = previous_updated_at
+                self._sync_source_attachment_from_media_entry(entry, at=entry.updated_at)
+                await self._persist_media_entry_projection(entry)
+                retry_after = self._provider_circuit_breaker.retry_after_seconds(provider)
+                PLAYBACK_RISK_EVENTS.labels(
+                    surface=_ACTIVE_STREAM_ROLE_DIRECT,
+                    reason="provider_circuit_open",
+                ).inc()
+                self._record_direct_playback_refresh_deferral(
+                    reason="provider_circuit_open",
+                )
+                return DirectPlaybackRefreshDispatchExecution(
+                    recommendation=dispatch.recommendation,
+                    rate_limited=True,
+                    retry_after_seconds=retry_after,
+                    limiter_bucket_key=bucket_key,
+                    deferred_reason="provider_circuit_open",
+                )
             updated = self.apply_media_entry_refresh_result(entry, result, at=requested_at)
+            await self._persist_media_entry_projection(updated)
             return DirectPlaybackRefreshDispatchExecution(
                 recommendation=dispatch.recommendation,
                 media_entry_execution=MediaEntryLeaseRefreshExecution(
@@ -3128,18 +3397,42 @@ class PlaybackSourceService:
                 return DirectPlaybackRefreshDispatchExecution(
                     recommendation=dispatch.recommendation
                 )
+            provider = dispatch_attachment_request.provider
+            if provider is not None and self._provider_circuit_breaker.is_open(provider):
+                retry_after = self._provider_circuit_breaker.retry_after_seconds(provider)
+                PLAYBACK_RISK_EVENTS.labels(
+                    surface=_ACTIVE_STREAM_ROLE_DIRECT,
+                    reason="provider_circuit_open",
+                ).inc()
+                self._record_direct_playback_refresh_deferral(
+                    reason="provider_circuit_open",
+                )
+                return DirectPlaybackRefreshDispatchExecution(
+                    recommendation=dispatch.recommendation,
+                    rate_limited=True,
+                    retry_after_seconds=retry_after,
+                    deferred_reason="provider_circuit_open",
+                )
             bucket_key, rate_limit_decision = await self._acquire_playback_refresh_rate_limit(
                 dispatch_attachment_request,
                 surface=_ACTIVE_STREAM_ROLE_DIRECT,
                 rate_limiter=rate_limiter,
             )
             if rate_limit_decision is not None and not rate_limit_decision.allowed:
+                self._record_direct_playback_refresh_deferral(
+                    reason="refresh_rate_limited",
+                )
                 return DirectPlaybackRefreshDispatchExecution(
                     recommendation=dispatch.recommendation,
                     rate_limited=True,
                     retry_after_seconds=rate_limit_decision.retry_after_seconds,
                     limiter_bucket_key=bucket_key,
+                    deferred_reason="refresh_rate_limited",
                 )
+            previous_refresh_state = attachment.refresh_state
+            previous_last_refresh_error = attachment.last_refresh_error
+            previous_last_refreshed_at = attachment.last_refreshed_at
+            previous_updated_at = attachment.updated_at
             self.start_attachment_refresh(attachment, at=requested_at)
             executor = self.select_refresh_executor(
                 dispatch_attachment_request,
@@ -3147,7 +3440,34 @@ class PlaybackSourceService:
                 provider_clients=resolved_provider_clients,
             )
             result = await executor(dispatch_attachment_request)
+            if (
+                not result.ok
+                and provider is not None
+                and result.error is not None
+                and "circuit open" in result.error.casefold()
+            ):
+                attachment.refresh_state = previous_refresh_state
+                attachment.last_refresh_error = previous_last_refresh_error
+                attachment.last_refreshed_at = previous_last_refreshed_at
+                attachment.updated_at = previous_updated_at
+                await self._persist_attachment_projection(attachment)
+                retry_after = self._provider_circuit_breaker.retry_after_seconds(provider)
+                PLAYBACK_RISK_EVENTS.labels(
+                    surface=_ACTIVE_STREAM_ROLE_DIRECT,
+                    reason="provider_circuit_open",
+                ).inc()
+                self._record_direct_playback_refresh_deferral(
+                    reason="provider_circuit_open",
+                )
+                return DirectPlaybackRefreshDispatchExecution(
+                    recommendation=dispatch.recommendation,
+                    rate_limited=True,
+                    retry_after_seconds=retry_after,
+                    limiter_bucket_key=bucket_key,
+                    deferred_reason="provider_circuit_open",
+                )
             updated_attachment = self.apply_refresh_result(attachment, result, at=requested_at)
+            await self._persist_attachment_projection(updated_attachment)
             return DirectPlaybackRefreshDispatchExecution(
                 recommendation=dispatch.recommendation,
                 attachment_execution=PlaybackAttachmentRefreshExecution(
@@ -3248,6 +3568,144 @@ class PlaybackSourceService:
             execution=execution,
         )
 
+    @staticmethod
+    def _record_selected_hls_refresh_deferral(
+        *,
+        trigger: Literal["failed_lease", "restricted_fallback"],
+        reason: PlaybackRefreshDeferredReason,
+    ) -> None:
+        """Record one selected-HLS background refresh deferral for status and metrics."""
+
+        SELECTED_HLS_REFRESH_DEFERRALS.labels(trigger=trigger, reason=reason).inc()
+        key_reason = "rate_limited" if reason == "refresh_rate_limited" else reason
+        key = f"hls_{trigger}_refresh_{key_reason}"
+        _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[key] += 1
+
+    @staticmethod
+    def _record_direct_playback_refresh_deferral(
+        *,
+        reason: PlaybackRefreshDeferredReason,
+    ) -> None:
+        """Record one direct-play background refresh deferral for status visibility."""
+
+        key_reason = "rate_limited" if reason == "refresh_rate_limited" else reason
+        key = f"direct_playback_refresh_{key_reason}"
+        _DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE[key] += 1
+
+    async def _execute_selected_hls_media_entry_refresh_with_providers(
+        self,
+        *,
+        item: MediaItemORM,
+        selected_entry: MediaEntryORM,
+        trigger: Literal["failed_lease", "restricted_fallback"],
+        executors: dict[str, PlaybackAttachmentRefreshExecutor] | None = None,
+        provider_clients: dict[str, PlaybackAttachmentProviderClient] | None = None,
+        rate_limiter: PlaybackRefreshRateLimiter | None = None,
+        at: datetime | None = None,
+    ) -> SelectedHlsRefreshExecutionResult:
+        """Execute one selected-HLS media-entry refresh with shared provider-pressure handling."""
+
+        requested_at = at or datetime.now(UTC)
+        resolved_provider_clients = (
+            provider_clients if provider_clients is not None else self._provider_clients
+        )
+        roles_by_entry = self._active_stream_roles_by_media_entry(item)
+        media_entry_request = self.build_media_entry_refresh_request(
+            selected_entry,
+            roles=roles_by_entry.get(selected_entry.id, ()),
+        )
+        if media_entry_request is None:
+            return SelectedHlsRefreshExecutionResult(outcome="no_action")
+
+        attachment_request = self._as_attachment_refresh_request(media_entry_request)
+        provider = attachment_request.provider
+        if provider is not None and self._provider_circuit_breaker.is_open(provider):
+            retry_after = self._provider_circuit_breaker.retry_after_seconds(provider)
+            PLAYBACK_RISK_EVENTS.labels(
+                surface=_ACTIVE_STREAM_ROLE_HLS,
+                reason="provider_circuit_open",
+            ).inc()
+            self._record_selected_hls_refresh_deferral(
+                trigger=trigger,
+                reason="provider_circuit_open",
+            )
+            return SelectedHlsRefreshExecutionResult(
+                outcome="run_later",
+                retry_after_seconds=retry_after,
+                deferred_reason="provider_circuit_open",
+            )
+
+        bucket_key, rate_limit_decision = await self._acquire_playback_refresh_rate_limit(
+            attachment_request,
+            surface=_ACTIVE_STREAM_ROLE_HLS,
+            rate_limiter=rate_limiter,
+        )
+        if rate_limit_decision is not None and not rate_limit_decision.allowed:
+            self._record_selected_hls_refresh_deferral(
+                trigger=trigger,
+                reason="refresh_rate_limited",
+            )
+            return SelectedHlsRefreshExecutionResult(
+                outcome="run_later",
+                retry_after_seconds=rate_limit_decision.retry_after_seconds,
+                limiter_bucket_key=bucket_key,
+                deferred_reason="refresh_rate_limited",
+            )
+
+        previous_refresh_state = selected_entry.refresh_state
+        previous_last_refresh_error = selected_entry.last_refresh_error
+        previous_last_refreshed_at = selected_entry.last_refreshed_at
+        previous_updated_at = selected_entry.updated_at
+
+        self.start_media_entry_refresh(selected_entry, at=requested_at)
+        executor = self.select_refresh_executor(
+            attachment_request,
+            executors=executors,
+            provider_clients=resolved_provider_clients,
+        )
+        result = await executor(attachment_request)
+        if (
+            not result.ok
+            and provider is not None
+            and result.error is not None
+            and "circuit open" in result.error.casefold()
+        ):
+            selected_entry.refresh_state = previous_refresh_state
+            selected_entry.last_refresh_error = previous_last_refresh_error
+            selected_entry.last_refreshed_at = previous_last_refreshed_at
+            selected_entry.updated_at = previous_updated_at
+            self._sync_source_attachment_from_media_entry(selected_entry, at=selected_entry.updated_at)
+            await self._persist_media_entry_projection(selected_entry)
+            retry_after = self._provider_circuit_breaker.retry_after_seconds(provider)
+            PLAYBACK_RISK_EVENTS.labels(
+                surface=_ACTIVE_STREAM_ROLE_HLS,
+                reason="provider_circuit_open",
+            ).inc()
+            self._record_selected_hls_refresh_deferral(
+                trigger=trigger,
+                reason="provider_circuit_open",
+            )
+            return SelectedHlsRefreshExecutionResult(
+                outcome="run_later",
+                retry_after_seconds=retry_after,
+                limiter_bucket_key=bucket_key,
+                deferred_reason="provider_circuit_open",
+            )
+
+        updated = self.apply_media_entry_refresh_result(selected_entry, result, at=requested_at)
+        await self._persist_media_entry_projection(updated)
+        return SelectedHlsRefreshExecutionResult(
+            outcome="completed",
+            execution=MediaEntryLeaseRefreshExecution(
+                media_entry_id=updated.id,
+                ok=result.ok,
+                refresh_state=updated.refresh_state,
+                locator=updated.unrestricted_url or updated.download_url or updated.local_path,
+                error=updated.last_refresh_error,
+            ),
+            limiter_bucket_key=bucket_key,
+        )
+
     async def execute_selected_hls_failed_lease_refresh_with_providers(
         self,
         item_identifier: str,
@@ -3260,9 +3718,6 @@ class PlaybackSourceService:
         """Execute one selected-HLS failed-lease refresh outside the HTTP request path."""
 
         requested_at = at or datetime.now(UTC)
-        resolved_provider_clients = (
-            provider_clients if provider_clients is not None else self._provider_clients
-        )
 
         for item in await self._list_items():
             if not self._matches_identifier(item, item_identifier):
@@ -3278,49 +3733,22 @@ class PlaybackSourceService:
                     outcome="no_action",
                 )
 
-            roles_by_entry = self._active_stream_roles_by_media_entry(item)
-            media_entry_request = self.build_media_entry_refresh_request(
-                selected_entry,
-                roles=roles_by_entry.get(selected_entry.id, ()),
-            )
-            if media_entry_request is None:
-                return HlsFailedLeaseRefreshResult(
-                    item_identifier=item_identifier,
-                    outcome="no_action",
-                )
-
-            attachment_request = self._as_attachment_refresh_request(media_entry_request)
-            bucket_key, rate_limit_decision = await self._acquire_playback_refresh_rate_limit(
-                attachment_request,
-                surface=_ACTIVE_STREAM_ROLE_HLS,
-                rate_limiter=rate_limiter,
-            )
-            if rate_limit_decision is not None and not rate_limit_decision.allowed:
-                return HlsFailedLeaseRefreshResult(
-                    item_identifier=item_identifier,
-                    outcome="run_later",
-                    retry_after_seconds=rate_limit_decision.retry_after_seconds,
-                    limiter_bucket_key=bucket_key,
-                )
-
-            self.start_media_entry_refresh(selected_entry, at=requested_at)
-            executor = self.select_refresh_executor(
-                attachment_request,
+            execution = await self._execute_selected_hls_media_entry_refresh_with_providers(
+                item=item,
+                selected_entry=selected_entry,
+                trigger="failed_lease",
                 executors=executors,
-                provider_clients=resolved_provider_clients,
+                provider_clients=provider_clients,
+                rate_limiter=rate_limiter,
+                at=requested_at,
             )
-            result = await executor(attachment_request)
-            updated = self.apply_media_entry_refresh_result(selected_entry, result, at=requested_at)
             return HlsFailedLeaseRefreshResult(
                 item_identifier=item_identifier,
-                outcome="completed",
-                execution=MediaEntryLeaseRefreshExecution(
-                    media_entry_id=updated.id,
-                    ok=result.ok,
-                    refresh_state=updated.refresh_state,
-                    locator=updated.unrestricted_url or updated.download_url or updated.local_path,
-                    error=updated.last_refresh_error,
-                ),
+                outcome=execution.outcome,
+                execution=execution.execution,
+                retry_after_seconds=execution.retry_after_seconds,
+                limiter_bucket_key=execution.limiter_bucket_key,
+                deferred_reason=execution.deferred_reason,
             )
 
         return HlsFailedLeaseRefreshResult(
@@ -3340,9 +3768,6 @@ class PlaybackSourceService:
         """Execute one selected-HLS restricted-fallback refresh outside the HTTP request path."""
 
         requested_at = at or datetime.now(UTC)
-        resolved_provider_clients = (
-            provider_clients if provider_clients is not None else self._provider_clients
-        )
 
         for item in await self._list_items():
             if not self._matches_identifier(item, item_identifier):
@@ -3377,49 +3802,22 @@ class PlaybackSourceService:
                     outcome="no_action",
                 )
 
-            roles_by_entry = self._active_stream_roles_by_media_entry(item)
-            media_entry_request = self.build_media_entry_refresh_request(
-                selected_entry,
-                roles=roles_by_entry.get(selected_entry.id, ()),
-            )
-            if media_entry_request is None:
-                return HlsRestrictedFallbackRefreshResult(
-                    item_identifier=item_identifier,
-                    outcome="no_action",
-                )
-
-            attachment_request = self._as_attachment_refresh_request(media_entry_request)
-            bucket_key, rate_limit_decision = await self._acquire_playback_refresh_rate_limit(
-                attachment_request,
-                surface=_ACTIVE_STREAM_ROLE_HLS,
-                rate_limiter=rate_limiter,
-            )
-            if rate_limit_decision is not None and not rate_limit_decision.allowed:
-                return HlsRestrictedFallbackRefreshResult(
-                    item_identifier=item_identifier,
-                    outcome="run_later",
-                    retry_after_seconds=rate_limit_decision.retry_after_seconds,
-                    limiter_bucket_key=bucket_key,
-                )
-
-            self.start_media_entry_refresh(selected_entry, at=requested_at)
-            executor = self.select_refresh_executor(
-                attachment_request,
+            execution = await self._execute_selected_hls_media_entry_refresh_with_providers(
+                item=item,
+                selected_entry=selected_entry,
+                trigger="restricted_fallback",
                 executors=executors,
-                provider_clients=resolved_provider_clients,
+                provider_clients=provider_clients,
+                rate_limiter=rate_limiter,
+                at=requested_at,
             )
-            result = await executor(attachment_request)
-            updated = self.apply_media_entry_refresh_result(selected_entry, result, at=requested_at)
             return HlsRestrictedFallbackRefreshResult(
                 item_identifier=item_identifier,
-                outcome="completed",
-                execution=MediaEntryLeaseRefreshExecution(
-                    media_entry_id=updated.id,
-                    ok=result.ok,
-                    refresh_state=updated.refresh_state,
-                    locator=updated.unrestricted_url or updated.download_url or updated.local_path,
-                    error=updated.last_refresh_error,
-                ),
+                outcome=execution.outcome,
+                execution=execution.execution,
+                retry_after_seconds=execution.retry_after_seconds,
+                limiter_bucket_key=execution.limiter_bucket_key,
+                deferred_reason=execution.deferred_reason,
             )
 
         return HlsRestrictedFallbackRefreshResult(
@@ -3569,6 +3967,7 @@ class PlaybackSourceService:
 
         entry.refresh_state = "stale"
         entry.updated_at = at or datetime.now(UTC)
+        PlaybackSourceService._sync_source_attachment_from_media_entry(entry, at=entry.updated_at)
         return entry
 
     @staticmethod
@@ -3579,6 +3978,7 @@ class PlaybackSourceService:
 
         entry.refresh_state = "refreshing"
         entry.updated_at = at or datetime.now(UTC)
+        PlaybackSourceService._sync_source_attachment_from_media_entry(entry, at=entry.updated_at)
         return entry
 
     @staticmethod
@@ -3617,6 +4017,7 @@ class PlaybackSourceService:
         entry.last_refreshed_at = refreshed_at
         entry.last_refresh_error = None
         entry.updated_at = refreshed_at
+        PlaybackSourceService._sync_source_attachment_from_media_entry(entry, at=refreshed_at)
         return entry
 
     @staticmethod
@@ -3633,6 +4034,7 @@ class PlaybackSourceService:
         entry.last_refresh_error = error
         entry.last_refreshed_at = failed_at
         entry.updated_at = failed_at
+        PlaybackSourceService._sync_source_attachment_from_media_entry(entry, at=failed_at)
         PLAYBACK_LEASE_REFRESH_FAILURES.labels(
             record_type="media_entry",
             reason=PlaybackSourceService._classify_refresh_error(error),
@@ -3865,7 +4267,12 @@ class PlaybackSourceService:
         )
         return self.build_direct_file_serving_descriptor(resolution)
 
-    async def resolve_hls_attachment(self, item_identifier: str) -> PlaybackAttachment:
+    async def resolve_hls_attachment(
+        self,
+        item_identifier: str,
+        *,
+        force_refresh: bool = False,
+    ) -> PlaybackAttachment:
         """Resolve one attachment for the HLS route family."""
 
         started_at = perf_counter()
@@ -3877,7 +4284,11 @@ class PlaybackSourceService:
                 item,
                 role=_ACTIVE_STREAM_ROLE_HLS,
             )
-            if selected_entry is not None and selected_entry.refresh_state == "failed":
+            if (
+                selected_entry is not None
+                and selected_entry.refresh_state == "failed"
+                and not force_refresh
+            ):
                 PLAYBACK_RISK_EVENTS.labels(
                     surface=_ACTIVE_STREAM_ROLE_HLS,
                     reason="selected_failed_lease",
@@ -3897,6 +4308,28 @@ class PlaybackSourceService:
 
             snapshot = self.build_resolution_snapshot(item)
             hls_attachment = snapshot.hls
+            if (
+                force_refresh
+                and selected_entry is not None
+                and selected_entry.kind != "local-file"
+                and self._link_resolver.can_resolve_media_entry(selected_entry)
+                and hls_attachment is not None
+                and hls_attachment.source_key.startswith("media-entry")
+            ):
+                roles = self._active_stream_roles_by_media_entry(item).get(selected_entry.id, ())
+                outcome = await self._link_resolver.resolve_media_entry(
+                    selected_entry,
+                    roles=roles,
+                    surface=_ACTIVE_STREAM_ROLE_HLS,
+                    force_refresh=True,
+                )
+                if outcome.attachment is not None:
+                    self._observe_resolution_duration(
+                        surface=_ACTIVE_STREAM_ROLE_HLS,
+                        result="resolved",
+                        started_at=started_at,
+                    )
+                    return outcome.attachment
             if hls_attachment is not None:
                 self._observe_resolution_duration(
                     surface=_ACTIVE_STREAM_ROLE_HLS,
@@ -3949,6 +4382,34 @@ class PlaybackSourceService:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No playback source available for item",
         )
+
+    async def mark_selected_hls_media_entry_stale(
+        self,
+        item_identifier: str,
+        *,
+        at: datetime | None = None,
+    ) -> bool:
+        """Persist the selected HLS media entry as stale so background refresh can pick it up."""
+
+        requested_at = at or datetime.now(UTC)
+        for item in await self._list_items():
+            if not self._matches_identifier(item, item_identifier):
+                continue
+
+            selected_entry = self._get_persisted_active_stream_media_entry(
+                item,
+                role=_ACTIVE_STREAM_ROLE_HLS,
+            )
+            if selected_entry is None or selected_entry.kind != "remote-hls":
+                return False
+            if selected_entry.refresh_state == "failed":
+                return False
+            if selected_entry.refresh_state == "ready":
+                self.mark_media_entry_stale(selected_entry, at=requested_at)
+                await self._persist_media_entry_projection(selected_entry)
+            return True
+
+        return False
 
 
 class InProcessDirectPlaybackRefreshController(DirectPlaybackRefreshScheduler):

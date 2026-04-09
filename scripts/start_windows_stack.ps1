@@ -1324,6 +1324,7 @@ $stderrPath = Join-Path $stateDirectory 'filmuvfs-windows-stderr.log'
 $callbackTracePath = Join-Path $stateDirectory 'filmuvfs-windows-callbacks.log'
 $wrapperTracePath = Join-Path $stateDirectory 'filmuvfs-winfsp-wrapper.log'
 $mountDiagnosticsPath = Join-Path $stateDirectory 'mount-operational-diagnostics.json'
+$runtimeStatusPath = Join-Path $stateDirectory 'filmuvfs-runtime-status.json'
 $managerLogPath = Join-Path $stateDirectory 'start_windows_stack.log'
 $binaryPath = Join-Path $repoRoot 'rust\filmuvfs\target\release\filmuvfs.exe'
 if ([string]::IsNullOrWhiteSpace($ProjFsAutoEnableResultPath)) {
@@ -1554,6 +1555,9 @@ if (Test-Path -LiteralPath $wrapperTracePath) {
 if (Test-Path -LiteralPath $mountDiagnosticsPath) {
     Remove-Item -LiteralPath $mountDiagnosticsPath -Force -ErrorAction SilentlyContinue
 }
+if (Test-Path -LiteralPath $runtimeStatusPath) {
+    Remove-Item -LiteralPath $runtimeStatusPath -Force -ErrorAction SilentlyContinue
+}
 $env:FILMUVFS_WINDOWS_TRACE_PATH = $callbackTracePath
 $env:FILMUVFS_WINFSP_WRAPPER_LOG = $wrapperTracePath
 $startArguments = [System.Collections.Generic.List[string]]::new()
@@ -1586,7 +1590,12 @@ $process = Start-Process -FilePath $binaryPath `
     -ArgumentList $startArguments `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
-    -Environment @{ FILMUVFS_WINDOWS_TRACE_PATH = $callbackTracePath; FILMUVFS_WINFSP_WRAPPER_LOG = $wrapperTracePath } `
+    -Environment @{
+        FILMUVFS_WINDOWS_TRACE_PATH = $callbackTracePath
+        FILMUVFS_WINFSP_WRAPPER_LOG = $wrapperTracePath
+        FILMUVFS_RUNTIME_STATUS_PATH = $runtimeStatusPath
+        FILMUVFS_RUNTIME_STATUS_INTERVAL_SECONDS = $SummaryIntervalSeconds.ToString()
+    } `
     -WindowStyle Hidden `
     -PassThru
 
@@ -1610,6 +1619,7 @@ $state = [pscustomobject]@{
     callback_trace_path = $callbackTracePath
     wrapper_trace_path = $wrapperTracePath
     mount_diagnostics_path = $mountDiagnosticsPath
+    runtime_status_path = $runtimeStatusPath
     manager_log_path = $managerLogPath
     mount_status = 'starting'
     started_at = (Get-Date).ToString('o')

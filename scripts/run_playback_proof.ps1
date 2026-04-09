@@ -78,6 +78,34 @@ function Invoke-WslBash {
     return & wsl.exe -d $WslDistro -u root -- bash -lc "$Command"
 }
 
+
+function Refresh-WslPersistentMount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ArtifactDir
+    )
+
+    $startScript = "$script:WslRepoRoot/rust/filmuvfs/scripts/start_persistent_mount.sh"
+    $preflightLogPath = Join-Path $ArtifactDir 'wsl-mount-preflight.txt'
+    $quotedStartScript = ConvertTo-BashSingleQuoted -Value $startScript
+    $output = & wsl.exe -d $WslDistro -u root -- bash -lc "tr -d '\r' < $quotedStartScript | bash" 2>&1
+    (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine) | Set-Content -Path $preflightLogPath -Encoding UTF8
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to refresh the WSL persistent mount via $startScript"
+    }
+
+    $quotedMountRoot = ConvertTo-BashSingleQuoted -Value $MountRoot
+    $listingText = (Invoke-WslBash -Command "ls $quotedMountRoot 2>/dev/null || true" | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    if ($listingText -notmatch '(^|\r?\n)(movies|shows)(\r?\n|$)') {
+        throw "WSL persistent mount preflight did not expose movies/shows under $MountRoot"
+    }
+
+    return [pscustomobject]@{
+        log_path = '/tmp/filmuvfs_persistent.log'
+        details  = 'Refreshed the WSL persistent mount so the mounted proof path uses the current filmuvfs binary and a fresh persistent log.'
+    }
+}
 function ConvertTo-BashSingleQuoted {
     param(
         [Parameter(Mandatory = $true)]
@@ -223,6 +251,17 @@ function Write-SummaryFile {
         ('  "wsl_host_mount_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_host_mount_status))
         ('  "wsl_host_mount_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_host_mount_details))
         ('  "wsl_persistent_log_path": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_persistent_log_path))
+        ('  "plex_wsl_evidence_path": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.plex_wsl_evidence_path))
+        ('  "wsl_mount_check_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_mount_check_status))
+        ('  "wsl_mount_check_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_mount_check_details))
+        ('  "wsl_host_binary_check_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_host_binary_check_status))
+        ('  "wsl_host_binary_check_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_host_binary_check_details))
+        ('  "refresh_identity_check_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.refresh_identity_check_status))
+        ('  "refresh_identity_check_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.refresh_identity_check_details))
+        ('  "foreground_fetch_check_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.foreground_fetch_check_status))
+        ('  "foreground_fetch_check_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.foreground_fetch_check_details))
+        ('  "plex_wsl_evidence_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.plex_wsl_evidence_status))
+        ('  "plex_wsl_evidence_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.plex_wsl_evidence_details))
         ('  "wsl_host_binary_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_host_binary_status))
         ('  "wsl_host_binary_details": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.wsl_host_binary_details))
         ('  "refresh_identity_status": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.refresh_identity_status))
@@ -1019,6 +1058,189 @@ function Invoke-EmbySessionProof {
     }
 }
 
+function Test-IsNativePlexUrl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Url
+    )
+
+    return [bool] ($Url -match '://(localhost|127\.0\.0\.1):32400(?:/|$)')
+}
+
+function Get-NativePlexUrl {
+    return 'http://127.0.0.1:32400'
+}
+
+function Get-NativePlexLocalAdminToken {
+    $localAppData = [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return ''
+    }
+
+    $tokenPath = Join-Path $localAppData 'Plex Media Server\.LocalAdminToken'
+    if (-not (Test-Path -LiteralPath $tokenPath)) {
+        return ''
+    }
+
+    return [string] (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+}
+
+function Get-NativePlexLogPath {
+    $localAppData = [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return $null
+    }
+
+    $logPath = Join-Path $localAppData 'Plex Media Server\Logs\Plex Media Server.log'
+    if (Test-Path -LiteralPath $logPath) {
+        return $logPath
+    }
+
+    return $null
+}
+
+
+function Get-NativePlexSetupState {
+    $localAppData = [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return $null
+    }
+
+    $setupPath = Join-Path $localAppData 'Plex Media Server\Setup Plex.html'
+    if (-not (Test-Path -LiteralPath $setupPath)) {
+        return $null
+    }
+
+    $content = [string] (Get-Content -LiteralPath $setupPath -Raw)
+    $redirectUrl = ''
+    $match = [regex]::Match($content, 'URL=(?<url>[^"]+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        $redirectUrl = [string] $match.Groups['url'].Value.Trim()
+    }
+
+    return [pscustomobject]@{
+        setup_path = $setupPath
+        redirect_url = $redirectUrl
+        awaiting_claim = ($redirectUrl -match '/await(?:$|[/?#])')
+    }
+}
+function Get-WebExceptionResponseBody {
+    param(
+        [object] $Response
+    )
+
+    if ($null -eq $Response) {
+        return ''
+    }
+
+    if ($Response -is [System.Net.Http.HttpResponseMessage]) {
+        try {
+            if ($null -ne $Response.Content) {
+                return [string] $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            }
+
+            return ''
+        }
+        catch {
+            return ''
+        }
+    }
+
+    if ($Response.PSObject.Methods.Name -contains 'GetResponseStream') {
+        try {
+            $stream = $Response.GetResponseStream()
+            if ($null -eq $stream) {
+                return ''
+            }
+
+            $reader = New-Object System.IO.StreamReader($stream)
+            try {
+                return $reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        catch {
+            return ''
+        }
+    }
+
+    return ''
+}
+
+function Invoke-PlexWebRequest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Uri,
+        [Parameter(Mandatory = $true)]
+        [string] $Token,
+        [int] $TimeoutSec = 20,
+        [int] $ReadyWaitSec = 240,
+        [int] $PollIntervalSec = 5
+    )
+
+    if (($ReadyWaitSec -eq 240) -and (-not [string]::IsNullOrWhiteSpace([string] $env:FILMU_PLEX_READY_WAIT_SECONDS))) {
+        $ReadyWaitSec = [int] $env:FILMU_PLEX_READY_WAIT_SECONDS
+    }
+
+    $deadline = (Get-Date).AddSeconds($ReadyWaitSec)
+
+    while ($true) {
+        try {
+            return Invoke-WebRequest -Method Get -Uri $Uri -Headers @{ 'X-Plex-Token' = $Token } -UseBasicParsing -TimeoutSec $TimeoutSec
+        }
+        catch {
+            $response = $null
+            if ($_.Exception.PSObject.Properties.Name -contains 'Response') {
+                $response = $_.Exception.Response
+            }
+
+            $statusCode = $null
+            if (($null -ne $response) -and ($response.PSObject.Properties.Name -contains 'StatusCode')) {
+                $statusCode = [int] $response.StatusCode
+            }
+
+            $responseBody = if (($_.ErrorDetails -ne $null) -and (-not [string]::IsNullOrWhiteSpace([string] $_.ErrorDetails.Message))) { [string] $_.ErrorDetails.Message } else { Get-WebExceptionResponseBody -Response $response }
+            $isMaintenance = ($statusCode -eq 503) -and (($responseBody -match 'startup maintenance tasks') -or ($responseBody -match 'title="Maintenance"') -or ($responseBody -match 'currently running startup maintenance'))
+            if ($isMaintenance -and (Test-IsNativePlexUrl -Url $Uri) -and ((Get-Date) -lt $deadline)) {
+                Start-Sleep -Seconds $PollIntervalSec
+                continue
+            }
+
+            if ($isMaintenance -and (Test-IsNativePlexUrl -Url $Uri)) {
+                $logPath = Get-NativePlexLogPath
+                $setupState = Get-NativePlexSetupState
+                $bodySnippet = ($responseBody -replace '\\s+', ' ').Trim()
+                if ($bodySnippet.Length -gt 200) {
+                    $bodySnippet = $bodySnippet.Substring(0, 200)
+                }
+
+                $message = "Native Plex at $Uri stayed in startup maintenance for $ReadyWaitSec seconds."
+                if (($null -ne $setupState) -and $setupState.awaiting_claim) {
+                    $message += " The local Plex install still appears to be in the initial claim/setup flow."
+                }
+                if (($null -ne $setupState) -and (-not [string]::IsNullOrWhiteSpace([string] $setupState.redirect_url))) {
+                    $message += " Setup redirect: $($setupState.redirect_url)"
+                }
+                if (($null -ne $setupState) -and (-not [string]::IsNullOrWhiteSpace([string] $setupState.setup_path))) {
+                    $message += " Setup file: $($setupState.setup_path)"
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string] $logPath)) {
+                    $message += " Log: $logPath."
+                }
+                if (-not [string]::IsNullOrWhiteSpace($bodySnippet)) {
+                    $message += " Last response: $bodySnippet"
+                }
+
+                throw $message
+            }
+
+            throw
+        }
+    }
+}
+
 function Get-PlexXml {
     param(
         [Parameter(Mandatory = $true)]
@@ -1027,7 +1249,7 @@ function Get-PlexXml {
         [string] $Token
     )
 
-    $response = Invoke-WebRequest -Method Get -Uri $Uri -Headers @{ 'X-Plex-Token' = $Token } -UseBasicParsing -TimeoutSec 20
+    $response = Invoke-PlexWebRequest -Uri $Uri -Token $Token
     return [xml] $response.Content
 }
 
@@ -1036,8 +1258,9 @@ function Resolve-PlexContext {
         return $null
     }
 
-    $baseUrl = if (-not [string]::IsNullOrWhiteSpace($MediaServerUrl)) { $MediaServerUrl.TrimEnd('/') } elseif (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_URL)) { [string] $env:PLEX_URL.TrimEnd('/') } elseif ($script:DotEnv.ContainsKey('PLEX_URL') -and -not [string]::IsNullOrWhiteSpace([string] $script:DotEnv['PLEX_URL'])) { [string] $script:DotEnv['PLEX_URL'].TrimEnd('/') } else { 'http://localhost:32400' }
-    $token = if (-not [string]::IsNullOrWhiteSpace($MediaServerToken)) { $MediaServerToken } elseif (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_TOKEN)) { [string] $env:PLEX_TOKEN } elseif ($script:DotEnv.ContainsKey('PLEX_TOKEN')) { [string] $script:DotEnv['PLEX_TOKEN'] } else { '' }
+    $baseUrl = if (-not [string]::IsNullOrWhiteSpace($MediaServerUrl)) { $MediaServerUrl.TrimEnd('/') } elseif (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_URL)) { [string] $env:PLEX_URL.TrimEnd('/') } elseif ($script:DotEnv.ContainsKey('PLEX_URL') -and -not [string]::IsNullOrWhiteSpace([string] $script:DotEnv['PLEX_URL'])) { [string] $script:DotEnv['PLEX_URL'].TrimEnd('/') } else { Get-NativePlexUrl }
+    $localAdminToken = if (Test-IsNativePlexUrl -Url $baseUrl) { Get-NativePlexLocalAdminToken } else { '' }
+    $token = if (-not [string]::IsNullOrWhiteSpace($MediaServerToken)) { $MediaServerToken } elseif (-not [string]::IsNullOrWhiteSpace($localAdminToken)) { $localAdminToken } elseif (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_TOKEN)) { [string] $env:PLEX_TOKEN } elseif ($script:DotEnv.ContainsKey('PLEX_TOKEN')) { [string] $script:DotEnv['PLEX_TOKEN'] } else { '' }
     if ([string]::IsNullOrWhiteSpace($token)) {
         return $null
     }
@@ -1072,6 +1295,8 @@ function Get-PlexVisibilitySignal {
     $uri = "$($Context.base_url)/library/sections/$($Context.library_id)/all"
     $xml = Get-PlexXml -Uri $uri -Token $Context.api_key
     $target = $SearchTerm.ToLowerInvariant()
+    $normalizedTarget = ($target -replace '^[^a-z0-9]+|[^a-z0-9]+$', '') -replace '[^a-z0-9]+', ' '
+    $articleTrimmedTarget = ($normalizedTarget -replace '^(the|a|an)\s+', '').Trim()
     $items = @($xml.MediaContainer.Video)
     if ($items.Count -eq 0) {
         $items = @($xml.MediaContainer.Directory)
@@ -1079,7 +1304,15 @@ function Get-PlexVisibilitySignal {
 
     $match = $items | Where-Object {
         $title = [string] $_.title
-        $title.ToLowerInvariant().Contains($target)
+        $normalizedTitle = (($title.ToLowerInvariant() -replace '^[^a-z0-9]+|[^a-z0-9]+$', '') -replace '[^a-z0-9]+', ' ').Trim()
+        $articleTrimmedTitle = ($normalizedTitle -replace '^(the|a|an)\s+', '').Trim()
+        $filePath = [string] ($_.Media.Part.file)
+        $normalizedFilePath = (($filePath.ToLowerInvariant() -replace '[\\/_\.\-\(\)\[\]]+', ' ') -replace '\s+', ' ').Trim()
+
+        $title.ToLowerInvariant().Contains($target) -or
+        $normalizedTitle.Contains($normalizedTarget) -or
+        (($articleTrimmedTarget.Length -gt 0) -and $articleTrimmedTitle.Contains($articleTrimmedTarget)) -or
+        (($normalizedTarget.Length -gt 0) -and $normalizedFilePath.Contains($normalizedTarget))
     } | Select-Object -First 1
 
     if ($null -ne $match) {
@@ -1510,12 +1743,13 @@ function Get-PlexWslEvidence {
     $binaryEvidencePath = Join-Path $ArtifactDir 'wsl-filmuvfs-host-binary.txt'
     $filmuvfsTailPath = Join-Path $ArtifactDir 'filmuvfs-tail-for-plex-proof.log'
 
+    $evidencePath = Join-Path $ArtifactDir 'plex-wsl-evidence.json'
     $listingText = (Invoke-WslBash -Command 'ls /mnt/filmuvfs 2>/dev/null || true' | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
     Set-Content -Path $listingPath -Encoding UTF8 -Value $listingText
     $mountStatus = if ($listingText -match '(^|\r?\n)(movies|shows)(\r?\n|$)') { 'visible' } else { 'missing' }
     $mountDetails = if ($mountStatus -eq 'visible') { 'WSL host mount exposes the expected catalog root.' } else { 'WSL host mount listing did not expose movies/shows.' }
 
-    $persistentText = (Invoke-WslBash -Command 'tail -n 200 /tmp/filmuvfs_persistent.log 2>/dev/null || true' | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    $persistentText = (Invoke-WslBash -Command 'tail -n 400 /tmp/filmuvfs_persistent.log 2>/dev/null || true' | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
     Set-Content -Path $persistentLogPath -Encoding UTF8 -Value $persistentText
 
     $sourcePaths = @(
@@ -1564,35 +1798,85 @@ function Get-PlexWslEvidence {
         $binaryDetails = 'WSL host mount binary is older than the newest Rust/proto source input.'
     }
 
-    $filmuvfsLogText = Get-DockerLogsText -Container 'filmuvfs' -Tail 600
+    $filmuvfsLogText = $persistentText
     Set-Content -Path $filmuvfsTailPath -Encoding UTF8 -Value $filmuvfsLogText
+    $evidenceLogText = [regex]::Replace($filmuvfsLogText, ([string][char]27 + '\[[0-9;]*[A-Za-z]'), '')
 
-    $refreshIdentityStatus = if (($filmuvfsLogText -match 'entry_id') -and ($filmuvfsLogText -match 'file_id=.*file:')) { 'entry_id_bound' } else { 'not_observed' }
-    $refreshIdentityDetails = if ($refreshIdentityStatus -eq 'entry_id_bound') { 'Mounted read logging shows entry_id-based cache identity, which guards against provider_file_id refresh collisions.' } else { 'Did not observe entry_id-based read-plan logging in the captured filmuvfs tail.' }
+    $refreshIdentityStatus = if (($evidenceLogText -match 'entry_id') -and ($evidenceLogText -match 'file_id\s*=\s*file:')) { 'entry_id_bound' } else { 'not_observed' }
+    $refreshIdentityDetails = if ($refreshIdentityStatus -eq 'entry_id_bound') { 'Mounted read logging shows entry_id-based cache identity, which guards against provider_file_id refresh collisions.' } else { 'Did not observe entry_id-based read-plan logging in the captured persistent filmuvfs tail.' }
 
-    if ($filmuvfsLogText -match 'waiting for in-flight foreground fetch') {
+    if ($evidenceLogText -match 'waiting for in-flight foreground fetch') {
         $foregroundFetchStatus = 'coalesced_wait_observed'
-        $foregroundFetchDetails = 'Observed in-flight foreground fetch coalescing in filmuvfs logs.'
+        $foregroundFetchDetails = 'Observed in-flight foreground fetch coalescing in the persistent filmuvfs log.'
     }
-    elseif ($filmuvfsLogText -match 'pattern\s*=\s*"cache_hit"') {
+    elseif ($evidenceLogText -match 'pattern\s*=\s*"cache_hit"') {
         $foregroundFetchStatus = 'no_duplicate_fetch_signal_observed'
-        $foregroundFetchDetails = 'Captured read plans were cache hits with no duplicate foreground fetch signal.'
+        $foregroundFetchDetails = 'Captured read plans were cache hits with no duplicate foreground fetch signal in the persistent filmuvfs log.'
     }
     else {
         $foregroundFetchStatus = 'not_observed'
-        $foregroundFetchDetails = 'Did not observe cache-hit or in-flight fetch-coalescing evidence in the captured filmuvfs tail.'
+        $foregroundFetchDetails = 'Did not observe cache-hit or in-flight fetch-coalescing evidence in the captured persistent filmuvfs tail.'
     }
 
+
+    $mountCheckStatus = if ($mountStatus -eq 'visible') { 'passed' } else { 'failed' }
+    $mountCheckDetails = $mountDetails
+    $hostBinaryCheckStatus = if ($binaryStatus -eq 'current') { 'passed' } else { 'failed' }
+    $hostBinaryCheckDetails = $binaryDetails
+    $refreshIdentityCheckStatus = if ($refreshIdentityStatus -eq 'entry_id_bound') { 'passed' } else { 'failed' }
+    $refreshIdentityCheckDetails = $refreshIdentityDetails
+    $foregroundFetchCheckStatus = if ($foregroundFetchStatus -in @('coalesced_wait_observed', 'no_duplicate_fetch_signal_observed')) { 'passed' } else { 'failed' }
+    $foregroundFetchCheckDetails = $foregroundFetchDetails
+    $overallCheckStatus = if (($mountCheckStatus -eq 'passed') -and ($hostBinaryCheckStatus -eq 'passed') -and ($refreshIdentityCheckStatus -eq 'passed') -and ($foregroundFetchCheckStatus -eq 'passed')) { 'passed' } else { 'failed' }
+    $overallCheckDetails = "WSL mount=$mountStatus; binary=$binaryStatus; refresh_identity=$refreshIdentityStatus; foreground_fetch=$foregroundFetchStatus."
+
+    $evidence = [ordered]@{
+        mount_status                    = $mountStatus
+        mount_details                   = $mountDetails
+        persistent_log_path             = $persistentLogPath
+        host_binary_status              = $binaryStatus
+        host_binary_details             = $binaryDetails
+        refresh_identity_status         = $refreshIdentityStatus
+        refresh_identity_details        = $refreshIdentityDetails
+        foreground_fetch_status         = $foregroundFetchStatus
+        foreground_fetch_details        = $foregroundFetchDetails
+        mount_check_status              = $mountCheckStatus
+        mount_check_details             = $mountCheckDetails
+        host_binary_check_status        = $hostBinaryCheckStatus
+        host_binary_check_details       = $hostBinaryCheckDetails
+        refresh_identity_check_status   = $refreshIdentityCheckStatus
+        refresh_identity_check_details  = $refreshIdentityCheckDetails
+        foreground_fetch_check_status   = $foregroundFetchCheckStatus
+        foreground_fetch_check_details  = $foregroundFetchCheckDetails
+        overall_check_status            = $overallCheckStatus
+        overall_check_details           = $overallCheckDetails
+        listing_path                    = $listingPath
+        filmuvfs_tail_path              = $filmuvfsTailPath
+        binary_evidence_path            = $binaryEvidencePath
+    }
+    $evidence | ConvertTo-Json -Depth 8 | Set-Content -Path $evidencePath -Encoding UTF8
+    $evidence['evidence_path'] = $evidencePath
     return [pscustomobject]@{
-        mount_status             = $mountStatus
-        mount_details            = $mountDetails
-        persistent_log_path      = $persistentLogPath
-        host_binary_status       = $binaryStatus
-        host_binary_details      = $binaryDetails
-        refresh_identity_status  = $refreshIdentityStatus
-        refresh_identity_details = $refreshIdentityDetails
-        foreground_fetch_status  = $foregroundFetchStatus
-        foreground_fetch_details = $foregroundFetchDetails
+        mount_status                    = $mountStatus
+        mount_details                   = $mountDetails
+        persistent_log_path             = $persistentLogPath
+        host_binary_status              = $binaryStatus
+        host_binary_details             = $binaryDetails
+        refresh_identity_status         = $refreshIdentityStatus
+        refresh_identity_details        = $refreshIdentityDetails
+        foreground_fetch_status         = $foregroundFetchStatus
+        foreground_fetch_details        = $foregroundFetchDetails
+        mount_check_status              = $mountCheckStatus
+        mount_check_details             = $mountCheckDetails
+        host_binary_check_status        = $hostBinaryCheckStatus
+        host_binary_check_details       = $hostBinaryCheckDetails
+        refresh_identity_check_status   = $refreshIdentityCheckStatus
+        refresh_identity_check_details  = $refreshIdentityCheckDetails
+        foreground_fetch_check_status   = $foregroundFetchCheckStatus
+        foreground_fetch_check_details  = $foregroundFetchCheckDetails
+        overall_check_status            = $overallCheckStatus
+        overall_check_details           = $overallCheckDetails
+        evidence_path                   = $evidencePath
     }
 }
 
@@ -2111,7 +2395,7 @@ if ([string]::IsNullOrWhiteSpace($JellyfinSearchTerm)) {
 if (-not [string]::IsNullOrWhiteSpace($MediaServerProvider)) {
     if ([string]::IsNullOrWhiteSpace($MediaServerUrl)) {
         if ($MediaServerProvider -eq 'plex') {
-            $MediaServerUrl = if (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_URL)) { [string] $env:PLEX_URL } elseif ($script:DotEnv.ContainsKey('PLEX_URL')) { [string] $script:DotEnv['PLEX_URL'] } else { 'http://localhost:32400' }
+            $MediaServerUrl = if (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_URL)) { [string] $env:PLEX_URL } elseif ($script:DotEnv.ContainsKey('PLEX_URL')) { [string] $script:DotEnv['PLEX_URL'] } else { Get-NativePlexUrl }
         }
         elseif ($MediaServerProvider -eq 'jellyfin') {
             $MediaServerUrl = if (-not [string]::IsNullOrWhiteSpace([string] $env:JELLYFIN_URL)) { [string] $env:JELLYFIN_URL } elseif ($script:DotEnv.ContainsKey('JELLYFIN_URL')) { [string] $script:DotEnv['JELLYFIN_URL'] } else { 'http://localhost:8096' }
@@ -2123,7 +2407,11 @@ if (-not [string]::IsNullOrWhiteSpace($MediaServerProvider)) {
 
     if ([string]::IsNullOrWhiteSpace($MediaServerToken)) {
         if ($MediaServerProvider -eq 'plex') {
-            if (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_TOKEN)) {
+            $nativePlexToken = if (Test-IsNativePlexUrl -Url $MediaServerUrl) { Get-NativePlexLocalAdminToken } else { '' }
+            if (-not [string]::IsNullOrWhiteSpace($nativePlexToken)) {
+                $MediaServerToken = $nativePlexToken
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace([string] $env:PLEX_TOKEN)) {
                 $MediaServerToken = [string] $env:PLEX_TOKEN
             }
             elseif ($script:DotEnv.ContainsKey('PLEX_TOKEN')) {
@@ -2219,6 +2507,17 @@ $summary = [ordered]@{
         wsl_host_mount_status              = $null
         wsl_host_mount_details             = $null
         wsl_persistent_log_path            = $null
+        plex_wsl_evidence_path             = $null
+        wsl_mount_check_status             = $null
+        wsl_mount_check_details            = $null
+        wsl_host_binary_check_status       = $null
+        wsl_host_binary_check_details      = $null
+        refresh_identity_check_status      = $null
+        refresh_identity_check_details     = $null
+        foreground_fetch_check_status      = $null
+        foreground_fetch_check_details     = $null
+        plex_wsl_evidence_status           = $null
+        plex_wsl_evidence_details          = $null
         wsl_host_binary_status             = $null
         wsl_host_binary_details            = $null
         refresh_identity_status            = $null
@@ -2285,6 +2584,9 @@ try {
         throw 'Frontend did not become ready.'
     }
     Add-StepResult -Name 'frontend_ready' -Status 'passed' -Details $FrontendUrl
+
+    $wslMountPreflight = Refresh-WslPersistentMount -ArtifactDir $artifactDir
+    Add-StepResult -Name 'wsl_mount_preflight' -Status 'passed' -Details $wslMountPreflight.details
 
     $itemSummary = $null
     $existingItem = Get-ProofItemSummary
@@ -2543,16 +2845,34 @@ try {
             $summary.media_server.wsl_host_mount_status = $plexWslEvidence.mount_status
             $summary.media_server.wsl_host_mount_details = $plexWslEvidence.mount_details
             $summary.media_server.wsl_persistent_log_path = $plexWslEvidence.persistent_log_path
+            $summary.media_server.plex_wsl_evidence_path = $plexWslEvidence.evidence_path
+            $summary.media_server.wsl_mount_check_status = $plexWslEvidence.mount_check_status
+            $summary.media_server.wsl_mount_check_details = $plexWslEvidence.mount_check_details
             $summary.media_server.wsl_host_binary_status = $plexWslEvidence.host_binary_status
             $summary.media_server.wsl_host_binary_details = $plexWslEvidence.host_binary_details
+            $summary.media_server.wsl_host_binary_check_status = $plexWslEvidence.host_binary_check_status
+            $summary.media_server.wsl_host_binary_check_details = $plexWslEvidence.host_binary_check_details
             $summary.media_server.refresh_identity_status = $plexWslEvidence.refresh_identity_status
             $summary.media_server.refresh_identity_details = $plexWslEvidence.refresh_identity_details
+            $summary.media_server.refresh_identity_check_status = $plexWslEvidence.refresh_identity_check_status
+            $summary.media_server.refresh_identity_check_details = $plexWslEvidence.refresh_identity_check_details
             $summary.media_server.foreground_fetch_status = $plexWslEvidence.foreground_fetch_status
             $summary.media_server.foreground_fetch_details = $plexWslEvidence.foreground_fetch_details
-            $plexEvidenceStepStatus = if (($plexWslEvidence.mount_status -eq 'visible') -and ($plexWslEvidence.host_binary_status -eq 'current')) { 'passed' } else { 'failed' }
-            Add-StepResult -Name 'plex_wsl_evidence' -Status $plexEvidenceStepStatus -Details ("WSL mount={0}; binary={1}; refresh_identity={2}; foreground_fetch={3}." -f $plexWslEvidence.mount_status, $plexWslEvidence.host_binary_status, $plexWslEvidence.refresh_identity_status, $plexWslEvidence.foreground_fetch_status)
+            $summary.media_server.foreground_fetch_check_status = $plexWslEvidence.foreground_fetch_check_status
+            $summary.media_server.foreground_fetch_check_details = $plexWslEvidence.foreground_fetch_check_details
+            $summary.media_server.plex_wsl_evidence_status = $plexWslEvidence.overall_check_status
+            $summary.media_server.plex_wsl_evidence_details = $plexWslEvidence.overall_check_details
+            Add-StepResult -Name 'plex_wsl_mount_visibility' -Status $plexWslEvidence.mount_check_status -Details $plexWslEvidence.mount_check_details
+            Add-StepResult -Name 'plex_wsl_host_binary_freshness' -Status $plexWslEvidence.host_binary_check_status -Details $plexWslEvidence.host_binary_check_details
+            Add-StepResult -Name 'plex_wsl_refresh_identity_evidence' -Status $plexWslEvidence.refresh_identity_check_status -Details $plexWslEvidence.refresh_identity_check_details
+            Add-StepResult -Name 'plex_wsl_foreground_fetch_evidence' -Status $plexWslEvidence.foreground_fetch_check_status -Details $plexWslEvidence.foreground_fetch_check_details
+            Add-StepResult -Name 'plex_wsl_evidence' -Status $plexWslEvidence.overall_check_status -Details $plexWslEvidence.overall_check_details
         }
         else {
+            Add-StepResult -Name 'plex_wsl_mount_visibility' -Status 'skipped' -Details 'WSL/Docker Plex evidence is only recorded for Plex playback proofs on the docker_wsl topology.'
+            Add-StepResult -Name 'plex_wsl_host_binary_freshness' -Status 'skipped' -Details 'WSL/Docker Plex evidence is only recorded for Plex playback proofs on the docker_wsl topology.'
+            Add-StepResult -Name 'plex_wsl_refresh_identity_evidence' -Status 'skipped' -Details 'WSL/Docker Plex evidence is only recorded for Plex playback proofs on the docker_wsl topology.'
+            Add-StepResult -Name 'plex_wsl_foreground_fetch_evidence' -Status 'skipped' -Details 'WSL/Docker Plex evidence is only recorded for Plex playback proofs on the docker_wsl topology.'
             Add-StepResult -Name 'plex_wsl_evidence' -Status 'skipped' -Details 'WSL/Docker Plex evidence is only recorded for Plex playback proofs on the docker_wsl topology.'
         }
 

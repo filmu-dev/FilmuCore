@@ -34,7 +34,9 @@ use crate::{
     catalog::state::{
         inode_for_entry_id as hashed_inode_for_entry_id, CatalogStateStore, ROOT_INODE,
     },
-    chunk_engine::{ChunkEngine, ChunkEngineConfig, ChunkEngineError, ChunkReadRequest},
+    chunk_engine::{
+        ChunkCacheSnapshot, ChunkEngine, ChunkEngineConfig, ChunkEngineError, ChunkReadRequest,
+    },
     chunk_planner::ChunkPlannerConfig,
     config::{PrefetchConfig, ResolvedMountAdapterKind, SidecarConfig},
     hidden_paths::{is_hidden_path, is_ignored_path},
@@ -49,8 +51,9 @@ use crate::{
         CatalogEntry, CatalogEntryKind, CatalogFileTransport, FileEntry,
     },
     telemetry::{
-        record_inline_refresh, record_mounted_read_duration, record_prefetch_event,
-        record_read_request, record_upstream_fetch_bytes, record_upstream_fetch_duration,
+        record_backend_fallback, record_handle_startup_duration, record_inline_refresh,
+        record_mounted_read_duration, record_prefetch_event, record_read_request,
+        record_upstream_fetch_bytes, record_upstream_fetch_duration,
     },
     upstream::{UpstreamReadError, UpstreamReader},
 };
@@ -186,6 +189,8 @@ struct MountHandleState {
     inode: u64,
     handle_key: String,
     invalidated: bool,
+    opened_at: Instant,
+    startup_recorded: bool,
 }
 
 #[derive(Debug)]
@@ -445,6 +450,25 @@ impl MountRuntime {
         self.chunk_engine.cache_snapshot().weighted_size_bytes
     }
 
+    pub fn chunk_cache_snapshot(&self) -> ChunkCacheSnapshot {
+        self.chunk_engine.cache_snapshot()
+    }
+
+    pub fn active_read_count(&self) -> u64 {
+        self.active_reads.load(Ordering::SeqCst)
+    }
+
+    fn record_handle_startup_result(&self, handle_id: u64, result: &'static str) {
+        let Some(mut handle_state) = self.handles.get_mut(&handle_id) else {
+            return;
+        };
+        if handle_state.startup_recorded {
+            return;
+        }
+        handle_state.startup_recorded = true;
+        record_handle_startup_duration(handle_state.opened_at.elapsed(), result);
+    }
+
     pub fn initiate_shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if self.active_reads.load(Ordering::SeqCst) == 0 {
@@ -679,6 +703,7 @@ impl MountRuntime {
         );
         if request.length == 0 {
             record_read_request("ok");
+            self.record_handle_startup_result(request.handle_id, "ok");
             return Ok(Bytes::new());
         }
 
@@ -744,6 +769,7 @@ impl MountRuntime {
                 Ok(bytes) => {
                     record_read_request("ok");
                     record_mounted_read_duration(elapsed, "ok");
+                    self.record_handle_startup_result(request.handle_id, "ok");
                     record_upstream_fetch_bytes(bytes.len() as u64);
                     self.schedule_adaptive_prefetch(&request, &chunk_request, bytes.len() as u64);
                     debug!(
@@ -780,6 +806,7 @@ impl MountRuntime {
                             Ok(bytes) => {
                                 record_read_request("ok");
                                 record_mounted_read_duration(retry_elapsed, "ok");
+                                self.record_handle_startup_result(request.handle_id, "ok");
                                 record_upstream_fetch_bytes(bytes.len() as u64);
                                 self.schedule_adaptive_prefetch(
                                     &request,
@@ -801,6 +828,7 @@ impl MountRuntime {
                             Err(retry_error) if retry_error.is_stale() => {
                                 record_read_request("estale");
                                 record_mounted_read_duration(retry_elapsed, "estale");
+                                self.record_handle_startup_result(request.handle_id, "estale");
                                 warn!(
                                     error = %retry_error,
                                     path = %request.path,
@@ -825,6 +853,10 @@ impl MountRuntime {
                                     .map_err(|proxy_error| {
                                         record_read_request("error");
                                         record_mounted_read_duration(retry_elapsed, "error");
+                                        self.record_handle_startup_result(
+                                            request.handle_id,
+                                            "error",
+                                        );
                                         error!(
                                             error = %proxy_error,
                                             path = %request.path,
@@ -840,6 +872,7 @@ impl MountRuntime {
                                 {
                                     record_read_request("ok");
                                     record_mounted_read_duration(retry_elapsed, "ok");
+                                    self.record_handle_startup_result(request.handle_id, "ok");
                                     record_upstream_fetch_bytes(bytes.len() as u64);
                                     self.schedule_adaptive_prefetch(
                                         &request,
@@ -850,6 +883,7 @@ impl MountRuntime {
                                 } else {
                                     record_read_request("error");
                                     record_mounted_read_duration(retry_elapsed, "error");
+                                    self.record_handle_startup_result(request.handle_id, "error");
                                     error!(
                                         error = %retry_error,
                                         path = %request.path,
@@ -874,9 +908,14 @@ impl MountRuntime {
                             )
                             .await
                             .map_err(|proxy_error| {
-                                let outcome = if proxy_error.is_stale() { "estale" } else { "error" };
+                                let outcome = if proxy_error.is_stale() {
+                                    "estale"
+                                } else {
+                                    "error"
+                                };
                                 record_read_request(outcome);
                                 record_mounted_read_duration(elapsed, outcome);
+                                self.record_handle_startup_result(request.handle_id, outcome);
                                 MountRuntimeError::from_chunk_engine(
                                     request.path.clone(),
                                     proxy_error,
@@ -885,6 +924,7 @@ impl MountRuntime {
                         {
                             record_read_request("ok");
                             record_mounted_read_duration(elapsed, "ok");
+                            self.record_handle_startup_result(request.handle_id, "ok");
                             record_upstream_fetch_bytes(bytes.len() as u64);
                             self.schedule_adaptive_prefetch(
                                 &request,
@@ -896,6 +936,7 @@ impl MountRuntime {
                             let outcome = if error.is_stale() { "estale" } else { "error" };
                             record_read_request(outcome);
                             record_mounted_read_duration(elapsed, outcome);
+                            self.record_handle_startup_result(request.handle_id, outcome);
                             Err(MountRuntimeError::from_chunk_engine(
                                 request.path.clone(),
                                 error,
@@ -910,6 +951,7 @@ impl MountRuntime {
                         .map_err(|proxy_error| {
                             record_read_request("error");
                             record_mounted_read_duration(elapsed, "error");
+                            self.record_handle_startup_result(request.handle_id, "error");
                             error!(
                                 error = %proxy_error,
                                 path = %request.path,
@@ -920,6 +962,7 @@ impl MountRuntime {
                     {
                         record_read_request("ok");
                         record_mounted_read_duration(elapsed, "ok");
+                        self.record_handle_startup_result(request.handle_id, "ok");
                         record_upstream_fetch_bytes(bytes.len() as u64);
                         self.schedule_adaptive_prefetch(
                             &request,
@@ -930,6 +973,7 @@ impl MountRuntime {
                     } else {
                         record_read_request("error");
                         record_mounted_read_duration(elapsed, "error");
+                        self.record_handle_startup_result(request.handle_id, "error");
                         error!(
                             error = %error,
                             path = %request.path,
@@ -1003,11 +1047,12 @@ impl MountRuntime {
         &self,
         request: &MountReadRequest,
         chunk_request: &ChunkReadRequest,
-        reason: &str,
+        reason: &'static str,
     ) -> Result<Option<Bytes>, ChunkEngineError> {
         let Some(proxy_url) = self.backend_stream_url(request) else {
             return Ok(None);
         };
+        record_backend_fallback("attempt", reason);
         info!(
             entry_id = %request.entry_id,
             item_id = %request.item_id,
@@ -1020,7 +1065,16 @@ impl MountRuntime {
             url: proxy_url,
             ..chunk_request.clone()
         };
-        let bytes = self.chunk_engine.read(proxy_request).await?;
+        let bytes = match self.chunk_engine.read(proxy_request).await {
+            Ok(bytes) => {
+                record_backend_fallback("success", reason);
+                bytes
+            }
+            Err(error) => {
+                record_backend_fallback("failure", reason);
+                return Err(error);
+            }
+        };
         Ok(Some(bytes))
     }
 
@@ -1088,6 +1142,8 @@ impl MountRuntime {
                 inode,
                 handle_key: handle_key.clone(),
                 invalidated: false,
+                opened_at: Instant::now(),
+                startup_recorded: false,
             },
         );
         self.chunk_engine.register_handle(&handle_key);

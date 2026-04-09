@@ -191,6 +191,17 @@ async def _first_watch_event(
     return await anext(stream)
 
 
+async def _collect_watch_events(
+    servicer: FilmuVfsCatalogGrpcServicer,
+    request: catalog_pb2.WatchCatalogRequest,
+) -> list[catalog_pb2.WatchCatalogEvent]:
+    async def request_iterator() -> AsyncIterator[catalog_pb2.WatchCatalogRequest]:
+        yield request
+
+    stream = servicer.WatchCatalog(request_iterator(), cast(Any, _FakeContext()))
+    return [event async for event in stream]
+
+
 def test_watch_catalog_serves_delta_for_known_reconnect_generation() -> None:
     previous_snapshot = _catalog_snapshot(generation_id="1", file_url="https://cdn.example.com/movie-a")
     current_snapshot = _catalog_snapshot(generation_id="2", file_url="https://cdn.example.com/movie-b")
@@ -230,6 +241,49 @@ def test_watch_catalog_serves_delta_for_known_reconnect_generation() -> None:
     assert supplier.delta_since_calls == [1]
 
 
+def test_watch_catalog_governance_tracks_reconnect_delta_lifecycle() -> None:
+    previous_snapshot = _catalog_snapshot(generation_id="1", file_url="https://cdn.example.com/movie-a")
+    current_snapshot = _catalog_snapshot(generation_id="2", file_url="https://cdn.example.com/movie-b")
+    reconnect_delta = VfsCatalogDelta(
+        generation_id="2",
+        base_generation_id="1",
+        published_at=current_snapshot.published_at,
+        upserts=(current_snapshot.entries[-1],),
+        removals=(),
+        stats=current_snapshot.stats,
+    )
+    supplier = _StubSupplier(
+        current_snapshot=current_snapshot,
+        reconnect_delta=reconnect_delta,
+        snapshots_by_generation={1: previous_snapshot, 2: current_snapshot},
+    )
+    servicer = FilmuVfsCatalogGrpcServicer(cast(Any, supplier))
+
+    events = asyncio.run(
+        _collect_watch_events(
+            servicer,
+            catalog_pb2.WatchCatalogRequest(
+                subscribe=catalog_pb2.CatalogSubscribe(
+                    daemon_id="pytest-daemon",
+                    last_applied_generation_id="1",
+                    want_full_snapshot=True,
+                    correlation=catalog_pb2.CatalogCorrelationKeys(),
+                )
+            ),
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].WhichOneof("payload") == "delta"
+    snapshot = servicer.build_governance_snapshot()
+    assert snapshot["vfs_catalog_watch_sessions_started"] == 1
+    assert snapshot["vfs_catalog_watch_sessions_completed"] == 1
+    assert snapshot["vfs_catalog_watch_sessions_active"] == 0
+    assert snapshot["vfs_catalog_reconnect_requested"] == 1
+    assert snapshot["vfs_catalog_reconnect_delta_served"] == 1
+    assert snapshot["vfs_catalog_deltas_served"] == 1
+
+
 def test_refresh_catalog_entry_forces_provider_refresh_and_returns_new_url() -> None:
     snapshot = _catalog_snapshot(generation_id="1", file_url="https://cdn.example.com/stale")
     provider_client = _FakeProviderClient("https://cdn.example.com/fresh")
@@ -259,6 +313,11 @@ def test_refresh_catalog_entry_forces_provider_refresh_and_returns_new_url() -> 
     link, request = provider_client.calls[0]
     assert link == "https://api.example.com/restricted/movie-1"
     assert request.provider_file_id == "provider-file-movie-1"
+    snapshot = servicer.build_governance_snapshot()
+    assert snapshot["vfs_catalog_inline_refresh_requests"] == 1
+    assert snapshot["vfs_catalog_inline_refresh_succeeded"] == 1
+    assert snapshot["vfs_catalog_refresh_attempts"] == 1
+    assert snapshot["vfs_catalog_refresh_succeeded"] == 1
 
 
 def test_refresh_catalog_entry_prefers_entry_id_over_shared_provider_file_id() -> None:

@@ -212,6 +212,18 @@ $binaryCapabilities = $null
 if ($null -ne $state -and $null -ne $state.binary_capabilities) {
     $binaryCapabilities = $state.binary_capabilities
 }
+$runtimeStatusPath = $null
+if ($null -ne $state -and $state.PSObject.Properties.Match('runtime_status_path').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$state.runtime_status_path)) {
+    $runtimeStatusPath = [string]$state.runtime_status_path
+}
+$runtimeStatus = $null
+if (($null -ne $runtimeStatusPath) -and (Test-Path -LiteralPath $runtimeStatusPath)) {
+    try {
+        $runtimeStatus = Get-Content -LiteralPath $runtimeStatusPath -Raw | ConvertFrom-Json
+    }
+    catch {
+    }
+}
 
 Write-Host '==> FilmuCore Windows-native stack status' -ForegroundColor Cyan
 Write-Host ''
@@ -267,11 +279,37 @@ else {
     if (-not [string]::IsNullOrWhiteSpace([string]$state.callback_trace_path)) {
         Write-Host ("  Callback Log:  {0}" -f ([string] $state.callback_trace_path)) -ForegroundColor White
     }
+    if (-not [string]::IsNullOrWhiteSpace([string]$runtimeStatusPath)) {
+        Write-Host ("  Runtime Stat:  {0}" -f $runtimeStatusPath) -ForegroundColor White
+    }
     if (-not [string]::IsNullOrWhiteSpace([string]$state.manager_log_path)) {
         Write-Host ("  Manager Log:   {0}" -f ([string] $state.manager_log_path)) -ForegroundColor White
     }
     if ($state.PSObject.Properties.Match('last_error').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$state.last_error)) {
         Write-Host ("  Last Error:    {0}" -f ([string] $state.last_error)) -ForegroundColor Yellow
+    }
+}
+
+if ($null -ne $runtimeStatus) {
+    Write-Host ''
+    Write-Host '[Rust Runtime Status]' -ForegroundColor Yellow
+    if ($runtimeStatus.PSObject.Properties.Match('generated_at_unix_seconds').Count -gt 0) {
+        Write-Host ("  Generated At:  {0}" -f ([long]$runtimeStatus.generated_at_unix_seconds)) -ForegroundColor White
+    }
+    if ($runtimeStatus.PSObject.Properties.Match('runtime').Count -gt 0) {
+        Write-Host ("  Open Handles:  {0}" -f ([int64]$runtimeStatus.runtime.open_handles)) -ForegroundColor White
+        Write-Host ("  Active Reads:  {0}" -f ([int64]$runtimeStatus.runtime.active_reads)) -ForegroundColor White
+        Write-Host ("  Cache Bytes:   {0}" -f ([int64]$runtimeStatus.runtime.chunk_cache_weighted_bytes)) -ForegroundColor White
+    }
+    if ($runtimeStatus.PSObject.Properties.Match('mounted_reads').Count -gt 0) {
+        Write-Host ("  Reads OK:      {0}" -f ([int64]$runtimeStatus.mounted_reads.ok)) -ForegroundColor White
+        Write-Host ("  Reads Error:   {0}" -f ([int64]$runtimeStatus.mounted_reads.error)) -ForegroundColor White
+        Write-Host ("  Reads ESTALE:  {0}" -f ([int64]$runtimeStatus.mounted_reads.estale)) -ForegroundColor White
+    }
+    if ($runtimeStatus.PSObject.Properties.Match('chunk_cache').Count -gt 0) {
+        Write-Host ("  Cache Hits:    {0}" -f ([int64]$runtimeStatus.chunk_cache.hits)) -ForegroundColor White
+        Write-Host ("  Cache Misses:  {0}" -f ([int64]$runtimeStatus.chunk_cache.misses)) -ForegroundColor White
+        Write-Host ("  Cache Inserts: {0}" -f ([int64]$runtimeStatus.chunk_cache.inserts)) -ForegroundColor White
     }
 }
 

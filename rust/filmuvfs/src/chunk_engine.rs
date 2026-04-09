@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::sync::Notify;
 
 use crate::{
-    cache::CacheEngine,
+    cache::{CacheEngine, CacheEngineSnapshot},
     chunk_planner::{ChunkPlanner, ChunkPlannerConfig, PlannedChunk, PlannedRead, ReadPattern},
     prefetch::{PrefetchScheduleError, PrefetchScheduler},
     telemetry::{record_chunk_cache_event, record_chunk_read_pattern, record_prefetch_event},
@@ -46,7 +46,19 @@ struct HandleReadState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkCacheSnapshot {
+    pub backend: &'static str,
     pub weighted_size_bytes: u64,
+    pub memory_bytes: u64,
+    pub memory_max_bytes: u64,
+    pub memory_hits: u64,
+    pub memory_misses: u64,
+    pub disk_bytes: u64,
+    pub disk_max_bytes: u64,
+    pub disk_hits: u64,
+    pub disk_misses: u64,
+    pub disk_writes: u64,
+    pub disk_write_errors: u64,
+    pub disk_evictions: u64,
 }
 
 #[derive(Debug, Error)]
@@ -137,8 +149,21 @@ impl ChunkEngine {
 
     #[must_use]
     pub fn cache_snapshot(&self) -> ChunkCacheSnapshot {
+        let cache_snapshot: CacheEngineSnapshot = self.cache.snapshot();
         ChunkCacheSnapshot {
-            weighted_size_bytes: self.cache.size_bytes(),
+            backend: cache_snapshot.backend,
+            weighted_size_bytes: cache_snapshot.weighted_size_bytes,
+            memory_bytes: cache_snapshot.memory_bytes,
+            memory_max_bytes: cache_snapshot.memory_max_bytes,
+            memory_hits: cache_snapshot.memory_hits,
+            memory_misses: cache_snapshot.memory_misses,
+            disk_bytes: cache_snapshot.disk_bytes,
+            disk_max_bytes: cache_snapshot.disk_max_bytes,
+            disk_hits: cache_snapshot.disk_hits,
+            disk_misses: cache_snapshot.disk_misses,
+            disk_writes: cache_snapshot.disk_writes,
+            disk_write_errors: cache_snapshot.disk_write_errors,
+            disk_evictions: cache_snapshot.disk_evictions,
         }
     }
 

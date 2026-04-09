@@ -30,6 +30,7 @@ Already present in the Python backend:
 - abort and request-shape (range/seek/EOF) counters
 - session-level read amplification proxies
 - logs/history SSE compatibility path
+- bounded in-memory log broker for `/api/v1/logs`, SSE logging, and GraphQL `logStream`
 
 Metric naming contract:
 
@@ -48,6 +49,10 @@ What this baseline is good at:
 
 What it does **not** yet provide sufficiently:
 
+- durable structured log retention outside process memory
+- ECS-style structured file output and shipper-friendly NDJSON logs
+- trace/span identifiers embedded directly into emitted log records
+- operator-ready local log shipping and search comparable to the current `riven-ts` Elastic/Filebeat path
 - rate-limiter pressure/deny visibility by operation or provider class
 - GraphQL operation timing and error taxonomy
 - mounted Rust data-plane telemetry and cross-process traceability
@@ -79,6 +84,7 @@ To check progressively and update as we go.
 | **Retry/DLQ visibility**              | Improved baseline              | queue lag, retry counts over time, DLQ age/size/reason breakdown                                                               | Needed for D1 and future D2 maturity                                 | **P1**   |
 | **Plugin load telemetry**             | Implemented baseline           | richer startup health rollups and longer-lived plugin health summaries                                                         | Needed as plugin platform grows beyond GraphQL                       | **P1**   |
 | **Plugin runtime telemetry**          | Implemented in-process baseline | per-plugin error/timeout health rollups, and queue lag only if/when hook execution becomes durable/queued                     | Needed for safe extensibility                                        | **P1**   |
+| **Structured log pipeline**           | Partial                         | durable file-backed structured logs, ECS/NDJSON output, trace/span-enriched log records, retention policy, and shipper/export readiness | Current `riven-ts` now has a materially stronger operator log pipeline | **P1**   |
 | **GraphQL observability**             | Minimal                        | operation-level timing, error-classification, schema diff governance                                                          | Needed for strategic parity and regression detection                 | **P2**   |
 | **Cache observability**               | Implemented baseline           | hit/miss split by layer, richer invalidation reasons, and longer-lived stale-serve ratios                                      | Needed for correctness and provider safety                           | **P1**   |
 | **Rate limiter observability**        | Partial                        | bucket pressure, denies by class, stream-link denial visibility                                                               | Needed for provider safety and FilmuVFS control-plane tuning         | **P1**   |
@@ -101,6 +107,7 @@ This layer is now largely landed:
 Remaining Layer 1 gap:
 
 - rate-limiter denies and pressure visibility by operation/provider class
+- durable structured logging beyond the current in-memory broker
 
 This is now the active baseline for the current expanding backend rather than a purely future plan.
 
@@ -173,6 +180,32 @@ Add as VFS/stream work progresses:
 - HLS startup and segment timing
 
 This is crucial if the goal is to exceed the TS backend rather than just match it.
+
+### Logging delta vs current `riven-ts`
+
+Current upstream `riven-ts` logging is materially broader than the current Filmu baseline:
+
+- Winston transport stack in `apps/riven/lib/utilities/logger/logger.ts`
+- ECS NDJSON output to `logs/ecs.json`
+- optional durable local `combined.log`, `error.log`, and `exceptions.log`
+- Sentry trace/span enrichment via `sentry-meta.format.ts`
+- source-tagged console output with `riven.log.source` and `riven.worker.id`
+- local Elastic/Filebeat/Kibana stack under `elastic-local/`
+
+Filmu currently has:
+
+- stdlib logging + `structlog` JSON rendering in [`../../filmu_py/logging.py`](../../filmu_py/logging.py)
+- compatibility-oriented bounded in-memory log history and live fan-out in [`../../filmu_py/core/log_stream.py`](../../filmu_py/core/log_stream.py)
+
+That means Filmu still needs a real operator log pipeline, not just a compatibility log surface.
+
+Minimum bar for closing that gap:
+
+- file-backed structured logs outside process memory
+- explicit retention/rotation policy
+- shipper-friendly JSON or ECS-like log format
+- trace/span/request/worker/plugin correlation fields in every emitted record
+- documented local operator flow for searching and shipping logs
 
 ### Layer 4 — Durable event/workflow visibility
 
@@ -266,7 +299,7 @@ Priority 6 should be considered meaningfully advanced when:
 - The backend now also exposes `upstream_manifest_invalid` in that HLS route taxonomy, so malformed remote playlists have a dedicated operator-facing classification instead of being hidden inside generic upstream failures.
 - The backend now also records explicit timeout/error upstream open outcomes for remote proxy playback and maps remote-HLS playlist fetch / segment proxy transport failures to explicit `504` / `502` responses, which makes that transport layer more observable and predictable.
 - The backend now also exposes remote-HLS retry/cooldown counters through [`/api/v1/stream/status`](../../filmu_py/api/routes/stream.py), including retry attempts, cooldown starts, cooldown hits, and currently active cooldown windows.
-- This is a stronger baseline than the original serving-only status view, and the Rust sidecar now also emits first mounted-read cache/pattern/prefetch/refresh metrics from live WinFSP/ProjFS reads. It is still below the fuller stream/VFS observability model described in this matrix because provider-pressure rollups, richer on-disk-cache visibility, prefetch-depth visibility, and true end-to-end amplification summaries still remain.
+- This is a stronger baseline than the original serving-only status view, and the Rust sidecar now also emits mounted-read cache/pattern/prefetch/refresh metrics plus cache-layer backend/memory/disk breakdown from live WinFSP/ProjFS reads. It is still below the fuller stream/VFS observability model described in this matrix because provider-pressure rollups, prefetch-depth visibility, and true end-to-end amplification summaries still remain.
 
 
 

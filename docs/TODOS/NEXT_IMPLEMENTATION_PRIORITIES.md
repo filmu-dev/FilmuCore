@@ -11,6 +11,12 @@ This is the current high-signal next-steps list for `filmu-python` after the lat
 
 This document is intentionally short and prioritized.
 
+## Strategic quality bar
+
+These priorities should now be read together with [`ENTERPRISE_GRADE_GAP_MATRIX.md`](ENTERPRISE_GRADE_GAP_MATRIX.md).
+
+Filmu is expected to become **enterprise-grade and state-of-the-art across all major areas**, not just locally parity-clean with current `riven-ts`.
+
 ---
 
 ## Priority 1 - Close the remaining playback parity gap
@@ -22,16 +28,20 @@ The active next step is hardening the now-real playback surface for the current 
 1. finish promoting the now-green playback harnesses into real playback-path merge gates, starting from the new self-hosted CI workflow in [`.github/workflows/playback-gate.yml`](../../.github/workflows/playback-gate.yml), [`../package.json`](../package.json) `proof:playback:gate`, [`../package.json`](../package.json) `proof:playback:providers:gate`, and the wrappers under [`../scripts/`](../scripts/)
 2. provision the self-hosted Linux runner prerequisites and media-server secrets for that workflow (`PLEX_TOKEN`, `EMBY_API_KEY`), validate them with [`../scripts/check_playback_gate_runner.ps1`](../scripts/check_playback_gate_runner.ps1), then make the gates required for playback-path changes; Windows dev hosts are expected to fail the Linux `/dev/fuse` prerequisite
 3. continue using the optional Plex-compatible stub proof, the real Jellyfin/frontend proof stack, the native Windows WinFSP gate, the now-working Docker Plex path, and the local Emby container as regression layers beneath the enforced gate
-4. strengthen `/api/v1/stream/file/{item_id}` source resolution and persisted lease-refresh behavior where the stale-link proof still exposes route-only recovery instead of durable projection repair
-5. continue hardening HLS/direct-play governance beyond the new production-grade HLS baseline, especially policy tuning, operator ergonomics, and any remaining control-plane refinements
+4. keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility in the proof artifact bundle
+5. keep the new thresholded Windows soak profiles green in repeated operator runs: `continuous`, `seek`, `concurrent`, and `full` now exist on top of [`../scripts/run_windows_vfs_soak.ps1`](../scripts/run_windows_vfs_soak.ps1), they now also capture backend `/api/v1/stream/status` VFS governance snapshots plus `backend_vfs_governance_delta` evidence when the backend is reachable, and the next step is repeatability across more than one environment class rather than inventing another soak harness
+6. continue hardening HLS/direct-play governance beyond the new production-grade HLS baseline, especially policy tuning, operator ergonomics, and any remaining control-plane refinements
 6. continue hardening direct-play governance beyond the now-shipped shared chunk-engine HTTP path, degraded-direct fallback awareness, provider-backed direct-source ranking, lease-freshness-aware provider-backed ordering, related-entry recovery via provider file identity, explicit active-stream-winner authority rules, same-file sibling collapse for non-active direct entries, richer-identity-first different-file fallback ordering, generated-local HLS cache/reference integrity checks, explicit malformed-manifest governance signals, route-level malformed-manifest observability/signaling, normalized HLS failure-reason counters, generated-missing/upstream-failure HLS route visibility, upstream-playlist structural validation, and explicit remote-HLS timeout/transport failure policy
 
 Why first:
 
 - Full current-frontend local playback proof is now present, so the next risk is drift without an enforced gate.
-- Local Plex and Emby containers are now provisioned in Compose, native Windows Jellyfin plus sampled Emby are already validated on `C:\FilmuCoreVFS`, the isolated Docker Plex path is green through repeatable proof coverage against the shared WSL host mount, and the repo now has a dedicated native Windows provider gate for Jellyfin/Emby/Plex in [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1). The next parity step is collecting separate native Windows Plex evidence when a real local PMS target exists while keeping both provider gates green.
+- Local Plex and Emby containers are now provisioned in Compose, native Windows Jellyfin plus Emby are already validated on `C:\FilmuCoreVFS`, the isolated Docker Plex path reran green through repeatable proof coverage against the shared WSL host mount on April 9, 2026, and the repo now has a dedicated native Windows provider gate for Jellyfin/Emby/Plex in [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1). Native Windows Plex is now green too, so the next parity step is no longer bring-up; it is keeping the now-explicit Docker evidence checks and the native Windows provider gate green while promoting both into CI/merge policy.
 - It aligns with the backend-as-motor principle without reopening already-delivered Phase C breadth.
-- The playback harness now has live-green preferred-client proof plus repeated green local runs, and the first CI workflow path now exists, so the fastest next step is runner provisioning / merge-policy promotion rather than more harness design.
+- The playback harness now has live-green preferred-client proof plus repeated green local runs, the selected direct stale-link repair now persists refreshed leases across session boundaries, selected media-entry-backed remote-HLS winners can now also self-heal once inline on real upstream playlist/segment failure, that inline repair path is now explicitly visible on `/api/v1/stream/status`, and the self-hosted CI workflow now fail-fast validates runner readiness, enforces the provider gate, uploads artifacts, and covers `main`/`merge_group` traffic. The fastest next step is therefore runner provisioning plus branch-protection / merge-policy promotion rather than more harness design.
+- Mounted/VFS operator visibility is also no longer split between the Python bridge and sidecar-local artifacts: `/api/v1/stream/status` now reports FilmuVFS catalog watch-session churn, reconnect-delta behavior, supplier failure classes, provider-backed refresh outcomes, explicit inline refresh request outcomes from the gRPC bridge, and additive `vfs_runtime_*` counters ingested from the Rust sidecar snapshot, so the next observability step is failure-taxonomy refinement and repeated soak evidence rather than first cross-process status exposure.
+- The Rust sidecar still emits a structured `filmuvfs-runtime-status.json` snapshot under the managed Windows-native state directory, and the soak/status scripts still consume it directly. With the Python API now ingesting the same file, the soak gate now using runtime-derived checks for upstream provider pressure, cold-fetch churn, unrecovered stale reads, and fatal mounted-read failures, and the runtime/status surface now also exposing `vfs_runtime_handle_startup_*`, the next mounted observability step is no longer first convergence between Rust and Python status vocabularies, first threshold attachment, or first startup-latency exposure; it is deciding which remaining mounted-read/cache/data-plane classes still need promotion and then re-proving those gates through repeated real environment runs.
+- Backend HTTP fallback behavior is no longer one of those remaining blind spots either: the mounted runtime now reports fallback attempts/success/failure by reason through `vfs_runtime_backend_fallback_*`, so the next mounted observability step is narrower still: repeated live soak evidence, cache/prefetch behavior under sustained load, and any remaining active-stream/data-plane counters that are still missing.
 
 ---
 
@@ -85,11 +95,11 @@ Current plugin support now includes packaged entry-point discovery, plugin-scope
 Next capability layers should include:
 
 - stronger compatibility/version policy and manifest/schema validation
-- richer external-author packaging/distribution guidance
+- richer external-author packaging/distribution guidance via [`../PLUGIN_DISTRIBUTION_POLICY.md`](../PLUGIN_DISTRIBUTION_POLICY.md)
 - ✅ MDBList list sync — real ContentServicePlugin implementation
 - ✅ Webhook notifications — real NotificationPlugin + PluginEventHookWorker implementation
 - ✅ Overseerr webhook intake at `/api/v1/webhook/overseerr`
-- deepen the now-real StremThru integration with stronger operator-facing health/compatibility policy rather than treating it as a remaining stub
+- deepen the now-real StremThru integration with stronger operator-facing health/compatibility policy rather than treating it as a remaining stub; the first additive readiness metadata now ships on [`GET /api/v1/plugins`](../../filmu_py/api/routes/default.py)
 - decide whether hook execution should remain in-process or grow into a durable/queued model
 - continue broadening capabilities only where they improve real platform breadth (see `PLUGIN_CAPABILITY_MODEL_MATRIX.md` for more details)
 
@@ -135,10 +145,10 @@ Recent Windows-native update:
 
 - `proof:windows:vfs:gate` is now green on `C:\FilmuCoreVFS`
 - native Jellyfin playback is proven on WinFSP
-- sampled native Emby playback/probe/stream-open checks now pass across multiple titles
+- native Emby playback/probe/stream-open checks now pass through the current provider proof on `C:\FilmuCoreVFS`
 - in-flight foreground chunk-fetch coalescing in [`../rust/filmuvfs/src/chunk_engine.rs`](../rust/filmuvfs/src/chunk_engine.rs) reduced duplicate upstream fetches and improved Emby buffering
-- the Docker Plex parity path is now working on the Linux/WSL topology after the WSL host-mount visibility and refresh-collision fixes
-- the next Plex step is no longer first playback bring-up; it is turning that path into repeatable proof/gate coverage and only then adding separate native Windows PMS evidence if available
+- the Docker Plex parity path is now working on the Linux/WSL topology after the WSL host-mount visibility and refresh-collision fixes, and the direct provider gate reran green on April 9, 2026
+- the next Plex step is no longer first playback bring-up; it is keeping the now-explicit Docker evidence checks green while promoting the gates into CI/merge policy, and only then adding separate native Windows PMS evidence if available
 
 The current hardening slice should therefore be driven by explicit validation scenarios:
 
@@ -207,7 +217,7 @@ After the shipped layer-1 baseline, deepen:
 
 - rate-limiter and provider-pressure visibility
 - GraphQL operation metrics
-- queue/backlog/control-plane lag visibility
+- queue/backlog/control-plane lag visibility; enqueue-decision, stale-cleanup, observed-job-status, and deferred-enqueue metrics are now the baseline, so the remaining work is broader lag/backlog visibility rather than first replay/dedup instrumentation
 - mounted stream/VFS data-plane metrics
 - correlation across API, workers, plugins, and stream control-plane events
 
@@ -237,12 +247,14 @@ Next:
 
 Next:
 
-1. Decide whether FilmuVFS should stop at discoverable alias entries or add a fully separate id-keyed browse tree, and how much broader queue-backed/orchestrated resolver workflow is still needed beyond the new mount-side inline refresh dedup
-2. GraphQL rich field expansion — add extended fields to compat subscription types
-3. Dedicated index-item worker stage (TMDB enrichment as ARQ stage, not request-time)
-4. Plex library scan trigger after item reaches `COMPLETED` state
-5. native Windows Plex parity run once a real local Plex Media Server exists against `C:\FilmuCoreVFS`
-6. CI/merge-policy promotion for the now-green `proof:playback:gate` and `proof:playback:providers:gate` surfaces
+1. CI/merge-policy promotion for the now-green `proof:playback:gate` and `proof:playback:providers:gate` surfaces
+2. Keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity evidence, and foreground-fetch/coalescing evidence in the playback-proof bundle
+3. Keep the thresholded Windows soak profiles green and repeatable across maintainers, then decide whether one of them should become a formal release gate alongside the shorter existing `proof:windows:vfs:gate`
+4. Decide whether FilmuVFS should stop at discoverable alias entries or add a fully separate id-keyed browse tree, and how much broader queue-backed/orchestrated resolver workflow is still needed beyond the new mount-side inline refresh dedup
+5. GraphQL rich field expansion — add extended fields to compat subscription types
+6. Dedicated index-item worker stage (TMDB enrichment as ARQ stage, not request-time)
+7. Plex library scan trigger after item reaches `COMPLETED` state
+8. keep native Windows Plex parity green against `C:\FilmuCoreVFS` through repeatable proof reruns and CI promotion
 
 ---
 
@@ -351,9 +363,9 @@ The next milestone should be considered reached when:
 - A small helper now also exists above that app-scoped controller attachment, so the next playback/VFS step is no longer first service-boundary trigger helper either; it is deciding whether to attach that helper to one narrow route-adjacent trigger, deepen provider-pressure/circuit-breaker policy, or continue production-grade HLS governance work.
 - A narrow route-adjacent non-blocking trigger now also exists in the direct-play route, so the next playback/VFS step is no longer first HTTP-surface attachment to the refresh control-plane either; it is deciding whether to deepen provider-pressure/circuit-breaker policy, expand similar non-blocking triggers to adjacent playback surfaces, or continue production-grade HLS governance work.
 - The direct-play trigger path now also has its first duplicate-trigger/backoff guardrails and status-surface governance counters, so the next playback/VFS step is no longer first provider-pressure observability on that route-adjacent path either; it is extending similar behavior to adjacent playback surfaces or continuing deeper HLS governance work.
-- The HLS route family now also has a first narrow selected-failed-lease refresh controller plus route-adjacent non-blocking trigger path, so the next playback/VFS step is no longer first HLS attachment to the durable lease-refresh control plane either; it is deciding whether to extend similar trigger behavior to stale/refreshing remote-HLS winners, deepen provider-pressure/circuit-breaker policy, or continue broader production-grade HLS lifecycle governance work.
+- The HLS route family now also has a first narrow selected-failed-lease refresh controller plus route-adjacent non-blocking trigger path, selected media-entry-backed remote-HLS winners can now also force one inline repair on real upstream playlist/segment failure, and `/api/v1/stream/status` now reports whether that inline repair path is attempting, recovering, failing, or no-oping, so the next playback/VFS step is no longer first HLS attachment to the durable lease-refresh control plane or first observability for that repair seam either; it is deciding whether to consolidate adjacent HLS trigger/retry policy, deepen provider-pressure/circuit-breaker policy, or continue broader production-grade HLS lifecycle governance work.
 - That HLS failed-lease trigger path now also has duplicate-trigger/backoff guardrails and status-surface governance counters, so the next playback/VFS step is no longer first HLS route-surface provider-pressure observability either; it is extending similar behavior to adjacent remote-HLS source classes or continuing deeper HLS governance work.
-- The HLS route family now also has a second narrow controller plus route-adjacent trigger path for selected stale or refreshing remote-HLS restricted-fallback winners, so the next playback/VFS step is no longer first narrow HLS winner-state attachment beyond failed leases either; it is deciding whether to extend similar behavior to broader remote-HLS classes, deepen provider-pressure/circuit-breaker policy, or continue broader production-grade HLS lifecycle governance work.
+- The HLS route family now also has a second narrow controller plus route-adjacent trigger path for selected stale or refreshing remote-HLS restricted-fallback winners, broader media-entry-backed remote-HLS winners now also have one-shot inline repair when the resolved upstream playlist/segment URL actually breaks, failed inline media-entry repair now also hands back into that restricted-fallback controller by persisting the selected winner stale before scheduling follow-up work, the two selected-HLS background refresh paths now also share one provider-pressure-aware execution core plus explicit `/api/v1/stream/status` counters for rate-limit vs provider-circuit deferrals, and the direct background refresh plane now also follows the same deferred provider-pressure contract plus matching status counters, so the next playback/VFS step is no longer first narrow HLS winner-state attachment, first repair-handoff unification, first selected-HLS provider-pressure observability, or first widening of those pressure semantics beyond selected-HLS only; it is consolidating the remaining route-adjacent matrix into cleaner policy helpers and keeping the repeated playback/provider proof gates green as stability criteria rather than adding more one-off route patches.
 - That restricted-fallback HLS trigger path now also has its own duplicate-trigger/backoff guardrails and parallel status-surface governance counters, so the next playback/VFS step is no longer first separate observability for stale/refreshing HLS backoff pressure either; it is broadening or consolidating adjacent HLS trigger policy deliberately rather than introducing new taxonomy casually.
 - The direct-file route now also preserves a stable inline filename contract for resolved direct-play attachments while respecting upstream-provided `content-disposition` on proxied remote responses, so the next playback/VFS step is no longer first filename-preserving direct-file contract hardening either; it is deepening the link resolver abstraction and service-layer direct-file serving descriptor rather than only patching individual headers.
 - The playback service now also builds its internal `DirectFileLinkResolution` model from the explicit direct-play decision seam rather than raw attachment shape alone, so the next playback/VFS step is no longer first separation of direct-file classification policy from serving-descriptor synthesis either; it is deciding how far to deepen provider/link lifecycle read models without widening into new persistence concepts or route surface changes.
@@ -364,6 +376,10 @@ The next milestone should be considered reached when:
 - The Rust runtime now also exists at [`../rust/filmuvfs`](../rust/filmuvfs), and the mounted runtime already passes Linux-target compile validation, WSL/Linux mount lifecycle tests, manual mount/read smoke, and Plex/Emby playback validation.
 - The Rust sidecar now also ships chunk-engine-backed mounted reads, inline stale-read refresh, `moka::future` caching, opt-in hybrid L2 cache support, adaptive velocity-based prefetch, hidden-path guards, and stable assigned inodes with collision fallback, so the active FilmuVFS frontier is no longer first mount bring-up or first read-path implementation.
 - That means the current FilmuVFS frontier is longer-running soak/backpressure hardening, richer mounted data-plane observability, rollout controls, and continued semantic/operational convergence across the HTTP and VFS playback paths.
+
+
+
+
 
 
 

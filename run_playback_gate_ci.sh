@@ -32,6 +32,8 @@ export FILMU_FRONTEND_CONTEXT="${FILMU_FRONTEND_CONTEXT:-../../Triven_riven-fork
 export FILMU_BACKEND_CONTAINER_NAME="${FILMU_BACKEND_CONTAINER_NAME:-filmu-python}"
 export PLEX_URL="${PLEX_URL:-http://localhost:32401}"
 export EMBY_URL="${EMBY_URL:-http://localhost:8097}"
+export FILMU_REQUIRE_PROVIDER_GATE="${FILMU_REQUIRE_PROVIDER_GATE:-1}"
+export FILMU_PLAYBACK_REQUIRED_CHECK_NAME="${FILMU_PLAYBACK_REQUIRED_CHECK_NAME:-Playback Gate / Playback Gate}"
 
 require_nonempty_env TMDB_API_KEY
 require_nonempty_env FILMU_FRONTEND_CONTEXT
@@ -57,7 +59,16 @@ if [[ ! -e /dev/fuse ]]; then
   exit 1
 fi
 
+readiness_args=(-NoProfile -File ./scripts/check_playback_gate_runner.ps1)
+if [[ "$FILMU_REQUIRE_PROVIDER_GATE" == "1" ]]; then
+  readiness_args+=(-RequireProviderGate)
+fi
+
+echo "[playback-gate-ci] validating runner readiness"
+pwsh "${readiness_args[@]}"
+
 mkdir -p /mnt/filmuvfs
+mkdir -p playback-proof-artifacts
 
 cleanup() {
   docker compose -f docker-compose.local.yml down --remove-orphans || true
@@ -105,12 +116,23 @@ if [[ -n "${PLEX_TOKEN:-}" && -n "${EMBY_API_KEY:-}" ]]; then
   echo "[playback-gate-ci] running provider parity gate"
   pwsh -NoProfile -File ./scripts/run_media_server_proof_gate.ps1 \
     -Providers plex,emby \
+    -RepeatCount 2 \
+    -FailFast \
     -SkipStart \
     -ReuseExistingItem \
     -TmdbId 603 \
     -Title "The Matrix"
+elif [[ "$FILMU_REQUIRE_PROVIDER_GATE" == "1" ]]; then
+  echo "[playback-gate-ci] provider parity gate was required but PLEX_TOKEN and/or EMBY_API_KEY were missing" >&2
+  exit 1
 else
   echo "[playback-gate-ci] skipping provider parity gate because PLEX_TOKEN and/or EMBY_API_KEY are not configured on this runner"
 fi
 
-
+cat > playback-proof-artifacts/ci-execution-summary.json <<EOF
+{
+  "required_check_name": "${FILMU_PLAYBACK_REQUIRED_CHECK_NAME}",
+  "provider_gate_required": ${FILMU_REQUIRE_PROVIDER_GATE},
+  "provider_gate_ran": $(if [[ -n "${PLEX_TOKEN:-}" && -n "${EMBY_API_KEY:-}" ]]; then echo true; else echo false; fi)
+}
+EOF

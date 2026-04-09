@@ -12,6 +12,8 @@ use hyper_util::{
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 
+use crate::telemetry::{record_upstream_failure, record_upstream_retryable_event};
+
 const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const UPSTREAM_RETRY_ATTEMPTS: usize = 5;
 const UPSTREAM_RETRY_BACKOFF_MS: u64 = 500;
@@ -42,21 +44,24 @@ impl RangeRequest {
     }
 
     pub fn build_http_request(&self) -> Result<Request<Empty<Bytes>>, UpstreamReadError> {
-        let uri = self
-            .url
-            .parse::<Uri>()
-            .map_err(|source| UpstreamReadError::InvalidUrl {
+        let uri = self.url.parse::<Uri>().map_err(|source| {
+            record_upstream_failure("invalid_url");
+            UpstreamReadError::InvalidUrl {
                 url: self.url.clone(),
                 source,
-            })?;
+            }
+        })?;
 
         Request::builder()
             .method("GET")
             .uri(uri)
             .header(RANGE, self.range_header_value())
             .body(Empty::new())
-            .map_err(|error| UpstreamReadError::BuildRequest {
-                message: error.to_string(),
+            .map_err(|error| {
+                record_upstream_failure("build_request");
+                UpstreamReadError::BuildRequest {
+                    message: error.to_string(),
+                }
             })
     }
 }
@@ -136,18 +141,22 @@ impl UpstreamReader {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
+                        record_upstream_retryable_event("network");
                         sleep(retry_backoff(attempt)).await;
                         continue;
                     }
+                    record_upstream_failure("network");
                     return Err(UpstreamReadError::Network {
                         message: error.to_string(),
                     });
                 }
                 Err(_) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
+                        record_upstream_retryable_event("network");
                         sleep(retry_backoff(attempt)).await;
                         continue;
                     }
+                    record_upstream_failure("network");
                     return Err(UpstreamReadError::Network {
                         message: format!(
                             "request timed out after {}s",
@@ -162,13 +171,21 @@ impl UpstreamReader {
                 status,
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::GONE
             ) {
+                record_upstream_failure("stale_status");
                 return Err(UpstreamReadError::StaleStatus { status });
             }
 
             if !status.is_success() {
                 if should_retry_status(status) && attempt < UPSTREAM_RETRY_ATTEMPTS {
+                    record_upstream_retryable_event(retryable_status_event(status));
                     sleep(retry_delay_for_response(response.headers(), attempt)).await;
                     continue;
+                }
+                record_upstream_failure("unexpected_status");
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    record_upstream_failure("unexpected_status_too_many_requests");
+                } else if status.is_server_error() {
+                    record_upstream_failure("unexpected_status_server_error");
                 }
                 return Err(UpstreamReadError::UnexpectedStatus { status });
             }
@@ -179,18 +196,22 @@ impl UpstreamReader {
                 Ok(Ok(collected)) => return Ok(collected.to_bytes()),
                 Ok(Err(error)) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
+                        record_upstream_retryable_event("read_body");
                         sleep(retry_backoff(attempt)).await;
                         continue;
                     }
+                    record_upstream_failure("read_body");
                     return Err(UpstreamReadError::ReadBody {
                         message: error.to_string(),
                     });
                 }
                 Err(_) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
+                        record_upstream_retryable_event("read_body");
                         sleep(retry_backoff(attempt)).await;
                         continue;
                     }
+                    record_upstream_failure("read_body");
                     return Err(UpstreamReadError::ReadBody {
                         message: format!(
                             "body collection timed out after {}s",
@@ -211,6 +232,14 @@ fn retry_backoff(attempt: usize) -> Duration {
     let exponent = attempt.saturating_sub(1).min(6) as u32;
     let scaled = UPSTREAM_RETRY_BACKOFF_MS.saturating_mul(1u64 << exponent);
     Duration::from_millis(scaled.min(UPSTREAM_RETRY_BACKOFF_MAX_MS))
+}
+
+fn retryable_status_event(status: StatusCode) -> &'static str {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        "status_too_many_requests"
+    } else {
+        "status_server_error"
+    }
 }
 
 fn should_retry_status(status: StatusCode) -> bool {
@@ -258,5 +287,17 @@ mod tests {
         assert!(should_retry_status(StatusCode::SERVICE_UNAVAILABLE));
         assert!(should_retry_status(StatusCode::TOO_MANY_REQUESTS));
         assert!(!should_retry_status(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn retryable_status_event_classifies_provider_pressure() {
+        assert_eq!(
+            retryable_status_event(StatusCode::TOO_MANY_REQUESTS),
+            "status_too_many_requests"
+        );
+        assert_eq!(
+            retryable_status_event(StatusCode::BAD_GATEWAY),
+            "status_server_error"
+        );
     }
 }
