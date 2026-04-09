@@ -25,6 +25,24 @@ pub trait CacheEngine: Send + Sync + 'static {
     async fn invalidate(&self, key: &str);
     fn size_bytes(&self) -> u64;
     fn name(&self) -> &'static str;
+    fn snapshot(&self) -> CacheEngineSnapshot;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheEngineSnapshot {
+    pub backend: &'static str,
+    pub weighted_size_bytes: u64,
+    pub memory_bytes: u64,
+    pub memory_max_bytes: u64,
+    pub memory_hits: u64,
+    pub memory_misses: u64,
+    pub disk_bytes: u64,
+    pub disk_max_bytes: u64,
+    pub disk_hits: u64,
+    pub disk_misses: u64,
+    pub disk_writes: u64,
+    pub disk_write_errors: u64,
+    pub disk_evictions: u64,
 }
 
 #[derive(Debug)]
@@ -32,6 +50,8 @@ pub struct MemoryCache {
     inner: Cache<String, Bytes>,
     size_bytes: Arc<AtomicU64>,
     max_bytes: u64,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 impl MemoryCache {
@@ -53,6 +73,8 @@ impl MemoryCache {
             inner,
             size_bytes,
             max_bytes,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
@@ -70,7 +92,13 @@ impl MemoryCache {
 #[async_trait]
 impl CacheEngine for MemoryCache {
     async fn get(&self, key: &str) -> Option<Bytes> {
-        self.inner.get(key).await
+        let value = self.inner.get(key).await;
+        if value.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        value
     }
 
     async fn insert(&self, key: String, value: Bytes) {
@@ -97,6 +125,24 @@ impl CacheEngine for MemoryCache {
     fn name(&self) -> &'static str {
         "memory"
     }
+
+    fn snapshot(&self) -> CacheEngineSnapshot {
+        CacheEngineSnapshot {
+            backend: self.name(),
+            weighted_size_bytes: self.current_size_bytes(),
+            memory_bytes: self.current_size_bytes(),
+            memory_max_bytes: self.max_bytes(),
+            memory_hits: self.hits.load(Ordering::Relaxed),
+            memory_misses: self.misses.load(Ordering::Relaxed),
+            disk_bytes: 0,
+            disk_max_bytes: 0,
+            disk_hits: 0,
+            disk_misses: 0,
+            disk_writes: 0,
+            disk_write_errors: 0,
+            disk_evictions: 0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -110,6 +156,11 @@ pub struct HybridCache {
     l2_bytes: Arc<AtomicU64>,
     access_counter: Arc<AtomicU64>,
     write_lock: Mutex<()>,
+    l2_hits: AtomicU64,
+    l2_misses: AtomicU64,
+    l2_writes: AtomicU64,
+    l2_write_errors: AtomicU64,
+    l2_evictions: AtomicU64,
 }
 
 impl HybridCache {
@@ -137,6 +188,11 @@ impl HybridCache {
             l2_bytes: Arc::new(AtomicU64::new(logical_bytes)),
             access_counter: Arc::new(AtomicU64::new(max_access_order)),
             write_lock: Mutex::new(()),
+            l2_hits: AtomicU64::new(0),
+            l2_misses: AtomicU64::new(0),
+            l2_writes: AtomicU64::new(0),
+            l2_write_errors: AtomicU64::new(0),
+            l2_evictions: AtomicU64::new(0),
         })
     }
 
@@ -278,6 +334,7 @@ impl HybridCache {
             let key = String::from_utf8(key_bytes.to_vec())
                 .context("encountered non-UTF8 cache key during L2 eviction")?;
             self.remove_l2_locked(&key, Some(order_key.as_ref()))?;
+            self.l2_evictions.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -292,6 +349,7 @@ impl CacheEngine for HybridCache {
 
         match self.data.get(key.as_bytes()) {
             Ok(Some(value)) => {
+                self.l2_hits.fetch_add(1, Ordering::Relaxed);
                 let bytes = Bytes::from(value.to_vec());
                 self.l1.insert(key.to_owned(), bytes.clone()).await;
                 if let Err(error) = self.record_access(key).await {
@@ -299,8 +357,12 @@ impl CacheEngine for HybridCache {
                 }
                 Some(bytes)
             }
-            Ok(None) => None,
+            Ok(None) => {
+                self.l2_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
             Err(error) => {
+                self.l2_misses.fetch_add(1, Ordering::Relaxed);
                 warn!(error = %error, cache_key = %key, "failed to read from L2 cache");
                 None
             }
@@ -310,7 +372,10 @@ impl CacheEngine for HybridCache {
     async fn insert(&self, key: String, value: Bytes) {
         self.l1.insert(key.clone(), value.clone()).await;
         if let Err(error) = self.write_l2(&key, &value).await {
+            self.l2_write_errors.fetch_add(1, Ordering::Relaxed);
             warn!(error = %error, cache_key = %key, "failed to persist value into L2 cache");
+        } else {
+            self.l2_writes.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -329,6 +394,25 @@ impl CacheEngine for HybridCache {
 
     fn name(&self) -> &'static str {
         "hybrid"
+    }
+
+    fn snapshot(&self) -> CacheEngineSnapshot {
+        let l1_snapshot = self.l1.snapshot();
+        CacheEngineSnapshot {
+            backend: self.name(),
+            weighted_size_bytes: self.size_bytes(),
+            memory_bytes: self.l1_size_bytes(),
+            memory_max_bytes: self.l1.max_bytes(),
+            memory_hits: l1_snapshot.memory_hits,
+            memory_misses: l1_snapshot.memory_misses,
+            disk_bytes: self.l2_size_bytes(),
+            disk_max_bytes: self.l2_max_bytes,
+            disk_hits: self.l2_hits.load(Ordering::Relaxed),
+            disk_misses: self.l2_misses.load(Ordering::Relaxed),
+            disk_writes: self.l2_writes.load(Ordering::Relaxed),
+            disk_write_errors: self.l2_write_errors.load(Ordering::Relaxed),
+            disk_evictions: self.l2_evictions.load(Ordering::Relaxed),
+        }
     }
 }
 

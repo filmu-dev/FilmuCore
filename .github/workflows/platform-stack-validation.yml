@@ -12,14 +12,14 @@ on:
       - "WINDOWS_README.md"
       - "LINUX_UNIX_README.md"
       - "docs/LOCAL_DOCKER_STACK.md"
-      - "start_local_stack.ps1"
-      - "status_local_stack.ps1"
-      - "stop_local_stack.ps1"
-      - "start_windows_stack.ps1"
+      - "scripts/start_local_stack.ps1"
+      - "scripts/status_local_stack.ps1"
+      - "scripts/stop_local_stack.ps1"
+      - "scripts/start_windows_stack.ps1"
       - "check_windows_stack.ps1"
-      - "status_windows_stack.ps1"
-      - "stop_windows_stack.ps1"
-      - "validate_platform_stack.ps1"
+      - "scripts/status_windows_stack.ps1"
+      - "scripts/stop_windows_stack.ps1"
+      - "scripts/validate_platform_stack.ps1"
 
 concurrency:
   group: platform-stack-validation-${{ github.ref }}
@@ -36,4 +36,4 @@ jobs:
 
       - name: Validate split Linux and Windows stack files
         shell: pwsh
-        run: ./validate_platform_stack.ps1
+        run: ./scripts/validate_platform_stack.ps1

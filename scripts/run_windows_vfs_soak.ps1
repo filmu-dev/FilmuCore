@@ -841,6 +841,30 @@ function Get-NestedRuntimeMetric {
     return [int64]$current
 }
 
+function Get-NestedRuntimeText {
+    param(
+        $Snapshot,
+        [string[]] $Path,
+        [string] $Default = ''
+    )
+
+    $current = $Snapshot
+    foreach ($segment in $Path) {
+        if ($null -eq $current -or $current.PSObject.Properties.Match($segment).Count -eq 0) {
+            return $Default
+        }
+        $current = $current.$segment
+    }
+    if ($null -eq $current) {
+        return $Default
+    }
+    $text = [string]$current
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $Default
+    }
+    return $text.Trim()
+}
+
 function Get-FilmuvfsRuntimeDelta {
     param(
         $BeforeSnapshot,
@@ -891,6 +915,13 @@ function Get-FilmuvfsRuntimeDelta {
         chunk_cache_hits = ([int64]$AfterSnapshot.chunk_cache.hits) - ([int64]$BeforeSnapshot.chunk_cache.hits)
         chunk_cache_misses = ([int64]$AfterSnapshot.chunk_cache.misses) - ([int64]$BeforeSnapshot.chunk_cache.misses)
         chunk_cache_inserts = ([int64]$AfterSnapshot.chunk_cache.inserts) - ([int64]$BeforeSnapshot.chunk_cache.inserts)
+        chunk_cache_memory_hits = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'memory_hits')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'memory_hits'))
+        chunk_cache_memory_misses = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'memory_misses')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'memory_misses'))
+        chunk_cache_disk_hits = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_hits')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_hits'))
+        chunk_cache_disk_misses = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_misses')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_misses'))
+        chunk_cache_disk_writes = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_writes')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_writes'))
+        chunk_cache_disk_write_errors = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_write_errors')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_write_errors'))
+        chunk_cache_disk_evictions = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_evictions')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_evictions'))
         prefetch_background_spawned = ([int64]$AfterSnapshot.prefetch.background_spawned) - ([int64]$BeforeSnapshot.prefetch.background_spawned)
         prefetch_background_backpressure = ([int64]$AfterSnapshot.prefetch.background_backpressure) - ([int64]$BeforeSnapshot.prefetch.background_backpressure)
         prefetch_background_error = ([int64]$AfterSnapshot.prefetch.background_error) - ([int64]$BeforeSnapshot.prefetch.background_error)
@@ -904,11 +935,26 @@ function Get-FilmuvfsRuntimeDelta {
 }
 
 function Get-RuntimeDiagnostics {
-    param($RuntimeDelta)
+    param(
+        $RuntimeDelta,
+        $RuntimeAfterSnapshot
+    )
 
     if ($null -eq $RuntimeDelta) {
         return [ordered]@{
             captured = $false
+            chunk_cache_backend = $null
+            chunk_cache_memory_bytes = $null
+            chunk_cache_memory_max_bytes = $null
+            chunk_cache_disk_bytes = $null
+            chunk_cache_disk_max_bytes = $null
+            chunk_cache_memory_hits = $null
+            chunk_cache_memory_misses = $null
+            chunk_cache_disk_hits = $null
+            chunk_cache_disk_misses = $null
+            chunk_cache_disk_writes = $null
+            chunk_cache_disk_write_errors = $null
+            chunk_cache_disk_evictions = $null
             cache_cold_fetch_incidents = $null
             cache_pressure_incidents = $null
             provider_pressure_incidents = $null
@@ -957,6 +1003,18 @@ function Get-RuntimeDiagnostics {
 
     return [ordered]@{
         captured = $true
+        chunk_cache_backend = Get-NestedRuntimeText -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'backend') -Default 'unknown'
+        chunk_cache_memory_bytes = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_bytes')
+        chunk_cache_memory_max_bytes = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_max_bytes')
+        chunk_cache_disk_bytes = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'disk_bytes')
+        chunk_cache_disk_max_bytes = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'disk_max_bytes')
+        chunk_cache_memory_hits = [int64]$RuntimeDelta.chunk_cache_memory_hits
+        chunk_cache_memory_misses = [int64]$RuntimeDelta.chunk_cache_memory_misses
+        chunk_cache_disk_hits = [int64]$RuntimeDelta.chunk_cache_disk_hits
+        chunk_cache_disk_misses = [int64]$RuntimeDelta.chunk_cache_disk_misses
+        chunk_cache_disk_writes = [int64]$RuntimeDelta.chunk_cache_disk_writes
+        chunk_cache_disk_write_errors = [int64]$RuntimeDelta.chunk_cache_disk_write_errors
+        chunk_cache_disk_evictions = [int64]$RuntimeDelta.chunk_cache_disk_evictions
         cache_cold_fetch_incidents = [int64]$RuntimeDelta.chunk_cache_misses
         cache_pressure_incidents = $cachePressureIncidents
         provider_pressure_incidents = $providerPressureIncidents
@@ -1047,6 +1105,24 @@ function Add-ThresholdCheck {
     })
 }
 
+function New-EmptyRuntimeStatusCapture {
+    [pscustomobject]@{
+        captured = $false
+        path = $null
+        snapshot = $null
+        error = $null
+    }
+}
+
+function New-EmptyBackendStatusCapture {
+    [pscustomobject]@{
+        captured = $false
+        url = $null
+        governance = $null
+        error = $null
+    }
+}
+
 Apply-SoakProfile -Profile $SoakProfile
 
 if ([string]::IsNullOrWhiteSpace($MountPath)) {
@@ -1065,18 +1141,78 @@ $resolvedApiKey = Resolve-BackendApiKey -ExplicitKey $ApiKey
 $artifactRoot = Join-Path (Get-StateDirectory) ("soak-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 
-$beforeState = Assert-LiveMount -MountPath $MountPath -RequireFilmuvfs:$RequireFilmuvfs
-$runtimeStatusBefore = Get-FilmuvfsRuntimeStatusSnapshot -FilmuvfsState $beforeState
-$backendStatusBefore = Get-BackendStreamStatusSnapshot -BackendUrl $BackendUrl -ApiKey $resolvedApiKey
-$targetFiles = Resolve-TargetFiles -MountPath $MountPath -ExplicitFile $TargetFile -DesiredCount ([Math]::Max($ConcurrentReaders, 1))
-$primaryFile = $targetFiles[0]
-$remuxFile = Resolve-RemuxTargetFile -MountPath $MountPath -ExplicitFile $RemuxTargetFile
-
+$summaryPath = Join-Path $artifactRoot 'summary.json'
+$beforeState = $null
+$afterState = $null
+$runtimeStatusBefore = New-EmptyRuntimeStatusCapture
+$runtimeStatusAfter = New-EmptyRuntimeStatusCapture
+$backendStatusBefore = New-EmptyBackendStatusCapture
+$backendStatusAfter = New-EmptyBackendStatusCapture
+$runtimeStatusDelta = $null
+$runtimeDiagnostics = [ordered]@{
+    captured = $false
+    chunk_cache_backend = $null
+    chunk_cache_memory_bytes = $null
+    chunk_cache_memory_max_bytes = $null
+    chunk_cache_disk_bytes = $null
+    chunk_cache_disk_max_bytes = $null
+    chunk_cache_memory_hits = $null
+    chunk_cache_memory_misses = $null
+    chunk_cache_disk_hits = $null
+    chunk_cache_disk_misses = $null
+    chunk_cache_disk_writes = $null
+    chunk_cache_disk_write_errors = $null
+    chunk_cache_disk_evictions = $null
+    cache_cold_fetch_incidents = $null
+    cache_pressure_incidents = $null
+    provider_pressure_incidents = $null
+    unrecovered_stale_refresh_incidents = $null
+    handle_startup_total = $null
+    handle_startup_failures = $null
+    handle_startup_average_duration_ms = $null
+    handle_startup_max_duration_ms = $null
+    backend_fallback_attempts = $null
+    backend_fallback_success = $null
+    backend_fallback_failure = $null
+    fatal_error_incidents = $null
+    failure_classifications = $null
+}
+$stdoutSnapshot = [ordered]@{ path = (Get-LogPath -Name 'filmuvfs-windows-stdout.log'); exists = $false; line_count = 0; tail = @() }
+$stderrSnapshot = [ordered]@{ path = (Get-LogPath -Name 'filmuvfs-windows-stderr.log'); exists = $false; line_count = 0; tail = @() }
+$callbacksSnapshot = [ordered]@{ path = (Get-LogPath -Name 'filmuvfs-windows-callbacks.log'); exists = $false; line_count = 0; tail = @() }
+$logDiagnostics = [ordered]@{
+    reconnect_incidents = 0
+    stale_refresh_attempts = 0
+    unrecovered_stale_refresh_incidents = 0
+    cache_cold_fetch_incidents = 0
+    cache_hit_incidents = 0
+    provider_pressure_incidents = 0
+    fatal_error_incidents = 0
+    failure_classifications = [ordered]@{
+        panic = 0
+        mounted_read_failure = 0
+        inline_refresh_failure = 0
+        callback_error = 0
+        ntstatus_failure = 0
+    }
+}
 $scenarioResults = [System.Collections.Generic.List[object]]::new()
 $failed = $false
 $failureMessage = $null
+$thresholdChecks = [System.Collections.Generic.List[object]]::new()
+$thresholdFailures = @()
+$targetFiles = @()
+$primaryFile = $null
+$remuxFile = $null
 
 try {
+    $beforeState = Assert-LiveMount -MountPath $MountPath -RequireFilmuvfs:$RequireFilmuvfs
+    $runtimeStatusBefore = Get-FilmuvfsRuntimeStatusSnapshot -FilmuvfsState $beforeState
+    $backendStatusBefore = Get-BackendStreamStatusSnapshot -BackendUrl $BackendUrl -ApiKey $resolvedApiKey
+    $targetFiles = Resolve-TargetFiles -MountPath $MountPath -ExplicitFile $TargetFile -DesiredCount ([Math]::Max($ConcurrentReaders, 1))
+    $primaryFile = $targetFiles[0]
+    $remuxFile = Resolve-RemuxTargetFile -MountPath $MountPath -ExplicitFile $RemuxTargetFile
+
     if (-not $SkipSequential) {
         $scenarioResults.Add((Invoke-SequentialScenario -FilePath $primaryFile -Duration ([TimeSpan]::FromMinutes($SequentialMinutes)) -BlockSizeBytes ($SequentialBlockSizeKb * 1024) -MountPath $MountPath -RequireFilmuvfs:$RequireFilmuvfs))
     }
@@ -1108,133 +1244,163 @@ catch {
     $failed = $true
     $failureMessage = $_.Exception.Message
 }
+finally {
+    try {
+        $afterState = Get-FilmuvfsState -MountPath $MountPath
+    }
+    catch {
+        $afterState = [pscustomobject]@{
+            timestamp = (Get-Date).ToString('o')
+            mount_path = $MountPath
+            mount_exists = $false
+            pid = $null
+            running = $false
+            state_mount_status = $null
+            state_mount_adapter = $null
+            state_runtime_status_path = $null
+        }
+    }
 
-$afterState = Get-FilmuvfsState -MountPath $MountPath
-$runtimeStatusAfter = Get-FilmuvfsRuntimeStatusSnapshot -FilmuvfsState $afterState
-$backendStatusAfter = Get-BackendStreamStatusSnapshot -BackendUrl $BackendUrl -ApiKey $resolvedApiKey
-$runtimeStatusDelta = if ($runtimeStatusBefore.captured -and $runtimeStatusAfter.captured) {
-    Get-FilmuvfsRuntimeDelta -BeforeSnapshot $runtimeStatusBefore.snapshot -AfterSnapshot $runtimeStatusAfter.snapshot
-} else {
-    $null
-}
-$runtimeDiagnostics = Get-RuntimeDiagnostics -RuntimeDelta $runtimeStatusDelta
-$stdoutSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stdout.log')
-$stderrSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stderr.log')
-$callbacksSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-callbacks.log')
-$logDiagnostics = Get-LogDiagnostics -Paths @(
-    $stdoutSnapshot.path,
-    $stderrSnapshot.path,
-    $callbacksSnapshot.path
-)
-$thresholdChecks = [System.Collections.Generic.List[object]]::new()
+    try {
+        $runtimeStatusAfter = Get-FilmuvfsRuntimeStatusSnapshot -FilmuvfsState $afterState
+    }
+    catch {
+        $runtimeStatusAfter = New-EmptyRuntimeStatusCapture
+        $runtimeStatusAfter.error = $_.Exception.Message
+    }
 
-if (-not $SkipSequential) {
-    $sequentialScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'sequential' } | Select-Object -First 1)[0]
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'continuous_playback_duration' -Passed ([bool]($null -ne $sequentialScenario -and $sequentialScenario.duration_seconds -ge ($SequentialMinutes * 60))) -Observed (if ($null -ne $sequentialScenario) { $sequentialScenario.duration_seconds } else { $null }) -Threshold ($SequentialMinutes * 60)
-}
-if (-not $SkipSeek) {
-    $seekScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'seek_resume' } | Select-Object -First 1)[0]
-    $seekThreshold = if ($SeekMinutes -gt 0) { $SeekMinutes * 60 } else { $SeekIterations }
-    $seekObserved = if ($SeekMinutes -gt 0 -and $null -ne $seekScenario) { $seekScenario.duration_seconds } elseif ($null -ne $seekScenario) { $seekScenario.reads } else { $null }
-    $seekPassed = if ($SeekMinutes -gt 0) { [bool]($null -ne $seekScenario -and $seekScenario.duration_seconds -ge ($SeekMinutes * 60)) } else { [bool]($null -ne $seekScenario -and $seekScenario.reads -ge $SeekIterations) }
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'interactive_seek_soak' -Passed $seekPassed -Observed $seekObserved -Threshold $seekThreshold
-}
-if (-not $SkipConcurrent) {
-    $concurrentScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'concurrent_readers' } | Select-Object -First 1)[0]
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_reader_count' -Passed ([bool]($null -ne $concurrentScenario -and $ConcurrentReaders -ge 3)) -Observed $ConcurrentReaders -Threshold 3
-    if ($ConcurrentMinutes -gt 0) {
-        $minObservedReaderReads = if ($null -ne $concurrentScenario) { (@($concurrentScenario.readers_detail | Measure-Object -Property reads -Minimum).Minimum) } else { $null }
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_pressure_duration' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.duration_seconds -ge ($ConcurrentMinutes * 60))) -Observed (if ($null -ne $concurrentScenario) { $concurrentScenario.duration_seconds } else { $null }) -Threshold ($ConcurrentMinutes * 60)
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_reader_activity' -Passed ([bool]($null -ne $concurrentScenario -and $minObservedReaderReads -gt 0)) -Observed $minObservedReaderReads -Threshold 'all readers produced reads for a timed run'
+    try {
+        $backendStatusAfter = Get-BackendStreamStatusSnapshot -BackendUrl $BackendUrl -ApiKey $resolvedApiKey
+    }
+    catch {
+        $backendStatusAfter = New-EmptyBackendStatusCapture
+        $backendStatusAfter.error = $_.Exception.Message
+    }
+
+    if ($runtimeStatusBefore.captured -and $runtimeStatusAfter.captured) {
+        $runtimeStatusDelta = Get-FilmuvfsRuntimeDelta -BeforeSnapshot $runtimeStatusBefore.snapshot -AfterSnapshot $runtimeStatusAfter.snapshot
     }
     else {
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_iterations' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.total_reads -ge ($ConcurrentReaders * $ConcurrentIterations))) -Observed (if ($null -ne $concurrentScenario) { $concurrentScenario.total_reads } else { $null }) -Threshold ($ConcurrentReaders * $ConcurrentIterations)
+        $runtimeStatusDelta = $null
     }
-}
-Add-ThresholdCheck -Checks $thresholdChecks -Name 'mount_survived' -Passed ([bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))) -Observed ([bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))) -Threshold $true
-if ($MaxReconnectIncidents -ge 0) {
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'reconnect_incidents' -Passed ([bool]($logDiagnostics.reconnect_incidents -le $MaxReconnectIncidents)) -Observed $logDiagnostics.reconnect_incidents -Threshold $MaxReconnectIncidents
-}
-if ($MaxUnrecoveredStaleRefreshIncidents -ge 0) {
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'unrecovered_stale_refresh_incidents' -Passed ([bool]($logDiagnostics.unrecovered_stale_refresh_incidents -le $MaxUnrecoveredStaleRefreshIncidents)) -Observed $logDiagnostics.unrecovered_stale_refresh_incidents -Threshold $MaxUnrecoveredStaleRefreshIncidents
-    if ($runtimeDiagnostics.captured) {
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_unrecovered_stale_refresh_incidents' -Passed ([bool]($runtimeDiagnostics.unrecovered_stale_refresh_incidents -le $MaxUnrecoveredStaleRefreshIncidents)) -Observed $runtimeDiagnostics.unrecovered_stale_refresh_incidents -Threshold $MaxUnrecoveredStaleRefreshIncidents
-    }
-}
-if ($MaxCacheColdFetchIncidents -ge 0) {
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'cache_cold_fetch_incidents' -Passed ([bool]($logDiagnostics.cache_cold_fetch_incidents -le $MaxCacheColdFetchIncidents)) -Observed $logDiagnostics.cache_cold_fetch_incidents -Threshold $MaxCacheColdFetchIncidents
-    if ($runtimeDiagnostics.captured) {
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_cache_cold_fetch_incidents' -Passed ([bool]($runtimeDiagnostics.cache_cold_fetch_incidents -le $MaxCacheColdFetchIncidents)) -Observed $runtimeDiagnostics.cache_cold_fetch_incidents -Threshold $MaxCacheColdFetchIncidents
-    }
-}
-if ($MaxProviderPressureIncidents -ge 0) {
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'provider_pressure_incidents' -Passed ([bool]($logDiagnostics.provider_pressure_incidents -le $MaxProviderPressureIncidents)) -Observed $logDiagnostics.provider_pressure_incidents -Threshold $MaxProviderPressureIncidents
-    if ($runtimeDiagnostics.captured) {
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_provider_pressure_incidents' -Passed ([bool]($runtimeDiagnostics.provider_pressure_incidents -le $MaxProviderPressureIncidents)) -Observed $runtimeDiagnostics.provider_pressure_incidents -Threshold $MaxProviderPressureIncidents
-    }
-}
-if ($MaxFatalErrorIncidents -ge 0) {
-    Add-ThresholdCheck -Checks $thresholdChecks -Name 'fatal_error_incidents' -Passed ([bool]($logDiagnostics.fatal_error_incidents -le $MaxFatalErrorIncidents)) -Observed $logDiagnostics.fatal_error_incidents -Threshold $MaxFatalErrorIncidents
-    if ($runtimeDiagnostics.captured) {
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_fatal_error_incidents' -Passed ([bool]($runtimeDiagnostics.fatal_error_incidents -le $MaxFatalErrorIncidents)) -Observed $runtimeDiagnostics.fatal_error_incidents -Threshold $MaxFatalErrorIncidents
-    }
-}
-$thresholdFailures = @($thresholdChecks | Where-Object { -not $_.passed })
+    $runtimeDiagnostics = Get-RuntimeDiagnostics -RuntimeDelta $runtimeStatusDelta -RuntimeAfterSnapshot $runtimeStatusAfter.snapshot
+    $stdoutSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stdout.log')
+    $stderrSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stderr.log')
+    $callbacksSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-callbacks.log')
+    $logDiagnostics = Get-LogDiagnostics -Paths @(
+        $stdoutSnapshot.path,
+        $stderrSnapshot.path,
+        $callbacksSnapshot.path
+    )
+    $thresholdChecks = [System.Collections.Generic.List[object]]::new()
 
-$summary = [ordered]@{
-    soak_profile = $SoakProfile
-    mount_path = $MountPath
-    target_files = $targetFiles
-    primary_file = $primaryFile
-    remux_file = $remuxFile
-    ffmpeg_path = $resolvedFfmpegPath
-    before = $beforeState
-    after = $afterState
-    runtime_status_before = $runtimeStatusBefore
-    runtime_status_after = $runtimeStatusAfter
-    runtime_status_delta = $runtimeStatusDelta
-    runtime_diagnostics = $runtimeDiagnostics
-    backend_stream_status_before = $backendStatusBefore
-    backend_stream_status_after = $backendStatusAfter
-    backend_vfs_governance_delta = if ($backendStatusBefore.captured -and $backendStatusAfter.captured) {
-        Get-VfsGovernanceDelta -BeforeGovernance $backendStatusBefore.governance -AfterGovernance $backendStatusAfter.governance
-    } else {
-        $null
+    if (-not $SkipSequential) {
+        $sequentialScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'sequential' } | Select-Object -First 1)[0]
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'continuous_playback_duration' -Passed ([bool]($null -ne $sequentialScenario -and $sequentialScenario.duration_seconds -ge ($SequentialMinutes * 60))) -Observed (if ($null -ne $sequentialScenario) { $sequentialScenario.duration_seconds } else { $null }) -Threshold ($SequentialMinutes * 60)
     }
-    scenarios = $scenarioResults
-    mount_survived = [bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))
-    failed = $failed
-    failure_message = $failureMessage
-    thresholds = [ordered]@{
-        sequential_minutes = if (-not $SkipSequential) { $SequentialMinutes } else { $null }
-        seek_minutes = if (-not $SkipSeek -and $SeekMinutes -gt 0) { $SeekMinutes } else { $null }
-        seek_iterations = if (-not $SkipSeek -and $SeekMinutes -le 0) { $SeekIterations } else { $null }
-        concurrent_minutes = if (-not $SkipConcurrent -and $ConcurrentMinutes -gt 0) { $ConcurrentMinutes } else { $null }
-        concurrent_iterations = if (-not $SkipConcurrent -and $ConcurrentMinutes -le 0) { $ConcurrentIterations } else { $null }
-        concurrent_readers = if (-not $SkipConcurrent) { $ConcurrentReaders } else { $null }
-        max_reconnect_incidents = if ($MaxReconnectIncidents -ge 0) { $MaxReconnectIncidents } else { $null }
-        max_unrecovered_stale_refresh_incidents = if ($MaxUnrecoveredStaleRefreshIncidents -ge 0) { $MaxUnrecoveredStaleRefreshIncidents } else { $null }
-        max_cache_cold_fetch_incidents = if ($MaxCacheColdFetchIncidents -ge 0) { $MaxCacheColdFetchIncidents } else { $null }
-        max_provider_pressure_incidents = if ($MaxProviderPressureIncidents -ge 0) { $MaxProviderPressureIncidents } else { $null }
-        max_fatal_error_incidents = if ($MaxFatalErrorIncidents -ge 0) { $MaxFatalErrorIncidents } else { $null }
+    if (-not $SkipSeek) {
+        $seekScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'seek_resume' } | Select-Object -First 1)[0]
+        $seekThreshold = if ($SeekMinutes -gt 0) { $SeekMinutes * 60 } else { $SeekIterations }
+        $seekObserved = if ($SeekMinutes -gt 0 -and $null -ne $seekScenario) { $seekScenario.duration_seconds } elseif ($null -ne $seekScenario) { $seekScenario.reads } else { $null }
+        $seekPassed = if ($SeekMinutes -gt 0) { [bool]($null -ne $seekScenario -and $seekScenario.duration_seconds -ge ($SeekMinutes * 60)) } else { [bool]($null -ne $seekScenario -and $seekScenario.reads -ge $SeekIterations) }
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'interactive_seek_soak' -Passed $seekPassed -Observed $seekObserved -Threshold $seekThreshold
     }
-    threshold_checks = $thresholdChecks
-    threshold_failures = $thresholdFailures
-    diagnostics = $logDiagnostics
-    log_summary = [ordered]@{
-        stdout = $stdoutSnapshot
-        stderr = $stderrSnapshot
-        callbacks = $callbacksSnapshot
+    if (-not $SkipConcurrent) {
+        $concurrentScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'concurrent_readers' } | Select-Object -First 1)[0]
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_reader_count' -Passed ([bool]($null -ne $concurrentScenario -and $ConcurrentReaders -ge 3)) -Observed $ConcurrentReaders -Threshold 3
+        if ($ConcurrentMinutes -gt 0) {
+            $minObservedReaderReads = if ($null -ne $concurrentScenario) { (@($concurrentScenario.readers_detail | Measure-Object -Property reads -Minimum).Minimum) } else { $null }
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_pressure_duration' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.duration_seconds -ge ($ConcurrentMinutes * 60))) -Observed (if ($null -ne $concurrentScenario) { $concurrentScenario.duration_seconds } else { $null }) -Threshold ($ConcurrentMinutes * 60)
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_reader_activity' -Passed ([bool]($null -ne $concurrentScenario -and $minObservedReaderReads -gt 0)) -Observed $minObservedReaderReads -Threshold 'all readers produced reads for a timed run'
+        }
+        else {
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_iterations' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.total_reads -ge ($ConcurrentReaders * $ConcurrentIterations))) -Observed (if ($null -ne $concurrentScenario) { $concurrentScenario.total_reads } else { $null }) -Threshold ($ConcurrentReaders * $ConcurrentIterations)
+        }
     }
-    generated_at = (Get-Date).ToString('o')
+    Add-ThresholdCheck -Checks $thresholdChecks -Name 'mount_survived' -Passed ([bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))) -Observed ([bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))) -Threshold $true
+    if ($MaxReconnectIncidents -ge 0) {
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'reconnect_incidents' -Passed ([bool]($logDiagnostics.reconnect_incidents -le $MaxReconnectIncidents)) -Observed $logDiagnostics.reconnect_incidents -Threshold $MaxReconnectIncidents
+    }
+    if ($MaxUnrecoveredStaleRefreshIncidents -ge 0) {
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'unrecovered_stale_refresh_incidents' -Passed ([bool]($logDiagnostics.unrecovered_stale_refresh_incidents -le $MaxUnrecoveredStaleRefreshIncidents)) -Observed $logDiagnostics.unrecovered_stale_refresh_incidents -Threshold $MaxUnrecoveredStaleRefreshIncidents
+        if ($runtimeDiagnostics.captured) {
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_unrecovered_stale_refresh_incidents' -Passed ([bool]($runtimeDiagnostics.unrecovered_stale_refresh_incidents -le $MaxUnrecoveredStaleRefreshIncidents)) -Observed $runtimeDiagnostics.unrecovered_stale_refresh_incidents -Threshold $MaxUnrecoveredStaleRefreshIncidents
+        }
+    }
+    if ($MaxCacheColdFetchIncidents -ge 0) {
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'cache_cold_fetch_incidents' -Passed ([bool]($logDiagnostics.cache_cold_fetch_incidents -le $MaxCacheColdFetchIncidents)) -Observed $logDiagnostics.cache_cold_fetch_incidents -Threshold $MaxCacheColdFetchIncidents
+        if ($runtimeDiagnostics.captured) {
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_cache_cold_fetch_incidents' -Passed ([bool]($runtimeDiagnostics.cache_cold_fetch_incidents -le $MaxCacheColdFetchIncidents)) -Observed $runtimeDiagnostics.cache_cold_fetch_incidents -Threshold $MaxCacheColdFetchIncidents
+        }
+    }
+    if ($MaxProviderPressureIncidents -ge 0) {
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'provider_pressure_incidents' -Passed ([bool]($logDiagnostics.provider_pressure_incidents -le $MaxProviderPressureIncidents)) -Observed $logDiagnostics.provider_pressure_incidents -Threshold $MaxProviderPressureIncidents
+        if ($runtimeDiagnostics.captured) {
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_provider_pressure_incidents' -Passed ([bool]($runtimeDiagnostics.provider_pressure_incidents -le $MaxProviderPressureIncidents)) -Observed $runtimeDiagnostics.provider_pressure_incidents -Threshold $MaxProviderPressureIncidents
+        }
+    }
+    if ($MaxFatalErrorIncidents -ge 0) {
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'fatal_error_incidents' -Passed ([bool]($logDiagnostics.fatal_error_incidents -le $MaxFatalErrorIncidents)) -Observed $logDiagnostics.fatal_error_incidents -Threshold $MaxFatalErrorIncidents
+        if ($runtimeDiagnostics.captured) {
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_fatal_error_incidents' -Passed ([bool]($runtimeDiagnostics.fatal_error_incidents -le $MaxFatalErrorIncidents)) -Observed $runtimeDiagnostics.fatal_error_incidents -Threshold $MaxFatalErrorIncidents
+        }
+    }
+    $thresholdFailures = @($thresholdChecks | Where-Object { -not $_.passed })
+
+    $summary = [ordered]@{
+        soak_profile = $SoakProfile
+        mount_path = $MountPath
+        target_files = $targetFiles
+        primary_file = $primaryFile
+        remux_file = $remuxFile
+        ffmpeg_path = $resolvedFfmpegPath
+        before = $beforeState
+        after = $afterState
+        runtime_status_before = $runtimeStatusBefore
+        runtime_status_after = $runtimeStatusAfter
+        runtime_status_delta = $runtimeStatusDelta
+        runtime_diagnostics = $runtimeDiagnostics
+        backend_stream_status_before = $backendStatusBefore
+        backend_stream_status_after = $backendStatusAfter
+        backend_vfs_governance_delta = if ($backendStatusBefore.captured -and $backendStatusAfter.captured) {
+            Get-VfsGovernanceDelta -BeforeGovernance $backendStatusBefore.governance -AfterGovernance $backendStatusAfter.governance
+        } else {
+            $null
+        }
+        scenarios = $scenarioResults
+        mount_survived = [bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))
+        failed = $failed
+        failure_message = $failureMessage
+        thresholds = [ordered]@{
+            sequential_minutes = if (-not $SkipSequential) { $SequentialMinutes } else { $null }
+            seek_minutes = if (-not $SkipSeek -and $SeekMinutes -gt 0) { $SeekMinutes } else { $null }
+            seek_iterations = if (-not $SkipSeek -and $SeekMinutes -le 0) { $SeekIterations } else { $null }
+            concurrent_minutes = if (-not $SkipConcurrent -and $ConcurrentMinutes -gt 0) { $ConcurrentMinutes } else { $null }
+            concurrent_iterations = if (-not $SkipConcurrent -and $ConcurrentMinutes -le 0) { $ConcurrentIterations } else { $null }
+            concurrent_readers = if (-not $SkipConcurrent) { $ConcurrentReaders } else { $null }
+            max_reconnect_incidents = if ($MaxReconnectIncidents -ge 0) { $MaxReconnectIncidents } else { $null }
+            max_unrecovered_stale_refresh_incidents = if ($MaxUnrecoveredStaleRefreshIncidents -ge 0) { $MaxUnrecoveredStaleRefreshIncidents } else { $null }
+            max_cache_cold_fetch_incidents = if ($MaxCacheColdFetchIncidents -ge 0) { $MaxCacheColdFetchIncidents } else { $null }
+            max_provider_pressure_incidents = if ($MaxProviderPressureIncidents -ge 0) { $MaxProviderPressureIncidents } else { $null }
+            max_fatal_error_incidents = if ($MaxFatalErrorIncidents -ge 0) { $MaxFatalErrorIncidents } else { $null }
+        }
+        threshold_checks = $thresholdChecks
+        threshold_failures = $thresholdFailures
+        diagnostics = $logDiagnostics
+        log_summary = [ordered]@{
+            stdout = $stdoutSnapshot
+            stderr = $stderrSnapshot
+            callbacks = $callbacksSnapshot
+        }
+        generated_at = (Get-Date).ToString('o')
+    }
+
+    $summary | ConvertTo-Json -Depth 8 | Set-Content -Path $summaryPath -Encoding UTF8
+
+    ($stdoutSnapshot.tail -join [Environment]::NewLine) | Set-Content -Path (Join-Path $artifactRoot 'filmuvfs-windows-stdout.tail.log') -Encoding UTF8
+    ($stderrSnapshot.tail -join [Environment]::NewLine) | Set-Content -Path (Join-Path $artifactRoot 'filmuvfs-windows-stderr.tail.log') -Encoding UTF8
+    ($callbacksSnapshot.tail -join [Environment]::NewLine) | Set-Content -Path (Join-Path $artifactRoot 'filmuvfs-windows-callbacks.tail.log') -Encoding UTF8
 }
-
-$summaryPath = Join-Path $artifactRoot 'summary.json'
-$summary | ConvertTo-Json -Depth 8 | Set-Content -Path $summaryPath -Encoding UTF8
-
-($stdoutSnapshot.tail -join [Environment]::NewLine) | Set-Content -Path (Join-Path $artifactRoot 'filmuvfs-windows-stdout.tail.log') -Encoding UTF8
-($stderrSnapshot.tail -join [Environment]::NewLine) | Set-Content -Path (Join-Path $artifactRoot 'filmuvfs-windows-stderr.tail.log') -Encoding UTF8
-($callbacksSnapshot.tail -join [Environment]::NewLine) | Set-Content -Path (Join-Path $artifactRoot 'filmuvfs-windows-callbacks.tail.log') -Encoding UTF8
 
 if ($failed -or -not $summary.mount_survived -or $thresholdFailures.Count -gt 0) {
     throw ("[windows-vfs-soak] FAIL. Summary: {0}" -f $summaryPath)

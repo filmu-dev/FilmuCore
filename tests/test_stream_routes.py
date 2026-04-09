@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import AsyncGenerator
@@ -468,6 +469,12 @@ def _headers() -> dict[str, str]:
     """Return authenticated API headers for compatibility route tests."""
 
     return {"x-api-key": "a" * 32}
+
+
+def _local_hls_runtime_item_key(item_id: str) -> str:
+    """Match the internal opaque local-HLS runtime key used by the route layer."""
+
+    return hashlib.sha256(item_id.encode("utf-8")).hexdigest()
 
 
 def test_logs_route_returns_historical_log_lines() -> None:
@@ -2926,7 +2933,7 @@ def test_hls_playlist_route_recovers_via_transcode_source_when_remote_hls_refres
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == "https://cdn.example.com/hls-refresh-to-direct-fresh.mkv"
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(stream_routes, "_download_remote_hls_playlist", fake_download_remote_hls_playlist)
@@ -3058,7 +3065,7 @@ def test_hls_file_route_recovers_via_transcode_source_when_remote_hls_refresh_ch
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == "https://cdn.example.com/hls-file-refresh-to-direct-fresh.mkv"
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(stream_routes, "_open_remote_hls_child_stream", fake_open_remote_hls_child_stream)
@@ -7705,7 +7712,7 @@ def test_hls_playlist_route_rewrites_generated_local_playlist(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -7744,7 +7751,7 @@ def test_hls_playlist_route_uses_remote_direct_transcode_source(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == "https://cdn.example.com/transcode-source.mkv"
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     def fake_start_direct_trigger(*, request: Any, item_identifier: str) -> None:
@@ -7858,7 +7865,7 @@ def test_hls_playlist_route_refreshes_media_entry_backed_transcode_source_after_
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == "https://cdn.example.com/hls-inline-refresh-fresh.mkv"
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(stream_routes, "_head_remote_direct_url", fake_head)
@@ -8051,7 +8058,7 @@ def test_hls_playlist_route_keeps_healthy_media_entry_backed_transcode_source_wi
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == "https://cdn.example.com/hls-inline-healthy.mkv"
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(stream_routes, "_head_remote_direct_url", fake_head)
@@ -8088,7 +8095,7 @@ def test_hls_segment_route_serves_generated_local_segment(tmp_path: Path, monkey
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -8128,7 +8135,7 @@ def test_hls_segment_route_serves_generated_segment_for_remote_direct_transcode_
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == "https://cdn.example.com/transcode-segment-source.mkv"
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     def fake_start_direct_trigger(*, request: Any, item_identifier: str) -> None:
@@ -8191,7 +8198,7 @@ def test_hls_segment_route_uses_http_hls_owner_for_generated_local_segment(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     def fake_stream_local_file(path: Path, request: Any, *, owner: str = "http-direct") -> Response:
@@ -8220,7 +8227,7 @@ def test_hls_playlist_route_maps_local_generation_timeout_to_503(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         raise HTTPException(status_code=504, detail="HLS generation timed out")
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -8242,7 +8249,7 @@ def test_hls_segment_route_maps_local_generation_failure_to_503(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         raise HTTPException(status_code=500, detail="ffmpeg failed")
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -8264,7 +8271,7 @@ def test_hls_playlist_route_maps_malformed_generated_manifest_to_503(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         raise HTTPException(status_code=500, detail="Generated HLS playlist is malformed")
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -8286,7 +8293,7 @@ def test_hls_segment_route_maps_malformed_generated_manifest_to_503(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         raise HTTPException(status_code=500, detail="Generated HLS playlist is malformed")
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -8312,7 +8319,7 @@ def test_hls_segment_route_keeps_missing_generated_file_as_404(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -8340,7 +8347,7 @@ def test_hls_segment_route_rejects_unreferenced_generated_local_file(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -9051,7 +9058,7 @@ def test_hls_playlist_route_rejects_generation_when_capacity_is_saturated(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         raise HTTPException(
             status_code=503,
             detail="HLS generation capacity exceeded",
@@ -9094,7 +9101,7 @@ def test_hls_routes_reap_generated_artifacts_after_player_disconnect_window(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -9321,7 +9328,7 @@ def test_stream_route_metrics_track_success_and_failure_outcomes(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -9494,10 +9501,22 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "failure_post_inline_refresh_failure": 1,
                 },
                 "chunk_cache": {
+                    "backend": "hybrid",
                     "hits": 9,
                     "misses": 3,
                     "inserts": 2,
                     "prefetch_hits": 1,
+                    "memory_bytes": 4096,
+                    "memory_max_bytes": 16384,
+                    "memory_hits": 6,
+                    "memory_misses": 4,
+                    "disk_bytes": 12288,
+                    "disk_max_bytes": 65536,
+                    "disk_hits": 3,
+                    "disk_misses": 1,
+                    "disk_writes": 2,
+                    "disk_write_errors": 1,
+                    "disk_evictions": 4,
                 },
                 "prefetch": {
                     "background_spawned": 7,
@@ -9529,6 +9548,18 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_open_handles"] == 4
     assert governance["vfs_runtime_active_reads"] == 2
     assert governance["vfs_runtime_chunk_cache_weighted_bytes"] == 8192
+    assert governance["vfs_runtime_chunk_cache_backend"] == "hybrid"
+    assert governance["vfs_runtime_chunk_cache_memory_bytes"] == 4096
+    assert governance["vfs_runtime_chunk_cache_memory_max_bytes"] == 16384
+    assert governance["vfs_runtime_chunk_cache_memory_hits"] == 6
+    assert governance["vfs_runtime_chunk_cache_memory_misses"] == 4
+    assert governance["vfs_runtime_chunk_cache_disk_bytes"] == 12288
+    assert governance["vfs_runtime_chunk_cache_disk_max_bytes"] == 65536
+    assert governance["vfs_runtime_chunk_cache_disk_hits"] == 3
+    assert governance["vfs_runtime_chunk_cache_disk_misses"] == 1
+    assert governance["vfs_runtime_chunk_cache_disk_writes"] == 2
+    assert governance["vfs_runtime_chunk_cache_disk_write_errors"] == 1
+    assert governance["vfs_runtime_chunk_cache_disk_evictions"] == 4
     assert governance["vfs_runtime_handle_startup_total"] == 5
     assert governance["vfs_runtime_handle_startup_ok"] == 3
     assert governance["vfs_runtime_handle_startup_error"] == 1
@@ -9602,7 +9633,7 @@ def test_hls_route_failure_governance_counts_generation_timeout(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         raise HTTPException(status_code=504, detail="HLS generation timed out")
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -9630,7 +9661,7 @@ def test_hls_route_failure_governance_counts_manifest_invalid(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         raise HTTPException(status_code=500, detail="Generated HLS playlist is malformed")
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -9692,7 +9723,7 @@ def test_hls_route_failure_governance_counts_generated_missing(
 
     async def fake_ensure_local_hls_playlist(source_path: str, item_id: str) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         return playlist_path
 
     monkeypatch.setattr(byte_streaming, "ensure_local_hls_playlist", fake_ensure_local_hls_playlist)
@@ -10672,7 +10703,7 @@ def test_frontend_player_hls_query_params_are_compatibility_safe_for_local_playl
         transcode_profile: byte_streaming.LocalHlsTranscodeProfile | None = None,
     ) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         assert transcode_profile == byte_streaming.LocalHlsTranscodeProfile(
             pix_fmt="yuv420p",
             profile="high",
@@ -10716,7 +10747,7 @@ def test_local_hls_playlist_route_marks_the_returned_variant_playlist_path(
         transcode_profile: byte_streaming.LocalHlsTranscodeProfile | None = None,
     ) -> Path:
         assert source_path == str(media_file)
-        assert item_id == item.id
+        assert item_id == _local_hls_runtime_item_key(item.id)
         assert transcode_profile == byte_streaming.LocalHlsTranscodeProfile(
             pix_fmt="yuv420p",
             profile="high",
@@ -10738,6 +10769,7 @@ def test_local_hls_playlist_route_marks_the_returned_variant_playlist_path(
 
     assert response.status_code == 200
     assert touched == [playlist_path]
+
 
 
 

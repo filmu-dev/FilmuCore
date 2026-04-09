@@ -34,7 +34,9 @@ use crate::{
     catalog::state::{
         inode_for_entry_id as hashed_inode_for_entry_id, CatalogStateStore, ROOT_INODE,
     },
-    chunk_engine::{ChunkEngine, ChunkEngineConfig, ChunkEngineError, ChunkReadRequest},
+    chunk_engine::{
+        ChunkCacheSnapshot, ChunkEngine, ChunkEngineConfig, ChunkEngineError, ChunkReadRequest,
+    },
     chunk_planner::ChunkPlannerConfig,
     config::{PrefetchConfig, ResolvedMountAdapterKind, SidecarConfig},
     hidden_paths::{is_hidden_path, is_ignored_path},
@@ -446,6 +448,10 @@ impl MountRuntime {
 
     pub fn chunk_cache_weighted_size_bytes(&self) -> u64 {
         self.chunk_engine.cache_snapshot().weighted_size_bytes
+    }
+
+    pub fn chunk_cache_snapshot(&self) -> ChunkCacheSnapshot {
+        self.chunk_engine.cache_snapshot()
     }
 
     pub fn active_read_count(&self) -> u64 {

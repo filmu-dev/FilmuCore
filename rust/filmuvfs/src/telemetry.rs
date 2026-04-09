@@ -245,11 +245,23 @@ pub struct FilmuvfsBackendFallbackStatusSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FilmuvfsChunkCacheStatusSnapshot {
+    pub backend: &'static str,
     pub total_events: u64,
     pub hits: u64,
     pub misses: u64,
     pub inserts: u64,
     pub prefetch_hits: u64,
+    pub memory_bytes: u64,
+    pub memory_max_bytes: u64,
+    pub memory_hits: u64,
+    pub memory_misses: u64,
+    pub disk_bytes: u64,
+    pub disk_max_bytes: u64,
+    pub disk_hits: u64,
+    pub disk_misses: u64,
+    pub disk_writes: u64,
+    pub disk_write_errors: u64,
+    pub disk_evictions: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1149,6 +1161,7 @@ impl FilmuvfsMetrics {
         &self,
         config: &SidecarConfig,
     ) -> FilmuvfsRuntimeStatusSnapshot {
+        let chunk_cache_snapshot = self.mount_runtime.chunk_cache_snapshot();
         let catalog_counts = self.catalog_state.counts();
         let read_ok = self.read_requests_ok.load(Ordering::Relaxed);
         let read_error = self.read_requests_error.load(Ordering::Relaxed);
@@ -1302,6 +1315,7 @@ impl FilmuvfsMetrics {
                     .load(Ordering::Relaxed),
             },
             chunk_cache: FilmuvfsChunkCacheStatusSnapshot {
+                backend: chunk_cache_snapshot.backend,
                 total_events: self.chunk_cache_hits.load(Ordering::Relaxed)
                     + self.chunk_cache_misses.load(Ordering::Relaxed)
                     + self.chunk_cache_inserts.load(Ordering::Relaxed)
@@ -1310,6 +1324,17 @@ impl FilmuvfsMetrics {
                 misses: self.chunk_cache_misses.load(Ordering::Relaxed),
                 inserts: self.chunk_cache_inserts.load(Ordering::Relaxed),
                 prefetch_hits: self.chunk_cache_prefetch_hits.load(Ordering::Relaxed),
+                memory_bytes: chunk_cache_snapshot.memory_bytes,
+                memory_max_bytes: chunk_cache_snapshot.memory_max_bytes,
+                memory_hits: chunk_cache_snapshot.memory_hits,
+                memory_misses: chunk_cache_snapshot.memory_misses,
+                disk_bytes: chunk_cache_snapshot.disk_bytes,
+                disk_max_bytes: chunk_cache_snapshot.disk_max_bytes,
+                disk_hits: chunk_cache_snapshot.disk_hits,
+                disk_misses: chunk_cache_snapshot.disk_misses,
+                disk_writes: chunk_cache_snapshot.disk_writes,
+                disk_write_errors: chunk_cache_snapshot.disk_write_errors,
+                disk_evictions: chunk_cache_snapshot.disk_evictions,
             },
             chunk_read_patterns: FilmuvfsChunkReadPatternSnapshot {
                 header_scan: self.read_pattern_header_scan.load(Ordering::Relaxed),

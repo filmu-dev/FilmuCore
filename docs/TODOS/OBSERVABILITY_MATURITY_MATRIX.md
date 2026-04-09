@@ -299,7 +299,7 @@ Priority 6 should be considered meaningfully advanced when:
 - The backend now also exposes `upstream_manifest_invalid` in that HLS route taxonomy, so malformed remote playlists have a dedicated operator-facing classification instead of being hidden inside generic upstream failures.
 - The backend now also records explicit timeout/error upstream open outcomes for remote proxy playback and maps remote-HLS playlist fetch / segment proxy transport failures to explicit `504` / `502` responses, which makes that transport layer more observable and predictable.
 - The backend now also exposes remote-HLS retry/cooldown counters through [`/api/v1/stream/status`](../../filmu_py/api/routes/stream.py), including retry attempts, cooldown starts, cooldown hits, and currently active cooldown windows.
-- This is a stronger baseline than the original serving-only status view, and the Rust sidecar now also emits first mounted-read cache/pattern/prefetch/refresh metrics from live WinFSP/ProjFS reads. It is still below the fuller stream/VFS observability model described in this matrix because provider-pressure rollups, richer on-disk-cache visibility, prefetch-depth visibility, and true end-to-end amplification summaries still remain.
+- This is a stronger baseline than the original serving-only status view, and the Rust sidecar now also emits mounted-read cache/pattern/prefetch/refresh metrics plus cache-layer backend/memory/disk breakdown from live WinFSP/ProjFS reads. It is still below the fuller stream/VFS observability model described in this matrix because provider-pressure rollups, prefetch-depth visibility, and true end-to-end amplification summaries still remain.
 
 
 

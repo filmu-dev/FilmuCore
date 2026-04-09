@@ -220,6 +220,18 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_open_handles: int
     vfs_runtime_active_reads: int
     vfs_runtime_chunk_cache_weighted_bytes: int
+    vfs_runtime_chunk_cache_backend: str
+    vfs_runtime_chunk_cache_memory_bytes: int
+    vfs_runtime_chunk_cache_memory_max_bytes: int
+    vfs_runtime_chunk_cache_memory_hits: int
+    vfs_runtime_chunk_cache_memory_misses: int
+    vfs_runtime_chunk_cache_disk_bytes: int
+    vfs_runtime_chunk_cache_disk_max_bytes: int
+    vfs_runtime_chunk_cache_disk_hits: int
+    vfs_runtime_chunk_cache_disk_misses: int
+    vfs_runtime_chunk_cache_disk_writes: int
+    vfs_runtime_chunk_cache_disk_write_errors: int
+    vfs_runtime_chunk_cache_disk_evictions: int
     vfs_runtime_handle_startup_total: int
     vfs_runtime_handle_startup_ok: int
     vfs_runtime_handle_startup_error: int

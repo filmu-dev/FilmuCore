@@ -238,6 +238,12 @@ _ATTACHMENT_RESTRICTED_URL_KEYS = (
 )
 
 
+def _local_hls_runtime_item_key(item_id: str) -> str:
+    """Return an opaque internal key for local HLS cache/runtime state."""
+
+    return hashlib.sha256(item_id.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class InlineRemoteHlsRefreshOutcome:
     """Result of one inline remote-HLS media-entry repair attempt."""
@@ -373,7 +379,7 @@ def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
     }
 
 
-def _empty_vfs_runtime_governance_snapshot() -> dict[str, int]:
+def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | str]:
     """Return the default Rust runtime governance payload for /stream/status."""
 
     return {
@@ -381,6 +387,18 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int]:
         "vfs_runtime_open_handles": 0,
         "vfs_runtime_active_reads": 0,
         "vfs_runtime_chunk_cache_weighted_bytes": 0,
+        "vfs_runtime_chunk_cache_backend": "unknown",
+        "vfs_runtime_chunk_cache_memory_bytes": 0,
+        "vfs_runtime_chunk_cache_memory_max_bytes": 0,
+        "vfs_runtime_chunk_cache_memory_hits": 0,
+        "vfs_runtime_chunk_cache_memory_misses": 0,
+        "vfs_runtime_chunk_cache_disk_bytes": 0,
+        "vfs_runtime_chunk_cache_disk_max_bytes": 0,
+        "vfs_runtime_chunk_cache_disk_hits": 0,
+        "vfs_runtime_chunk_cache_disk_misses": 0,
+        "vfs_runtime_chunk_cache_disk_writes": 0,
+        "vfs_runtime_chunk_cache_disk_write_errors": 0,
+        "vfs_runtime_chunk_cache_disk_evictions": 0,
         "vfs_runtime_handle_startup_total": 0,
         "vfs_runtime_handle_startup_ok": 0,
         "vfs_runtime_handle_startup_error": 0,
@@ -460,6 +478,16 @@ def _as_int(value: object) -> int:
     return 0
 
 
+def _as_str(value: object, *, default: str = "") -> str:
+    """Normalize Rust runtime JSON string values into safe status payloads."""
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return default
+
+
 def _nested_mapping_value(payload: object, *keys: str) -> object | None:
     """Safely walk nested JSON objects loaded from the Rust runtime status file."""
 
@@ -511,7 +539,7 @@ def _load_vfs_runtime_status_payload() -> dict[str, object] | None:
     return None
 
 
-def _vfs_runtime_governance_snapshot() -> dict[str, int]:
+def _vfs_runtime_governance_snapshot() -> dict[str, int | str]:
     """Return additive governance counters extracted from the Rust runtime snapshot."""
 
     payload = _load_vfs_runtime_status_payload()
@@ -523,6 +551,43 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int]:
     governance["vfs_runtime_active_reads"] = _as_int(_nested_mapping_value(payload, "runtime", "active_reads"))
     governance["vfs_runtime_chunk_cache_weighted_bytes"] = _as_int(
         _nested_mapping_value(payload, "runtime", "chunk_cache_weighted_bytes")
+    )
+    governance["vfs_runtime_chunk_cache_backend"] = _as_str(
+        _nested_mapping_value(payload, "chunk_cache", "backend"),
+        default="unknown",
+    )
+    governance["vfs_runtime_chunk_cache_memory_bytes"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "memory_bytes")
+    )
+    governance["vfs_runtime_chunk_cache_memory_max_bytes"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "memory_max_bytes")
+    )
+    governance["vfs_runtime_chunk_cache_memory_hits"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "memory_hits")
+    )
+    governance["vfs_runtime_chunk_cache_memory_misses"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "memory_misses")
+    )
+    governance["vfs_runtime_chunk_cache_disk_bytes"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "disk_bytes")
+    )
+    governance["vfs_runtime_chunk_cache_disk_max_bytes"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "disk_max_bytes")
+    )
+    governance["vfs_runtime_chunk_cache_disk_hits"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "disk_hits")
+    )
+    governance["vfs_runtime_chunk_cache_disk_misses"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "disk_misses")
+    )
+    governance["vfs_runtime_chunk_cache_disk_writes"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "disk_writes")
+    )
+    governance["vfs_runtime_chunk_cache_disk_write_errors"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "disk_write_errors")
+    )
+    governance["vfs_runtime_chunk_cache_disk_evictions"] = _as_int(
+        _nested_mapping_value(payload, "chunk_cache", "disk_evictions")
     )
     governance["vfs_runtime_handle_startup_total"] = _as_int(
         _nested_mapping_value(payload, "handle_startup", "total")
@@ -1486,14 +1551,15 @@ async def _serve_hls_playlist_from_resolved_source(
             source_key=source_key,
         )
 
+    local_hls_item_key = _local_hls_runtime_item_key(item_id)
     playlist_path = (
         await byte_streaming.ensure_local_hls_playlist(
             source_value,
-            item_id,
+            local_hls_item_key,
             transcode_profile=local_hls_transcode_profile,
         )
         if local_hls_transcode_profile is not None
-        else await byte_streaming.ensure_local_hls_playlist(source_value, item_id)
+        else await byte_streaming.ensure_local_hls_playlist(source_value, local_hls_item_key)
     )
     playlist_text = playlist_path.read_text(encoding="utf-8")
     byte_streaming.mark_local_hls_activity(playlist_path)
@@ -1538,14 +1604,15 @@ async def _serve_hls_child_from_resolved_source(
             source_key=source_key,
         )
 
+    local_hls_item_key = _local_hls_runtime_item_key(item_id)
     playlist_path = (
         await byte_streaming.ensure_local_hls_playlist(
             source_value,
-            item_id,
+            local_hls_item_key,
             transcode_profile=local_hls_transcode_profile,
         )
         if local_hls_transcode_profile is not None
-        else await byte_streaming.ensure_local_hls_playlist(source_value, item_id)
+        else await byte_streaming.ensure_local_hls_playlist(source_value, local_hls_item_key)
     )
     candidate = byte_streaming.resolve_safe_child_path(playlist_path.parent, file_path)
     referenced_files = byte_streaming.referenced_local_hls_files(playlist_path)

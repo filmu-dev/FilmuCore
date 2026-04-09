@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$repoRoot = $PSScriptRoot
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 function Test-PowerShellScriptSyntax {
     param(
@@ -45,13 +45,13 @@ function Test-DockerComposeConfig {
 }
 
 $powerShellScripts = @(
-    'start_local_stack.ps1',
-    'status_local_stack.ps1',
-    'stop_local_stack.ps1',
-    'start_windows_stack.ps1',
+    'scripts\start_local_stack.ps1',
+    'scripts\status_local_stack.ps1',
+    'scripts\stop_local_stack.ps1',
+    'scripts\start_windows_stack.ps1',
     'check_windows_stack.ps1',
-    'status_windows_stack.ps1',
-    'stop_windows_stack.ps1'
+    'scripts\status_windows_stack.ps1',
+    'scripts\stop_windows_stack.ps1'
 ) | ForEach-Object { Join-Path $repoRoot $_ }
 
 $composeFiles = @(
