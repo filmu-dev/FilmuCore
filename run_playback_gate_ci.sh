@@ -20,6 +20,28 @@ require_nonempty_env() {
   fi
 }
 
+resolve_browser_executable() {
+  local candidates=(
+    "${FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE:-}"
+    "$(command -v google-chrome 2>/dev/null || true)"
+    "$(command -v google-chrome-stable 2>/dev/null || true)"
+    "$(command -v chromium 2>/dev/null || true)"
+    "$(command -v chromium-browser 2>/dev/null || true)"
+    "$(command -v microsoft-edge 2>/dev/null || true)"
+    "$(command -v msedge 2>/dev/null || true)"
+  )
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 require_command docker
 require_command curl
 require_command pwsh
@@ -34,9 +56,16 @@ export PLEX_URL="${PLEX_URL:-http://localhost:32401}"
 export EMBY_URL="${EMBY_URL:-http://localhost:8097}"
 export FILMU_REQUIRE_PROVIDER_GATE="${FILMU_REQUIRE_PROVIDER_GATE:-1}"
 export FILMU_PLAYBACK_REQUIRED_CHECK_NAME="${FILMU_PLAYBACK_REQUIRED_CHECK_NAME:-Playback Gate / Playback Gate}"
+export FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE="${FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE:-}"
 
 require_nonempty_env TMDB_API_KEY
 require_nonempty_env FILMU_FRONTEND_CONTEXT
+
+if [[ -z "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
+  FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE="$(resolve_browser_executable || true)"
+  export FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE
+fi
+
 require_nonempty_env FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE
 
 if [[ ! -d "$FILMU_FRONTEND_CONTEXT" ]]; then
@@ -55,7 +84,7 @@ if [[ -z "${FILMU_PY_REALDEBRID_API_TOKEN:-}${REAL_DEBRID_API_KEY:-}${FILMU_PY_A
 fi
 
 if [[ ! -e /dev/fuse ]]; then
-  echo "[playback-gate-ci] /dev/fuse is required on the self-hosted Linux runner" >&2
+  echo "[playback-gate-ci] /dev/fuse is required on the Linux playback runner" >&2
   exit 1
 fi
 

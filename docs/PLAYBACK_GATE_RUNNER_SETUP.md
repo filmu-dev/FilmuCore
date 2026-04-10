@@ -39,7 +39,7 @@ Required prerequisites for the base playback gate:
 - `TMDB_API_KEY`
 - at least one debrid provider token/key
 - `FILMU_FRONTEND_CONTEXT`
-- `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`
+- a Chromium/Chrome/Edge executable discoverable on the runner, or `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`
 
 Additional prerequisites for the provider parity gate:
 
@@ -68,7 +68,6 @@ Variables:
 - optional `FILMU_FRONTEND_CONTEXT`
 - `FILMU_FRONTEND_REPOSITORY`
 - optional `FILMU_FRONTEND_REF`
-- `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`
 - optional `FILMU_FRONTEND_USERNAME`
 
 GitHub-hosted frontend checkout note:
@@ -76,6 +75,8 @@ GitHub-hosted frontend checkout note:
 - the workflow now runs on `ubuntu-latest`
 - when `FILMU_FRONTEND_REPOSITORY` is set, the workflow checks out that external frontend repo into `${GITHUB_WORKSPACE}/Triven_frontend`
 - `FILMU_FRONTEND_CONTEXT` now defaults to that checkout path when no explicit override is provided
+- the workflow now auto-discovers a Chrome/Chromium/Edge binary on the hosted Ubuntu image and exports it into `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE` when the repo variable is unset
+- the workflow also attempts `sudo modprobe fuse` before readiness validation so `/dev/fuse` is not treated as a manual pre-step on the standard GitHub-hosted Linux runner
 - if `FILMU_FRONTEND_REPOSITORY` is unset, readiness will fail unless `FILMU_FRONTEND_CONTEXT` already points to a readable frontend checkout inside the runner workspace
 
 Required-check promotion note:

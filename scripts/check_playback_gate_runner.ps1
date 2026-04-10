@@ -38,13 +38,41 @@ function Test-CommandAvailable {
     return ($null -ne (Get-Command $Name -ErrorAction SilentlyContinue))
 }
 
+function Resolve-BrowserExecutablePath {
+    param(
+        [AllowEmptyString()][string] $ConfiguredPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPath) -and (Test-Path -LiteralPath $ConfiguredPath)) {
+        return $ConfiguredPath
+    }
+
+    $candidateCommands = @(
+        'google-chrome'
+        'google-chrome-stable'
+        'chromium'
+        'chromium-browser'
+        'microsoft-edge'
+        'msedge'
+    )
+
+    foreach ($candidate in $candidateCommands) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace($command.Source)) {
+            return [string] $command.Source
+        }
+    }
+
+    return ''
+}
+
 $scriptRoot = $PSScriptRoot
 $repoRoot = Split-Path -Parent $scriptRoot
 $dotEnv = Get-DotEnvMap -Path (Join-Path $repoRoot '.env')
 $isLinuxHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
 
 $frontendContext = Get-EnvValue -Name 'FILMU_FRONTEND_CONTEXT' -DotEnv $dotEnv
-$browserPath = Get-EnvValue -Name 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE' -DotEnv $dotEnv
+$browserPath = Resolve-BrowserExecutablePath -ConfiguredPath (Get-EnvValue -Name 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE' -DotEnv $dotEnv)
 $tmdbKey = Get-EnvValue -Name 'TMDB_API_KEY' -DotEnv $dotEnv
 $plexToken = Get-EnvValue -Name 'PLEX_TOKEN' -DotEnv $dotEnv
 $embyApiKey = Get-EnvValue -Name 'EMBY_API_KEY' -DotEnv $dotEnv
@@ -79,6 +107,7 @@ $result = [pscustomobject]@{
     timestamp = (Get-Date).ToString('o')
     repo_root = $repoRoot
     require_provider_gate = $RequireProviderGate.IsPresent
+    browser_executable_path = $browserPath
     status = $status
     checks = $checks
 }

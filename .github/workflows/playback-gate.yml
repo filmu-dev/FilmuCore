@@ -82,6 +82,35 @@ jobs:
           ref: ${{ vars.FILMU_FRONTEND_REF != '' && vars.FILMU_FRONTEND_REF || 'main' }}
           path: Triven_frontend
 
+      - name: Provision hosted runner prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          browser_path="${FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE:-}"
+          if [[ -z "$browser_path" || ! -x "$browser_path" ]]; then
+            for candidate in \
+              "$(command -v google-chrome 2>/dev/null || true)" \
+              "$(command -v google-chrome-stable 2>/dev/null || true)" \
+              "$(command -v chromium 2>/dev/null || true)" \
+              "$(command -v chromium-browser 2>/dev/null || true)" \
+              "$(command -v microsoft-edge 2>/dev/null || true)" \
+              "$(command -v msedge 2>/dev/null || true)"; do
+              if [[ -n "$candidate" && -x "$candidate" ]]; then
+                browser_path="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [[ -n "$browser_path" && -x "$browser_path" ]]; then
+            echo "FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE=$browser_path" >> "$GITHUB_ENV"
+          fi
+
+          if [[ ! -e /dev/fuse ]]; then
+            sudo modprobe fuse || true
+          fi
+
       - name: Validate runner readiness
         shell: pwsh
         run: |
@@ -124,6 +153,16 @@ jobs:
             echo
             if [[ -f playback-proof-artifacts/runner-readiness.json ]]; then
               echo "Runner readiness artifact captured."
+              if command -v jq >/dev/null 2>&1; then
+                readiness_status="$(jq -r '.status // "unknown"' playback-proof-artifacts/runner-readiness.json)"
+                echo "- Runner readiness status: \`${readiness_status}\`"
+                mapfile -t readiness_failures < <(jq -r '.checks[] | select(.required == true and .ok == false) | "- " + .name + ": " + .details' playback-proof-artifacts/runner-readiness.json)
+                if [[ "${#readiness_failures[@]}" -gt 0 ]]; then
+                  echo
+                  echo "### Missing readiness prerequisites"
+                  printf '%s\n' "${readiness_failures[@]}"
+                fi
+              fi
             else
               echo "Runner readiness artifact missing."
             fi
