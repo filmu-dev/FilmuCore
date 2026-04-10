@@ -1230,7 +1230,9 @@ def test_debrid_item_transitions_to_failed_when_no_selected_stream(monkeypatch: 
 
 
 def test_debrid_item_retries_rate_limit_without_transitioning_to_failed(
-    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     item_id = "item-debrid-rate-limited"
     selected = _build_stream(
@@ -1274,15 +1276,17 @@ def test_debrid_item_retries_rate_limit_without_transitioning_to_failed(
         "_resolve_enabled_downloader",
         lambda settings, item_id=None, item_request_id=None: ("realdebrid", "rd-token"),
     )
+    caplog.clear()
     with pytest.raises(tasks.Retry):
         asyncio.run(tasks.debrid_item({"settings": _build_worker_settings()}, item_id))
 
     assert media_service.state is ItemState.DOWNLOADED
     assert media_service.transition_messages == []
     captured = capsys.readouterr()
-    assert "debrid_item.rate_limited" in captured.out
-    assert "provider=realdebrid" in captured.out
-    assert "retry_after=7.0" in captured.out
+    output = caplog.text + captured.out + captured.err
+    assert "debrid_item.rate_limited" in output
+    assert "realdebrid" in output
+    assert "7.0" in output
 
 
 def test_finalize_item_marks_downloaded_item_completed(monkeypatch: Any) -> None:

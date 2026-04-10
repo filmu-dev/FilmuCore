@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from time import perf_counter
 
 from graphql.language.ast import FieldNode, OperationDefinitionNode
@@ -71,7 +72,7 @@ def _operation_outcome(execution_context: ExecutionContext) -> str:
 class GraphQLOperationMetricsExtension(SchemaExtension):
     """Emit Prometheus metrics for GraphQL operations using bounded labels."""
 
-    def on_operation(self):  # type: ignore[override]
+    def on_operation(self) -> Iterator[None]:
         started_at = perf_counter()
         try:
             yield

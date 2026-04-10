@@ -827,6 +827,13 @@ class Settings(BaseSettings):
     def _logging_model(self) -> LoggingSettings:
         return _coerce_model(self.logging, LoggingSettings)
 
+    def _compat_logging_payload(self) -> dict[str, Any]:
+        payload = _compat_dump(self._logging_model())
+        payload.pop("retention_files", None)
+        payload.pop("directory", None)
+        payload.pop("structured_filename", None)
+        return payload
+
     def _stream_model(self) -> StreamSettings:
         return _coerce_model(self.stream, StreamSettings)
 
@@ -860,7 +867,7 @@ class Settings(BaseSettings):
             "database": _compat_dump(self._database_model()),
             "notifications": _compat_dump(self._notifications_model()),
             "post_processing": _compat_dump(self._post_processing_model()),
-            "logging": _compat_dump(self._logging_model()),
+            "logging": self._compat_logging_payload(),
             "stream": _compat_dump(self._stream_model()),
         }
 
