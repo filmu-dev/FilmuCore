@@ -129,27 +129,28 @@ jobs:
           $readinessJson = ./scripts/check_playback_gate_runner.ps1 @readinessArgs
           $readinessJson | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
           $readiness = $readinessJson | ConvertFrom-Json
-          $requiredFailures = @(
-            $readiness.checks | Where-Object { $_.required -and -not $_.ok } | ForEach-Object { [string] $_.name }
+          $requiredFailureChecks = @(
+            $readiness.checks | Where-Object { $_.required -and -not $_.ok }
           )
-          $dryRunEligibleFailures = @{
-            tmdb_api_key = $true
-            debrid_provider_token = $true
-          }
           $unexpectedFailures = @(
-            $requiredFailures | Where-Object { -not $dryRunEligibleFailures.ContainsKey([string] $_) }
+            $requiredFailureChecks | Where-Object {
+              $_.name -ne 'tmdb_api_key' -and $_.name -ne 'debrid_provider_token'
+            }
           )
           if ($unexpectedFailures.Count -gt 0) {
-            foreach ($failureName in $unexpectedFailures) {
-              $failure = $readiness.checks | Where-Object { $_.name -eq $failureName } | Select-Object -First 1
+            foreach ($failure in $unexpectedFailures) {
               Write-Host ("::error title=playback gate readiness::{0} - {1}" -f $failure.name, $failure.details)
             }
             exit 1
           }
-          if ($requiredFailures.Count -gt 0) {
+          $baseSecretFailures = @(
+            $requiredFailureChecks | Where-Object {
+              $_.name -eq 'tmdb_api_key' -or $_.name -eq 'debrid_provider_token'
+            }
+          )
+          if ($baseSecretFailures.Count -gt 0) {
             "FILMU_PLAYBACK_DRY_RUN=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            foreach ($failureName in $requiredFailures) {
-              $failure = $readiness.checks | Where-Object { $_.name -eq $failureName } | Select-Object -First 1
+            foreach ($failure in $baseSecretFailures) {
               Write-Host ("::warning title=playback gate dry-run fallback::{0} - {1}" -f $failure.name, $failure.details)
             }
           }
