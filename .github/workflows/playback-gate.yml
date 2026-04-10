@@ -132,9 +132,12 @@ jobs:
           $requiredFailures = @(
             $readiness.checks | Where-Object { $_.required -and -not $_.ok } | ForEach-Object { [string] $_.name }
           )
-          $dryRunEligibleFailures = @('tmdb_api_key', 'debrid_provider_token')
+          $dryRunEligibleFailures = @{
+            tmdb_api_key = $true
+            debrid_provider_token = $true
+          }
           $unexpectedFailures = @(
-            $requiredFailures | Where-Object { $_ -notin $dryRunEligibleFailures }
+            $requiredFailures | Where-Object { -not $dryRunEligibleFailures.ContainsKey([string] $_) }
           )
           if ($unexpectedFailures.Count -gt 0) {
             foreach ($failureName in $unexpectedFailures) {
