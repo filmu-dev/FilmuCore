@@ -26,12 +26,30 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Get-OptionalObjectPropertyValue {
+    param(
+        [AllowNull()][object] $InputObject,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject.PSObject.Properties.Name -contains $Name) {
+        return $InputObject.$Name
+    }
+
+    return $null
+}
+
 if ($RepeatCount -lt 1) {
     throw 'RepeatCount must be at least 1.'
 }
 
-$repoRoot = $PSScriptRoot
-$singleRunScript = Join-Path $repoRoot 'run_playback_proof.ps1'
+$scriptRoot = $PSScriptRoot
+$repoRoot = Split-Path -Parent $scriptRoot
+$singleRunScript = Join-Path $scriptRoot 'run_playback_proof.ps1'
 $artifactsRoot = Join-Path $repoRoot 'playback-proof-artifacts'
 $runTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $stabilitySummaryPath = Join-Path $artifactsRoot ("stability-summary-{0}.json" -f $runTimestamp)
@@ -172,10 +190,14 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
         $summary = Get-Content $summaryPath -Raw | ConvertFrom-Json
         $completedState = [string] $summary.movie.final_state
         $staleRefreshStatus = [string] $summary.media_server.stale_refresh_status
-        $preferredClientStatus = [string] $summary.preferred_client.status
-        $durationSeconds = $summary.hardening.duration_seconds
-        $reconnectIncidentCount = $summary.hardening.reconnect_incident_count
-        $failureClassesObserved = @($summary.hardening.failure_classes_observed)
+        $preferredClient = Get-OptionalObjectPropertyValue -InputObject $summary -Name 'preferred_client'
+        $hardening = Get-OptionalObjectPropertyValue -InputObject $summary -Name 'hardening'
+        $preferredClientStatus = [string] (Get-OptionalObjectPropertyValue -InputObject $preferredClient -Name 'status')
+        $durationSeconds = Get-OptionalObjectPropertyValue -InputObject $hardening -Name 'duration_seconds'
+        $reconnectIncidentCount = Get-OptionalObjectPropertyValue -InputObject $hardening -Name 'reconnect_incident_count'
+        $failureClassesObserved = @(
+            Get-OptionalObjectPropertyValue -InputObject $hardening -Name 'failure_classes_observed'
+        )
     }
 
     $runPassed = $exitCode -eq 0 -and $summaryExists
