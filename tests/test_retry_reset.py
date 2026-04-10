@@ -168,14 +168,28 @@ def _build_settings() -> Settings:
 class FakeRouteMediaService:
     arq_required: bool = False
 
-    async def retry_item(self, item_id: str, db: object, arq_pool: object | None) -> MediaItemORM:
-        _ = db
+    async def retry_item(
+        self,
+        item_id: str,
+        db: object,
+        arq_pool: object | None,
+        *,
+        tenant_id: str | None = None,
+    ) -> MediaItemORM:
+        _ = (db, tenant_id)
         if self.arq_required and arq_pool is None:
             raise ArqNotEnabledError("ARQ is not enabled; retry/reset requires the worker to be running")
         return _build_item(imdb_id="tt0137523", state=ItemState.REQUESTED.value)
 
-    async def reset_item(self, item_id: str, db: object, arq_pool: object | None) -> MediaItemORM:
-        _ = (item_id, db)
+    async def reset_item(
+        self,
+        item_id: str,
+        db: object,
+        arq_pool: object | None,
+        *,
+        tenant_id: str | None = None,
+    ) -> MediaItemORM:
+        _ = (item_id, db, tenant_id)
         if self.arq_required and arq_pool is None:
             raise ArqNotEnabledError("ARQ is not enabled; retry/reset requires the worker to be running")
         item = _build_item(imdb_id="tt0137523", state=ItemState.REQUESTED.value)
@@ -192,13 +206,16 @@ class FakeRouteMediaService:
     async def request_items_by_identifiers(self, **kwargs: Any) -> ItemActionResult:  # pragma: no cover
         raise AssertionError(kwargs)
 
-    async def retry_items(self, ids: list[str]) -> ItemActionResult:
+    async def retry_items(self, ids: list[str], *, tenant_id: str | None = None) -> ItemActionResult:
+        _ = tenant_id
         return ItemActionResult(message="Items retried.", ids=list(ids))
 
-    async def reset_items(self, ids: list[str]) -> ItemActionResult:
+    async def reset_items(self, ids: list[str], *, tenant_id: str | None = None) -> ItemActionResult:
+        _ = tenant_id
         return ItemActionResult(message="Items reset.", ids=list(ids))
 
-    async def remove_items(self, ids: list[str]) -> ItemActionResult:
+    async def remove_items(self, ids: list[str], *, tenant_id: str | None = None) -> ItemActionResult:
+        _ = tenant_id
         return ItemActionResult(message="Items removed.", ids=list(ids))
 
 
@@ -221,6 +238,10 @@ def _build_route_client(*, arq_enabled: bool) -> TestClient:
     return TestClient(app)
 
 
+def _route_headers() -> dict[str, str]:
+    return {"x-api-key": "a" * 32, "x-actor-roles": "platform:admin"}
+
+
 @dataclass
 class FakeGraphqlMediaService:
     arq_enabled: bool = True
@@ -229,22 +250,33 @@ class FakeGraphqlMediaService:
         _ = kwargs
         return ItemActionResult(message="Requested 1 item.", ids=["item-1"])
 
-    async def get_item(self, item_id: str) -> Any:
+    async def get_item(self, item_id: str, *, tenant_id: str | None = None) -> Any:
+        _ = tenant_id
         if item_id != "item-1":
             return None
         return type("_Record", (), {"id": "item-1", "state": type("_State", (), {"value": "requested"})()})()
 
-    async def retry_items(self, ids: list[str]) -> ItemActionResult:
+    async def retry_items(self, ids: list[str], *, tenant_id: str | None = None) -> ItemActionResult:
+        _ = tenant_id
         return ItemActionResult(message="Items retried.", ids=list(ids))
 
-    async def reset_items(self, ids: list[str]) -> ItemActionResult:
+    async def reset_items(self, ids: list[str], *, tenant_id: str | None = None) -> ItemActionResult:
+        _ = tenant_id
         return ItemActionResult(message="Items reset.", ids=list(ids))
 
-    async def remove_items(self, ids: list[str]) -> ItemActionResult:
+    async def remove_items(self, ids: list[str], *, tenant_id: str | None = None) -> ItemActionResult:
+        _ = tenant_id
         return ItemActionResult(message="Items removed.", ids=list(ids))
 
-    async def retry_item(self, item_id: str, db: object, arq_pool: object | None) -> MediaItemORM:
-        _ = db
+    async def retry_item(
+        self,
+        item_id: str,
+        db: object,
+        arq_pool: object | None,
+        *,
+        tenant_id: str | None = None,
+    ) -> MediaItemORM:
+        _ = (db, tenant_id)
         if not self.arq_enabled or arq_pool is None:
             raise ArqNotEnabledError("ARQ is not enabled; retry/reset requires the worker to be running")
         item = _build_item(imdb_id="tt0137523", state=ItemState.REQUESTED.value)
@@ -252,8 +284,15 @@ class FakeGraphqlMediaService:
         item._scrape_job_enqueued = True  # type: ignore[attr-defined]
         return item
 
-    async def reset_item(self, item_id: str, db: object, arq_pool: object | None) -> MediaItemORM:
-        _ = (item_id, db)
+    async def reset_item(
+        self,
+        item_id: str,
+        db: object,
+        arq_pool: object | None,
+        *,
+        tenant_id: str | None = None,
+    ) -> MediaItemORM:
+        _ = (item_id, db, tenant_id)
         if not self.arq_enabled or arq_pool is None:
             raise ArqNotEnabledError("ARQ is not enabled; retry/reset requires the worker to be running")
         item = _build_item(imdb_id="tt0137523", state=ItemState.REQUESTED.value)
@@ -404,28 +443,28 @@ async def test_reset_item_raises_when_arq_disabled() -> None:
 
 def test_retry_route_returns_item_action_response_shape() -> None:
     client = _build_route_client(arq_enabled=True)
-    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 200
     assert response.json() == {"message": "Items retried.", "ids": ["item-1"]}
 
 
 def test_reset_route_returns_item_action_response_shape() -> None:
     client = _build_route_client(arq_enabled=True)
-    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 200
     assert response.json() == {"message": "Items reset.", "ids": ["item-1"]}
 
 
 def test_retry_route_returns_400_when_arq_disabled() -> None:
     client = _build_route_client(arq_enabled=False)
-    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 400
     assert response.json() == {"detail": "ARQ is not enabled; retry/reset requires the worker to be running"}
 
 
 def test_reset_route_returns_400_when_arq_disabled() -> None:
     client = _build_route_client(arq_enabled=False)
-    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 400
     assert response.json() == {"detail": "ARQ is not enabled; retry/reset requires the worker to be running"}
 

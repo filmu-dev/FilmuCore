@@ -13,6 +13,7 @@ _ALLOWED_DISTRIBUTIONS = {"filesystem", "entry_point", "builtin"}
 _ALLOWED_RELEASE_CHANNELS = {"stable", "beta", "experimental", "builtin"}
 _ALLOWED_TRUST_LEVELS = {"builtin", "trusted", "community"}
 _ALLOWED_SANDBOX_PROFILES = {"host", "network", "restricted", "isolated"}
+_ALLOWED_TENANCY_MODES = {"shared", "tenant", "control_plane"}
 _SCOPE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*:[a-z0-9._-]+$")
 _SHA256_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 _REQUIRED_PERMISSION_SCOPES_BY_CAPABILITY: dict[str, frozenset[str]] = {
@@ -91,6 +92,7 @@ class PluginManifest(BaseModel):
     signature: str | None = Field(default=None)
     signing_key_id: str | None = Field(default=None)
     sandbox_profile: str = Field(default="restricted", min_length=1)
+    tenancy_mode: str = Field(default="shared", min_length=1)
     quarantined: bool = Field(default=False)
     quarantine_reason: str | None = Field(default=None)
     capabilities: frozenset[str] = Field(default_factory=frozenset)
@@ -218,6 +220,16 @@ class PluginManifest(BaseModel):
             raise ValueError(
                 "sandbox_profile must be one of: host, network, restricted, isolated"
             )
+        return normalized
+
+    @field_validator("tenancy_mode")
+    @classmethod
+    def validate_tenancy_mode(cls, value: str) -> str:
+        """Restrict tenancy declarations to current host policy vocabulary."""
+
+        normalized = value.strip().lower()
+        if normalized not in _ALLOWED_TENANCY_MODES:
+            raise ValueError("tenancy_mode must be one of: shared, tenant, control_plane")
         return normalized
 
     @field_validator(
@@ -390,6 +402,8 @@ class PluginManifest(BaseModel):
                 raise ValueError("builtin plugins must use trust_level='builtin'")
             if self.sandbox_profile != "host":
                 raise ValueError("builtin plugins must use sandbox_profile='host'")
+            if self.tenancy_mode != "control_plane":
+                raise ValueError("builtin plugins must use tenancy_mode='control_plane'")
 
         if self.quarantined and self.quarantine_reason is None:
             raise ValueError("quarantined plugins must declare quarantine_reason")
@@ -401,6 +415,8 @@ class PluginManifest(BaseModel):
             raise ValueError("signature requires source_sha256")
         if self.trust_level == "community" and self.sandbox_profile == "host":
             raise ValueError("community plugins must not request sandbox_profile='host'")
+        if self.trust_level == "community" and self.tenancy_mode == "control_plane":
+            raise ValueError("community plugins must not request tenancy_mode='control_plane'")
 
         if self.publishable_events:
             expected_prefix = f"{self.name}."

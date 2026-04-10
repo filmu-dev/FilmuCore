@@ -55,6 +55,7 @@ def _manifest(**payload: object) -> PluginManifest:
             "release_channel": "builtin",
             "trust_level": "builtin",
             "sandbox_profile": "host",
+            "tenancy_mode": "control_plane",
             **payload,
         }
     )

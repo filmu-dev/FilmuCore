@@ -1697,6 +1697,7 @@ fn build_default_chunk_engine(
             cache,
             ChunkEngineConfig {
                 planner,
+                prefetch_max_background_per_handle: prefetch_config.max_background_per_handle,
                 ..ChunkEngineConfig::default()
             },
             upstream_reader,
@@ -1718,6 +1719,7 @@ fn build_chunk_engine_from_sidecar_config(
     let chunk_config = ChunkEngineConfig {
         planner,
         prefetch_concurrency: config.prefetch_concurrency,
+        prefetch_max_background_per_handle: config.prefetch.max_background_per_handle,
     };
 
     Ok(Arc::new(ChunkEngine::new(

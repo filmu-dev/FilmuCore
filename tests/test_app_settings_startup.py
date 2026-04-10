@@ -71,6 +71,19 @@ class DummyDatabaseRuntime:
         self.disposed = True
 
 
+class DummySecurityIdentityService:
+    """Async identity-plane stub for startup tests."""
+
+    def __init__(self) -> None:
+        self.bootstrapped = False
+
+    async def bootstrap(self, _settings: Settings) -> None:
+        self.bootstrapped = True
+
+    async def record_auth_context(self, _auth_context: object) -> None:
+        return None
+
+
 class DummyCatalogSupplier:
     """Small async supplier stand-in used to exercise the gRPC bridge during lifespan tests."""
 
@@ -244,6 +257,11 @@ def _patch_app_startup(
     monkeypatch.setattr(app_module, "create_pool", fake_create_pool)
     monkeypatch.setattr(app_module, "run_migrations", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(app_module, "DatabaseRuntime", DummyDatabaseRuntime)
+    monkeypatch.setattr(
+        app_module,
+        "build_security_identity_service",
+        lambda _resources: DummySecurityIdentityService(),
+    )
     monkeypatch.setattr(app_module, "build_playback_refresh_controller", lambda _resources: None)
     monkeypatch.setattr(
         app_module, "build_hls_failed_lease_refresh_controller", lambda _resources: None
@@ -364,9 +382,13 @@ def test_startup_attaches_plugin_registry_and_capability_context_provider(monkey
     assert len(load_calls) == 2
     assert load_calls[0]["register_graphql"] is True
     assert load_calls[0]["register_capabilities"] is False
+    assert load_calls[0]["trust_store_path"] is None
+    assert load_calls[0]["strict_signatures"] is False
     assert load_calls[0].get("context_provider") is None
     assert load_calls[1]["register_graphql"] is False
     assert load_calls[1]["register_capabilities"] is True
+    assert load_calls[1]["trust_store_path"] is None
+    assert load_calls[1]["strict_signatures"] is False
     assert load_calls[1]["context_provider"] is not None
 
 

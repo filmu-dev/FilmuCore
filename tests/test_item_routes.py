@@ -66,6 +66,11 @@ class DummyMediaService:
     """Deterministic media-service test double for item compatibility routes."""
 
     last_detail_request: tuple[str, str] | None = None
+    last_search_tenant_id: str | None = None
+    last_detail_tenant_id: str | None = None
+    last_reset_tenant_id: str | None = None
+    last_retry_tenant_id: str | None = None
+    last_remove_tenant_id: str | None = None
 
     async def search_items(
         self,
@@ -77,8 +82,10 @@ class DummyMediaService:
         sort: list[str] | None,
         search: str | None,
         extended: bool,
+        tenant_id: str | None,
     ) -> MediaItemsPage:
         _ = (item_types, states, sort, search, extended)
+        self.last_search_tenant_id = tenant_id
         return MediaItemsPage(
             success=True,
             items=[
@@ -107,8 +114,10 @@ class DummyMediaService:
         *,
         media_type: str,
         extended: bool,
+        tenant_id: str | None = None,
     ) -> MediaItemSummaryRecord | None:
         self.last_detail_request = (item_identifier, media_type)
+        self.last_detail_tenant_id = tenant_id
         if item_identifier == "missing":
             return None
         active_stream = None
@@ -226,15 +235,37 @@ class DummyMediaService:
     async def retry_items(self, ids: list[str]) -> ItemActionResult:
         return ItemActionResult(message="Items retried.", ids=ids)
 
-    async def reset_item(self, item_id: str, db: object, arq_pool: object) -> Any:
+    async def reset_item(
+        self,
+        item_id: str,
+        db: object,
+        arq_pool: object,
+        *,
+        tenant_id: str | None = None,
+    ) -> Any:
         _ = (db, arq_pool)
+        self.last_reset_tenant_id = tenant_id
         return type("_ResetItem", (), {"id": item_id})()
 
-    async def retry_item(self, item_id: str, db: object, arq_pool: object) -> Any:
+    async def retry_item(
+        self,
+        item_id: str,
+        db: object,
+        arq_pool: object,
+        *,
+        tenant_id: str | None = None,
+    ) -> Any:
         _ = (db, arq_pool)
+        self.last_retry_tenant_id = tenant_id
         return type("_RetryItem", (), {"id": item_id})()
 
-    async def remove_items(self, ids: list[str]) -> ItemActionResult:
+    async def remove_items(
+        self,
+        ids: list[str],
+        *,
+        tenant_id: str | None = None,
+    ) -> ItemActionResult:
+        self.last_remove_tenant_id = tenant_id
         return ItemActionResult(message="Items removed.", ids=ids)
 
     async def request_items_by_identifiers(
@@ -243,7 +274,11 @@ class DummyMediaService:
         media_type: str,
         tmdb_ids: list[str] | None = None,
         tvdb_ids: list[str] | None = None,
+        requested_seasons: list[int] | None = None,
+        requested_episodes: dict[str, list[int]] | None = None,
+        tenant_id: str = "global",
     ) -> ItemActionResult:
+        _ = (requested_seasons, requested_episodes)
         identifiers = tmdb_ids if media_type == "movie" else tvdb_ids
         resolved = [identifier for identifier in identifiers or [] if identifier]
         if not resolved:
@@ -287,11 +322,16 @@ def _build_client(*, media_service: DummyMediaService | None = None) -> TestClie
 
 
 def _headers() -> dict[str, str]:
-    return {"x-api-key": "a" * 32}
+    return {
+        "x-api-key": "a" * 32,
+        "x-actor-roles": "platform:admin",
+        "x-tenant-id": "tenant-main",
+    }
 
 
 def test_items_route_returns_paginated_payload() -> None:
-    client = _build_client()
+    media_service = DummyMediaService()
+    client = _build_client(media_service=media_service)
     response = client.get(
         "/api/v1/items",
         params={"limit": 24, "page": 1, "type": ["movie"], "states": ["Completed"]},
@@ -307,10 +347,12 @@ def test_items_route_returns_paginated_payload() -> None:
     assert body["items"][0]["next_retry_at"] == "2026-03-22T22:00:00Z"
     assert body["items"][0]["recovery_attempt_count"] == 2
     assert body["items"][0]["is_in_cooldown"] is True
+    assert media_service.last_search_tenant_id == "tenant-main"
 
 
 def test_get_item_route_returns_detail_payload() -> None:
-    client = _build_client()
+    media_service = DummyMediaService()
+    client = _build_client(media_service=media_service)
     response = client.get(
         "/api/v1/items/123",
         params={"media_type": "movie", "extended": True},
@@ -333,6 +375,7 @@ def test_get_item_route_returns_detail_payload() -> None:
     assert body["resolved_playback"]["direct"]["provider"] == "realdebrid"
     assert body["resolved_playback"]["hls"]["kind"] == "local-file"
     assert body["media_entries"][0]["entry_type"] == "media"
+    assert media_service.last_detail_tenant_id == "tenant-main"
     assert body["media_entries"][0]["provider_download_id"] == "torrent-123"
     assert body["media_entries"][0]["original_filename"] == "Movie.mkv"
     assert body["media_entries"][0]["active_for_direct"] is True
@@ -392,6 +435,17 @@ def test_add_items_route_returns_404_when_media_type_has_no_identifiers() -> Non
     )
 
     assert response.status_code == 404
+
+
+def test_add_items_route_requires_admin_role() -> None:
+    client = _build_client()
+    response = client.post(
+        "/api/v1/items/add",
+        json={"media_type": "movie", "tmdb_ids": ["123"], "tvdb_ids": []},
+        headers={"x-api-key": "a" * 32, "x-actor-roles": "library:viewer"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_item_identifier_matching_accepts_namespaced_external_refs() -> None:

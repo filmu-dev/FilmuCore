@@ -163,6 +163,26 @@ jobs:
           chmod +x ./run_playback_gate_ci.sh
           ./run_playback_gate_ci.sh
 
+      - name: Capture expected merge policy proof
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
+          $policyArgs = @{
+            Repository = '${{ github.repository }}'
+            Branch = 'main'
+            RequirePlaybackGate = $true
+            MinimumApprovingReviewCount = 1
+            RequireAdminsEnforced = $true
+            AsJson = $true
+          }
+          if ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1') {
+            $policyArgs.RequireProviderGate = $true
+          }
+          ./scripts/check_github_main_policy.ps1 @policyArgs |
+            Set-Content -Path playback-proof-artifacts/github-main-policy-expected.json -Encoding UTF8
+
       - name: Upload playback gate artifacts
         if: always()
         uses: actions/upload-artifact@v4

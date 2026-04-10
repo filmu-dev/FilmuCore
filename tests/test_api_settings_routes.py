@@ -397,10 +397,61 @@ def test_generate_apikey_rotates_runtime_key_and_persists_it(monkeypatch: Any) -
     assert isinstance(body["key"], str)
     assert len(body["key"]) >= 32
     assert body["key"] != "a" * 32
+    assert isinstance(body["api_key_id"], str)
+    assert body["api_key_id"] != "primary-test"
     assert "Update BACKEND_API_KEY" in body["warning"]
     assert resources.settings.api_key.get_secret_value() == body["key"]
+    assert resources.settings.api_key_id == body["api_key_id"]
     assert resources.db.settings_blob is not None
     assert resources.db.settings_blob["api_key"] == body["key"]
+    assert resources.db.settings_blob["api_key_id"] == body["api_key_id"]
+
+
+def test_generate_apikey_bounds_api_key_identifier_length(monkeypatch: Any) -> None:
+    client, resources = _build_client()
+    _install_settings_persistence_stubs(monkeypatch)
+    response = client.post(
+        "/api/v1/generateapikey",
+        headers=_headers(**{"x-actor-id": "operator-" + ("x" * 300)}),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["api_key_id"]) <= 128
+    assert resources.settings.api_key_id == body["api_key_id"]
+
+
+def test_settings_put_requires_settings_write_permission(monkeypatch: Any) -> None:
+    client, _resources = _build_client()
+    _install_settings_persistence_stubs(monkeypatch)
+    payload = _compatibility_payload()
+
+    response = client.put(
+        "/api/v1/settings",
+        json=payload,
+        headers=_headers(
+            **{"x-actor-roles": "", "x-actor-scopes": "playback:read"},
+        ),
+    )
+
+    assert response.status_code == 403
+
+
+def test_generate_apikey_requires_rotation_permission(monkeypatch: Any) -> None:
+    client, _resources = _build_client()
+    _install_settings_persistence_stubs(monkeypatch)
+
+    response = client.post(
+        "/api/v1/generateapikey",
+        headers=_headers(
+            **{
+                "x-actor-roles": "",
+                "x-actor-scopes": "settings:write",
+            }
+        ),
+    )
+
+    assert response.status_code == 403
 
 
 def test_settings_put_emits_audit_event_with_actor_and_tenant(monkeypatch: Any) -> None:
@@ -504,7 +555,11 @@ def test_settings_put_audit_uses_configured_api_key_identifier(monkeypatch: Any)
         )
 
     monkeypatch.setattr(settings_routes, "audit_action", fake_audit_action)
-    response = client.put("/api/v1/settings", json=payload, headers={"x-api-key": "a" * 32})
+    response = client.put(
+        "/api/v1/settings",
+        json=payload,
+        headers={"x-api-key": "a" * 32, "x-actor-roles": "platform:admin"},
+    )
 
     assert response.status_code == 200
     assert captured == [

@@ -61,6 +61,8 @@ April 2026 policy update:
 - [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) now surfaces those policy fields on load success, validates manifest policy on registration, and warns when non-builtin plugins rely on implicit capability-derived scopes instead of explicit declarations.
 - [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py) now exposes those policy/health fields on `GET /api/v1/plugins` and `GET /api/v1/plugins/events`, which gives operators a first explicit plugin trust/compatibility surface rather than a capability-only list.
 - [`../../filmu_py/plugins/manifest.py`](../../filmu_py/plugins/manifest.py) now also validates `source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, and quarantine fields, while [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) now rejects quarantined plugins and filesystem/source digest mismatches before registration.
+- [`../../filmu_py/plugins/trust.py`](../../filmu_py/plugins/trust.py) now loads an operator-managed JSON trust store, verifies HMAC-SHA256 plugin signatures, supports revocation lists for key IDs and signatures, and lets startup enforce strict signature policy for non-builtin plugins through `FILMU_PY_PLUGIN_TRUST_STORE_PATH` and `FILMU_PY_PLUGIN_STRICT_SIGNATURES`.
+- [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py) now surfaces `signature_verified`, `signature_verification_reason`, `trust_policy_decision`, and `trust_store_source` on `GET /api/v1/plugins`, so operators can distinguish unsigned, untrusted, revoked, and verified plugins without reading logs.
 
 ---
 
@@ -208,7 +210,7 @@ This is how Python can beat the TS model: not just matching breadth, but making 
 1. Strengthen plugin compatibility/version policy and manifest/schema validation.
 2. Harden external-author packaging/distribution guidance around the now-implemented discovery paths.
 3. Deepen plugin telemetry/health summaries and runtime isolation above the now-landed policy/permission baseline.
-4. Deepen the new provenance/quarantine baseline into real signature verification, trust-store policy, revocation, and stronger runtime isolation for non-builtin plugins.
+4. Deepen the new trust-store/signature baseline into stronger publisher lifecycle controls, artifact provenance, and stronger runtime isolation for non-builtin plugins.
 5. Only add durable queue-backed hook execution if operational evidence shows the in-process executor is insufficient.
 
 This sequence keeps the platform safe before it becomes broad.

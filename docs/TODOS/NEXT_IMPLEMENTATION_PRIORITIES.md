@@ -27,18 +27,12 @@ The active next step is hardening the now-real playback surface for the current 
 
 1. keep the merged GitHub-hosted playback workflow green on real PR traffic and verify the live protected-branch policy with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) from an admin-authenticated host; do not treat repo-settings state as proven from an unauthenticated workspace
    - the stricter policy profile is now explicit through `proof:playback:policy:enterprise` and `proof:playback:policy:enterprise:validate`, which add minimum-review and admin-enforcement expectations plus explicit provider/Windows proof-profile expectations to the canonical policy printout/validation path
+   - the playback gate workflow now also captures `playback-proof-artifacts/github-main-policy-expected.json`, so required-check promotion can use artifacted expected policy instead of screenshots or memory
 2. keep the GitHub-hosted Linux runner prerequisites, external frontend checkout variables, and media-server secrets intentionally configured for that workflow (`FILMU_FRONTEND_REPOSITORY` when overriding the default frontend checkout, plus `PLEX_TOKEN` / `EMBY_API_KEY` when provider parity should auto-run), and validate them with [`../scripts/check_playback_gate_runner.ps1`](../scripts/check_playback_gate_runner.ps1); Windows dev hosts are expected to fail the Linux `/dev/fuse` prerequisite
 3. continue using the optional Plex-compatible stub proof, the real Jellyfin/frontend proof stack, the native Windows WinFSP gate, the now-working Docker Plex path, and the local Emby container as regression layers beneath the merged workflow
 4. keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility in the proof artifact bundle
 5. keep the new thresholded Windows soak profiles green in repeated operator runs: `continuous`, `seek`, `concurrent`, and `full` now exist on top of [`../scripts/run_windows_vfs_soak.ps1`](../scripts/run_windows_vfs_soak.ps1), [`../scripts/run_windows_vfs_soak_stability.ps1`](../scripts/run_windows_vfs_soak_stability.ps1) now aggregates repeated runs across named environment classes, they now also capture backend `/api/v1/stream/status` VFS governance snapshots plus `backend_vfs_governance_delta`, live/peak prefetch-depth, and chunk-coalescing evidence when the backend is reachable, and the next step is repeatability across more than one environment class rather than inventing another soak harness
    - the stricter local wrapper now also exists as `proof:windows:vfs:soak:enterprise`, requiring runtime-status capture, backend-status capture, and zero tolerated reconnect/provider-pressure/fatal incidents for the selected repeated profile set
-1. finish promoting the now-green playback harnesses into real playback-path merge gates, starting from the new GitHub-hosted CI workflow in [`.github/workflows/playback-gate.yml`](../../.github/workflows/playback-gate.yml), [`../package.json`](../package.json) `proof:playback:gate`, [`../package.json`](../package.json) `proof:playback:providers:gate`, and the wrappers under [`../scripts/`](../scripts/)
-2. provision the GitHub-hosted Linux runner prerequisites, external frontend checkout variables, and media-server secrets for that workflow (`FILMU_FRONTEND_REPOSITORY`, `PLEX_TOKEN`, `EMBY_API_KEY`), validate them with [`../scripts/check_playback_gate_runner.ps1`](../scripts/check_playback_gate_runner.ps1), validate the exact GitHub `main` policy with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1), then make the gates required for playback-path changes; Windows dev hosts are expected to fail the Linux `/dev/fuse` prerequisite
-3. continue using the optional Plex-compatible stub proof, the real Jellyfin/frontend proof stack, the native Windows WinFSP gate, the now-working Docker Plex path, and the local Emby container as regression layers beneath the enforced gate
-4. keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility in the proof artifact bundle
-5. keep the new thresholded Windows soak profiles green in repeated operator runs: `continuous`, `seek`, `concurrent`, and `full` now exist on top of [`../scripts/run_windows_vfs_soak.ps1`](../scripts/run_windows_vfs_soak.ps1), [`../scripts/run_windows_vfs_soak_stability.ps1`](../scripts/run_windows_vfs_soak_stability.ps1) now aggregates repeated runs across named environment classes, they now also capture backend `/api/v1/stream/status` VFS governance snapshots plus `backend_vfs_governance_delta`, live/peak prefetch-depth, and chunk-coalescing evidence when the backend is reachable, and the next step is repeatability across more than one environment class rather than inventing another soak harness
-6. continue hardening HLS/direct-play governance beyond the new production-grade HLS baseline, especially policy tuning, operator ergonomics, and any remaining control-plane refinements
-7. continue hardening direct-play governance beyond the now-shipped shared chunk-engine HTTP path, degraded-direct fallback awareness, provider-backed direct-source ranking, lease-freshness-aware provider-backed ordering, related-entry recovery via provider file identity, explicit active-stream-winner authority rules, same-file sibling collapse for non-active direct entries, richer-identity-first different-file fallback ordering, generated-local HLS cache/reference integrity checks, explicit malformed-manifest governance signals, route-level malformed-manifest observability/signaling, normalized HLS failure-reason counters, generated-missing/upstream-failure HLS route visibility, upstream-playlist structural validation, and explicit remote-HLS timeout/transport failure policy
 
 Why first:
 
@@ -88,7 +82,7 @@ The following orchestration semantics are now implemented:
 Remaining orchestration gaps:
 
 - massive-torrent download performance optimization (current TS baseline now centers on `find-valid-torrent` plus sandboxed `map-items-to-files` / `validate-torrent-files` breadth) - see `RIVEN_TS_RUST_VFS_BRANCH_AUDIT.md` for more details on upstream orchestration
-- richer request-intake provenance beyond the now-working partial-request compatibility path (`items/add`, Overseerr intake, and the `scrape/auto` upsert bridge all create request-intent rows, but source attribution is still intentionally light)
+- richer request-intake provenance and policy beyond the now-working partial-request compatibility path (`items/add`, Overseerr intake, and the `scrape/auto` upsert bridge all create tenant-aware request-intent rows, but source attribution and quota policy are still intentionally light)
 - stronger stage-idempotency, enqueue-dedup, and queue-lag/operator visibility across the broader queue graph
 - add more orchestration stages only where they improve correctness and recovery breadth (see `ORCHESTRATION_BREADTH_MATRIX.md` for more details)
 
@@ -98,8 +92,8 @@ Remaining orchestration gaps:
 
 Detailed plugin-platform breakdown: [`PLUGIN_CAPABILITY_MODEL_MATRIX.md`](PLUGIN_CAPABILITY_MODEL_MATRIX.md).
 
-Current plugin support now includes packaged entry-point discovery, plugin-scoped settings, datasource-aware `PluginContext` construction, runtime capability registration across scraper/downloader/indexer/content-service/notification/event-hook capabilities, namespaced publishable-event governance, built-in Torrentio plus real MDBList/webhook-notification/StremThru integrations, runtime visibility through `/api/v1/plugins` plus `/api/v1/plugins/events`, and an explicit trust/policy baseline for `publisher`, `release_channel`, `trust_level`, and `permission_scopes`.
-Current plugin support now also includes provenance/isolation metadata (`source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, quarantine fields), loader-side digest verification, quarantine refusal, and operator-visible provenance fields on `/api/v1/plugins`.
+Current plugin support now includes packaged entry-point discovery, plugin-scoped settings, datasource-aware `PluginContext` construction, runtime capability registration across scraper/downloader/indexer/content-service/notification/event-hook capabilities, namespaced publishable-event governance, built-in Torrentio plus real MDBList/webhook-notification/StremThru integrations, runtime visibility through `/api/v1/plugins` plus `/api/v1/plugins/events`, and an explicit trust/policy baseline for `publisher`, `release_channel`, `trust_level`, `permission_scopes`, `tenancy_mode`, and publisher-policy evaluation.
+Current plugin support now also includes provenance/isolation metadata (`source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, quarantine fields), loader-side digest verification, trust-store-backed signature verification, quarantine refusal, publisher-policy enforcement, and operator-visible provenance/isolation/policy fields on `/api/v1/plugins`.
 
 Next capability layers should include:
 
@@ -108,7 +102,7 @@ Next capability layers should include:
 - ✅ Webhook notifications — real NotificationPlugin + PluginEventHookWorker implementation
 - ✅ Overseerr webhook intake at `/api/v1/webhook/overseerr`
 - deepen the now-real StremThru integration with stronger operator-facing health/compatibility policy rather than treating it as a remaining stub; the first additive readiness metadata now ships on [`GET /api/v1/plugins`](../../filmu_py/api/routes/default.py)
-- cryptographically verify signatures instead of only surfacing `signature` metadata, and add revocation/trust-store policy above the now-landed provenance/quarantine baseline
+- deepen the now-landed trust-store/publisher-policy baseline into stronger runtime sandboxing, publisher lifecycle controls, artifact provenance/distribution policy, and operator quarantine/revocation workflows
 - decide whether hook execution should remain in-process or grow into a durable/queued model
 - continue broadening capabilities only where they improve real platform breadth (see `PLUGIN_CAPABILITY_MODEL_MATRIX.md` for more details)
 
@@ -134,11 +128,13 @@ Recent baseline completed here:
 - the Rust sidecar now parses mounted media-semantic path metadata (`path_type`, `tmdb_id`/`tvdb_id`/`imdb_id`, `season`, `episode`), carries it on mounted `getattr` / `readdir` / `open` / `read` surfaces, and resolves mounted semantic aliases like external-ref show folders plus season/episode names onto canonical catalog paths
 - the Rust sidecar now also surfaces those semantic aliases as discoverable mounted directory entries (`tvdb-*`, `tmdb-*`, `Season 01`, `Episode 01.mkv`) instead of keeping them as resolution-only affordances
 - the Rust sidecar now also deduplicates concurrent inline stale-link refreshes per catalog entry and reuses already-refreshed catalog URLs for later mounted stale reads instead of fanning out duplicate refresh RPCs
+- the Rust sidecar now also enforces a first explicit per-handle background-prefetch fairness cap, and the runtime snapshot exposes that operator policy alongside live prefetch depth so multi-reader pressure is diagnosable instead of implicit
+- the Rust sidecar now also counts fairness denials and global backpressure denials, and `/api/v1/stream/status` exposes both via `vfs_runtime_prefetch_*` fields so operator soak evidence can distinguish per-handle starvation from global saturation
 
 Build toward:
 
 1. integrate the implemented shared chunk/range planning and caching engine across mounted FilmuVFS reads
-2. add optional disk/persistent cache and smarter prefetch policy above the now-hardened Rust cache/control plane
+2. keep deepening the optional disk/persistent cache and smarter prefetch policy above the now-hardened Rust cache/control plane; the new per-handle background-prefetch fairness cap is the first explicit operator policy, not the end state
 3. deepen mounted `open`/`read`/`readdir`/`getattr`/`release` behavior for long-running operational behavior, soak testing, and backpressure handling
 4. keep the WatchCatalog/runtime and stale-link refresh story hardened now that reconnect deltas and inline refresh are in place
 5. deeper HLS and serving-lifecycle governance
@@ -233,16 +229,16 @@ After the shipped layer-1 baseline, deepen:
 
 ## Priority 7 — Turn interim auth context into a real enterprise identity plane
 
-Current implementation now carries additive actor/tenant/role/scope context through authenticated API requests and emits structured audit logs for privileged settings/API-key mutations.
+Current implementation now carries additive actor/tenant/role/scope context through authenticated API requests, computes `effective_permissions`, emits structured audit logs for privileged settings/API-key mutations, rotates `api_key_id` alongside the secret itself, and persists actor-aware service-account key identity.
 
 That is not yet a finished enterprise identity system.
 
 Next identity/authz work should include:
 
-- persisted principals, service accounts, and tenant/org models
 - OIDC/SSO readiness instead of header-carried operator metadata
-- RBAC/ABAC policy enforcement across API, workers, plugins, and VFS control-plane actions
-- tenant-aware quotas, audit retention, and operator-visible access policy state
+- deeper RBAC/ABAC policy evaluation across API, workers, plugins, and VFS control-plane actions
+- tenant-scoped authorization, quotas, audit retention, and operator-visible access policy state
+- broader tenancy propagation across plugin execution, VFS governance, metrics ownership, and control-plane attribution
 
 Why continuously:
 
@@ -278,19 +274,11 @@ Next:
 
 Next 5 slices after that:
 
-1. Admin-authenticated GitHub branch-policy validation and merge-policy enforcement for the playback gate.
-2. Multi-environment Windows/Linux mounted-soak hardening with threshold tuning and stronger mount data-plane diagnostics.
-3. Queue-backed resolver/orchestration breadth beyond today’s inline dedup, especially replay-safe lag history and operator alerting.
-4. Plugin provenance/signing/sandboxing for non-builtin plugins, including quarantine/revocation policy.
-5. Enterprise identity/tenancy/authz foundation so the control plane stops depending on a single shared API key.
-1. CI/merge-policy promotion for the now-green `proof:playback:gate` and `proof:playback:providers:gate` surfaces
-2. Keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity evidence, and foreground-fetch/coalescing evidence in the playback-proof bundle
-3. Keep the thresholded Windows soak profiles green and repeatable across maintainers now that they preserve live prefetch-depth and chunk-coalescing evidence, then decide whether one of them should become a formal release gate alongside the shorter existing `proof:windows:vfs:gate`
-4. Decide whether FilmuVFS should stop at discoverable alias entries or add a fully separate id-keyed browse tree, and how much broader queue-backed/orchestrated resolver workflow is still needed beyond the new mount-side inline refresh dedup
-5. GraphQL rich field expansion — add extended fields to compat subscription types
-6. Dedicated index-item worker stage (TMDB enrichment as ARQ stage, not request-time)
-7. Plex library scan trigger after item reaches `COMPLETED` state
-8. keep native Windows Plex parity green against `C:\FilmuCoreVFS` through repeatable proof reruns and CI promotion
+1. Admin-authenticated live GitHub `main` policy validation plus enforced merge-policy promotion for the playback gate using the now-canonical expected-policy artifact/check names.
+2. Multi-environment Windows/Linux mounted-soak hardening with threshold tuning, rollout criteria, and richer mounted data-plane diagnostics backed by the new fairness/global-backpressure counters.
+3. Real RBAC/ABAC and tenant-scoped authorization depth across API, workers, plugins, and VFS control-plane actions on top of the new effective-permission baseline.
+4. Broader tenancy propagation into plugin execution, quotas, metrics ownership, and VFS/control-plane attribution so `tenant_id` becomes an operational boundary instead of only persisted metadata.
+5. Plugin trust/isolation deepening: runtime sandboxing, publisher lifecycle controls, artifact provenance/distribution policy, and operator quarantine/revocation workflows.
 
 ---
 

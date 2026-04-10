@@ -282,6 +282,8 @@ pub struct FilmuvfsPrefetchStatusSnapshot {
     pub background_spawned: u64,
     pub background_populated: u64,
     pub background_backpressure: u64,
+    pub fairness_denied: u64,
+    pub global_backpressure_denied: u64,
     pub background_error: u64,
     pub skipped_pattern: u64,
     pub skipped_cached: u64,
@@ -290,10 +292,12 @@ pub struct FilmuvfsPrefetchStatusSnapshot {
     pub startup_scheduled: u64,
     pub startup_error: u64,
     pub concurrency_limit: u64,
+    pub max_background_per_handle: u64,
     pub available_permits: u64,
     pub active_permits: u64,
     pub active_background_tasks: u64,
     pub peak_active_background_tasks: u64,
+    pub handles_with_background_tasks: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1373,6 +1377,8 @@ impl FilmuvfsMetrics {
                 background_backpressure: self
                     .prefetch_background_backpressure
                     .load(Ordering::Relaxed),
+                fairness_denied: prefetch_snapshot.fairness_denied_total,
+                global_backpressure_denied: prefetch_snapshot.global_backpressure_denied_total,
                 background_error: self.prefetch_background_error.load(Ordering::Relaxed),
                 skipped_pattern: self.prefetch_skipped_pattern.load(Ordering::Relaxed),
                 skipped_cached: self.prefetch_skipped_cached.load(Ordering::Relaxed),
@@ -1381,10 +1387,12 @@ impl FilmuvfsMetrics {
                 startup_scheduled: self.prefetch_startup_scheduled.load(Ordering::Relaxed),
                 startup_error: self.prefetch_startup_error.load(Ordering::Relaxed),
                 concurrency_limit: prefetch_snapshot.concurrency_limit,
+                max_background_per_handle: prefetch_snapshot.max_background_per_handle,
                 available_permits: prefetch_snapshot.available_permits,
                 active_permits: prefetch_snapshot.active_permits,
                 active_background_tasks: prefetch_snapshot.active_background_tasks,
                 peak_active_background_tasks: prefetch_snapshot.peak_active_background_tasks,
+                handles_with_background_tasks: prefetch_snapshot.handles_with_background_tasks,
             },
             chunk_coalescing: FilmuvfsChunkCoalescingStatusSnapshot {
                 in_flight_chunks: chunk_coalescing_snapshot.in_flight_chunks,

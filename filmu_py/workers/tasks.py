@@ -1789,6 +1789,12 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
         item = await media_service.get_item(item_id)
         if item is None:
             raise ValueError(f"Unknown item_id={item_id}")
+        bind_worker_contextvars(
+            ctx=mutable_ctx,
+            stage="scrape_item",
+            item_id=item_id,
+            tenant_id=getattr(item, "tenant_id", None),
+        )
 
         aired_at = item.attributes.get("aired_at")
         if aired_at is not None:
@@ -1885,6 +1891,12 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
                 refreshed_item = await media_service.get_item(item_id)
                 if refreshed_item is not None:
                     item = refreshed_item
+                    bind_worker_contextvars(
+                        ctx=mutable_ctx,
+                        stage="scrape_item",
+                        item_id=item_id,
+                        tenant_id=getattr(item, "tenant_id", None),
+                    )
                     scrape_candidates, provider_summaries = await _scrape_with_plugins(
                         plugin_registry=plugin_registry,
                         item=item,
@@ -1979,6 +1991,12 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         item = await media_service.get_item(item_id)
         if item is None:
             raise ValueError(f"Unknown item_id={item_id}")
+        bind_worker_contextvars(
+            ctx=mutable_ctx,
+            stage="debrid_item",
+            item_id=item_id,
+            tenant_id=getattr(item, "tenant_id", None),
+        )
         if item.state in {ItemState.COMPLETED, ItemState.FAILED}:
             return item_id
         if item.state is not ItemState.DOWNLOADED:
@@ -2174,6 +2192,12 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
         item = await media_service.get_item(item_id)
         if item is None:
             raise ValueError(f"Unknown item_id={item_id}")
+        bind_worker_contextvars(
+            ctx=mutable_ctx,
+            stage="finalize_item",
+            item_id=item_id,
+            tenant_id=getattr(item, "tenant_id", None),
+        )
         if item.state is ItemState.COMPLETED:
             return item_id
         if item.state not in (
@@ -2448,6 +2472,8 @@ async def _resolve_plugin_registry(ctx: dict[str, Any]) -> PluginRegistry:
         resolved,
         context_provider=context_provider,
         host_version=settings.version,
+        trust_store_path=settings.plugin_trust_store_path,
+        strict_signatures=settings.plugin_strict_signatures,
         register_graphql=False,
         register_capabilities=True,
     )

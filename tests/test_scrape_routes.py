@@ -57,7 +57,13 @@ class DummyMediaService:
     detailed_items: dict[str, str]
     created_items: dict[str, MediaItemRecord]
 
-    async def get_item(self, item_id: str) -> MediaItemRecord | None:
+    async def get_item(
+        self,
+        item_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> MediaItemRecord | None:
+        _ = tenant_id
         created_item = self.created_items.get(item_id)
         if created_item is not None:
             return created_item
@@ -98,8 +104,9 @@ class DummyMediaService:
         *,
         media_type: str,
         extended: bool = False,
+        tenant_id: str | None = None,
     ) -> MediaItemSummaryRecord | None:
-        _ = (media_type, extended)
+        _ = (media_type, extended, tenant_id)
         resolved_id = self.detailed_items.get(item_identifier)
         if resolved_id is None:
             return None
@@ -116,6 +123,19 @@ class DummyMediaService:
             else None,
             external_ref=item.external_ref,
         )
+
+    async def get_item_by_external_id(
+        self,
+        external_id: str,
+        *,
+        media_type: str | None = None,
+        tenant_id: str | None = None,
+    ) -> MediaItemRecord | None:
+        _ = (media_type, tenant_id)
+        resolved_id = self.detailed_items.get(external_id)
+        if resolved_id is None:
+            return None
+        return await self.get_item(resolved_id)
 
     async def retry_items(self, ids: list[str]) -> ItemActionResult:
         self.retried_ids.extend(ids)
@@ -153,6 +173,7 @@ class DummyMediaService:
         attributes: dict[str, object] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        tenant_id: str = "global",
     ) -> MediaItemRecord:
         self.requested_refs.append(external_ref)
         self.requested_payloads.append(
@@ -162,6 +183,7 @@ class DummyMediaService:
                 "requested_seasons": requested_seasons,
                 "requested_episodes": requested_episodes,
                 "attributes": attributes,
+                "tenant_id": tenant_id,
             }
         )
         existing_id = self.detailed_items.get(external_ref)
@@ -241,7 +263,11 @@ def _build_client() -> tuple[TestClient, DummyMediaService]:
 
 
 def _headers() -> dict[str, str]:
-    return {"x-api-key": "a" * 32}
+    return {
+        "x-api-key": "a" * 32,
+        "x-actor-roles": "platform:admin",
+        "x-tenant-id": "tenant-main",
+    }
 
 
 def test_auto_scrape_requests_item_from_external_id() -> None:
@@ -320,6 +346,7 @@ def test_auto_scrape_creates_missing_tv_item_from_partial_request_payload() -> N
             "requested_seasons": [1, 2],
             "requested_episodes": {"1": [1, 2], "2": [1]},
             "attributes": None,
+            "tenant_id": "tenant-main",
         }
     ]
     assert media_service.transitioned == [("item-created-1", "index", "queued for scrape")]
@@ -348,6 +375,7 @@ def test_auto_scrape_upserts_partial_scope_for_existing_tv_item() -> None:
             "requested_seasons": [3],
             "requested_episodes": {"3": [1, 2]},
             "attributes": None,
+            "tenant_id": "tenant-main",
         }
     ]
     assert media_service.transitioned == [("item-tv-1", "index", "queued for scrape")]
@@ -368,6 +396,17 @@ def test_scrape_routes_require_api_key() -> None:
     client, _ = _build_client()
     response = client.post("/api/v1/scrape/auto", json={"media_type": "movie", "tmdb_id": "123"})
     assert response.status_code == 401
+
+
+def test_scrape_auto_requires_admin_role() -> None:
+    client, _ = _build_client()
+    response = client.post(
+        "/api/v1/scrape/auto",
+        json={"media_type": "movie", "tmdb_id": "123"},
+        headers={"x-api-key": "a" * 32, "x-actor-roles": "library:viewer"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_scrape_item_returns_empty_json_baseline() -> None:

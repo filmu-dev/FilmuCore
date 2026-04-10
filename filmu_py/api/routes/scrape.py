@@ -17,7 +17,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from filmu_py.api.deps import get_media_service, get_resources
+from filmu_py.api.deps import (
+    get_auth_context,
+    get_media_service,
+    get_resources,
+    require_permissions,
+)
 from filmu_py.api.models import MessageResponse, ScrapeAutoPayload, ScrapeSessionStateResponse
 from filmu_py.services.media import ItemActionResult, MediaItemRecord, MediaService
 from filmu_py.state.item import InvalidItemTransition, ItemEvent, ItemState
@@ -193,6 +198,7 @@ async def _resolve_existing_item(
     item_identifier: str,
     *,
     media_type: str | None = None,
+    tenant_id: str | None = None,
 ) -> MediaItemRecord | None:
     """Resolve one existing item by UUID or supported external identifier."""
 
@@ -202,17 +208,21 @@ async def _resolve_existing_item(
             resolver = cast(Callable[..., Awaitable[Any]], get_by_external_id)
             item = cast(
                 MediaItemRecord | None,
-                await resolver(item_identifier, media_type=media_type),
+                await resolver(item_identifier, media_type=media_type, tenant_id=tenant_id),
             )
             if item is not None:
                 return item
 
-        detail = await media_service.get_item_detail(item_identifier, media_type="item")
+        detail = await media_service.get_item_detail(
+            item_identifier,
+            media_type="item",
+            tenant_id=tenant_id,
+        )
         if detail is not None:
-            return await media_service.get_item(detail.id)
+            return await media_service.get_item(detail.id, tenant_id=tenant_id)
         return None
 
-    return await media_service.get_item(item_identifier)
+    return await media_service.get_item(item_identifier, tenant_id=tenant_id)
 
 
 async def _request_missing_item_for_scrape(
@@ -222,6 +232,7 @@ async def _request_missing_item_for_scrape(
     scrape_request: AutoScrapeRequest,
     requested_seasons: list[int] | None,
     requested_episodes: dict[str, list[int]] | None,
+    tenant_id: str,
 ) -> MediaItemRecord:
     """Create one missing item while reusing the add-items path when available."""
 
@@ -231,14 +242,15 @@ async def _request_missing_item_for_scrape(
         result = cast(
             ItemActionResult,
             await requester(
-            media_type=scrape_request.media_type,
-            identifiers=[item_identifier],
-            requested_seasons=requested_seasons,
-            requested_episodes=requested_episodes,
+                media_type=scrape_request.media_type,
+                identifiers=[item_identifier],
+                requested_seasons=requested_seasons,
+                requested_episodes=requested_episodes,
+                tenant_id=tenant_id,
             ),
         )
         if result.ids:
-            created_item = await media_service.get_item(result.ids[0])
+            created_item = await media_service.get_item(result.ids[0], tenant_id=tenant_id)
             if created_item is not None:
                 return created_item
         raise ValueError("Could not create item from provided identifier")
@@ -248,6 +260,7 @@ async def _request_missing_item_for_scrape(
         media_type=scrape_request.media_type,
         requested_seasons=requested_seasons,
         requested_episodes=requested_episodes,
+        tenant_id=tenant_id,
     )
 
 
@@ -327,6 +340,7 @@ async def _queue_real_scrape(
 ) -> tuple[str, str]:
     """Resolve an item, transition it into indexed state when needed, and enqueue scrape."""
 
+    auth_context = get_auth_context(request)
     requested_seasons: list[int] | None = None
     requested_episodes: dict[str, list[int]] | None = None
     partial_scope_requested = False
@@ -343,6 +357,7 @@ async def _queue_real_scrape(
             media_service,
             item_identifier,
             media_type=scrape_request.media_type if scrape_request is not None else None,
+            tenant_id=auth_context.tenant_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -358,6 +373,7 @@ async def _queue_real_scrape(
                 scrape_request=scrape_request,
                 requested_seasons=requested_seasons,
                 requested_episodes=requested_episodes,
+                tenant_id=auth_context.tenant_id,
             )
             created_from_request = True
         except ValueError as exc:
@@ -384,6 +400,7 @@ async def _queue_real_scrape(
             title=item.title,
             requested_seasons=requested_seasons,
             requested_episodes=requested_episodes,
+            tenant_id=auth_context.tenant_id,
         )
         logger.info(
             "scrape_auto.partial_scope_upserted_for_existing_item",
@@ -496,6 +513,8 @@ def _require_session(session_id: str) -> ScrapeSessionRecord:
 async def _resolve_scrape_target(
     query: ScrapeItemQuery,
     media_service: MediaService,
+    *,
+    tenant_id: str | None = None,
 ) -> tuple[str, str]:
     """Resolve a scrape request into a stable external reference and display title."""
 
@@ -506,6 +525,7 @@ async def _resolve_scrape_target(
                 media_service,
                 item_identifier,
                 media_type=query.media_type,
+                tenant_id=tenant_id,
             )
         except ValueError:
             existing_item = None
@@ -531,6 +551,8 @@ async def _resolve_scrape_target(
 async def _resolve_session_target(
     query: ScrapeItemQuery,
     media_service: MediaService,
+    *,
+    tenant_id: str | None = None,
 ) -> tuple[str, str, str]:
     """Resolve a scrape-session target to `(item_id, external_ref, title)`.
 
@@ -545,6 +567,7 @@ async def _resolve_session_target(
                 media_service,
                 item_identifier,
                 media_type=query.media_type,
+                tenant_id=tenant_id,
             )
         except ValueError:
             existing_item = None
@@ -555,8 +578,16 @@ async def _resolve_session_target(
                 query.custom_title or existing_item.title,
             )
 
-    external_ref, title = await _resolve_scrape_target(query, media_service)
-    item = await media_service.request_item(external_ref=external_ref, title=title)
+    external_ref, title = await _resolve_scrape_target(
+        query,
+        media_service,
+        tenant_id=tenant_id,
+    )
+    item = await media_service.request_item(
+        external_ref=external_ref,
+        title=title,
+        tenant_id=tenant_id or "global",
+    )
     return item.id, item.external_ref, title
 
 
@@ -590,7 +621,12 @@ async def _iter_scrape_events(title: str) -> AsyncIterator[bytes]:
     )
 
 
-@router.post("/auto", operation_id="scrape.auto", response_model=MessageResponse)
+@router.post(
+    "/auto",
+    operation_id="scrape.auto",
+    response_model=MessageResponse,
+    dependencies=[Depends(require_permissions("scrape:write"))],
+)
 async def auto_scrape(
     http_request: Request,
     request: AutoScrapeRequest,
@@ -618,6 +654,7 @@ async def auto_scrape(
     "/start_session",
     operation_id="scrape.start_session",
     response_model=StartSessionResponse,
+    dependencies=[Depends(require_permissions("scrape:write"))],
 )
 async def start_manual_session(
     request_context: Request,
@@ -690,12 +727,14 @@ async def start_manual_session(
 )
 async def get_session_state(
     session_id: str,
+    request: Request,
     media_service: Annotated[MediaService, Depends(get_media_service)],
 ) -> ScrapeSessionStateResponse:
     """Return the current persisted item state for one queued scrape session."""
 
     session = _require_session(session_id)
-    item = await media_service.get_item(session.item_id)
+    auth_context = get_auth_context(request)
+    item = await media_service.get_item(session.item_id, tenant_id=auth_context.tenant_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
 
@@ -711,6 +750,7 @@ async def get_session_state(
     "/session/{session_id}",
     operation_id="scrape.session_action",
     response_model=MessageResponse | SelectFilesResponse,
+    dependencies=[Depends(require_permissions("scrape:write"))],
 )
 async def session_action(
     session_id: str,
@@ -768,6 +808,7 @@ async def session_action(
 
 @router.get("", operation_id="scrape.item", response_model=ScrapeItemResponse)
 async def scrape_item(
+    request: Request,
     item_id: str | int | None = None,
     tmdb_id: str | None = None,
     tvdb_id: str | None = None,
@@ -790,6 +831,7 @@ async def scrape_item(
     hard backend failure.
     """
 
+    auth_context = get_auth_context(request)
     query = ScrapeItemQuery(
         item_id=item_id,
         tmdb_id=tmdb_id,
@@ -803,7 +845,11 @@ async def scrape_item(
         max_filesize_override=max_filesize_override,
         stream=stream,
     )
-    _, title = await _resolve_scrape_target(query, media_service)
+    _, title = await _resolve_scrape_target(
+        query,
+        media_service,
+        tenant_id=auth_context.tenant_id,
+    )
 
     if stream:
         return StreamingResponse(

@@ -41,6 +41,7 @@ class DummyMediaService:
         tvdb_ids: list[str] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        tenant_id: str = "global",
     ) -> ItemActionResult:
         self.requests.append(
             {
@@ -50,6 +51,7 @@ class DummyMediaService:
                 "tvdb_ids": tvdb_ids,
                 "requested_seasons": requested_seasons,
                 "requested_episodes": requested_episodes,
+                "tenant_id": tenant_id,
             }
         )
         resolved = identifiers or []
@@ -91,7 +93,11 @@ def _build_client(*, media_service: DummyMediaService | None = None) -> tuple[Te
 
 
 def _headers() -> dict[str, str]:
-    return {"x-api-key": "a" * 32}
+    return {
+        "x-api-key": "a" * 32,
+        "x-actor-roles": "platform:admin",
+        "x-tenant-id": "tenant-main",
+    }
 
 
 def test_overseerr_request_added_movie_payload_is_accepted() -> None:
@@ -112,6 +118,7 @@ def test_overseerr_request_added_movie_payload_is_accepted() -> None:
     assert service.requests[-1]["media_type"] == "movie"
     assert service.requests[-1]["identifiers"] == ["tmdb:123"]
     assert service.requests[-1]["requested_seasons"] is None
+    assert service.requests[-1]["tenant_id"] == "tenant-main"
 
 
 def test_overseerr_request_added_tv_payload_passes_partial_seasons() -> None:
@@ -181,6 +188,22 @@ def test_overseerr_missing_api_key_returns_401() -> None:
     )
 
     assert response.status_code == 401
+
+
+def test_overseerr_requires_admin_role() -> None:
+    client, _service = _build_client()
+
+    response = client.post(
+        "/api/v1/webhook/overseerr",
+        json={
+            "notification_type": "REQUEST_ADDED",
+            "subject": "Movie requested",
+            "media": {"media_type": "movie", "tmdbId": "123"},
+        },
+        headers={"x-api-key": "a" * 32, "x-actor-roles": "webhook:viewer"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_overseerr_same_tmdb_id_is_idempotent() -> None:

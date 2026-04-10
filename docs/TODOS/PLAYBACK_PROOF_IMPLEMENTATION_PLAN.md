@@ -75,8 +75,9 @@ The first implementation slice for this plan is now in the repository.
 
 - [x] stale-link / refresh-path proof during active playback (route-level recovery proven live; persisted item-detail lease projection still needs follow-up hardening)
 - [x] harness completion hang removal so successful proof runs now emit `summary.json` and exit cleanly
-- [ ] promotion of the harness from a locally green gate into an enforced playback-path merge requirement
-- [ ] runner provisioning / secrets rollout for the new GitHub-hosted CI execution path, including `FILMU_FRONTEND_REPOSITORY`, `PLEX_TOKEN`, and `EMBY_API_KEY` so the Linux CI helper can activate the external frontend checkout and provider parity gate automatically; [`../../scripts/check_playback_gate_runner.ps1`](../../scripts/check_playback_gate_runner.ps1) is now the authoritative readiness check and should fail only for real runner gaps
+- [x] GitHub-hosted playback-gate workflow merged to `main` and green on the last PR before merge
+- [ ] verify the live protected-branch policy from an admin-authenticated GitHub host using [`../../scripts/check_github_main_policy.ps1`](../../scripts/check_github_main_policy.ps1) `-ValidateCurrent`; this environment cannot prove repository settings without `gh` + admin auth
+- [ ] keep runner variables/secrets intentionally configured for the GitHub-hosted CI execution path, including `FILMU_FRONTEND_REPOSITORY` when overriding the default public frontend checkout plus `PLEX_TOKEN` / `EMBY_API_KEY` when provider parity should auto-run; [`../../scripts/check_playback_gate_runner.ps1`](../../scripts/check_playback_gate_runner.ps1) remains the authoritative readiness check and should fail only for real runner gaps
 - [ ] keep the new Windows-native soak gate green on `C:\FilmuCoreVFS` under long playback, seek/resume, and concurrent-reader pressure; the explicit thresholded soak profiles now exist in [`../../scripts/run_windows_vfs_soak.ps1`](../../scripts/run_windows_vfs_soak.ps1) and are exposed as `proof:windows:vfs:soak:continuous`, `proof:windows:vfs:soak:seek`, `proof:windows:vfs:soak:concurrent`, and `proof:windows:vfs:soak:full`
 - [x] add a real Docker Plex playback-start proof stage to [`../../scripts/run_playback_proof.ps1`](../../scripts/run_playback_proof.ps1) so the currently operator-validated path becomes repeatable artifacted evidence
 - [x] turn the remaining Docker Plex proof warnings into explicit pass/fail evidence instead of artifact-only warnings: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility
@@ -87,8 +88,8 @@ The first implementation slice for this plan is now in the repository.
 The next step from this plan is:
 
 1. keep [`../../scripts/run_playback_proof.ps1`](../../scripts/run_playback_proof.ps1) and [`../../scripts/run_playback_proof_stability.ps1`](../../scripts/run_playback_proof_stability.ps1) green as the playback-path regression harness
-2. provision the GitHub-hosted Linux runner variables/secrets required by [`.github/workflows/playback-gate.yml`](../../.github/workflows/playback-gate.yml), validate them with [`../../scripts/check_playback_gate_runner.ps1`](../../scripts/check_playback_gate_runner.ps1) and [`../PLAYBACK_GATE_RUNNER_SETUP.md`](../PLAYBACK_GATE_RUNNER_SETUP.md), then promote it into an enforced merge requirement for playback-path changes
-3. keep the new provider-parity gate green for Docker Plex + native Windows Emby + native Windows Plex while CI/merge-policy promotion is prepared, keep the newly explicit Docker Plex evidence checks green in repeated runs, and keep the native Windows Plex gate green through repeatable reruns
+2. verify the live `main` branch-protection / required-check policy from an admin-authenticated GitHub host using [`../../scripts/check_github_main_policy.ps1`](../../scripts/check_github_main_policy.ps1) and [`../PLAYBACK_GATE_RUNNER_SETUP.md`](../PLAYBACK_GATE_RUNNER_SETUP.md); do not claim repo-settings state from an unauthenticated workspace
+3. keep the new provider-parity gate green for Docker Plex + native Windows Emby + native Windows Plex in repeated runs, keep the newly explicit Docker Plex evidence checks green, and keep the native Windows Plex gate green through repeatable reruns across more than one environment class
 
 Implemented baseline:
 
@@ -149,7 +150,7 @@ Current verified status of this slice:
 - true preferred-client playback is now live-green through the real authenticated frontend client: a Chrome-backed host-browser run reached the real playing state end-to-end against the local stack, and a standalone Edge-backed run also passed after the runner was hardened for explicit host-browser CDP attachment
 - repeated local gate validation is now also live-green: [`../../scripts/run_playback_proof_stability.ps1`](../../scripts/run_playback_proof_stability.ps1) passed `2/2` repeated runs with `-ProofStaleDirectRefresh -RequirePreferredClientPlayback -ReuseExistingItem -RequireCompletedState`
 - the provider/media-server parity gate is no longer single-shot only: [`../../scripts/run_media_server_proof_gate.ps1`](../../scripts/run_media_server_proof_gate.ps1) now supports `-RepeatCount`, and the stricter package/workflow gate path now runs that provider parity surface twice with fail-fast behavior
-- a first CI execution path now exists for GitHub-hosted Linux runners, with explicit prerequisites for Docker, `pwsh`, a real browser executable, debrid/TMDB secrets, and a reachable frontend source tree or checked-out frontend repo; that workflow now covers `pull_request`, `push` to `main`, and `merge_group` traffic and emits an explicit job summary alongside the artifact bundle
+- a first CI execution path now exists for GitHub-hosted Linux runners, with explicit prerequisites for Docker, `pwsh`, a real browser executable, debrid/TMDB secrets, and a reachable frontend source tree or checked-out frontend repo; that workflow now covers `pull_request`, `push` to `main`, and `merge_group` traffic, emits an explicit job summary alongside the artifact bundle, and has already passed on the last merged playback-gate PR before landing in `main`
 - the runner is now less machine-shaped: explicit host browser selection comes from `-PreferredClientBrowserExecutable` or `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`, mounted-read proof no longer depends on WSL alone, and the container-browser path remains available as a fallback
 - Windows-native soak proof is now more decision-shaped too: [`../../scripts/run_windows_vfs_soak.ps1`](../../scripts/run_windows_vfs_soak.ps1) emits threshold checks and named diagnostics for reconnect churn, stale-refresh failures, cache cold-fetch churn, provider-pressure mentions, and mounted-read fatal classifications directly into the existing artifact family rather than leaving the soak rubric as prose-only guidance
 - that same soak artifact family now also captures backend `/api/v1/stream/status` snapshots before and after the run when the backend is reachable, including a focused `backend_vfs_governance_delta` block for FilmuVFS watch-session churn, reconnect outcomes, bridge failure classes, and provider-backed refresh outcomes, so mounted proof evidence and live operator status now share one vocabulary
@@ -163,7 +164,7 @@ Current verified status of this slice:
 - peak mounted pressure is now preserved through that same path too: the runtime snapshot/status surface now carries peak open handles, peak active reads, peak active background prefetch tasks, and peak in-flight chunk coalescing so repeated pressure runs still retain the actual high-water marks after the system returns to idle
 - the Windows soak runner now also preserves terminal failure evidence more deliberately: once the run artifact directory exists, preflight or scenario failures still write `summary.json` plus tail-log captures before the script exits non-zero, so a failed long soak no longer disappears without a final artifact bundle
 - repeated proof execution now has repo-level wrappers instead of only manual operator repetition: [`../../scripts/run_media_server_proof_gate.ps1`](../../scripts/run_media_server_proof_gate.ps1) now treats the explicit Docker Plex evidence steps as part of pass/fail, [`../../scripts/run_windows_media_server_gate.ps1`](../../scripts/run_windows_media_server_gate.ps1) now supports repeated native Windows provider runs, and [`../../scripts/run_windows_vfs_soak_stability.ps1`](../../scripts/run_windows_vfs_soak_stability.ps1) now aggregates repeated `continuous` / `seek` / `concurrent` / `full` soak runs across named environment classes
-- the remaining playback-proof gap is no longer first preferred-client playback, first native Windows Emby proof, first Docker Plex playback-start evidence, native Plex targeting, first route-to-controller handoff for failed inline remote-HLS repair, first selected-HLS provider-pressure deferral visibility, first widening of those same semantics into direct background refresh work, or first repeated provider-parity gate coverage. It is promoting the now-wired CI playback gates into actual branch-protection / merge policy, keeping the newly explicit Docker Plex evidence checks green on the shared WSL/Docker topology, keeping the new native Windows Plex gate green through repeatable reruns, and continuing longer-running stability hardening.
+- the remaining playback-proof gap is no longer first preferred-client playback, first native Windows Emby proof, first Docker Plex playback-start evidence, native Plex targeting, first route-to-controller handoff for failed inline remote-HLS repair, first selected-HLS provider-pressure deferral visibility, first widening of those same semantics into direct background refresh work, or first repeated provider-parity gate coverage. It is verifying live GitHub policy state from an admin-authenticated host, keeping the newly explicit Docker Plex evidence checks green on the shared WSL/Docker topology, keeping the new native Windows Plex gate green through repeatable reruns, and continuing longer-running stability hardening.
 
 ## Post-proof operational hardening gate
 
@@ -310,8 +311,8 @@ The target state is a blocking merge gate.
 Practical rollout:
 
 1. **Day 0-Day 1**: harness is created and made reproducible locally.
-2. **As soon as the first green run exists**: PRs touching playback, stream, VFS, mount, or playback-resolution code require the harness to pass before merge.
-3. **After the harness is stable for 2-3 consecutive days**: promote it to a general merge gate for `main`.
+2. **As soon as the first green run exists**: wire the workflow and required-check names so PRs touching playback, stream, VFS, mount, or playback-resolution code can rely on the same gate shape before merge.
+3. **After the harness is stable for 2-3 consecutive days**: validate the live protected-branch policy from an admin-authenticated host and keep the same gate as a general merge blocker for `main`.
 
 This avoids a fake “required” gate that nobody can currently pass while still converging rapidly to the user's required blocking policy.
 
@@ -320,7 +321,7 @@ Current state:
 - the harness entrypoint now exists
 - dry-run validation now exists
 - mounted-read proof, stale-link route recovery proof, and true preferred-client playback proof now all have live-green local evidence
-- the local gate wrapper is now green, and the first self-hosted CI workflow exists, but it is **not** yet an enforced merge requirement because runner/secrets rollout and merge-policy promotion are still open
+- the local gate wrapper is now green, the GitHub-hosted CI workflow is merged to `main`, and the last pre-merge PR run completed green; live repository-settings enforcement still needs explicit validation from an admin-authenticated GitHub host because this workspace cannot prove branch-protection state
 
 ---
 

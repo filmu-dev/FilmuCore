@@ -9528,6 +9528,8 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "peak_active_background_tasks": 4,
                     "background_spawned": 7,
                     "background_backpressure": 2,
+                    "fairness_denied": 1,
+                    "global_backpressure_denied": 1,
                     "background_error": 1,
                 },
                 "chunk_coalescing": {
@@ -9635,6 +9637,8 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_prefetch_peak_active_background_tasks"] == 4
     assert governance["vfs_runtime_prefetch_background_spawned"] == 7
     assert governance["vfs_runtime_prefetch_background_backpressure"] == 2
+    assert governance["vfs_runtime_prefetch_fairness_denied"] == 1
+    assert governance["vfs_runtime_prefetch_global_backpressure_denied"] == 1
     assert governance["vfs_runtime_prefetch_background_error"] == 1
     assert governance["vfs_runtime_chunk_coalescing_in_flight_chunks"] == 1
     assert governance["vfs_runtime_chunk_coalescing_peak_in_flight_chunks"] == 3

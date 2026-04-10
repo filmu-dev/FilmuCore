@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 pub enum PrefetchScheduleError {
     #[error("prefetch concurrency must be greater than zero")]
     InvalidConcurrency,
+    #[error("per-handle prefetch fairness must be greater than zero")]
+    InvalidPerHandleLimit,
     #[error("foreground read permit acquisition failed because the scheduler is closed")]
     SchedulerClosed,
 }
@@ -27,17 +29,25 @@ pub struct PrefetchScheduler {
     semaphore: Arc<Semaphore>,
     handle_tokens: Arc<DashMap<String, CancellationToken>>,
     concurrency: usize,
+    max_background_per_handle: usize,
     active_background_tasks: Arc<AtomicU64>,
     peak_active_background_tasks: Arc<AtomicU64>,
+    handle_active_background_tasks: Arc<DashMap<String, u64>>,
+    fairness_denied_total: Arc<AtomicU64>,
+    global_backpressure_denied_total: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrefetchSchedulerSnapshot {
     pub concurrency_limit: u64,
+    pub max_background_per_handle: u64,
     pub available_permits: u64,
     pub active_permits: u64,
     pub active_background_tasks: u64,
     pub peak_active_background_tasks: u64,
+    pub handles_with_background_tasks: u64,
+    pub fairness_denied_total: u64,
+    pub global_backpressure_denied_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -131,17 +141,27 @@ impl VelocityTracker {
 }
 
 impl PrefetchScheduler {
-    pub fn new(concurrency: usize) -> Result<Self, PrefetchScheduleError> {
+    pub fn new(
+        concurrency: usize,
+        max_background_per_handle: usize,
+    ) -> Result<Self, PrefetchScheduleError> {
         if concurrency == 0 {
             return Err(PrefetchScheduleError::InvalidConcurrency);
+        }
+        if max_background_per_handle == 0 {
+            return Err(PrefetchScheduleError::InvalidPerHandleLimit);
         }
 
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(concurrency)),
             handle_tokens: Arc::new(DashMap::new()),
             concurrency,
+            max_background_per_handle,
             active_background_tasks: Arc::new(AtomicU64::new(0)),
             peak_active_background_tasks: Arc::new(AtomicU64::new(0)),
+            handle_active_background_tasks: Arc::new(DashMap::new()),
+            fairness_denied_total: Arc::new(AtomicU64::new(0)),
+            global_backpressure_denied_total: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -153,6 +173,7 @@ impl PrefetchScheduler {
         if let Some((_, token)) = self.handle_tokens.remove(handle_key) {
             token.cancel();
         }
+        self.handle_active_background_tasks.remove(handle_key);
     }
 
     pub async fn acquire_foreground(&self) -> Result<OwnedSemaphorePermit, PrefetchScheduleError> {
@@ -169,10 +190,16 @@ impl PrefetchScheduler {
         let available_permits = self.semaphore.available_permits() as u64;
         PrefetchSchedulerSnapshot {
             concurrency_limit,
+            max_background_per_handle: self.max_background_per_handle as u64,
             available_permits,
             active_permits: concurrency_limit.saturating_sub(available_permits),
             active_background_tasks: self.active_background_tasks.load(Ordering::Relaxed),
             peak_active_background_tasks: self.peak_active_background_tasks.load(Ordering::Relaxed),
+            handles_with_background_tasks: self.handle_active_background_tasks.len() as u64,
+            fairness_denied_total: self.fairness_denied_total.load(Ordering::Relaxed),
+            global_backpressure_denied_total: self
+                .global_backpressure_denied_total
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -186,14 +213,30 @@ impl PrefetchScheduler {
             .entry(handle_key.to_owned())
             .or_default()
             .clone();
+        let handle_active_background_tasks = Arc::clone(&self.handle_active_background_tasks);
+        let mut handle_task_count = handle_active_background_tasks
+            .entry(handle_key.to_owned())
+            .or_default();
+        if (*handle_task_count as usize) >= self.max_background_per_handle {
+            self.fairness_denied_total.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        *handle_task_count = handle_task_count.saturating_add(1);
+        drop(handle_task_count);
         let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
+            self.global_backpressure_denied_total
+                .fetch_add(1, Ordering::Relaxed);
+            decrement_handle_task_count(&handle_active_background_tasks, handle_key);
             return false;
         };
         let active_background_tasks = Arc::clone(&self.active_background_tasks);
         let active_count = active_background_tasks.fetch_add(1, Ordering::Relaxed) + 1;
         update_max(&self.peak_active_background_tasks, active_count);
-        let active_background_guard =
-            BackgroundTaskGuard::new(Arc::clone(&active_background_tasks));
+        let active_background_guard = BackgroundTaskGuard::new(
+            Arc::clone(&active_background_tasks),
+            handle_key.to_owned(),
+            handle_active_background_tasks,
+        );
 
         tokio::spawn(async move {
             let _active_background_guard = active_background_guard;
@@ -212,12 +255,20 @@ impl PrefetchScheduler {
 #[derive(Debug)]
 struct BackgroundTaskGuard {
     active_background_tasks: Arc<AtomicU64>,
+    handle_key: String,
+    handle_active_background_tasks: Arc<DashMap<String, u64>>,
 }
 
 impl BackgroundTaskGuard {
-    fn new(active_background_tasks: Arc<AtomicU64>) -> Self {
+    fn new(
+        active_background_tasks: Arc<AtomicU64>,
+        handle_key: String,
+        handle_active_background_tasks: Arc<DashMap<String, u64>>,
+    ) -> Self {
         Self {
             active_background_tasks,
+            handle_key,
+            handle_active_background_tasks,
         }
     }
 }
@@ -225,6 +276,22 @@ impl BackgroundTaskGuard {
 impl Drop for BackgroundTaskGuard {
     fn drop(&mut self) {
         self.active_background_tasks.fetch_sub(1, Ordering::Relaxed);
+        decrement_handle_task_count(&self.handle_active_background_tasks, &self.handle_key);
+    }
+}
+
+fn decrement_handle_task_count(
+    handle_active_background_tasks: &DashMap<String, u64>,
+    handle_key: &str,
+) {
+    if let Some(mut active_for_handle) = handle_active_background_tasks.get_mut(handle_key) {
+        let next = active_for_handle.saturating_sub(1);
+        if next == 0 {
+            drop(active_for_handle);
+            handle_active_background_tasks.remove(handle_key);
+        } else {
+            *active_for_handle = next;
+        }
     }
 }
 

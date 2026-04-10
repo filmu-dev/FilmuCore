@@ -159,7 +159,6 @@ foreach ($profile in $Profiles) {
             $providerPressureOk -and
             $fatalErrorsOk
         )
-        $passed = ($exitCode -eq 0) -and $summaryExists -and ($thresholdFailureCount -eq 0) -and $mountSurvived
         $result = [pscustomobject]@{
             environment_class = $EnvironmentClass
             profile = $profile

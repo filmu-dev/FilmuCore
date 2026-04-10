@@ -42,6 +42,7 @@ def _compatibility_fixture() -> dict[str, Any]:
 
 def _expected_compatibility_payload() -> dict[str, Any]:
     payload = _compatibility_fixture()
+    payload.setdefault("api_key_id", "primary")
     payload.setdefault("tmdb_api_key", "")
     return payload
 

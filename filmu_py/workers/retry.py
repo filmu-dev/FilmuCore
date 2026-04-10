@@ -89,6 +89,7 @@ def bind_worker_contextvars(
     stage: str,
     item_id: str | None,
     item_request_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     """Bind worker correlation keys into structlog contextvars for one stage."""
 
@@ -96,6 +97,7 @@ def bind_worker_contextvars(
     structlog.contextvars.bind_contextvars(
         item_id=str(item_id) if item_id is not None else None,
         item_request_id=str(item_request_id) if item_request_id is not None else None,
+        tenant_id=str(tenant_id) if tenant_id is not None else None,
         worker_stage=stage,
         job_id=str(ctx.get("job_id")) if ctx.get("job_id") is not None else None,
     )

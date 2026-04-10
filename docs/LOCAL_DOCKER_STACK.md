@@ -220,13 +220,13 @@ Important scope note:
 - the Docker Plex path is now materially fixed: `/mnt/filmuvfs` is visible inside the container, library scans repopulate correctly, direct part-stream requests return `206`, and recent Plex logs show real transcode/playback startup against mounted files
 - full harness-grade Plex playback proof is still an active follow-up; the current evidence is operator-validated container playback rather than an already-encoded proof-step in [`../run_playback_proof.ps1`](../run_playback_proof.ps1)
 - the harness now also has a live stale-link proof path through [`../tests/fixtures/force_media_entry_unrestricted_stale.py`](../tests/fixtures/force_media_entry_unrestricted_stale.py) and [`../run_playback_proof.ps1`](../run_playback_proof.ps1), reusing a completed item and forcing the selected direct media entry to a dead localhost URL before probing [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py)
-- current stale-link evidence proves **route-level recovery** (`206 Partial Content`) but not yet durable persisted lease repair, because the item-detail projection can still report the stale `unrestricted_url` after the route succeeds
+- current stale-link evidence now proves both **route-level recovery** (`206 Partial Content`) and durable persisted lease repair for the selected direct media-entry path, with refreshed lease state mirrored back onto the linked attachment so later detail projections can observe the repaired `unrestricted_url`
 - the previous late-stage harness completion hang is now fixed, and successful stale-refresh runs once again write `summary.json` and print the terminal PASS line
 - true preferred-client playback is now live-green through the authenticated frontend client on the local stack
 - repeated `proof:playback:gate` runs are now also live-green locally
 - host-browser proof execution is now explicit and portable: use `-PreferredClientBrowserExecutable` or `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE` when the container browser lacks the required codec support, while the container-browser path remains available as a fallback
-- a first self-hosted Linux CI path now exists in [`.github/workflows/playback-gate.yml`](../.github/workflows/playback-gate.yml), driven by [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) and env-configured frontend/browser/provider prerequisites
-- the remaining playback-proof step is runner provisioning plus CI / merge-gate promotion, not first preferred-client playback
+- the GitHub-hosted Linux playback-gate workflow now exists in [`.github/workflows/playback-gate.yml`](../.github/workflows/playback-gate.yml), is driven by [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh), and has already gone green on the last merged playback PR before landing in `main`
+- the remaining playback-proof step is repeated stability evidence plus explicit validation of live GitHub required-check policy from an admin-authenticated host, not first preferred-client playback
 - the current local Docker flow still validates the Linux/FUSE side of FilmuVFS. Windows-native ProjFS validation should be treated as a separate host test leg rather than assumed from the WSL UNC path.
 
 ## Stop the stack
