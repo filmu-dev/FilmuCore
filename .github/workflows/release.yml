@@ -13,7 +13,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
-  actions: write
   contents: write
   issues: write
   pull-requests: write
@@ -98,6 +97,10 @@ jobs:
       - release
     if: ${{ needs.release.result == 'success' && needs.release.outputs.release_created != 'true' && needs.release.outputs.prs_created != '' && needs.release.outputs.prs_created != '[]' && vars.RELEASE_PLEASE_USE_PAT != 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
     steps:
       - name: Trigger verify workflow for autorelease PR branches
         uses: actions/github-script@v8
