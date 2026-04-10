@@ -1,6 +1,6 @@
 # Playback Gate Runner Setup
 
-This runbook is the operator path for promoting the playback gates into enforced CI.
+This runbook is the operator path for maintaining the GitHub-hosted playback gates and validating the remaining external GitHub policy state.
 
 Current gate surfaces:
 
@@ -11,6 +11,7 @@ Current gate surfaces:
 - repeated native Windows media-center stability gate: [`../package.json`](../package.json) `proof:windows:vfs:providers:stability`
 - repeated Windows soak stability gate: [`../package.json`](../package.json) `proof:windows:vfs:soak:stability`
 - full Windows soak stability gate: [`../package.json`](../package.json) `proof:windows:vfs:soak:stability:full`
+- enterprise Windows soak stability gate: [`../package.json`](../package.json) `proof:windows:vfs:soak:enterprise`
 
 ## 1. Check Linux runner readiness
 
@@ -91,11 +92,12 @@ GitHub-hosted frontend checkout note:
 - the workflow also attempts `sudo modprobe fuse` and a `/dev/fuse` node creation fallback before readiness validation so FUSE device setup is not treated as a manual pre-step on the standard GitHub-hosted Linux runner
 - override `FILMU_FRONTEND_REPOSITORY` only if CI should use a different frontend repo than that default
 
-Required-check promotion note:
+Required-check policy note:
 
 - the workflow code path is already in place for `pull_request`, `push` to `main`, and `merge_group`
-- once the target GitHub-hosted runner configuration and secrets are available and the workflow has produced green runs on the protected branch path, mark the GitHub required check for this workflow, typically shown as `Playback Gate / Playback Gate`
-- this remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
+- the workflow has already gone green on the last playback-gate PR before merge to `main`
+- whether `Playback Gate / Playback Gate` is currently configured as a required protected-branch check is still an external GitHub policy question; validate it with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) from a host with `gh` installed and authenticated with repo-admin access
+- that remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
 - the workflow and [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now also emit the canonical required-check name into the CI artifact bundle so the repo-settings step can key off the exact check label instead of manual memory
 
 ## 2a. Validate GitHub `main` policy deterministically
@@ -105,6 +107,8 @@ The repository now also carries a policy checker for the external GitHub setting
 ```bash
 pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate
 pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -ValidateCurrent
+pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -RequireProviderGate -RequireWindowsVfsGate -RequireWindowsVfsProvidersGate -MinimumApprovingReviewCount 1 -RequireAdminsEnforced
+pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -RequireProviderGate -RequireWindowsVfsGate -RequireWindowsVfsProvidersGate -MinimumApprovingReviewCount 1 -RequireAdminsEnforced -ValidateCurrent
 ```
 
 Or via package scripts:
@@ -112,12 +116,15 @@ Or via package scripts:
 ```bash
 npm run proof:playback:policy
 npm run proof:playback:policy:validate
+npm run proof:playback:policy:enterprise
+npm run proof:playback:policy:enterprise:validate
 ```
 
 What it does:
 
 - prints the canonical required-check set for `main`
 - prints the expected merge-method policy (`squash` on, `merge commit` off, `rebase` off)
+- prints the stricter enterprise policy expectations for minimum approving reviews, optional admin enforcement, and whether provider/Windows proof profiles are expected inside the single `Playback Gate / Playback Gate` required check
 - when `gh` is installed and authenticated with repo-admin access, validates the current GitHub repository and branch-protection state instead of relying on manual memory
 - exits non-zero for `-ValidateCurrent` when the live policy is `not_ready` or `unverified`, so the checker can be used as a real CI gate instead of a report-only helper
 - keeps the print-only mode (`proof:playback:policy` without `-ValidateCurrent`) exit-zero so operators can inspect the canonical expected policy on machines that do not have `gh` configured
@@ -136,10 +143,10 @@ What it does:
 
 So the expected rollout order is:
 
-1. make `proof:playback:gate` green on the runner
-2. add `PLEX_TOKEN` and `EMBY_API_KEY`
-3. confirm provider parity gate runs green in CI
-4. mark the `Playback Gate / Playback Gate` check required for playback-path changes
+1. keep `proof:playback:gate` green on the runner
+2. add `PLEX_TOKEN` and `EMBY_API_KEY` when provider parity should auto-run instead of skip
+3. confirm provider parity gate runs green in CI when those secrets are present
+4. validate the live `main` policy and required-check state with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1)
 
 ## 4. What still remains after runner rollout
 
@@ -147,4 +154,5 @@ So the expected rollout order is:
 - keep `proof:playback:providers:gate` and `proof:playback:providers:stability` green for repeated Docker Plex + native Windows Emby parity evidence
 - keep the explicit thresholded Windows soak profiles green on `C:\FilmuCoreVFS` (`proof:windows:vfs:soak:continuous`, `proof:windows:vfs:soak:seek`, `proof:windows:vfs:soak:concurrent`, and `proof:windows:vfs:soak:full`)
 - keep the repeated Windows soak stability wrappers green on real hosts so threshold tuning is based on repeated artifact evidence instead of one-off operator runs
+- keep `proof:windows:vfs:soak:enterprise` green on real hosts when promoting a release candidate, because it now requires runtime-status capture, backend-status capture, and zero tolerated reconnect/provider-pressure/fatal incidents across the selected profile set
 - native Windows Plex evidence is already present through [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1); the remaining work is repeatability and policy promotion, not first bring-up

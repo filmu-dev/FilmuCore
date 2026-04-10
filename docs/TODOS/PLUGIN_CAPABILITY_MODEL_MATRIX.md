@@ -48,10 +48,10 @@ What this baseline is good at:
 
 What it does **not** yet provide:
 
-- signing/provenance and release-channel governance beyond the new policy metadata baseline
+- cryptographic signature verification/trust-store governance beyond the new provenance metadata and digest-validation baseline
 - richer external-author packaging/distribution guidance
 - durable/queue-backed hook execution if operational pressure eventually requires it
-- runtime sandboxing/quarantine/revocation and broader plugin health/status rollups beyond the new baseline telemetry
+- deeper runtime sandboxing/revocation and broader plugin health/status rollups beyond the new baseline telemetry
 
 StremThru DownloaderPlugin is now a real implementation (Slice E): `add_magnet()`, `get_status()`, and `get_download_links()` now talk to the StremThru v0 API with token-based auth, `httpx.AsyncClient`, and downloader-plugin DTO normalization. With that change, all three built-in plugin stubs called out in the earlier Slice D update are now real implementations.
 
@@ -60,6 +60,7 @@ April 2026 policy update:
 - [`../../filmu_py/plugins/manifest.py`](../../filmu_py/plugins/manifest.py) now validates additive plugin policy metadata for `publisher`, `release_channel`, `trust_level`, `permission_scopes`, capability-derived minimum scopes, and built-in publishable-event namespacing.
 - [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) now surfaces those policy fields on load success, validates manifest policy on registration, and warns when non-builtin plugins rely on implicit capability-derived scopes instead of explicit declarations.
 - [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py) now exposes those policy/health fields on `GET /api/v1/plugins` and `GET /api/v1/plugins/events`, which gives operators a first explicit plugin trust/compatibility surface rather than a capability-only list.
+- [`../../filmu_py/plugins/manifest.py`](../../filmu_py/plugins/manifest.py) now also validates `source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, and quarantine fields, while [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) now rejects quarantined plugins and filesystem/source digest mismatches before registration.
 
 ---
 
@@ -128,7 +129,7 @@ Current update:
 - The loader now discovers both drop-in filesystem plugins and packaged plugins registered under the Python entry-point group `filmu.plugins`.
 - Both paths now flow through the same validated manifest contract and the same `PluginLoadSuccess` / `PluginLoadFailure` reporting path, so GraphQL schema composition stays discovery-source agnostic.
 - The manifest model now also carries `min_host_version`, and plugins that require a newer host version fail safely with `host_version_incompatible` instead of partially loading.
-- The manifest/loader surface now also carries operator-facing `publisher`, `release_channel`, `trust_level`, and bounded `permission_scopes`, and built-ins are now pinned to `builtin` policy metadata instead of relying on implicit convention.
+- The manifest/loader surface now also carries operator-facing `publisher`, `release_channel`, `trust_level`, bounded `permission_scopes`, provenance metadata, sandbox posture, and quarantine state, and built-ins are now pinned to explicit `builtin` policy metadata plus host-level sandbox posture instead of relying on implicit convention.
 
 ### Layer 2 — Configuration and datasources
 
@@ -207,7 +208,7 @@ This is how Python can beat the TS model: not just matching breadth, but making 
 1. Strengthen plugin compatibility/version policy and manifest/schema validation.
 2. Harden external-author packaging/distribution guidance around the now-implemented discovery paths.
 3. Deepen plugin telemetry/health summaries and runtime isolation above the now-landed policy/permission baseline.
-4. Add provenance/signing/quarantine/revocation and sandbox rules for non-builtin plugins.
+4. Deepen the new provenance/quarantine baseline into real signature verification, trust-store policy, revocation, and stronger runtime isolation for non-builtin plugins.
 5. Only add durable queue-backed hook execution if operational evidence shows the in-process executor is insufficient.
 
 This sequence keeps the platform safe before it becomes broad.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import AsyncGenerator
@@ -634,3 +635,111 @@ class LegacyQuery:
     assert report.failed[0].plugin_name == "legacy-plugin"
     assert report.failed[0].reason == "host_version_incompatible"
     assert report.failed[0].source == "filesystem"
+
+
+def test_filesystem_plugin_loader_validates_declared_source_digest(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    module_source = """import strawberry
+
+@strawberry.type
+class SignedQuery:
+    @strawberry.field
+    def signed_echo(self) -> str:
+        return "signed"
+"""
+    _write_plugin(
+        plugins_dir / "signed-plugin",
+        manifest={
+            "name": "signed-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "publisher": "filmu-labs",
+            "signature": "sig-store-record",
+            "signing_key_id": "filmu-labs-root",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["SignedQuery"]},
+        },
+        module_source=module_source,
+    )
+    module_digest = hashlib.sha256(
+        (plugins_dir / "signed-plugin" / "plugin.py").read_bytes()
+    ).hexdigest()
+    manifest_path = plugins_dir / "signed-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_sha256"] = module_digest
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(plugins_dir, registry)
+
+    assert len(report.loaded) == 1
+    assert report.failed == []
+    assert report.loaded[0].source_sha256 == module_digest
+    assert report.loaded[0].signing_key_id == "filmu-labs-root"
+    assert report.loaded[0].signature_present is True
+    assert report.loaded[0].sandbox_profile == "restricted"
+
+
+def test_filesystem_plugin_loader_rejects_source_digest_mismatch(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    _write_plugin(
+        plugins_dir / "tampered-plugin",
+        manifest={
+            "name": "tampered-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "publisher": "filmu-labs",
+            "source_sha256": "f" * 64,
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["TamperedQuery"]},
+        },
+        module_source="""import strawberry
+
+@strawberry.type
+class TamperedQuery:
+    @strawberry.field
+    def tampered_echo(self) -> str:
+        return "tampered"
+""",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(plugins_dir, registry)
+
+    assert report.loaded == []
+    assert len(report.failed) == 1
+    assert report.failed[0].plugin_name == "tampered-plugin"
+    assert report.failed[0].reason == "source_digest_mismatch"
+
+
+def test_filesystem_plugin_loader_rejects_quarantined_plugins(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    _write_plugin(
+        plugins_dir / "quarantined-plugin",
+        manifest={
+            "name": "quarantined-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "publisher": "filmu-labs",
+            "quarantined": True,
+            "quarantine_reason": "malware-suspected",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["NeverLoadedQuery"]},
+        },
+        module_source="""import strawberry
+
+@strawberry.type
+class NeverLoadedQuery:
+    @strawberry.field
+    def should_not_load(self) -> str:
+        return "nope"
+""",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(plugins_dir, registry)
+
+    assert report.loaded == []
+    assert len(report.failed) == 1
+    assert report.failed[0].plugin_name == "quarantined-plugin"
+    assert report.failed[0].reason == "plugin_quarantined"

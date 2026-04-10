@@ -8,6 +8,11 @@ param(
     [string] $TargetFile = '',
     [string] $RemuxTargetFile = '',
     [string] $FfmpegPath = '',
+    [switch] $RequireRuntimeCapture,
+    [switch] $RequireBackendStatusCapture,
+    [int] $MaxReconnectIncidents = 0,
+    [int] $MaxProviderPressureIncidents = 0,
+    [int] $MaxFatalErrorIncidents = 0,
     [switch] $RequireFilmuvfs,
     [switch] $FailFast
 )
@@ -138,7 +143,22 @@ foreach ($profile in $Profiles) {
             }
         }
 
-        $passed = ($exitCode -eq 0) -and $summaryExists -and ($thresholdFailureCount -eq 0) -and $mountSurvived
+        $runtimeCaptureOk = (-not $RequireRuntimeCapture) -or $runtimeCaptured
+        $backendCaptureOk = (-not $RequireBackendStatusCapture) -or $backendCaptured
+        $reconnectOk = ($null -eq $reconnectIncidents) -or ($reconnectIncidents -le $MaxReconnectIncidents)
+        $providerPressureOk = ($null -eq $providerPressureIncidents) -or ($providerPressureIncidents -le $MaxProviderPressureIncidents)
+        $fatalErrorsOk = ($null -eq $fatalErrorIncidents) -or ($fatalErrorIncidents -le $MaxFatalErrorIncidents)
+        $passed = (
+            ($exitCode -eq 0) -and
+            $summaryExists -and
+            ($thresholdFailureCount -eq 0) -and
+            $mountSurvived -and
+            $runtimeCaptureOk -and
+            $backendCaptureOk -and
+            $reconnectOk -and
+            $providerPressureOk -and
+            $fatalErrorsOk
+        )
         $result = [pscustomobject]@{
             environment_class = $EnvironmentClass
             profile = $profile
@@ -154,6 +174,11 @@ foreach ($profile in $Profiles) {
             fatal_error_incidents = $fatalErrorIncidents
             runtime_captured = $runtimeCaptured
             backend_status_captured = $backendCaptured
+            runtime_capture_ok = $runtimeCaptureOk
+            backend_status_capture_ok = $backendCaptureOk
+            reconnect_within_threshold = $reconnectOk
+            provider_pressure_within_threshold = $providerPressureOk
+            fatal_errors_within_threshold = $fatalErrorsOk
         }
         $results.Add($result)
 
@@ -173,6 +198,13 @@ $summary = [ordered]@{
     environment_class = $EnvironmentClass
     repeat_count = $RepeatCount
     profiles = $Profiles
+    enterprise_policy = [ordered]@{
+        require_runtime_capture = [bool] $RequireRuntimeCapture
+        require_backend_status_capture = [bool] $RequireBackendStatusCapture
+        max_reconnect_incidents = $MaxReconnectIncidents
+        max_provider_pressure_incidents = $MaxProviderPressureIncidents
+        max_fatal_error_incidents = $MaxFatalErrorIncidents
+    }
     all_green = (@($results | Where-Object { $_.status -ne 'passed' })).Count -eq 0
     max_reconnect_incidents = @($results | ForEach-Object { [int]($_.reconnect_incidents ?? 0) } | Measure-Object -Maximum).Maximum
     max_provider_pressure_incidents = @($results | ForEach-Object { [int]($_.provider_pressure_incidents ?? 0) } | Measure-Object -Maximum).Maximum

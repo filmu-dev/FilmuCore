@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, cast
 from fastapi import APIRouter, Query, Request
 from pydantic import SecretStr
 
+from filmu_py.audit import audit_action
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.services.debrid import DownloaderAccountService
@@ -23,6 +24,9 @@ from ..models import (
     MessageResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
+    QueueAlertResponse,
+    QueueStatusHistoryPointResponse,
+    QueueStatusHistoryResponse,
     QueueStatusResponse,
     StatsMediaYearRelease,
     StatsResponse,
@@ -143,6 +147,7 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
     return QueueStatusResponse(
         queue_name=snapshot.queue_name,
         arq_enabled=resources.settings.arq_enabled,
+        observed_at=snapshot.observed_at,
         total_jobs=snapshot.total_jobs,
         ready_jobs=snapshot.ready_jobs,
         deferred_jobs=snapshot.deferred_jobs,
@@ -150,8 +155,52 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
         retry_jobs=snapshot.retry_jobs,
         result_jobs=snapshot.result_jobs,
         dead_letter_jobs=snapshot.dead_letter_jobs,
+        alert_level=snapshot.alert_level,
+        alerts=[
+            QueueAlertResponse(
+                code=alert.code,
+                severity=alert.severity,
+                message=alert.message,
+            )
+            for alert in snapshot.alerts
+        ],
         oldest_ready_age_seconds=snapshot.oldest_ready_age_seconds,
         next_scheduled_in_seconds=snapshot.next_scheduled_in_seconds,
+    )
+
+
+@router.get(
+    "/workers/queue/history",
+    operation_id="default.worker_queue_history",
+    response_model=QueueStatusHistoryResponse,
+)
+async def get_worker_queue_history(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> QueueStatusHistoryResponse:
+    """Return bounded queue trend history captured during queue observations."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    history = await QueueStatusReader(redis, queue_name=queue_name).history(limit=limit)
+    return QueueStatusHistoryResponse(
+        queue_name=queue_name,
+        history=[
+            QueueStatusHistoryPointResponse(
+                observed_at=item.observed_at,
+                total_jobs=item.total_jobs,
+                ready_jobs=item.ready_jobs,
+                deferred_jobs=item.deferred_jobs,
+                in_progress_jobs=item.in_progress_jobs,
+                retry_jobs=item.retry_jobs,
+                dead_letter_jobs=item.dead_letter_jobs,
+                oldest_ready_age_seconds=item.oldest_ready_age_seconds,
+                next_scheduled_in_seconds=item.next_scheduled_in_seconds,
+                alert_level=item.alert_level,
+            )
+            for item in history
+        ],
     )
 
 
@@ -214,19 +263,25 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                     api_version=manifest.api_version if manifest is not None else None,
                     min_host_version=manifest.min_host_version if manifest is not None else None,
                     max_host_version=manifest.max_host_version if manifest is not None else None,
-                    publisher=manifest.publisher if manifest is not None else None,
-                    release_channel=manifest.release_channel if manifest is not None else None,
-                    trust_level=manifest.trust_level if manifest is not None else None,
-                    permission_scopes=(
-                        sorted(manifest.effective_permission_scopes())
-                        if manifest is not None
-                        else []
-                    ),
-                    source=getattr(failure, "source", None),
-                    warnings=warnings,
-                    error=getattr(failure, "reason", None),
-                )
+                publisher=manifest.publisher if manifest is not None else None,
+                release_channel=manifest.release_channel if manifest is not None else None,
+                trust_level=manifest.trust_level if manifest is not None else None,
+                permission_scopes=(
+                    sorted(manifest.effective_permission_scopes())
+                    if manifest is not None
+                    else []
+                ),
+                source_sha256=manifest.source_sha256 if manifest is not None else None,
+                signing_key_id=manifest.signing_key_id if manifest is not None else None,
+                signature_present=bool(manifest and manifest.signature),
+                sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
+                quarantined=manifest.quarantined if manifest is not None else False,
+                quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
+                source=getattr(failure, "source", None),
+                warnings=warnings,
+                error=getattr(failure, "reason", None),
             )
+        )
             continue
 
         responses.append(
@@ -248,6 +303,12 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                     if manifest is not None
                     else []
                 ),
+                source_sha256=manifest.source_sha256 if manifest is not None else None,
+                signing_key_id=manifest.signing_key_id if manifest is not None else None,
+                signature_present=bool(manifest and manifest.signature),
+                sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
+                quarantined=manifest.quarantined if manifest is not None else False,
+                quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
                 source=(
                     manifest.distribution
                     if manifest is not None
@@ -329,6 +390,12 @@ async def generate_apikey(request: Request) -> ApiKeyRotationResponse:
     resources.settings.api_key = SecretStr(new_key)
     set_runtime_settings(resources.settings)
     await save_settings(resources.db, resources.settings.to_compatibility_dict())
+    audit_action(
+        request,
+        action="security.generate_apikey",
+        target="runtime.api_key",
+        details={"rotated": True},
+    )
     return ApiKeyRotationResponse(key=new_key, warning=API_KEY_ROTATION_WARNING)
 
 

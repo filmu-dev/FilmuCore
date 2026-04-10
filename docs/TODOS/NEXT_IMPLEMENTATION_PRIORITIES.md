@@ -26,10 +26,12 @@ Detailed playback/readiness breakdown: [`LOCAL_FRONTEND_TESTING_READINESS.md`](.
 The active next step is hardening the now-real playback surface for the current frontend:
 
 1. keep the merged GitHub-hosted playback workflow green on real PR traffic and verify the live protected-branch policy with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) from an admin-authenticated host; do not treat repo-settings state as proven from an unauthenticated workspace
+   - the stricter policy profile is now explicit through `proof:playback:policy:enterprise` and `proof:playback:policy:enterprise:validate`, which add minimum-review and admin-enforcement expectations plus explicit provider/Windows proof-profile expectations to the canonical policy printout/validation path
 2. keep the GitHub-hosted Linux runner prerequisites, external frontend checkout variables, and media-server secrets intentionally configured for that workflow (`FILMU_FRONTEND_REPOSITORY` when overriding the default frontend checkout, plus `PLEX_TOKEN` / `EMBY_API_KEY` when provider parity should auto-run), and validate them with [`../scripts/check_playback_gate_runner.ps1`](../scripts/check_playback_gate_runner.ps1); Windows dev hosts are expected to fail the Linux `/dev/fuse` prerequisite
 3. continue using the optional Plex-compatible stub proof, the real Jellyfin/frontend proof stack, the native Windows WinFSP gate, the now-working Docker Plex path, and the local Emby container as regression layers beneath the merged workflow
 4. keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility in the proof artifact bundle
 5. keep the new thresholded Windows soak profiles green in repeated operator runs: `continuous`, `seek`, `concurrent`, and `full` now exist on top of [`../scripts/run_windows_vfs_soak.ps1`](../scripts/run_windows_vfs_soak.ps1), [`../scripts/run_windows_vfs_soak_stability.ps1`](../scripts/run_windows_vfs_soak_stability.ps1) now aggregates repeated runs across named environment classes, they now also capture backend `/api/v1/stream/status` VFS governance snapshots plus `backend_vfs_governance_delta`, live/peak prefetch-depth, and chunk-coalescing evidence when the backend is reachable, and the next step is repeatability across more than one environment class rather than inventing another soak harness
+   - the stricter local wrapper now also exists as `proof:windows:vfs:soak:enterprise`, requiring runtime-status capture, backend-status capture, and zero tolerated reconnect/provider-pressure/fatal incidents for the selected repeated profile set
 6. continue hardening HLS/direct-play governance beyond the new production-grade HLS baseline, especially policy tuning, operator ergonomics, and any remaining control-plane refinements
 7. continue hardening direct-play governance beyond the now-shipped shared chunk-engine HTTP path, degraded-direct fallback awareness, provider-backed direct-source ranking, lease-freshness-aware provider-backed ordering, related-entry recovery via provider file identity, explicit active-stream-winner authority rules, same-file sibling collapse for non-active direct entries, richer-identity-first different-file fallback ordering, generated-local HLS cache/reference integrity checks, explicit malformed-manifest governance signals, route-level malformed-manifest observability/signaling, normalized HLS failure-reason counters, generated-missing/upstream-failure HLS route visibility, upstream-playlist structural validation, and explicit remote-HLS timeout/transport failure policy
 
@@ -91,6 +93,7 @@ Remaining orchestration gaps:
 Detailed plugin-platform breakdown: [`PLUGIN_CAPABILITY_MODEL_MATRIX.md`](PLUGIN_CAPABILITY_MODEL_MATRIX.md).
 
 Current plugin support now includes packaged entry-point discovery, plugin-scoped settings, datasource-aware `PluginContext` construction, runtime capability registration across scraper/downloader/indexer/content-service/notification/event-hook capabilities, namespaced publishable-event governance, built-in Torrentio plus real MDBList/webhook-notification/StremThru integrations, runtime visibility through `/api/v1/plugins` plus `/api/v1/plugins/events`, and an explicit trust/policy baseline for `publisher`, `release_channel`, `trust_level`, and `permission_scopes`.
+Current plugin support now also includes provenance/isolation metadata (`source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, quarantine fields), loader-side digest verification, quarantine refusal, and operator-visible provenance fields on `/api/v1/plugins`.
 
 Next capability layers should include:
 
@@ -99,7 +102,7 @@ Next capability layers should include:
 - ✅ Webhook notifications — real NotificationPlugin + PluginEventHookWorker implementation
 - ✅ Overseerr webhook intake at `/api/v1/webhook/overseerr`
 - deepen the now-real StremThru integration with stronger operator-facing health/compatibility policy rather than treating it as a remaining stub; the first additive readiness metadata now ships on [`GET /api/v1/plugins`](../../filmu_py/api/routes/default.py)
-- add provenance/signing/quarantine rules and sandbox policy for non-builtin plugins
+- cryptographically verify signatures instead of only surfacing `signature` metadata, and add revocation/trust-store policy above the now-landed provenance/quarantine baseline
 - decide whether hook execution should remain in-process or grow into a durable/queued model
 - continue broadening capabilities only where they improve real platform breadth (see `PLUGIN_CAPABILITY_MODEL_MATRIX.md` for more details)
 
@@ -216,9 +219,24 @@ Detailed observability breakdown: [`OBSERVABILITY_MATURITY_MATRIX.md`](OBSERVABI
 After the shipped layer-1 baseline, deepen:
 
 - shipper/search workflow above the now-landed durable structured logs
-- queue/backlog/control-plane lag history and alerting; enqueue-decision, stale-cleanup, observed-job-status, deferred-enqueue, and queue snapshot metrics are now the baseline, so the remaining work is broader lag/backlog history and replay visibility rather than first instrumentation
+- queue/backlog/control-plane lag history and alerting are now baseline through `/api/v1/workers/queue`, `/api/v1/workers/queue/history`, and bounded alert classification; the remaining work is broader lag/backlog history depth, replay taxonomy, and stronger operator automation rather than first instrumentation
 - mounted stream/VFS data-plane metrics
 - correlation across API, workers, plugins, and stream control-plane events
+
+---
+
+## Priority 7 — Turn interim auth context into a real enterprise identity plane
+
+Current implementation now carries additive actor/tenant/role/scope context through authenticated API requests and emits structured audit logs for privileged settings/API-key mutations.
+
+That is not yet a finished enterprise identity system.
+
+Next identity/authz work should include:
+
+- persisted principals, service accounts, and tenant/org models
+- OIDC/SSO readiness instead of header-carried operator metadata
+- RBAC/ABAC policy enforcement across API, workers, plugins, and VFS control-plane actions
+- tenant-aware quotas, audit retention, and operator-visible access policy state
 
 Why continuously:
 

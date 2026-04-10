@@ -54,6 +54,7 @@ def _manifest(**payload: object) -> PluginManifest:
             "publisher": "filmu",
             "release_channel": "builtin",
             "trust_level": "builtin",
+            "sandbox_profile": "host",
             **payload,
         }
     )

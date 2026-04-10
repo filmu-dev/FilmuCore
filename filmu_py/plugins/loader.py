@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from dataclasses import dataclass, field
@@ -32,6 +33,10 @@ def _plugin_load_result(reason: str) -> str:
         return "skipped_version"
     if reason == "api_version_incompatible":
         return "skipped_api_version"
+    if reason == "plugin_quarantined":
+        return "skipped_quarantined"
+    if reason == "source_digest_mismatch":
+        return "skipped_integrity"
     if "plugin.json" in reason or "manifest" in reason:
         return "skipped_manifest"
     return "failed"
@@ -53,6 +58,12 @@ class PluginLoadSuccess:
     min_host_version: str | None
     max_host_version: str | None
     permission_scopes: tuple[str, ...]
+    source_sha256: str | None
+    signing_key_id: str | None
+    signature_present: bool
+    sandbox_profile: str
+    quarantined: bool
+    quarantine_reason: str | None
     registered_query_resolvers: int
     registered_mutation_resolvers: int
     registered_subscription_resolvers: int
@@ -184,7 +195,11 @@ def _register_plugin(
         else PluginManifest.model_validate(manifest_data)
     )
     manifest.validate_policy()
+    if manifest.quarantined:
+        raise ValueError("plugin_quarantined")
     manifest.ensure_host_compatibility(host_version, supported_api_versions=("1",))
+    source_path = _resolve_source_path(manifest_source=manifest_source, manifest=manifest, module=module)
+    _validate_source_digest(manifest=manifest, source_path=source_path)
     registry.register_manifest(manifest)
 
     skipped_messages: list[str] = []
@@ -193,6 +208,10 @@ def _register_plugin(
             "permission scopes were inferred from declared capabilities; "
             "set explicit permission_scopes for stricter policy review"
         )
+    if manifest.distribution != "builtin" and manifest.source_sha256 is None:
+        skipped_messages.append("source digest is not declared; provenance is not fully pinned")
+    if manifest.distribution != "builtin" and manifest.signature is None:
+        skipped_messages.append("plugin is unsigned; provenance is not independently verifiable")
     registered_counts: dict[GraphQLResolverKind, int] = {
         GraphQLResolverKind.QUERY: 0,
         GraphQLResolverKind.MUTATION: 0,
@@ -268,12 +287,50 @@ def _register_plugin(
         min_host_version=manifest.min_host_version,
         max_host_version=manifest.max_host_version,
         permission_scopes=tuple(sorted(manifest.effective_permission_scopes())),
+        source_sha256=manifest.source_sha256,
+        signing_key_id=manifest.signing_key_id,
+        signature_present=manifest.signature is not None,
+        sandbox_profile=manifest.sandbox_profile,
+        quarantined=manifest.quarantined,
+        quarantine_reason=manifest.quarantine_reason,
         registered_query_resolvers=registered_counts[GraphQLResolverKind.QUERY],
         registered_mutation_resolvers=registered_counts[GraphQLResolverKind.MUTATION],
         registered_subscription_resolvers=registered_counts[GraphQLResolverKind.SUBSCRIPTION],
         registered_capabilities=tuple(registered_capabilities),
         skipped=tuple(skipped_messages),
     )
+
+
+def _resolve_source_path(*, manifest_source: Path, manifest: PluginManifest, module: object) -> Path | None:
+    """Return the local source file used for optional provenance digest verification."""
+
+    if manifest.distribution == "filesystem":
+        candidate = manifest.resolve_entry_module(manifest_source)
+        return candidate if candidate.is_file() else None
+
+    module_file = getattr(module, "__file__", None)
+    if isinstance(module_file, str):
+        candidate = Path(module_file)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(64 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_source_digest(*, manifest: PluginManifest, source_path: Path | None) -> None:
+    """Verify one manifest-declared source digest when the source file is available."""
+
+    if manifest.source_sha256 is None or source_path is None:
+        return
+    if _sha256_file(source_path) != manifest.source_sha256:
+        raise ValueError("source_digest_mismatch")
 
 
 def load_plugins(

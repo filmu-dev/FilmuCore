@@ -86,6 +86,22 @@ class DummyRedis:
     async def llen(self, key: str) -> int:
         return len(self.lists.get(key, []))
 
+    async def lpush(self, key: str, *values: Any) -> int:
+        bucket = self.lists.setdefault(key, [])
+        for value in values:
+            bucket.insert(0, value if isinstance(value, bytes) else str(value).encode("utf-8"))
+        return len(bucket)
+
+    async def ltrim(self, key: str, start: int, stop: int) -> bool:
+        bucket = self.lists.get(key, [])
+        self.lists[key] = bucket[start : stop + 1]
+        return True
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[bytes]:
+        bucket = self.lists.get(key, [])
+        end = None if stop == -1 else stop + 1
+        return bucket[start:end]
+
     def scan_iter(self, *, match: str | None = None) -> Any:
         prefix = match[:-1] if isinstance(match, str) and match.endswith("*") else match
         keys = list(self.values)
@@ -205,7 +221,12 @@ def _build_client(
 def _headers() -> dict[str, str]:
     """Return valid auth headers for compatibility API requests."""
 
-    return {"x-api-key": "a" * 32}
+    return {
+        "x-api-key": "a" * 32,
+        "x-actor-id": "operator-1",
+        "x-tenant-id": "tenant-main",
+        "x-actor-roles": "platform:admin,playback:operator",
+    }
 
 
 def test_stats_route_returns_dashboard_snapshot() -> None:
@@ -292,6 +313,12 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "release_channel": None,
             "trust_level": None,
             "permission_scopes": [],
+            "source_sha256": None,
+            "signing_key_id": None,
+            "signature_present": False,
+            "sandbox_profile": None,
+            "quarantined": False,
+            "quarantine_reason": None,
             "source": None,
             "warnings": [],
             "error": None,
@@ -310,6 +337,12 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "release_channel": None,
             "trust_level": None,
             "permission_scopes": [],
+            "source_sha256": None,
+            "signing_key_id": None,
+            "signature_present": False,
+            "sandbox_profile": None,
+            "quarantined": False,
+            "quarantine_reason": None,
             "source": None,
             "warnings": [],
             "error": None,
@@ -380,6 +413,10 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
                 "version": "1.2.3",
                 "api_version": "1",
                 "distribution": "builtin",
+                "publisher": "filmu",
+                "release_channel": "builtin",
+                "trust_level": "builtin",
+                "sandbox_profile": "host",
                 "entry_module": "plugin.py",
                 "downloader": "StremThruDownloader",
                 "min_host_version": "0.1.0",
@@ -407,10 +444,16 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
             "api_version": "1",
             "min_host_version": "0.1.0",
             "max_host_version": None,
-            "publisher": None,
-            "release_channel": "stable",
-            "trust_level": "community",
+            "publisher": "filmu",
+            "release_channel": "builtin",
+            "trust_level": "builtin",
             "permission_scopes": ["download:transfer"],
+            "source_sha256": None,
+            "signing_key_id": None,
+            "signature_present": False,
+            "sandbox_profile": "host",
+            "quarantined": False,
+            "quarantine_reason": None,
             "source": "builtin",
             "warnings": [],
             "error": None,
@@ -449,6 +492,12 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "release_channel": None,
             "trust_level": None,
             "permission_scopes": [],
+            "source_sha256": None,
+            "signing_key_id": None,
+            "signature_present": False,
+            "sandbox_profile": None,
+            "quarantined": False,
+            "quarantine_reason": None,
             "source": "entry_point",
             "warnings": [],
             "error": "api_version_incompatible",
@@ -475,6 +524,7 @@ def test_worker_queue_route_returns_control_plane_snapshot() -> None:
     body = response.json()
     assert body["queue_name"] == "filmu-py"
     assert body["arq_enabled"] is True
+    assert body["observed_at"].endswith("Z")
     assert body["total_jobs"] == 2
     assert body["ready_jobs"] == 1
     assert body["deferred_jobs"] == 1
@@ -482,8 +532,28 @@ def test_worker_queue_route_returns_control_plane_snapshot() -> None:
     assert body["retry_jobs"] == 1
     assert body["result_jobs"] == 1
     assert body["dead_letter_jobs"] == 1
+    assert body["alert_level"] == "critical"
+    assert body["alerts"][0]["code"] == "dead_letter_backlog"
     assert 0.5 <= body["oldest_ready_age_seconds"] <= 3.0
     assert 0.0 <= body["next_scheduled_in_seconds"] <= 5.0
+
+
+def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    now_milliseconds = time.time() * 1000.0
+    redis.sorted_sets["filmu-py"] = {"job-ready": now_milliseconds - 2_000.0}
+
+    first = client.get("/api/v1/workers/queue", headers=_headers())
+    second = client.get("/api/v1/workers/queue/history", headers=_headers())
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    history = second.json()["history"]
+    assert len(history) == 1
+    assert history[0]["total_jobs"] == 1
+    assert history[0]["ready_jobs"] == 1
+    assert history[0]["alert_level"] == "ok"
 
 
 def test_dashboard_routes_require_api_key() -> None:

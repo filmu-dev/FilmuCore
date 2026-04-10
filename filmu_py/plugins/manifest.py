@@ -13,7 +13,9 @@ from filmu_py.graphql.plugin_registry import GraphQLResolverKind
 _ALLOWED_DISTRIBUTIONS = {"filesystem", "entry_point", "builtin"}
 _ALLOWED_RELEASE_CHANNELS = {"stable", "beta", "experimental", "builtin"}
 _ALLOWED_TRUST_LEVELS = {"builtin", "trusted", "community"}
+_ALLOWED_SANDBOX_PROFILES = {"host", "network", "restricted", "isolated"}
 _SCOPE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*:[a-z0-9._-]+$")
+_SHA256_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 _REQUIRED_PERMISSION_SCOPES_BY_CAPABILITY: dict[str, frozenset[str]] = {
     "graphql": frozenset({"graphql:extend"}),
     "scraper": frozenset({"scrape:search"}),
@@ -86,6 +88,12 @@ class PluginManifest(BaseModel):
     publisher: str | None = Field(default=None)
     release_channel: str = Field(default="stable", min_length=1)
     trust_level: str = Field(default="community", min_length=1)
+    source_sha256: str | None = Field(default=None)
+    signature: str | None = Field(default=None)
+    signing_key_id: str | None = Field(default=None)
+    sandbox_profile: str = Field(default="restricted", min_length=1)
+    quarantined: bool = Field(default=False)
+    quarantine_reason: str | None = Field(default=None)
     capabilities: frozenset[str] = Field(default_factory=frozenset)
     permission_scopes: frozenset[str] = Field(default_factory=frozenset)
     entry_module: str = Field(min_length=1)
@@ -175,6 +183,42 @@ class PluginManifest(BaseModel):
         normalized = value.strip().lower()
         if normalized not in _ALLOWED_TRUST_LEVELS:
             raise ValueError("trust_level must be one of: builtin, trusted, community")
+        return normalized
+
+    @field_validator("source_sha256")
+    @classmethod
+    def validate_source_sha256(cls, value: str | None) -> str | None:
+        """Normalize optional source digests and require full SHA-256 hex values."""
+
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not _SHA256_PATTERN.match(normalized):
+            raise ValueError("source_sha256 must be a 64-character SHA-256 hex digest")
+        return normalized
+
+    @field_validator("signature", "signing_key_id", "quarantine_reason")
+    @classmethod
+    def validate_optional_metadata(cls, value: str | None) -> str | None:
+        """Normalize optional provenance and quarantine metadata."""
+
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("metadata fields must not be empty when provided")
+        return normalized
+
+    @field_validator("sandbox_profile")
+    @classmethod
+    def validate_sandbox_profile(cls, value: str) -> str:
+        """Restrict sandbox-profile declarations to current host policy vocabulary."""
+
+        normalized = value.strip().lower()
+        if normalized not in _ALLOWED_SANDBOX_PROFILES:
+            raise ValueError(
+                "sandbox_profile must be one of: host, network, restricted, isolated"
+            )
         return normalized
 
     @field_validator(
@@ -345,6 +389,19 @@ class PluginManifest(BaseModel):
                 raise ValueError("builtin plugins must use release_channel='builtin'")
             if self.trust_level != "builtin":
                 raise ValueError("builtin plugins must use trust_level='builtin'")
+            if self.sandbox_profile != "host":
+                raise ValueError("builtin plugins must use sandbox_profile='host'")
+
+        if self.quarantined and self.quarantine_reason is None:
+            raise ValueError("quarantined plugins must declare quarantine_reason")
+        if not self.quarantined and self.quarantine_reason is not None:
+            raise ValueError("quarantine_reason requires quarantined=true")
+        if self.signature is not None and self.signing_key_id is None:
+            raise ValueError("signature requires signing_key_id")
+        if self.signature is not None and self.source_sha256 is None:
+            raise ValueError("signature requires source_sha256")
+        if self.trust_level == "community" and self.sandbox_profile == "host":
+            raise ValueError("community plugins must not request sandbox_profile='host'")
 
         if self.publishable_events:
             expected_prefix = f"{self.name}."

@@ -23,6 +23,7 @@ from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.queue_status import (
+    QUEUE_ALERT_LEVEL,
     QUEUE_JOBS,
     QUEUE_NEXT_SCHEDULED_IN_SECONDS,
     QUEUE_OLDEST_READY_AGE_SECONDS,
@@ -115,6 +116,22 @@ class DummyRedis:
 
     async def llen(self, key: str) -> int:
         return len(self.lists.get(key, []))
+
+    async def lpush(self, key: str, *values: Any) -> int:
+        bucket = self.lists.setdefault(key, [])
+        for value in values:
+            bucket.insert(0, value if isinstance(value, bytes) else str(value).encode("utf-8"))
+        return len(bucket)
+
+    async def ltrim(self, key: str, start: int, stop: int) -> bool:
+        bucket = self.lists.get(key, [])
+        self.lists[key] = bucket[start : stop + 1]
+        return True
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[bytes]:
+        bucket = self.lists.get(key, [])
+        end = None if stop == -1 else stop + 1
+        return bucket[start:end]
 
     def scan_iter(self, *, match: str | None = None) -> Any:
         prefix = match[:-1] if isinstance(match, str) and match.endswith("*") else match
@@ -285,7 +302,11 @@ def _build_graphql_client() -> TestClient:
 
 
 def _headers() -> dict[str, str]:
-    return {"x-api-key": "a" * 32}
+    return {
+        "x-api-key": "a" * 32,
+        "x-actor-id": "operator-1",
+        "x-tenant-id": "tenant-main",
+    }
 
 
 def test_route_metrics_use_template_labels() -> None:
@@ -677,12 +698,18 @@ def test_queue_status_reader_updates_metrics() -> None:
     assert snapshot.dead_letter_jobs == 2
     assert snapshot.oldest_ready_age_seconds == 1.0
     assert snapshot.next_scheduled_in_seconds == 3.0
+    assert snapshot.alert_level == "critical"
+    assert snapshot.alerts[0].code == "dead_letter_backlog"
     assert float(QUEUE_JOBS.labels(queue_name="filmu-py", state="ready")._value.get()) == 1.0
     assert float(QUEUE_OLDEST_READY_AGE_SECONDS.labels(queue_name="filmu-py")._value.get()) == 1.0
     assert (
         float(QUEUE_NEXT_SCHEDULED_IN_SECONDS.labels(queue_name="filmu-py")._value.get())
         == 3.0
     )
+    assert float(QUEUE_ALERT_LEVEL.labels(queue_name="filmu-py")._value.get()) == 2.0
+    history = asyncio.run(QueueStatusReader(redis, queue_name="filmu-py").history(limit=5))
+    assert len(history) == 1
+    assert history[0].alert_level == "critical"
 
 
 def test_graphql_metrics_track_successful_operations() -> None:

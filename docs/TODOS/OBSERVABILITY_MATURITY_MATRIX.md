@@ -28,7 +28,8 @@ Already present in the Python backend:
 - rate-limiter allow/deny/remaining/retry-after metrics in [`../../filmu_py/core/rate_limiter.py`](../../filmu_py/core/rate_limiter.py)
 - plugin load and hook execution/duration metrics in [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) and [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py)
 - GraphQL operation duration/outcome metrics in [`../../filmu_py/graphql/observability.py`](../../filmu_py/graphql/observability.py)
-- ARQ queue lag/backlog gauges plus operator route visibility in [`../../filmu_py/core/queue_status.py`](../../filmu_py/core/queue_status.py) and [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py)
+- ARQ queue lag/backlog gauges, bounded queue-history persistence, alert classification, and operator route visibility in [`../../filmu_py/core/queue_status.py`](../../filmu_py/core/queue_status.py) and [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py)
+- additive actor/tenant/request auth correlation on authenticated API traffic in [`../../filmu_py/api/deps.py`](../../filmu_py/api/deps.py) plus privileged-action audit logging in [`../../filmu_py/audit.py`](../../filmu_py/audit.py)
 - extensive HLS status/governance metrics
 - latency histograms for reads, resolutions, and ffmpeg generation
 - abort and request-shape (range/seek/EOF) counters
@@ -56,7 +57,7 @@ What it does **not** yet provide sufficiently:
 - operator-ready local log shipping and search comparable to the current `riven-ts` Elastic/Filebeat path
 - richer trace/span adoption across every log-producing path
 - mounted Rust data-plane telemetry and cross-process traceability
-- queue lag / DLQ age-size history, alerting thresholds, and broader replay-taxonomy visibility
+- deeper queue replay-taxonomy visibility and longer-lived backlog history beyond the now-landed alert/history baseline
 - durable event/control-plane observability
 
 To check progressively and update as we go.
@@ -81,7 +82,7 @@ To check progressively and update as we go.
 | **HTTP request correlation**          | Implemented baseline           | Broaden into deeper service/control-plane correlation without high-cardinality labels                                          | Needed for route debugging and frontend integration support          | **P1**   |
 | **Route-level compatibility metrics** | Implemented baseline           | Deeper failure taxonomy, auth/contract drift breakdown, and broader surface coverage                                           | Needed to know which `/api/v1/*` surfaces are unstable or incomplete | **P1**   |
 | **Worker correlation**                | Implemented baseline           | Broader multi-stage lifecycle correlation across API -> queue -> worker -> playback/VFS paths                                   | Needed for reliable debugging of orchestration failures              | **P1**   |
-| **Retry/DLQ visibility**              | Improved baseline              | retry counts over time, DLQ age/size/reason history, and replay-taxonomy rollups                                               | Needed for D1 and future D2 maturity                                 | **P1**   |
+| **Retry/DLQ visibility**              | Improved baseline              | richer replay-taxonomy rollups, DLQ age/reason trend breakdown, and broader queue-graph history                                 | Needed for D1 and future D2 maturity                                 | **P1**   |
 | **Plugin load telemetry**             | Implemented baseline           | richer startup health rollups and longer-lived plugin health summaries                                                         | Needed as plugin platform grows beyond GraphQL                       | **P1**   |
 | **Plugin runtime telemetry**          | Implemented in-process baseline | per-plugin error/timeout health rollups, and queue lag only if/when hook execution becomes durable/queued                     | Needed for safe extensibility                                        | **P1**   |
 | **Structured log pipeline**           | Implemented baseline            | shipper/search workflow, environment-specific shipping policy, and stronger end-to-end trace/span adoption                       | Current `riven-ts` now has a materially stronger operator log pipeline | **P1**   |
@@ -89,7 +90,7 @@ To check progressively and update as we go.
 | **Cache observability**               | Implemented baseline           | hit/miss split by layer, richer invalidation reasons, and longer-lived stale-serve ratios                                      | Needed for correctness and provider safety                           | **P1**   |
 | **Rate limiter observability**        | Implemented baseline           | provider-refresh/control-plane correlation and alerting thresholds                                                              | Needed for provider safety and FilmuVFS control-plane tuning         | **P1**   |
 | **Stream/VFS observability**          | Strong HTTP baseline + limited mount baseline | deepen the current chunk-engine metrics into route/mount-driven amplification, plus richer lease-refresh and prefetch time series | Needed to outperform TS in FilmuVFS/product streaming                | **P1**   |
-| **Control-plane/event observability** | Improved baseline              | event publish lag, bridge lag, replay metrics, lease refresh events, and queue-history/alerting surfaces                       | Needed for future backplane work                                     | **P1**   |
+| **Control-plane/event observability** | Improved baseline              | event publish lag, bridge lag, replay metrics, lease refresh events, and broader queue-history/alert automation                 | Needed for future backplane work                                     | **P1**   |
 | **Durable workflow observability**    | Not started                    | workflow progress, signal/query visibility, compensation/failure telemetry                                                    | Needed only once D2 begins                                           | **P3**   |
 
 ---
@@ -283,7 +284,8 @@ Priority 6 should be considered meaningfully advanced when:
 - Rate-limiter observability now lives in [`../../filmu_py/core/rate_limiter.py`](../../filmu_py/core/rate_limiter.py), including allow/deny counts, remaining-token histograms, and retry-after histograms by bounded bucket class.
 - Plugin observability now lives in [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) and [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py), including load outcomes plus hook invocation/duration telemetry with success/error/timeout outcomes.
 - GraphQL observability now lives in [`../../filmu_py/graphql/observability.py`](../../filmu_py/graphql/observability.py), including operation counters and duration histograms by operation type and bounded root-field labels.
-- Queue/control-plane visibility now lives in [`../../filmu_py/core/queue_status.py`](../../filmu_py/core/queue_status.py) plus [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py), including queue depth, ready-vs-deferred lag, retry/result counts, dead-letter counts, and exported gauges.
+- Queue/control-plane visibility now lives in [`../../filmu_py/core/queue_status.py`](../../filmu_py/core/queue_status.py) plus [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py), including queue depth, ready-vs-deferred lag, retry/result counts, dead-letter counts, bounded history, alert-level classification, and exported gauges.
+- Auth/control-plane correlation now also binds additive actor/tenant/role/scope context on authenticated API requests and emits structured audit records for privileged settings/API-key mutations.
 - Structured logging now also has a durable file-backed baseline in [`../../filmu_py/logging.py`](../../filmu_py/logging.py), with rotating ECS/NDJSON-style output, correlation filters, and operator-ready local retention settings.
 - Dedicated coverage now exists in [`../../tests/test_observability.py`](../../tests/test_observability.py).
 - The full Python verification gate for this layer is currently green at `628 passed`, with the observability surfaces still covered by `ruff check .`, `mypy --strict filmu_py/`, and `pytest -q`.

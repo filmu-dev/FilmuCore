@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 
+from filmu_py.api import deps as api_deps
 from filmu_py.api.router import create_api_router
 from filmu_py.api.routes import default as default_routes
 from filmu_py.api.routes import settings as settings_routes
@@ -91,10 +92,18 @@ def _build_client() -> tuple[TestClient, AppResources]:
     return TestClient(app), resources
 
 
-def _headers() -> dict[str, str]:
+def _headers(**overrides: str) -> dict[str, str]:
     """Return valid auth headers for compatibility API requests."""
 
-    return {"x-api-key": "a" * 32}
+    headers = {
+        "x-api-key": "a" * 32,
+        "x-actor-id": "operator-1",
+        "x-tenant-id": "tenant-main",
+        "x-actor-roles": "platform:admin,settings:write",
+        "x-actor-scopes": "backend:admin,settings:write",
+    }
+    headers.update(overrides)
+    return headers
 
 
 def _install_settings_persistence_stubs(monkeypatch: Any) -> None:
@@ -391,6 +400,90 @@ def test_generate_apikey_rotates_runtime_key_and_persists_it(monkeypatch: Any) -
     assert resources.settings.api_key.get_secret_value() == body["key"]
     assert resources.db.settings_blob is not None
     assert resources.db.settings_blob["api_key"] == body["key"]
+
+
+def test_settings_put_emits_audit_event_with_actor_and_tenant(monkeypatch: Any) -> None:
+    client, _resources = _build_client()
+    _install_settings_persistence_stubs(monkeypatch)
+    payload = _compatibility_payload()
+    captured: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        auth = api_deps.get_auth_context(request)
+        captured.append(
+            {
+                "action": kwargs["action"],
+                "target": kwargs["target"],
+                "actor_id": auth.actor_id,
+                "tenant_id": auth.tenant_id,
+                "roles": auth.roles,
+            }
+        )
+
+    monkeypatch.setattr(settings_routes, "audit_action", fake_audit_action)
+    response = client.put(
+        "/api/v1/settings",
+        json=payload,
+        headers=_headers(
+            **{
+                "x-actor-id": "platform-admin",
+                "x-tenant-id": "tenant-enterprise",
+                "x-actor-roles": "platform:admin,settings:write",
+            }
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured == [
+        {
+            "action": "settings.put_current",
+            "target": "runtime.settings",
+            "actor_id": "platform-admin",
+            "tenant_id": "tenant-enterprise",
+            "roles": ("platform:admin", "settings:write"),
+        }
+    ]
+
+
+def test_generate_apikey_emits_audit_event_with_actor_and_tenant(monkeypatch: Any) -> None:
+    client, _resources = _build_client()
+    _install_settings_persistence_stubs(monkeypatch)
+    captured: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        auth = api_deps.get_auth_context(request)
+        captured.append(
+            {
+                "action": kwargs["action"],
+                "target": kwargs["target"],
+                "actor_id": auth.actor_id,
+                "tenant_id": auth.tenant_id,
+                "scopes": auth.scopes,
+            }
+        )
+
+    monkeypatch.setattr(default_routes, "audit_action", fake_audit_action)
+    response = client.post(
+        "/api/v1/generateapikey",
+        headers=_headers(
+            **{
+                "x-actor-id": "security-admin",
+                "x-tenant-id": "tenant-enterprise",
+                "x-actor-scopes": "backend:admin,security:apikey.rotate",
+            }
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured == [
+        {
+            "action": "security.generate_apikey",
+            "target": "runtime.api_key",
+            "actor_id": "security-admin",
+            "tenant_id": "tenant-enterprise",
+            "scopes": ("backend:admin", "security:apikey.rotate"),
+        }
+    ]
 
 
 def test_worker_reads_updated_downloader_settings_after_put(monkeypatch: Any) -> None:
