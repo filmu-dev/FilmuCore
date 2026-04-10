@@ -17,25 +17,32 @@ class AuthContextLike(Protocol):
     """Minimal request-auth shape needed by the security identity service."""
 
     @property
-    def authentication_mode(self) -> str: ...
+    def authentication_mode(self) -> str:
+        raise NotImplementedError
 
     @property
-    def api_key_id(self) -> str: ...
+    def api_key_id(self) -> str:
+        raise NotImplementedError
 
     @property
-    def actor_id(self) -> str: ...
+    def actor_id(self) -> str:
+        raise NotImplementedError
 
     @property
-    def actor_type(self) -> str: ...
+    def actor_type(self) -> str:
+        raise NotImplementedError
 
     @property
-    def tenant_id(self) -> str: ...
+    def tenant_id(self) -> str:
+        raise NotImplementedError
 
     @property
-    def roles(self) -> tuple[str, ...]: ...
+    def roles(self) -> tuple[str, ...]:
+        raise NotImplementedError
 
     @property
-    def scopes(self) -> tuple[str, ...]: ...
+    def scopes(self) -> tuple[str, ...]:
+        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)
