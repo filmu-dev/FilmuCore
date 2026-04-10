@@ -84,6 +84,15 @@ Required checks should include at least:
 Add these as required when their runner paths are fully provisioned:
 
 - `PR Title / Semantic PR Title`
+- `PR Title / Semantic PR Title`
+- `Verify / Verify - Python Lint`
+- `Verify / Verify - Python Tests`
+- `Verify / Verify - Rust Format`
+- `Verify / Verify - Rust Check`
+- `Verify / Verify - Rust Tests`
+
+Add these as required when their runner paths are fully provisioned:
+
 - `Playback Gate / Playback Gate`
 - `Validate Platform Stack / Validate Platform Stack`
 
