@@ -56,6 +56,7 @@ def _build_settings() -> Settings:
 
     return Settings(
         FILMU_PY_API_KEY=SecretStr("a" * 32),
+        FILMU_PY_API_KEY_ID="primary-test",
         FILMU_PY_POSTGRES_DSN="postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
         FILMU_PY_REDIS_URL=AnyUrl("redis://localhost:6379/0"),
         FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
@@ -482,6 +483,35 @@ def test_generate_apikey_emits_audit_event_with_actor_and_tenant(monkeypatch: An
             "actor_id": "security-admin",
             "tenant_id": "tenant-enterprise",
             "scopes": ("backend:admin", "security:apikey.rotate"),
+        }
+    ]
+
+
+def test_settings_put_audit_uses_configured_api_key_identifier(monkeypatch: Any) -> None:
+    client, _resources = _build_client()
+    _install_settings_persistence_stubs(monkeypatch)
+    payload = _compatibility_payload()
+    captured: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        auth = api_deps.get_auth_context(request)
+        captured.append(
+            {
+                "action": kwargs["action"],
+                "api_key_id": auth.api_key_id,
+                "actor_id": auth.actor_id,
+            }
+        )
+
+    monkeypatch.setattr(settings_routes, "audit_action", fake_audit_action)
+    response = client.put("/api/v1/settings", json=payload, headers={"x-api-key": "a" * 32})
+
+    assert response.status_code == 200
+    assert captured == [
+        {
+            "action": "settings.put_current",
+            "api_key_id": "primary-test",
+            "actor_id": "api-key:primary-test",
         }
     ]
 

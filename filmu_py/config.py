@@ -564,6 +564,7 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", alias="FILMU_PY_HOST")
     port: int = Field(default=8080, alias="FILMU_PY_PORT")
     api_key: SecretStr = Field(alias="FILMU_PY_API_KEY")
+    api_key_id: str = Field(default="primary", alias="FILMU_PY_API_KEY_ID")
     tmdb_api_key: str = Field(default="", alias="TMDB_API_KEY")
     log_level: str = Field(default="INFO", alias="FILMU_PY_LOG_LEVEL")
     enable_network_tracing: bool = Field(default=False, alias="FILMU_PY_ENABLE_NETWORK_TRACING")
@@ -686,6 +687,21 @@ class Settings(BaseSettings):
         if raw.lower() == "change-me" or len(raw) < 32:
             raise ValueError("FILMU_PY_API_KEY must be at least 32 characters")
         return SecretStr(raw)
+
+    @field_validator("api_key_id")
+    @classmethod
+    def validate_api_key_id(cls, value: str) -> str:
+        """Ensure API key identifiers are stable log-safe labels, not secrets."""
+
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("FILMU_PY_API_KEY_ID must not be empty")
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        if any(char not in allowed for char in normalized):
+            raise ValueError(
+                "FILMU_PY_API_KEY_ID may only contain letters, numbers, '.', '_' or '-'"
+            )
+        return normalized
 
     @classmethod
     def _load_env_file_values(cls) -> dict[str, str]:
@@ -863,6 +879,7 @@ class Settings(BaseSettings):
             FILMU_PY_API_KEY=SecretStr(
                 str(payload.get("api_key") or os.getenv("FILMU_PY_API_KEY", ""))
             ),
+            FILMU_PY_API_KEY_ID=os.getenv("FILMU_PY_API_KEY_ID", "primary"),
             TMDB_API_KEY=payload.get("tmdb_api_key") or env_tmdb_api_key,
             FILMU_PY_LOG_LEVEL=payload.get("log_level", "INFO"),
             FILMU_PY_ENABLE_NETWORK_TRACING=payload.get("enable_network_tracing", False),

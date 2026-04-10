@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
 
 import structlog
 from fastapi import HTTPException, Request, status
@@ -44,12 +43,13 @@ class AuthContext:
     scopes: tuple[str, ...]
 
 
-def _fingerprint_secret(value: str | None) -> str | None:
-    """Return a short non-reversible fingerprint for troubleshooting auth flows."""
+def _normalize_key_id(value: str | None) -> str | None:
+    """Return a safe non-secret identifier for troubleshooting auth flows."""
 
-    if not value:
+    if value is None:
         return None
-    return sha256(value.encode("utf-8")).hexdigest()[:12]
+    normalized = value.strip()
+    return normalized or None
 
 
 def _split_header_values(raw: str | None, *, fallback: tuple[str, ...]) -> tuple[str, ...]:
@@ -93,8 +93,8 @@ def get_auth_context(request: Request) -> AuthContext:
     if isinstance(auth_context, AuthContext):
         return auth_context
 
-    api_key = get_settings(request).api_key.get_secret_value()
-    return _build_auth_context(request, api_key_id=_fingerprint_secret(api_key) or "unknown")
+    api_key_id = _normalize_key_id(get_settings(request).api_key_id)
+    return _build_auth_context(request, api_key_id=api_key_id or "primary")
 
 
 def get_resources(request: Request) -> AppResources:
@@ -161,6 +161,7 @@ def verify_api_key(request: Request) -> None:
 
     settings = get_settings(request)
     expected = settings.api_key.get_secret_value()
+    key_id = _normalize_key_id(settings.api_key_id) or "primary"
 
     provided = (
         request.headers.get("x-api-key")
@@ -171,8 +172,8 @@ def verify_api_key(request: Request) -> None:
     if not provided or provided != expected:
         logger.warning(
             "auth.api_key.rejected",
-            expected_key_id=_fingerprint_secret(expected),
-            provided_key_id=_fingerprint_secret(provided),
+            expected_key_id=key_id,
+            provided_key_present=bool(provided),
             provided=bool(provided),
             path=request.url.path,
             method=request.method,
@@ -184,7 +185,7 @@ def verify_api_key(request: Request) -> None:
 
     auth_context = _build_auth_context(
         request,
-        api_key_id=_fingerprint_secret(expected) or "unknown",
+        api_key_id=key_id,
     )
     request.state.auth_context = auth_context
     structlog.contextvars.bind_contextvars(
