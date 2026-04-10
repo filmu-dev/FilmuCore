@@ -65,7 +65,7 @@ jobs:
       FILMU_PY_API_KEY: ${{ secrets.FILMU_PY_API_KEY }}
       FILMU_BACKEND_CONTAINER_NAME: filmu-python
       FILMU_PLAYBACK_REQUIRED_CHECK_NAME: Playback Gate / Playback Gate
-      FILMU_PLAYBACK_DRY_RUN: "0"
+      FILMU_PLAYBACK_DRY_RUN: ${{ (secrets.TMDB_API_KEY == '' || (secrets.FILMU_PY_REALDEBRID_API_TOKEN == '' && secrets.REAL_DEBRID_API_KEY == '' && secrets.FILMU_PY_ALLDEBRID_API_TOKEN == '' && secrets.ALL_DEBRID_API_KEY == '' && secrets.FILMU_PY_DEBRIDLINK_API_TOKEN == '' && secrets.DEBRID_LINK_API_KEY == '')) && '1' || '0' }}
       PLEX_URL: http://localhost:32401
       EMBY_URL: http://localhost:8097
       PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
@@ -117,6 +117,7 @@ jobs:
           fi
 
       - name: Validate runner readiness
+        continue-on-error: ${{ env.FILMU_PLAYBACK_DRY_RUN == '1' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
