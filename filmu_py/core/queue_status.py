@@ -35,8 +35,8 @@ QUEUE_ALERT_LEVEL = Gauge(
 _DEAD_LETTER_KEY_PREFIX = "arq:dead-letter:"
 _HISTORY_KEY_PREFIX = "arq:queue-status-history:"
 _ALERT_SCORES = {"ok": 0.0, "warning": 1.0, "critical": 2.0}
-AlertLevel = Literal["ok", "warning", "critical"]
-AlertSeverity = Literal["warning", "critical"]
+type AlertLevel = Literal["ok", "warning", "critical"]
+type AlertSeverity = Literal["warning", "critical"]
 
 
 @dataclass(frozen=True, slots=True)
