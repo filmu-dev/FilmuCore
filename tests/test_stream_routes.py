@@ -9445,7 +9445,9 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
             {
                 "runtime": {
                     "open_handles": 4,
+                    "peak_open_handles": 9,
                     "active_reads": 2,
+                    "peak_active_reads": 5,
                     "chunk_cache_weighted_bytes": 8192,
                 },
                 "handle_startup": {
@@ -9519,9 +9521,23 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "disk_evictions": 4,
                 },
                 "prefetch": {
+                    "concurrency_limit": 4,
+                    "available_permits": 1,
+                    "active_permits": 3,
+                    "active_background_tasks": 2,
+                    "peak_active_background_tasks": 4,
                     "background_spawned": 7,
                     "background_backpressure": 2,
                     "background_error": 1,
+                },
+                "chunk_coalescing": {
+                    "in_flight_chunks": 1,
+                    "peak_in_flight_chunks": 3,
+                    "waits_total": 6,
+                    "waits_hit": 5,
+                    "waits_miss": 1,
+                    "wait_average_duration_ms": 14,
+                    "wait_max_duration_ms": 89,
                 },
                 "inline_refresh": {
                     "success": 3,
@@ -9546,7 +9562,9 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     governance = response.json()["governance"]
     assert governance["vfs_runtime_snapshot_available"] == 1
     assert governance["vfs_runtime_open_handles"] == 4
+    assert governance["vfs_runtime_peak_open_handles"] == 9
     assert governance["vfs_runtime_active_reads"] == 2
+    assert governance["vfs_runtime_peak_active_reads"] == 5
     assert governance["vfs_runtime_chunk_cache_weighted_bytes"] == 8192
     assert governance["vfs_runtime_chunk_cache_backend"] == "hybrid"
     assert governance["vfs_runtime_chunk_cache_memory_bytes"] == 4096
@@ -9610,9 +9628,21 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_chunk_cache_misses"] == 3
     assert governance["vfs_runtime_chunk_cache_inserts"] == 2
     assert governance["vfs_runtime_chunk_cache_prefetch_hits"] == 1
+    assert governance["vfs_runtime_prefetch_concurrency_limit"] == 4
+    assert governance["vfs_runtime_prefetch_available_permits"] == 1
+    assert governance["vfs_runtime_prefetch_active_permits"] == 3
+    assert governance["vfs_runtime_prefetch_active_background_tasks"] == 2
+    assert governance["vfs_runtime_prefetch_peak_active_background_tasks"] == 4
     assert governance["vfs_runtime_prefetch_background_spawned"] == 7
     assert governance["vfs_runtime_prefetch_background_backpressure"] == 2
     assert governance["vfs_runtime_prefetch_background_error"] == 1
+    assert governance["vfs_runtime_chunk_coalescing_in_flight_chunks"] == 1
+    assert governance["vfs_runtime_chunk_coalescing_peak_in_flight_chunks"] == 3
+    assert governance["vfs_runtime_chunk_coalescing_waits_total"] == 6
+    assert governance["vfs_runtime_chunk_coalescing_waits_hit"] == 5
+    assert governance["vfs_runtime_chunk_coalescing_waits_miss"] == 1
+    assert governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] == 14
+    assert governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] == 89
     assert governance["vfs_runtime_inline_refresh_success"] == 3
     assert governance["vfs_runtime_inline_refresh_no_url"] == 1
     assert governance["vfs_runtime_inline_refresh_error"] == 2

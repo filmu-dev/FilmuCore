@@ -6,7 +6,11 @@ Current gate surfaces:
 
 - full playback gate: [`../package.json`](../package.json) `proof:playback:gate`
 - media-center parity gate: [`../package.json`](../package.json) `proof:playback:providers:gate`
+- repeated media-center parity stability gate: [`../package.json`](../package.json) `proof:playback:providers:stability`
 - native Windows media-center gate: [`../package.json`](../package.json) `proof:windows:vfs:providers:gate`
+- repeated native Windows media-center stability gate: [`../package.json`](../package.json) `proof:windows:vfs:providers:stability`
+- repeated Windows soak stability gate: [`../package.json`](../package.json) `proof:windows:vfs:soak:stability`
+- full Windows soak stability gate: [`../package.json`](../package.json) `proof:windows:vfs:soak:stability:full`
 
 ## 1. Check Linux runner readiness
 
@@ -72,6 +76,28 @@ Required-check promotion note:
 - this remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
 - the workflow and [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now also emit the canonical required-check name into the CI artifact bundle so the repo-settings step can key off the exact check label instead of manual memory
 
+## 2a. Validate GitHub `main` policy deterministically
+
+The repository now also carries a policy checker for the external GitHub settings step:
+
+```bash
+pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate
+pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -ValidateCurrent
+```
+
+Or via package scripts:
+
+```bash
+npm run proof:playback:policy
+npm run proof:playback:policy:validate
+```
+
+What it does:
+
+- prints the canonical required-check set for `main`
+- prints the expected merge-method policy (`squash` on, `merge commit` off, `rebase` off)
+- when `gh` is installed and authenticated with repo-admin access, validates the current GitHub repository and branch-protection state instead of relying on manual memory
+
 ## 3. CI behavior
 
 [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now does this:
@@ -94,6 +120,7 @@ So the expected rollout order is:
 ## 4. What still remains after runner rollout
 
 - keep `proof:windows:vfs:gate` green on the native Windows path
-- keep `proof:playback:providers:gate` green for Docker Plex + native Windows Emby parity
+- keep `proof:playback:providers:gate` and `proof:playback:providers:stability` green for repeated Docker Plex + native Windows Emby parity evidence
 - keep the explicit thresholded Windows soak profiles green on `C:\FilmuCoreVFS` (`proof:windows:vfs:soak:continuous`, `proof:windows:vfs:soak:seek`, `proof:windows:vfs:soak:concurrent`, and `proof:windows:vfs:soak:full`)
+- keep the repeated Windows soak stability wrappers green on real hosts so threshold tuning is based on repeated artifact evidence instead of one-off operator runs
 - native Windows Plex evidence is already present through [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1); the remaining work is repeatability and policy promotion, not first bring-up

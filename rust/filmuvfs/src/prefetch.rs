@@ -1,4 +1,10 @@
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use dashmap::DashMap;
 use thiserror::Error;
@@ -20,6 +26,18 @@ pub enum PrefetchScheduleError {
 pub struct PrefetchScheduler {
     semaphore: Arc<Semaphore>,
     handle_tokens: Arc<DashMap<String, CancellationToken>>,
+    concurrency: usize,
+    active_background_tasks: Arc<AtomicU64>,
+    peak_active_background_tasks: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefetchSchedulerSnapshot {
+    pub concurrency_limit: u64,
+    pub available_permits: u64,
+    pub active_permits: u64,
+    pub active_background_tasks: u64,
+    pub peak_active_background_tasks: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +139,9 @@ impl PrefetchScheduler {
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(concurrency)),
             handle_tokens: Arc::new(DashMap::new()),
+            concurrency,
+            active_background_tasks: Arc::new(AtomicU64::new(0)),
+            peak_active_background_tasks: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -143,6 +164,19 @@ impl PrefetchScheduler {
     }
 
     #[must_use]
+    pub fn snapshot(&self) -> PrefetchSchedulerSnapshot {
+        let concurrency_limit = self.concurrency as u64;
+        let available_permits = self.semaphore.available_permits() as u64;
+        PrefetchSchedulerSnapshot {
+            concurrency_limit,
+            available_permits,
+            active_permits: concurrency_limit.saturating_sub(available_permits),
+            active_background_tasks: self.active_background_tasks.load(Ordering::Relaxed),
+            peak_active_background_tasks: self.peak_active_background_tasks.load(Ordering::Relaxed),
+        }
+    }
+
+    #[must_use]
     pub fn spawn_background<Fut>(&self, handle_key: &str, future: Fut) -> bool
     where
         Fut: Future<Output = ()> + Send + 'static,
@@ -155,8 +189,13 @@ impl PrefetchScheduler {
         let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
             return false;
         };
+        let active_background_tasks = Arc::clone(&self.active_background_tasks);
+        let active_count = active_background_tasks.fetch_add(1, Ordering::Relaxed) + 1;
+        update_max(&self.peak_active_background_tasks, active_count);
 
         tokio::spawn(async move {
+            let _active_background_guard =
+                BackgroundTaskGuard::new(Arc::clone(&active_background_tasks));
             tokio::select! {
                 _ = token.cancelled() => {}
                 _ = async move {
@@ -167,4 +206,29 @@ impl PrefetchScheduler {
         });
         true
     }
+}
+
+#[derive(Debug)]
+struct BackgroundTaskGuard {
+    active_background_tasks: Arc<AtomicU64>,
+}
+
+impl BackgroundTaskGuard {
+    fn new(active_background_tasks: Arc<AtomicU64>) -> Self {
+        Self {
+            active_background_tasks,
+        }
+    }
+}
+
+impl Drop for BackgroundTaskGuard {
+    fn drop(&mut self) {
+        self.active_background_tasks.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn update_max(target: &AtomicU64, candidate: u64) {
+    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        (candidate > current).then_some(candidate)
+    });
 }

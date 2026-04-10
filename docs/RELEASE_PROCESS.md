@@ -90,6 +90,8 @@ Add these as required when their runner paths are fully provisioned:
 The playback gate may stay path-conditional in practice, but once the self-hosted runner is provisioned it should be marked required for the protected `main` workflow policy described in the playback-gate docs.
 The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
 
+The repository now also carries [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) plus package scripts `proof:playback:policy` and `proof:playback:policy:validate` so the exact expected `main` policy can be printed or, when `gh` is installed and authenticated, validated against the live repository settings instead of relying on screenshots or memory.
+
 ## Operational Flow
 
 ### Feature delivery

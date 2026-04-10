@@ -385,7 +385,9 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | str]:
     return {
         "vfs_runtime_snapshot_available": 0,
         "vfs_runtime_open_handles": 0,
+        "vfs_runtime_peak_open_handles": 0,
         "vfs_runtime_active_reads": 0,
+        "vfs_runtime_peak_active_reads": 0,
         "vfs_runtime_chunk_cache_weighted_bytes": 0,
         "vfs_runtime_chunk_cache_backend": "unknown",
         "vfs_runtime_chunk_cache_memory_bytes": 0,
@@ -443,9 +445,21 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | str]:
         "vfs_runtime_chunk_cache_misses": 0,
         "vfs_runtime_chunk_cache_inserts": 0,
         "vfs_runtime_chunk_cache_prefetch_hits": 0,
+        "vfs_runtime_prefetch_concurrency_limit": 0,
+        "vfs_runtime_prefetch_available_permits": 0,
+        "vfs_runtime_prefetch_active_permits": 0,
+        "vfs_runtime_prefetch_active_background_tasks": 0,
+        "vfs_runtime_prefetch_peak_active_background_tasks": 0,
         "vfs_runtime_prefetch_background_spawned": 0,
         "vfs_runtime_prefetch_background_backpressure": 0,
         "vfs_runtime_prefetch_background_error": 0,
+        "vfs_runtime_chunk_coalescing_in_flight_chunks": 0,
+        "vfs_runtime_chunk_coalescing_peak_in_flight_chunks": 0,
+        "vfs_runtime_chunk_coalescing_waits_total": 0,
+        "vfs_runtime_chunk_coalescing_waits_hit": 0,
+        "vfs_runtime_chunk_coalescing_waits_miss": 0,
+        "vfs_runtime_chunk_coalescing_wait_average_duration_ms": 0,
+        "vfs_runtime_chunk_coalescing_wait_max_duration_ms": 0,
         "vfs_runtime_inline_refresh_success": 0,
         "vfs_runtime_inline_refresh_no_url": 0,
         "vfs_runtime_inline_refresh_error": 0,
@@ -548,7 +562,13 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | str]:
         return governance
     governance["vfs_runtime_snapshot_available"] = 1
     governance["vfs_runtime_open_handles"] = _as_int(_nested_mapping_value(payload, "runtime", "open_handles"))
+    governance["vfs_runtime_peak_open_handles"] = _as_int(
+        _nested_mapping_value(payload, "runtime", "peak_open_handles")
+    )
     governance["vfs_runtime_active_reads"] = _as_int(_nested_mapping_value(payload, "runtime", "active_reads"))
+    governance["vfs_runtime_peak_active_reads"] = _as_int(
+        _nested_mapping_value(payload, "runtime", "peak_active_reads")
+    )
     governance["vfs_runtime_chunk_cache_weighted_bytes"] = _as_int(
         _nested_mapping_value(payload, "runtime", "chunk_cache_weighted_bytes")
     )
@@ -763,6 +783,21 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | str]:
     governance["vfs_runtime_chunk_cache_prefetch_hits"] = _as_int(
         _nested_mapping_value(payload, "chunk_cache", "prefetch_hits")
     )
+    governance["vfs_runtime_prefetch_concurrency_limit"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "concurrency_limit")
+    )
+    governance["vfs_runtime_prefetch_available_permits"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "available_permits")
+    )
+    governance["vfs_runtime_prefetch_active_permits"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "active_permits")
+    )
+    governance["vfs_runtime_prefetch_active_background_tasks"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "active_background_tasks")
+    )
+    governance["vfs_runtime_prefetch_peak_active_background_tasks"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "peak_active_background_tasks")
+    )
     governance["vfs_runtime_prefetch_background_spawned"] = _as_int(
         _nested_mapping_value(payload, "prefetch", "background_spawned")
     )
@@ -771,6 +806,27 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | str]:
     )
     governance["vfs_runtime_prefetch_background_error"] = _as_int(
         _nested_mapping_value(payload, "prefetch", "background_error")
+    )
+    governance["vfs_runtime_chunk_coalescing_in_flight_chunks"] = _as_int(
+        _nested_mapping_value(payload, "chunk_coalescing", "in_flight_chunks")
+    )
+    governance["vfs_runtime_chunk_coalescing_peak_in_flight_chunks"] = _as_int(
+        _nested_mapping_value(payload, "chunk_coalescing", "peak_in_flight_chunks")
+    )
+    governance["vfs_runtime_chunk_coalescing_waits_total"] = _as_int(
+        _nested_mapping_value(payload, "chunk_coalescing", "waits_total")
+    )
+    governance["vfs_runtime_chunk_coalescing_waits_hit"] = _as_int(
+        _nested_mapping_value(payload, "chunk_coalescing", "waits_hit")
+    )
+    governance["vfs_runtime_chunk_coalescing_waits_miss"] = _as_int(
+        _nested_mapping_value(payload, "chunk_coalescing", "waits_miss")
+    )
+    governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "chunk_coalescing", "wait_average_duration_ms")
+    )
+    governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] = _as_int(
+        _nested_mapping_value(payload, "chunk_coalescing", "wait_max_duration_ms")
     )
     governance["vfs_runtime_inline_refresh_success"] = _as_int(
         _nested_mapping_value(payload, "inline_refresh", "success")

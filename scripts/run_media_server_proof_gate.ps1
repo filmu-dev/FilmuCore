@@ -1,6 +1,7 @@
 param(
     [string[]] $Providers = @('plex', 'emby'),
     [int] $RepeatCount = 1,
+    [string] $EnvironmentClass = '',
     [string] $TmdbId = '603',
     [string] $Title = 'The Matrix',
     [ValidateSet('movie', 'tv')]
@@ -43,6 +44,27 @@ $Providers = @($normalizedProviders)
 
 if ($Providers.Count -eq 0) {
     throw 'At least one provider is required.'
+}
+
+if ([string]::IsNullOrWhiteSpace($EnvironmentClass)) {
+    $EnvironmentClass = "{0}:{1}" -f $env:COMPUTERNAME, [System.Environment]::OSVersion.VersionString
+}
+
+function Get-StepStatus {
+    param(
+        [object] $Summary,
+        [string] $StepName
+    )
+
+    if ($null -eq $Summary -or -not ($Summary.PSObject.Properties.Name -contains 'steps')) {
+        return $null
+    }
+
+    $step = @($Summary.steps | Where-Object { [string] $_.name -eq $StepName } | Select-Object -First 1)[0]
+    if ($null -eq $step) {
+        return $null
+    }
+    return [string] $step.status
 }
 
 
@@ -94,15 +116,54 @@ foreach ($provider in $Providers) {
         }
 
         $result = [pscustomobject]@{
+            environment_class = $EnvironmentClass
             provider     = $provider
             run          = $runIndex
             exit_code    = $exitCode
-            status       = if ($exitCode -eq 0) { 'passed' } else { 'failed' }
+            status       = 'failed'
             artifact_dir = $artifactDir
+            topology     = $null
+            summary_exists = $false
+            playback_start_status = $null
+            stale_refresh_status = $null
+            docker_wsl_mount_visibility = $null
+            docker_wsl_host_binary_freshness = $null
+            docker_wsl_refresh_identity_evidence = $null
+            docker_wsl_foreground_fetch_evidence = $null
         }
+
+        $summaryExists = $false
+        $artifactSummary = $null
+        if (-not [string]::IsNullOrWhiteSpace([string] $artifactDir)) {
+            $artifactSummaryPath = Join-Path $artifactDir 'summary.json'
+            if (Test-Path -LiteralPath $artifactSummaryPath) {
+                $summaryExists = $true
+                $artifactSummary = Get-Content -LiteralPath $artifactSummaryPath -Raw | ConvertFrom-Json
+                $result.topology = if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'topology') { [string] $artifactSummary.media_server.topology } else { $null }
+                $result.playback_start_status = if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'playback_start_status') { [string] $artifactSummary.media_server.playback_start_status } else { $null }
+                $result.stale_refresh_status = if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'stale_refresh_status') { [string] $artifactSummary.media_server.stale_refresh_status } else { $null }
+                $result.docker_wsl_mount_visibility = Get-StepStatus -Summary $artifactSummary -StepName 'plex_wsl_mount_visibility'
+                $result.docker_wsl_host_binary_freshness = Get-StepStatus -Summary $artifactSummary -StepName 'plex_wsl_host_binary_freshness'
+                $result.docker_wsl_refresh_identity_evidence = Get-StepStatus -Summary $artifactSummary -StepName 'plex_wsl_refresh_identity_evidence'
+                $result.docker_wsl_foreground_fetch_evidence = Get-StepStatus -Summary $artifactSummary -StepName 'plex_wsl_foreground_fetch_evidence'
+            }
+        }
+        $result.summary_exists = $summaryExists
+
+        $explicitDockerPlexEvidencePassed = $true
+        if ($provider -eq 'plex' -and $result.topology -eq 'docker_wsl') {
+            $explicitDockerPlexEvidencePassed = (
+                ($result.docker_wsl_mount_visibility -eq 'passed') -and
+                ($result.docker_wsl_host_binary_freshness -eq 'passed') -and
+                ($result.docker_wsl_refresh_identity_evidence -eq 'passed') -and
+                ($result.docker_wsl_foreground_fetch_evidence -eq 'passed')
+            )
+        }
+        $result.status = if (($exitCode -eq 0) -and $summaryExists -and $explicitDockerPlexEvidencePassed) { 'passed' } else { 'failed' }
+
         $results.Add($result)
 
-        if ($exitCode -ne 0 -and $FailFast) {
+        if ($result.status -ne 'passed' -and $FailFast) {
             $stopRequested = $true
             break
         }
@@ -118,6 +179,7 @@ foreach ($provider in $Providers) {
 
 $summary = [pscustomobject]@{
     timestamp  = (Get-Date).ToString('o')
+    environment_class = $EnvironmentClass
     providers  = $Providers
     repeat_count = $RepeatCount
     tmdb_id    = $TmdbId
