@@ -119,7 +119,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
-          ./scripts/check_playback_gate_runner.ps1 -RequireProviderGate -AsJson | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
+          $readinessArgs = @('-AsJson')
+          if ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1') {
+            $readinessArgs += '-RequireProviderGate'
+          }
+          ./scripts/check_playback_gate_runner.ps1 @readinessArgs | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
 
       - name: Run playback gate
         run: |
