@@ -89,12 +89,14 @@ Add these as required when their runner paths are fully provisioned:
 - `Verify / Verify - Rust Format`
 - `Verify / Verify - Rust Check`
 - `Verify / Verify - Rust Tests`
-
-Add these as required when their runner paths are fully provisioned:
-
 - `Playback Gate / Playback Gate`
 - `Validate Platform Stack / Validate Platform Stack`
 
+The playback gate may stay path-conditional in practice, but the workflow itself is now merged and green. Whether it is already marked required on live protected-branch policy must still be validated from an admin-authenticated host with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1).
+The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
+
+The repository now also carries [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) plus package scripts `proof:playback:policy` and `proof:playback:policy:validate` so the exact expected `main` policy can be printed or, when `gh` is installed and authenticated, validated against the live repository settings instead of relying on screenshots or memory.
+For the stricter release-candidate posture, the repository also now carries `proof:playback:policy:enterprise` and `proof:playback:policy:enterprise:validate`, which add minimum-review/admin-enforcement expectations and the expected provider/Windows proof-profile contract behind the single playback gate.
 The playback gate may stay path-conditional in practice, but once the GitHub-hosted runner configuration is provisioned and green it should be marked required for the protected `main` workflow policy described in the playback-gate docs.
 The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
 

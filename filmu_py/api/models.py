@@ -26,6 +26,16 @@ class PluginCapabilityStatusResponse(BaseModel):
     api_version: str | None = None
     min_host_version: str | None = None
     max_host_version: str | None = None
+    publisher: str | None = None
+    release_channel: str | None = None
+    trust_level: str | None = None
+    permission_scopes: list[str] = []
+    source_sha256: str | None = None
+    signing_key_id: str | None = None
+    signature_present: bool = False
+    sandbox_profile: str | None = None
+    quarantined: bool = False
+    quarantine_reason: str | None = None
     source: str | None = None
     warnings: list[str] = []
     error: str | None = None
@@ -35,8 +45,58 @@ class PluginEventStatusResponse(BaseModel):
     """One plugin event-governance and hook-subscription summary."""
 
     name: str
+    publisher: str | None = None
     publishable_events: list[str]
     hook_subscriptions: list[str]
+
+
+class QueueStatusResponse(BaseModel):
+    """Current ARQ queue control-plane snapshot."""
+
+    queue_name: str
+    arq_enabled: bool
+    observed_at: str
+    total_jobs: int
+    ready_jobs: int
+    deferred_jobs: int
+    in_progress_jobs: int
+    retry_jobs: int
+    result_jobs: int
+    dead_letter_jobs: int
+    alert_level: Literal["ok", "warning", "critical"] = "ok"
+    alerts: list["QueueAlertResponse"] = []
+    oldest_ready_age_seconds: float | None = None
+    next_scheduled_in_seconds: float | None = None
+
+
+class QueueAlertResponse(BaseModel):
+    """One operator-facing queue alert classification."""
+
+    code: str
+    severity: Literal["warning", "critical"]
+    message: str
+
+
+class QueueStatusHistoryPointResponse(BaseModel):
+    """One persisted queue snapshot for trend inspection."""
+
+    observed_at: str
+    total_jobs: int
+    ready_jobs: int
+    deferred_jobs: int
+    in_progress_jobs: int
+    retry_jobs: int
+    dead_letter_jobs: int
+    oldest_ready_age_seconds: float | None = None
+    next_scheduled_in_seconds: float | None = None
+    alert_level: Literal["ok", "warning", "critical"] = "ok"
+
+
+class QueueStatusHistoryResponse(BaseModel):
+    """Bounded queue-history timeline for operator views."""
+
+    queue_name: str
+    history: list[QueueStatusHistoryPointResponse]
 
 
 class ApiKeyRotationResponse(BaseModel):

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from filmu_py.api.deps import get_db
 from filmu_py.api.deps import get_settings as dep_get_settings
 from filmu_py.api.models import MessageResponse
+from filmu_py.audit import audit_action
 from filmu_py.config import Settings, set_runtime_settings
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.services.settings_service import save_settings as persist_settings_blob
@@ -207,6 +208,12 @@ async def put_current_settings(
     """Validate, persist, and activate a full compatibility settings payload."""
 
     validated = await _persist_runtime_settings(request=request, db=db, payload=payload)
+    audit_action(
+        request,
+        action="settings.put_current",
+        target="runtime.settings",
+        details={"top_level_keys": sorted(payload)},
+    )
     return validated.to_compatibility_dict()
 
 
@@ -320,6 +327,12 @@ async def set_all_settings(
     """Compatibility alias for persisting a full settings payload over POST."""
 
     await _persist_runtime_settings(request=request, db=db, payload=payload)
+    audit_action(
+        request,
+        action="settings.set_all",
+        target="runtime.settings",
+        details={"top_level_keys": sorted(payload)},
+    )
     return MessageResponse(message="All settings updated successfully!")
 
 
@@ -378,6 +391,12 @@ async def set_settings_for_paths(
             )
 
         await _persist_runtime_settings(request=request, db=db, payload=settings_data)
+        audit_action(
+            request,
+            action="settings.set_paths",
+            target="runtime.settings",
+            details={"paths": requested_paths},
+        )
         return MessageResponse(message="Settings updated successfully.")
     except Exception as e:
         detail_getter = getattr(e, "errors", None)

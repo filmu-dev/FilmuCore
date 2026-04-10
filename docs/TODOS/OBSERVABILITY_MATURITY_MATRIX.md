@@ -19,12 +19,17 @@ This document maps the current `filmu-python` observability baseline against the
 Already present in the Python backend:
 
 - structured logging in `filmu_py/logging.py`
+- durable rotating ECS/NDJSON-style file output in `logs/ecs.json` via [`../../filmu_py/logging.py`](../../filmu_py/logging.py)
 - request correlation via `RequestIdMiddleware`
 - route-level compatibility counters and latency histograms in [`../../filmu_py/api/router.py`](../../filmu_py/api/router.py)
 - Prometheus/OpenTelemetry bootstrap in `filmu_py/observability.py`
 - worker stage/retry/DLQ metrics plus `structlog.contextvars` correlation in [`../../filmu_py/workers/retry.py`](../../filmu_py/workers/retry.py) and [`../../filmu_py/workers/tasks.py`](../../filmu_py/workers/tasks.py)
 - cache hit/miss/invalidation/stale counters in [`../../filmu_py/core/cache.py`](../../filmu_py/core/cache.py)
+- rate-limiter allow/deny/remaining/retry-after metrics in [`../../filmu_py/core/rate_limiter.py`](../../filmu_py/core/rate_limiter.py)
 - plugin load and hook execution/duration metrics in [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) and [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py)
+- GraphQL operation duration/outcome metrics in [`../../filmu_py/graphql/observability.py`](../../filmu_py/graphql/observability.py)
+- ARQ queue lag/backlog gauges, bounded queue-history persistence, alert classification, and operator route visibility in [`../../filmu_py/core/queue_status.py`](../../filmu_py/core/queue_status.py) and [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py)
+- additive actor/tenant/request auth correlation on authenticated API traffic in [`../../filmu_py/api/deps.py`](../../filmu_py/api/deps.py) plus privileged-action audit logging in [`../../filmu_py/audit.py`](../../filmu_py/audit.py)
 - extensive HLS status/governance metrics
 - latency histograms for reads, resolutions, and ffmpeg generation
 - abort and request-shape (range/seek/EOF) counters
@@ -49,14 +54,10 @@ What this baseline is good at:
 
 What it does **not** yet provide sufficiently:
 
-- durable structured log retention outside process memory
-- ECS-style structured file output and shipper-friendly NDJSON logs
-- trace/span identifiers embedded directly into emitted log records
 - operator-ready local log shipping and search comparable to the current `riven-ts` Elastic/Filebeat path
-- rate-limiter pressure/deny visibility by operation or provider class
-- GraphQL operation timing and error taxonomy
+- richer trace/span adoption across every log-producing path
 - mounted Rust data-plane telemetry and cross-process traceability
-- queue lag / DLQ age-size visibility beyond counters
+- deeper queue replay-taxonomy visibility and longer-lived backlog history beyond the now-landed alert/history baseline
 - durable event/control-plane observability
 
 To check progressively and update as we go.
@@ -80,16 +81,16 @@ To check progressively and update as we go.
 | ------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------- |
 | **HTTP request correlation**          | Implemented baseline           | Broaden into deeper service/control-plane correlation without high-cardinality labels                                          | Needed for route debugging and frontend integration support          | **P1**   |
 | **Route-level compatibility metrics** | Implemented baseline           | Deeper failure taxonomy, auth/contract drift breakdown, and broader surface coverage                                           | Needed to know which `/api/v1/*` surfaces are unstable or incomplete | **P1**   |
-| **Worker correlation**                | Implemented baseline           | Queue lag/backlog visibility and broader multi-stage lifecycle correlation                                                     | Needed for reliable debugging of orchestration failures              | **P1**   |
-| **Retry/DLQ visibility**              | Improved baseline              | queue lag, retry counts over time, DLQ age/size/reason breakdown                                                               | Needed for D1 and future D2 maturity                                 | **P1**   |
+| **Worker correlation**                | Implemented baseline           | Broader multi-stage lifecycle correlation across API -> queue -> worker -> playback/VFS paths                                   | Needed for reliable debugging of orchestration failures              | **P1**   |
+| **Retry/DLQ visibility**              | Improved baseline              | richer replay-taxonomy rollups, DLQ age/reason trend breakdown, and broader queue-graph history                                 | Needed for D1 and future D2 maturity                                 | **P1**   |
 | **Plugin load telemetry**             | Implemented baseline           | richer startup health rollups and longer-lived plugin health summaries                                                         | Needed as plugin platform grows beyond GraphQL                       | **P1**   |
 | **Plugin runtime telemetry**          | Implemented in-process baseline | per-plugin error/timeout health rollups, and queue lag only if/when hook execution becomes durable/queued                     | Needed for safe extensibility                                        | **P1**   |
-| **Structured log pipeline**           | Partial                         | durable file-backed structured logs, ECS/NDJSON output, trace/span-enriched log records, retention policy, and shipper/export readiness | Current `riven-ts` now has a materially stronger operator log pipeline | **P1**   |
-| **GraphQL observability**             | Minimal                        | operation-level timing, error-classification, schema diff governance                                                          | Needed for strategic parity and regression detection                 | **P2**   |
+| **Structured log pipeline**           | Implemented baseline            | shipper/search workflow, environment-specific shipping policy, and stronger end-to-end trace/span adoption                       | Current `riven-ts` now has a materially stronger operator log pipeline | **P1**   |
+| **GraphQL observability**             | Implemented baseline           | richer error taxonomy, schema diff governance, and subscription/control-plane visibility                                        | Needed for strategic parity and regression detection                 | **P1**   |
 | **Cache observability**               | Implemented baseline           | hit/miss split by layer, richer invalidation reasons, and longer-lived stale-serve ratios                                      | Needed for correctness and provider safety                           | **P1**   |
-| **Rate limiter observability**        | Partial                        | bucket pressure, denies by class, stream-link denial visibility                                                               | Needed for provider safety and FilmuVFS control-plane tuning         | **P1**   |
+| **Rate limiter observability**        | Implemented baseline           | provider-refresh/control-plane correlation and alerting thresholds                                                              | Needed for provider safety and FilmuVFS control-plane tuning         | **P1**   |
 | **Stream/VFS observability**          | Strong HTTP baseline + limited mount baseline | deepen the current chunk-engine metrics into route/mount-driven amplification, plus richer lease-refresh and prefetch time series | Needed to outperform TS in FilmuVFS/product streaming                | **P1**   |
-| **Control-plane/event observability** | Partial                        | event publish lag, bridge lag, replay metrics, lease refresh events                                                           | Needed for future backplane work                                     | **P2**   |
+| **Control-plane/event observability** | Improved baseline              | event publish lag, bridge lag, replay metrics, lease refresh events, and broader queue-history/alert automation                 | Needed for future backplane work                                     | **P1**   |
 | **Durable workflow observability**    | Not started                    | workflow progress, signal/query visibility, compensation/failure telemetry                                                    | Needed only once D2 begins                                           | **P3**   |
 
 ---
@@ -106,8 +107,8 @@ This layer is now largely landed:
 
 Remaining Layer 1 gap:
 
-- rate-limiter denies and pressure visibility by operation/provider class
-- durable structured logging beyond the current in-memory broker
+- shipper/search workflow above the now-landed durable structured logs
+- wider trace/span propagation across API, workers, plugin paths, and Rust-sidecar correlation
 
 This is now the active baseline for the current expanding backend rather than a purely future plan.
 
@@ -258,10 +259,11 @@ These keys should be propagated consistently across:
 
 1. route-level compatibility metrics — delivered
 2. worker correlation + retry/DLQ metrics — delivered
-3. cache + rate-limiter visibility by operation class — cache delivered; rate-limiter visibility still remaining
+3. cache + rate-limiter visibility by operation class — delivered
 4. plugin discovery/runtime metrics — delivered for the current in-process runtime
-5. stream/VFS metrics as soon as byte-serving implementation starts — ongoing on the HTTP path; mount data-plane visibility still remaining
-6. event/workflow observability only when the corresponding platform layer becomes real
+5. GraphQL operation metrics plus queue/control-plane lag visibility — delivered baseline
+6. stream/VFS metrics as soon as byte-serving implementation starts — ongoing on the HTTP path; mount data-plane visibility still remaining
+7. event/workflow observability only when the corresponding platform layer becomes real
 
 ---
 
@@ -279,7 +281,12 @@ Priority 6 should be considered meaningfully advanced when:
 - Route-level metrics now live in [`../../filmu_py/api/router.py`](../../filmu_py/api/router.py) and use route templates to avoid uncontrolled path-label cardinality.
 - Worker observability now lives in [`../../filmu_py/workers/retry.py`](../../filmu_py/workers/retry.py) plus [`../../filmu_py/workers/tasks.py`](../../filmu_py/workers/tasks.py), including stage duration, retry, and dead-letter counters plus `structlog.contextvars` binding for `item_id`, `item_request_id`, `worker_stage`, and `job_id`.
 - Cache observability now lives in [`../../filmu_py/core/cache.py`](../../filmu_py/core/cache.py), including hit/miss/invalidation/stale-serve counters.
+- Rate-limiter observability now lives in [`../../filmu_py/core/rate_limiter.py`](../../filmu_py/core/rate_limiter.py), including allow/deny counts, remaining-token histograms, and retry-after histograms by bounded bucket class.
 - Plugin observability now lives in [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) and [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py), including load outcomes plus hook invocation/duration telemetry with success/error/timeout outcomes.
+- GraphQL observability now lives in [`../../filmu_py/graphql/observability.py`](../../filmu_py/graphql/observability.py), including operation counters and duration histograms by operation type and bounded root-field labels.
+- Queue/control-plane visibility now lives in [`../../filmu_py/core/queue_status.py`](../../filmu_py/core/queue_status.py) plus [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py), including queue depth, ready-vs-deferred lag, retry/result counts, dead-letter counts, bounded history, alert-level classification, and exported gauges.
+- Auth/control-plane correlation now also binds additive actor/tenant/role/scope context on authenticated API requests and emits structured audit records for privileged settings/API-key mutations.
+- Structured logging now also has a durable file-backed baseline in [`../../filmu_py/logging.py`](../../filmu_py/logging.py), with rotating ECS/NDJSON-style output, correlation filters, and operator-ready local retention settings.
 - Dedicated coverage now exists in [`../../tests/test_observability.py`](../../tests/test_observability.py).
 - The full Python verification gate for this layer is currently green at `628 passed`, with the observability surfaces still covered by `ruff check .`, `mypy --strict filmu_py/`, and `pytest -q`.
 

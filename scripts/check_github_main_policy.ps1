@@ -2,6 +2,11 @@ param(
     [string] $Repository = 'filmu-dev/FilmuCore',
     [string] $Branch = 'main',
     [switch] $RequirePlaybackGate,
+    [switch] $RequireProviderGate,
+    [switch] $RequireWindowsVfsGate,
+    [switch] $RequireWindowsVfsProvidersGate,
+    [int] $MinimumApprovingReviewCount = 1,
+    [switch] $RequireAdminsEnforced,
     [switch] $ValidateCurrent,
     [switch] $AsJson
 )
@@ -35,6 +40,15 @@ function Invoke-GhApiJson {
 }
 
 function New-ExpectedPolicy {
+    param(
+        [string] $Branch,
+        [switch] $RequirePlaybackGate,
+        [switch] $RequireProviderGate,
+        [switch] $RequireWindowsVfsGate,
+        [switch] $RequireWindowsVfsProvidersGate,
+        [int] $MinimumApprovingReviewCount,
+        [switch] $RequireAdminsEnforced
+    )
     param([switch] $RequirePlaybackGate)
 
     $requiredChecks = @(
@@ -60,6 +74,15 @@ function New-ExpectedPolicy {
             branch = $Branch
             require_pull_request = $true
             require_up_to_date_branches = $true
+            minimum_approving_review_count = $MinimumApprovingReviewCount
+            require_admins_enforced = [bool] $RequireAdminsEnforced
+            required_status_checks = $requiredChecks
+            proof_profiles = [ordered]@{
+                playback_gate_required = [bool] $RequirePlaybackGate
+                provider_gate_expected_inside_playback_gate = [bool] $RequireProviderGate
+                windows_vfs_gate_expected_inside_playback_gate = [bool] $RequireWindowsVfsGate
+                windows_provider_gate_expected_inside_playback_gate = [bool] $RequireWindowsVfsProvidersGate
+            }
             required_status_checks = $requiredChecks
         }
         gh_commands = [ordered]@{
@@ -117,6 +140,14 @@ function Get-ValidationExitCode {
     return 1
 }
 
+$expected = New-ExpectedPolicy `
+    -Branch $Branch `
+    -RequirePlaybackGate:$RequirePlaybackGate `
+    -RequireProviderGate:$RequireProviderGate `
+    -RequireWindowsVfsGate:$RequireWindowsVfsGate `
+    -RequireWindowsVfsProvidersGate:$RequireWindowsVfsProvidersGate `
+    -MinimumApprovingReviewCount $MinimumApprovingReviewCount `
+    -RequireAdminsEnforced:$RequireAdminsEnforced
 $expected = New-ExpectedPolicy -RequirePlaybackGate:$RequirePlaybackGate
 $escapedBranch = [System.Uri]::EscapeDataString($Branch)
 $result = [ordered]@{
@@ -124,6 +155,9 @@ $result = [ordered]@{
     repository = $Repository
     branch = $Branch
     require_playback_gate = [bool] $RequirePlaybackGate
+    require_provider_gate = [bool] $RequireProviderGate
+    require_windows_vfs_gate = [bool] $RequireWindowsVfsGate
+    require_windows_vfs_providers_gate = [bool] $RequireWindowsVfsProvidersGate
     expected = $expected
     validation = $null
 }
@@ -160,6 +194,19 @@ if ($ValidateCurrent) {
             ($mergePolicy.allow_rebase_merge -eq $expected.repository.allow_rebase_merge)
         )
         $pullRequestRequired = $null -ne $branchProtectionPayload.required_pull_request_reviews
+        $requiredReviewCount = if ($pullRequestRequired -and $branchProtectionPayload.required_pull_request_reviews.PSObject.Properties.Name -contains 'required_approving_review_count') {
+            [int] $branchProtectionPayload.required_pull_request_reviews.required_approving_review_count
+        } else {
+            0
+        }
+        $reviewsOk = $requiredReviewCount -ge $expected.branch_protection.minimum_approving_review_count
+        $strictChecks = [bool] $branchProtectionPayload.required_status_checks.strict
+        $adminsEnforced = [bool] (
+            ($branchProtectionPayload.PSObject.Properties.Name -contains 'enforce_admins' -and $null -ne $branchProtectionPayload.enforce_admins) -or
+            ($branchProtectionPayload.PSObject.Properties.Name -contains 'enforce_admins_url' -and -not [string]::IsNullOrWhiteSpace([string] $branchProtectionPayload.enforce_admins_url))
+        )
+        $adminsOk = if ($expected.branch_protection.require_admins_enforced) { $adminsEnforced } else { $true }
+        $status = if ($mergePolicyOk -and $pullRequestRequired -and $reviewsOk -and $adminsOk -and $strictChecks -and $missingChecks.Count -eq 0) {
         $strictChecks = [bool] $branchProtectionPayload.required_status_checks.strict
         $status = if ($mergePolicyOk -and $pullRequestRequired -and $strictChecks -and $missingChecks.Count -eq 0) {
             'ready'
@@ -171,10 +218,15 @@ if ($ValidateCurrent) {
             merge_policy = $mergePolicy
             merge_policy_ok = $mergePolicyOk
             pull_request_required = $pullRequestRequired
+            required_approving_review_count = $requiredReviewCount
+            minimum_approving_review_count_ok = $reviewsOk
+            admins_enforced = $adminsEnforced
+            admins_enforced_ok = $adminsOk
             up_to_date_branches_required = $strictChecks
             actual_required_checks = $actualChecks
             missing_required_checks = $missingChecks
             unexpected_required_checks = $unexpectedChecks
+            proof_profiles = $expected.branch_protection.proof_profiles
         }
     }
 }
@@ -187,6 +239,11 @@ if ($AsJson) {
 Write-Host ("[github-main-policy] repository: {0}" -f $Repository)
 Write-Host ("[github-main-policy] branch: {0}" -f $Branch)
 Write-Host ("[github-main-policy] require playback gate: {0}" -f ([bool] $RequirePlaybackGate))
+Write-Host ("[github-main-policy] require provider parity inside playback gate: {0}" -f ([bool] $RequireProviderGate))
+Write-Host ("[github-main-policy] require windows VFS gate evidence inside playback gate: {0}" -f ([bool] $RequireWindowsVfsGate))
+Write-Host ("[github-main-policy] require windows provider parity inside playback gate: {0}" -f ([bool] $RequireWindowsVfsProvidersGate))
+Write-Host ("[github-main-policy] minimum approving reviews: {0}" -f $MinimumApprovingReviewCount)
+Write-Host ("[github-main-policy] require admins enforced: {0}" -f ([bool] $RequireAdminsEnforced))
 Write-Host "[github-main-policy] expected required checks:"
 foreach ($check in $expected.branch_protection.required_status_checks) {
     Write-Host ("[github-main-policy] - {0}" -f $check)
