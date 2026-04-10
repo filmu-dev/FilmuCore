@@ -1,4 +1,11 @@
-use std::{cmp, sync::Arc};
+use std::{
+    cmp,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use bytes::{Bytes, BytesMut};
 use dashmap::{mapref::entry::Entry, DashMap};
@@ -8,7 +15,7 @@ use tokio::sync::Notify;
 use crate::{
     cache::{CacheEngine, CacheEngineSnapshot},
     chunk_planner::{ChunkPlanner, ChunkPlannerConfig, PlannedChunk, PlannedRead, ReadPattern},
-    prefetch::{PrefetchScheduleError, PrefetchScheduler},
+    prefetch::{PrefetchScheduleError, PrefetchScheduler, PrefetchSchedulerSnapshot},
     telemetry::{record_chunk_cache_event, record_chunk_read_pattern, record_prefetch_event},
     upstream::{RangeRequest, UpstreamReadError, UpstreamReader},
 };
@@ -61,6 +68,17 @@ pub struct ChunkCacheSnapshot {
     pub disk_evictions: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChunkCoalescingSnapshot {
+    pub in_flight_chunks: u64,
+    pub peak_in_flight_chunks: u64,
+    pub waits_total: u64,
+    pub waits_hit: u64,
+    pub waits_miss: u64,
+    pub wait_average_duration_ms: f64,
+    pub wait_max_duration_ms: f64,
+}
+
 #[derive(Debug, Error)]
 pub enum ChunkEngineError {
     #[error("invalid chunk-engine request: {message}")]
@@ -96,6 +114,12 @@ pub struct ChunkEngine {
     upstream_reader: UpstreamReader,
     handle_reads: Arc<DashMap<String, HandleReadState>>,
     in_flight_chunks: Arc<DashMap<String, Arc<Notify>>>,
+    coalescing_waits_total: Arc<AtomicU64>,
+    coalescing_waits_hit: Arc<AtomicU64>,
+    coalescing_waits_miss: Arc<AtomicU64>,
+    coalescing_wait_micros_total: Arc<AtomicU64>,
+    coalescing_wait_micros_max: Arc<AtomicU64>,
+    coalescing_peak_in_flight_chunks: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for ChunkEngine {
@@ -120,6 +144,12 @@ impl ChunkEngine {
             upstream_reader,
             handle_reads: Arc::new(DashMap::new()),
             in_flight_chunks: Arc::new(DashMap::new()),
+            coalescing_waits_total: Arc::new(AtomicU64::new(0)),
+            coalescing_waits_hit: Arc::new(AtomicU64::new(0)),
+            coalescing_waits_miss: Arc::new(AtomicU64::new(0)),
+            coalescing_wait_micros_total: Arc::new(AtomicU64::new(0)),
+            coalescing_wait_micros_max: Arc::new(AtomicU64::new(0)),
+            coalescing_peak_in_flight_chunks: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -164,6 +194,30 @@ impl ChunkEngine {
             disk_writes: cache_snapshot.disk_writes,
             disk_write_errors: cache_snapshot.disk_write_errors,
             disk_evictions: cache_snapshot.disk_evictions,
+        }
+    }
+
+    #[must_use]
+    pub fn prefetch_snapshot(&self) -> PrefetchSchedulerSnapshot {
+        self.scheduler.snapshot()
+    }
+
+    #[must_use]
+    pub fn chunk_coalescing_snapshot(&self) -> ChunkCoalescingSnapshot {
+        let waits_total = self.coalescing_waits_total.load(Ordering::Relaxed);
+        let wait_micros_total = self.coalescing_wait_micros_total.load(Ordering::Relaxed);
+        ChunkCoalescingSnapshot {
+            in_flight_chunks: self.in_flight_chunks.len() as u64,
+            peak_in_flight_chunks: self
+                .coalescing_peak_in_flight_chunks
+                .load(Ordering::Relaxed),
+            waits_total,
+            waits_hit: self.coalescing_waits_hit.load(Ordering::Relaxed),
+            waits_miss: self.coalescing_waits_miss.load(Ordering::Relaxed),
+            wait_average_duration_ms: average_millis(wait_micros_total, waits_total),
+            wait_max_duration_ms: duration_to_millis(
+                self.coalescing_wait_micros_max.load(Ordering::Relaxed),
+            ),
         }
     }
 
@@ -420,6 +474,10 @@ impl ChunkEngine {
                 Entry::Vacant(entry) => {
                     let notify = Arc::new(Notify::new());
                     entry.insert(Arc::clone(&notify));
+                    update_max(
+                        &self.coalescing_peak_in_flight_chunks,
+                        self.in_flight_chunks.len() as u64,
+                    );
                     Some(notify)
                 }
                 Entry::Occupied(entry) => {
@@ -431,10 +489,13 @@ impl ChunkEngine {
                         chunk_length = chunk.length,
                         "chunk_engine.read waiting for in-flight foreground fetch"
                     );
+                    let wait_started = tokio::time::Instant::now();
                     let notified = notify.notified();
                     drop(entry);
                     notified.await;
+                    let wait_duration = wait_started.elapsed();
                     if let Some(bytes) = self.cache.get(&key).await {
+                        self.record_coalescing_wait("hit", wait_duration);
                         record_chunk_cache_event("hit_after_inflight_wait");
                         tracing::debug!(
                             handle_key = %request.handle_key,
@@ -445,6 +506,7 @@ impl ChunkEngine {
                         );
                         return Ok(bytes);
                     }
+                    self.record_coalescing_wait("miss", wait_duration);
                     record_chunk_cache_event("miss_after_inflight_wait");
                     continue;
                 }
@@ -598,6 +660,23 @@ impl ChunkEngine {
         record_chunk_cache_event("insert");
         self.cache.insert(key, bytes).await;
     }
+
+    fn record_coalescing_wait(&self, result: &'static str, duration: Duration) {
+        let micros = duration.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.coalescing_waits_total.fetch_add(1, Ordering::Relaxed);
+        self.coalescing_wait_micros_total
+            .fetch_add(micros, Ordering::Relaxed);
+        update_max(&self.coalescing_wait_micros_max, micros);
+        match result {
+            "hit" => {
+                self.coalescing_waits_hit.fetch_add(1, Ordering::Relaxed);
+            }
+            "miss" => {
+                self.coalescing_waits_miss.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn cache_key(file_id: &str, chunk: PlannedChunk) -> String {
@@ -612,4 +691,21 @@ fn read_pattern_name(pattern: ReadPattern) -> &'static str {
         ReadPattern::TailProbe => "tail_probe",
         ReadPattern::CacheHit => "cache_hit",
     }
+}
+
+fn update_max(target: &AtomicU64, candidate: u64) {
+    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        (candidate > current).then_some(candidate)
+    });
+}
+
+fn average_millis(total_micros: u64, count: u64) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+    total_micros as f64 / count as f64 / 1000.0
+}
+
+fn duration_to_millis(micros: u64) -> f64 {
+    micros as f64 / 1000.0
 }

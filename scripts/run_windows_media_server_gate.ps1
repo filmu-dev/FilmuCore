@@ -1,5 +1,7 @@
 param(
     [string[]] $Providers = @('jellyfin', 'emby', 'plex'),
+    [int] $RepeatCount = 1,
+    [string] $EnvironmentClass = '',
     [string] $MountPath = '',
     [string] $TmdbId = '603',
     [string] $Title = 'The Matrix',
@@ -9,7 +11,8 @@ param(
     [switch] $SkipStart,
     [switch] $StopWhenDone,
     [switch] $FailFast,
-    [switch] $RequireFilmuvfs
+    [switch] $RequireFilmuvfs,
+    [switch] $DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,6 +103,10 @@ foreach ($providerEntry in $Providers) {
 }
 $Providers = @($normalizedProviders)
 if ($Providers.Count -eq 0) { throw 'At least one provider is required.' }
+if ($RepeatCount -lt 1) { throw 'RepeatCount must be at least 1.' }
+if ([string]::IsNullOrWhiteSpace($EnvironmentClass)) {
+    $EnvironmentClass = "{0}:{1}" -f $env:COMPUTERNAME, [System.Environment]::OSVersion.VersionString
+}
 
 if ([string]::IsNullOrWhiteSpace($MountPath)) {
     $MountPath = Get-DefaultMountPath
@@ -115,97 +122,124 @@ if ($RequireFilmuvfs -and $null -eq $filmuvfsProcess) {
 $results = [System.Collections.Generic.List[object]]::new()
 $sharedReuse = $ReuseExistingItem
 $sharedSkipStart = $SkipStart
+$stopRequested = $false
 
 foreach ($provider in $Providers) {
     if (-not (Test-ProviderConfigured -Provider $provider -DotEnv $dotEnv)) {
         $results.Add([pscustomobject]@{
+            environment_class = $EnvironmentClass
             provider = $provider
+            run = $null
             status = 'skipped'
             exit_code = $null
             topology = $null
             artifact_dir = $null
+            summary_exists = $false
+            playback_start_status = $null
             details = 'Provider is not configured in env/.env for this host.'
         })
         continue
     }
 
-    $before = @()
-    if (Test-Path -LiteralPath $artifactsRoot) {
-        $before = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
-    }
-
-    $argList = [System.Collections.Generic.List[string]]::new()
-    $argList.Add('-NoProfile')
-    $argList.Add('-File')
-    $argList.Add($proofScript)
-    $argList.Add('-MediaServerProvider')
-    $argList.Add($provider)
-    $argList.Add('-TmdbId')
-    $argList.Add($TmdbId)
-    $argList.Add('-Title')
-    $argList.Add($Title)
-    $argList.Add('-MediaType')
-    $argList.Add($MediaType)
-    if ($provider -eq 'plex') {
-        $argList.Add('-MediaServerUrl')
-        $argList.Add((Get-NativePlexUrl))
-        $nativePlexToken = Get-NativePlexLocalAdminToken
-        if (-not [string]::IsNullOrWhiteSpace($nativePlexToken)) {
-            $argList.Add('-MediaServerToken')
-            $argList.Add($nativePlexToken)
+    for ($runIndex = 1; $runIndex -le $RepeatCount; $runIndex++) {
+        $before = @()
+        if (Test-Path -LiteralPath $artifactsRoot) {
+            $before = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
         }
-    }
-    if ($sharedReuse) { $argList.Add('-ReuseExistingItem') }
-    if ($sharedSkipStart) { $argList.Add('-SkipStart') }
 
-    Write-Host ("[windows-media-gate] Running provider '{0}'..." -f $provider)
-    & $shellExecutable @argList
-    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int] $LASTEXITCODE }
-
-    $after = @()
-    if (Test-Path -LiteralPath $artifactsRoot) {
-        $after = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
-    }
-    $artifactDir = $after | Where-Object { $before -notcontains $_ } | Select-Object -First 1
-    if ([string]::IsNullOrWhiteSpace([string] $artifactDir) -and $after.Count -gt 0) {
-        $artifactDir = $after[0]
-    }
-
-    $topology = $null
-    $details = $null
-    if (-not [string]::IsNullOrWhiteSpace([string] $artifactDir)) {
-        $artifactSummaryPath = Join-Path $artifactDir 'summary.json'
-        if (Test-Path -LiteralPath $artifactSummaryPath) {
-            $artifactSummary = Get-Content -LiteralPath $artifactSummaryPath -Raw | ConvertFrom-Json
-            if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'topology') {
-                $topology = [string] $artifactSummary.media_server.topology
+        $argList = [System.Collections.Generic.List[string]]::new()
+        $argList.Add('-NoProfile')
+        $argList.Add('-File')
+        $argList.Add($proofScript)
+        $argList.Add('-MediaServerProvider')
+        $argList.Add($provider)
+        $argList.Add('-TmdbId')
+        $argList.Add($TmdbId)
+        $argList.Add('-Title')
+        $argList.Add($Title)
+        $argList.Add('-MediaType')
+        $argList.Add($MediaType)
+        if ($provider -eq 'plex') {
+            $argList.Add('-MediaServerUrl')
+            $argList.Add((Get-NativePlexUrl))
+            $nativePlexToken = Get-NativePlexLocalAdminToken
+            if (-not [string]::IsNullOrWhiteSpace($nativePlexToken)) {
+                $argList.Add('-MediaServerToken')
+                $argList.Add($nativePlexToken)
             }
-            if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'playback_start_details') {
-                $details = [string] $artifactSummary.media_server.playback_start_details
-            }
-            if ([string]::IsNullOrWhiteSpace($details) -and ($artifactSummary.PSObject.Properties.Name -contains 'steps')) {
-                $failedStep = @($artifactSummary.steps) | Where-Object { [string] $_.status -eq 'failed' } | Select-Object -Last 1
-                if (($null -ne $failedStep) -and ($failedStep.PSObject.Properties.Name -contains 'details')) {
-                    $details = [string] $failedStep.details
+        }
+        if ($sharedReuse) { $argList.Add('-ReuseExistingItem') }
+        if ($sharedSkipStart) { $argList.Add('-SkipStart') }
+        if ($DryRun) { $argList.Add('-DryRun') }
+
+        Write-Host ("[windows-media-gate] Running provider '{0}' ({1}/{2})..." -f $provider, $runIndex, $RepeatCount)
+        & $shellExecutable @argList
+        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int] $LASTEXITCODE }
+
+        $after = @()
+        if (Test-Path -LiteralPath $artifactsRoot) {
+            $after = @(Get-ChildItem -LiteralPath $artifactsRoot -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -ExpandProperty FullName)
+        }
+        $artifactDir = $after | Where-Object { $before -notcontains $_ } | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace([string] $artifactDir) -and $after.Count -gt 0) {
+            $artifactDir = $after[0]
+        }
+
+        $topology = $null
+        $details = $null
+        $summaryExists = $false
+        $playbackStartStatus = $null
+        if (-not [string]::IsNullOrWhiteSpace([string] $artifactDir)) {
+            $artifactSummaryPath = Join-Path $artifactDir 'summary.json'
+            if (Test-Path -LiteralPath $artifactSummaryPath) {
+                $summaryExists = $true
+                $artifactSummary = Get-Content -LiteralPath $artifactSummaryPath -Raw | ConvertFrom-Json
+                if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'topology') {
+                    $topology = [string] $artifactSummary.media_server.topology
+                }
+                if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'playback_start_status') {
+                    $playbackStartStatus = [string] $artifactSummary.media_server.playback_start_status
+                }
+                if ($artifactSummary.media_server.PSObject.Properties.Name -contains 'playback_start_details') {
+                    $details = [string] $artifactSummary.media_server.playback_start_details
+                }
+                if ([string]::IsNullOrWhiteSpace($details) -and ($artifactSummary.PSObject.Properties.Name -contains 'steps')) {
+                    $failedStep = @($artifactSummary.steps) | Where-Object { [string] $_.status -eq 'failed' } | Select-Object -Last 1
+                    if (($null -ne $failedStep) -and ($failedStep.PSObject.Properties.Name -contains 'details')) {
+                        $details = [string] $failedStep.details
+                    }
                 }
             }
         }
+
+        $topologySatisfied = $DryRun -or ($topology -eq 'native_windows')
+        $status = if (($exitCode -eq 0) -and $summaryExists -and $topologySatisfied) { 'passed' } else { 'failed' }
+        $results.Add([pscustomobject]@{
+            environment_class = $EnvironmentClass
+            provider = $provider
+            run = $runIndex
+            status = $status
+            exit_code = $exitCode
+            topology = $topology
+            dry_run = [bool] $DryRun
+            artifact_dir = $artifactDir
+            summary_exists = $summaryExists
+            playback_start_status = $playbackStartStatus
+            details = $details
+        })
+
+        if (($status -eq 'failed') -and $FailFast) {
+            $stopRequested = $true
+            break
+        }
+
+        $sharedReuse = $true
+        $sharedSkipStart = $true
     }
 
-    $status = if (($exitCode -eq 0) -and ($topology -eq 'native_windows')) { 'passed' } else { 'failed' }
-    $results.Add([pscustomobject]@{
-        provider = $provider
-        status = $status
-        exit_code = $exitCode
-        topology = $topology
-        artifact_dir = $artifactDir
-        details = $details
-    })
-
-    if (($status -eq 'failed') -and $FailFast) { break }
-
-    $sharedReuse = $true
-    $sharedSkipStart = $true
+    if ($stopRequested) {
+        break
+    }
 }
 
 $summary = [pscustomobject]@{
@@ -213,7 +247,9 @@ $summary = [pscustomobject]@{
     mount_path = $MountPath
     filmuvfs_running = ($null -ne $filmuvfsProcess)
     filmuvfs_pid = if ($null -ne $filmuvfsProcess) { [int] $filmuvfsProcess.Id } else { $null }
+    environment_class = $EnvironmentClass
     providers = $Providers
+    repeat_count = $RepeatCount
     tmdb_id = $TmdbId
     title = $Title
     media_type = $MediaType

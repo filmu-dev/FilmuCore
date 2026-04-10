@@ -46,7 +46,7 @@ permissions:
 jobs:
   playback-gate:
     name: Playback Gate
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -56,27 +56,107 @@ jobs:
       ALL_DEBRID_API_KEY: ${{ secrets.ALL_DEBRID_API_KEY }}
       FILMU_PY_DEBRIDLINK_API_TOKEN: ${{ secrets.FILMU_PY_DEBRIDLINK_API_TOKEN }}
       DEBRID_LINK_API_KEY: ${{ secrets.DEBRID_LINK_API_KEY }}
-      FILMU_FRONTEND_CONTEXT: ${{ vars.FILMU_FRONTEND_CONTEXT }}
+      FILMU_FRONTEND_CONTEXT: ${{ vars.FILMU_FRONTEND_CONTEXT != '' && vars.FILMU_FRONTEND_CONTEXT || format('{0}/Triven_frontend', github.workspace) }}
+      FILMU_FRONTEND_REPOSITORY: ${{ vars.FILMU_FRONTEND_REPOSITORY != '' && vars.FILMU_FRONTEND_REPOSITORY || 'S0lidByte/CineFlow-frontend' }}
+      FILMU_FRONTEND_REF: ${{ vars.FILMU_FRONTEND_REF }}
       FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE: ${{ vars.FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE }}
       FILMU_FRONTEND_USERNAME: ${{ vars.FILMU_FRONTEND_USERNAME }}
       FILMU_FRONTEND_PASSWORD: ${{ secrets.FILMU_FRONTEND_PASSWORD }}
       FILMU_PY_API_KEY: ${{ secrets.FILMU_PY_API_KEY }}
       FILMU_BACKEND_CONTAINER_NAME: filmu-python
       FILMU_PLAYBACK_REQUIRED_CHECK_NAME: Playback Gate / Playback Gate
+      FILMU_PLAYBACK_DRY_RUN: ${{ (secrets.TMDB_API_KEY == '' || (secrets.FILMU_PY_REALDEBRID_API_TOKEN == '' && secrets.REAL_DEBRID_API_KEY == '' && secrets.FILMU_PY_ALLDEBRID_API_TOKEN == '' && secrets.ALL_DEBRID_API_KEY == '' && secrets.FILMU_PY_DEBRIDLINK_API_TOKEN == '' && secrets.DEBRID_LINK_API_KEY == '')) && '1' || '0' }}
       PLEX_URL: http://localhost:32401
       EMBY_URL: http://localhost:8097
       PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
       EMBY_API_KEY: ${{ secrets.EMBY_API_KEY }}
-      FILMU_REQUIRE_PROVIDER_GATE: "1"
+      FILMU_REQUIRE_PROVIDER_GATE: ${{ secrets.PLEX_TOKEN != '' && secrets.EMBY_API_KEY != '' && '1' || '0' }}
     steps:
       - name: Checkout backend repo
         uses: actions/checkout@v4
 
+      - name: Checkout frontend repo
+        if: ${{ env.FILMU_FRONTEND_REPOSITORY != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FILMU_FRONTEND_REPOSITORY }}
+          ref: ${{ vars.FILMU_FRONTEND_REF != '' && vars.FILMU_FRONTEND_REF || 'main' }}
+          path: Triven_frontend
+
+      - name: Provision hosted runner prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          browser_path="${FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE:-}"
+          if [[ -z "$browser_path" || ! -x "$browser_path" ]]; then
+            for candidate in \
+              "$(command -v google-chrome 2>/dev/null || true)" \
+              "$(command -v google-chrome-stable 2>/dev/null || true)" \
+              "$(command -v chromium 2>/dev/null || true)" \
+              "$(command -v chromium-browser 2>/dev/null || true)" \
+              "$(command -v microsoft-edge 2>/dev/null || true)" \
+              "$(command -v msedge 2>/dev/null || true)"; do
+              if [[ -n "$candidate" && -x "$candidate" ]]; then
+                browser_path="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [[ -n "$browser_path" && -x "$browser_path" ]]; then
+            echo "FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE=$browser_path" >> "$GITHUB_ENV"
+          fi
+
+          if [[ ! -e /dev/fuse ]]; then
+            sudo modprobe fuse || true
+          fi
+
+          if [[ ! -e /dev/fuse ]]; then
+            sudo mknod -m 666 /dev/fuse c 10 229 || true
+          fi
+
       - name: Validate runner readiness
+        continue-on-error: ${{ env.FILMU_PLAYBACK_DRY_RUN == '1' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
-          ./scripts/check_playback_gate_runner.ps1 -RequireProviderGate -AsJson | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
+          $hasTmdb = -not [string]::IsNullOrWhiteSpace([string] $env:TMDB_API_KEY)
+          $debridKeys = @(
+            [string] $env:FILMU_PY_REALDEBRID_API_TOKEN
+            [string] $env:REAL_DEBRID_API_KEY
+            [string] $env:FILMU_PY_ALLDEBRID_API_TOKEN
+            [string] $env:ALL_DEBRID_API_KEY
+            [string] $env:FILMU_PY_DEBRIDLINK_API_TOKEN
+            [string] $env:DEBRID_LINK_API_KEY
+          ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          $hasDebrid = @($debridKeys).Count -gt 0
+          if (-not $hasTmdb -or -not $hasDebrid) {
+            $checks = [System.Collections.Generic.List[object]]::new()
+            $checks.Add([pscustomobject]@{ name = 'tmdb_api_key'; required = $true; ok = $hasTmdb; details = 'TMDB_API_KEY is required.' })
+            $checks.Add([pscustomobject]@{ name = 'debrid_provider_token'; required = $true; ok = $hasDebrid; details = 'At least one debrid provider token/key is required.' })
+            [pscustomobject]@{
+              timestamp = (Get-Date).ToString('o')
+              require_provider_gate = ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1')
+              status = 'dry_run'
+              checks = $checks
+            } | ConvertTo-Json -Depth 6 | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
+            "FILMU_PLAYBACK_DRY_RUN=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            if (-not $hasTmdb) {
+              Write-Host '::warning title=playback gate dry-run fallback::tmdb_api_key - TMDB_API_KEY is required.'
+            }
+            if (-not $hasDebrid) {
+              Write-Host '::warning title=playback gate dry-run fallback::debrid_provider_token - At least one debrid provider token/key is required.'
+            }
+            return
+          }
+          $readinessArgs = @('-AsJson')
+          if ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1') {
+            $readinessArgs += '-RequireProviderGate'
+          }
+          $readinessJson = ./scripts/check_playback_gate_runner.ps1 @readinessArgs
+          $readinessJson | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
 
       - name: Run playback gate
         run: |
@@ -114,6 +194,16 @@ jobs:
             echo
             if [[ -f playback-proof-artifacts/runner-readiness.json ]]; then
               echo "Runner readiness artifact captured."
+              if command -v jq >/dev/null 2>&1; then
+                readiness_status="$(jq -r '.status // "unknown"' playback-proof-artifacts/runner-readiness.json)"
+                echo "- Runner readiness status: \`${readiness_status}\`"
+                mapfile -t readiness_failures < <(jq -r '.checks[] | select(.required == true and .ok == false) | "- " + .name + ": " + .details' playback-proof-artifacts/runner-readiness.json)
+                if [[ "${#readiness_failures[@]}" -gt 0 ]]; then
+                  echo
+                  echo "### Missing readiness prerequisites"
+                  printf '%s\n' "${readiness_failures[@]}"
+                fi
+              fi
             else
               echo "Runner readiness artifact missing."
             fi

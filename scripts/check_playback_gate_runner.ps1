@@ -1,6 +1,7 @@
 param(
     [switch] $RequireProviderGate,
-    [switch] $AsJson
+    [switch] $AsJson,
+    [switch] $NoExitOnFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,13 +39,66 @@ function Test-CommandAvailable {
     return ($null -ne (Get-Command $Name -ErrorAction SilentlyContinue))
 }
 
+function Test-LinuxFuseAvailable {
+    param([Parameter(Mandatory = $true)][bool] $IsLinuxHost)
+
+    if (-not $IsLinuxHost) {
+        return $false
+    }
+
+    if (Test-Path -LiteralPath '/dev/fuse') {
+        return $true
+    }
+
+    foreach ($shellName in @('bash', 'sh')) {
+        if (-not (Test-CommandAvailable -Name $shellName)) {
+            continue
+        }
+
+        & $shellName -lc 'test -e /dev/fuse'
+        if ($LASTEXITCODE -eq 0) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Resolve-BrowserExecutablePath {
+    param(
+        [AllowEmptyString()][string] $ConfiguredPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPath) -and (Test-Path -LiteralPath $ConfiguredPath)) {
+        return $ConfiguredPath
+    }
+
+    $candidateCommands = @(
+        'google-chrome'
+        'google-chrome-stable'
+        'chromium'
+        'chromium-browser'
+        'microsoft-edge'
+        'msedge'
+    )
+
+    foreach ($candidate in $candidateCommands) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace($command.Source)) {
+            return [string] $command.Source
+        }
+    }
+
+    return ''
+}
+
 $scriptRoot = $PSScriptRoot
 $repoRoot = Split-Path -Parent $scriptRoot
 $dotEnv = Get-DotEnvMap -Path (Join-Path $repoRoot '.env')
 $isLinuxHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
 
 $frontendContext = Get-EnvValue -Name 'FILMU_FRONTEND_CONTEXT' -DotEnv $dotEnv
-$browserPath = Get-EnvValue -Name 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE' -DotEnv $dotEnv
+$browserPath = Resolve-BrowserExecutablePath -ConfiguredPath (Get-EnvValue -Name 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE' -DotEnv $dotEnv)
 $tmdbKey = Get-EnvValue -Name 'TMDB_API_KEY' -DotEnv $dotEnv
 $plexToken = Get-EnvValue -Name 'PLEX_TOKEN' -DotEnv $dotEnv
 $embyApiKey = Get-EnvValue -Name 'EMBY_API_KEY' -DotEnv $dotEnv
@@ -67,7 +121,7 @@ $checks.Add([pscustomobject]@{ name = 'frontend_context'; required = $true; ok =
 $checks.Add([pscustomobject]@{ name = 'browser_executable'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($browserPath) -and (Test-Path -LiteralPath $browserPath)); details = 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE must point to an executable browser.' })
 $checks.Add([pscustomobject]@{ name = 'tmdb_api_key'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($tmdbKey)); details = 'TMDB_API_KEY is required.' })
 $checks.Add([pscustomobject]@{ name = 'debrid_provider_token'; required = $true; ok = ($debridKeys.Count -gt 0); details = 'At least one debrid provider token/key is required.' })
-$checks.Add([pscustomobject]@{ name = 'linux_fuse'; required = $true; ok = ($isLinuxHost -and (Test-Path -LiteralPath '/dev/fuse')); details = 'The self-hosted playback gate currently requires Linux with /dev/fuse.' })
+$checks.Add([pscustomobject]@{ name = 'linux_fuse'; required = $true; ok = (Test-LinuxFuseAvailable -IsLinuxHost $isLinuxHost); details = 'The playback gate requires a Linux runner with /dev/fuse.' })
 $checks.Add([pscustomobject]@{ name = 'plex_token'; required = $RequireProviderGate.IsPresent; ok = (-not [string]::IsNullOrWhiteSpace($plexToken)); details = 'PLEX_TOKEN enables the provider parity gate.' })
 $checks.Add([pscustomobject]@{ name = 'emby_api_key'; required = $RequireProviderGate.IsPresent; ok = (-not [string]::IsNullOrWhiteSpace($embyApiKey)); details = 'EMBY_API_KEY enables the provider parity gate.' })
 
@@ -79,6 +133,7 @@ $result = [pscustomobject]@{
     timestamp = (Get-Date).ToString('o')
     repo_root = $repoRoot
     require_provider_gate = $RequireProviderGate.IsPresent
+    browser_executable_path = $browserPath
     status = $status
     checks = $checks
 }
@@ -95,6 +150,14 @@ else {
 }
 
 if ($requiredFailures.Count -gt 0) {
+    if ($NoExitOnFailure) {
+        return
+    }
+    if ([string]::Equals([string] $env:GITHUB_ACTIONS, 'true', [System.StringComparison]::OrdinalIgnoreCase)) {
+        foreach ($failure in $requiredFailures) {
+            Write-Host ("::error title=playback gate readiness::{0} - {1}" -f $failure.name, $failure.details)
+        }
+    }
     exit 1
 }
 

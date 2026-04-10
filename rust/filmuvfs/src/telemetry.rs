@@ -161,6 +161,7 @@ pub struct FilmuvfsRuntimeStatusSnapshot {
     pub chunk_cache: FilmuvfsChunkCacheStatusSnapshot,
     pub chunk_read_patterns: FilmuvfsChunkReadPatternSnapshot,
     pub prefetch: FilmuvfsPrefetchStatusSnapshot,
+    pub chunk_coalescing: FilmuvfsChunkCoalescingStatusSnapshot,
     pub inline_refresh: FilmuvfsInlineRefreshStatusSnapshot,
     pub windows_projfs: FilmuvfsWindowsProjfsStatusSnapshot,
 }
@@ -175,7 +176,9 @@ pub struct FilmuvfsCatalogStatusSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct FilmuvfsRuntimeGaugeSnapshot {
     pub open_handles: u64,
+    pub peak_open_handles: u64,
     pub active_reads: u64,
+    pub peak_active_reads: u64,
     pub chunk_cache_weighted_bytes: u64,
 }
 
@@ -286,6 +289,22 @@ pub struct FilmuvfsPrefetchStatusSnapshot {
     pub adaptive_error: u64,
     pub startup_scheduled: u64,
     pub startup_error: u64,
+    pub concurrency_limit: u64,
+    pub available_permits: u64,
+    pub active_permits: u64,
+    pub active_background_tasks: u64,
+    pub peak_active_background_tasks: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FilmuvfsChunkCoalescingStatusSnapshot {
+    pub in_flight_chunks: u64,
+    pub peak_in_flight_chunks: u64,
+    pub waits_total: u64,
+    pub waits_hit: u64,
+    pub waits_miss: u64,
+    pub wait_average_duration_ms: f64,
+    pub wait_max_duration_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1162,6 +1181,8 @@ impl FilmuvfsMetrics {
         config: &SidecarConfig,
     ) -> FilmuvfsRuntimeStatusSnapshot {
         let chunk_cache_snapshot = self.mount_runtime.chunk_cache_snapshot();
+        let prefetch_snapshot = self.mount_runtime.prefetch_snapshot();
+        let chunk_coalescing_snapshot = self.mount_runtime.chunk_coalescing_snapshot();
         let catalog_counts = self.catalog_state.counts();
         let read_ok = self.read_requests_ok.load(Ordering::Relaxed);
         let read_error = self.read_requests_error.load(Ordering::Relaxed);
@@ -1222,7 +1243,9 @@ impl FilmuvfsMetrics {
             },
             runtime: FilmuvfsRuntimeGaugeSnapshot {
                 open_handles: self.mount_runtime.open_handle_count() as u64,
+                peak_open_handles: self.mount_runtime.peak_open_handle_count(),
                 active_reads: self.mount_runtime.active_read_count(),
+                peak_active_reads: self.mount_runtime.peak_active_read_count(),
                 chunk_cache_weighted_bytes: self.mount_runtime.chunk_cache_weighted_size_bytes(),
             },
             handle_startup: FilmuvfsHandleStartupStatusSnapshot {
@@ -1357,6 +1380,20 @@ impl FilmuvfsMetrics {
                 adaptive_error: self.prefetch_adaptive_error.load(Ordering::Relaxed),
                 startup_scheduled: self.prefetch_startup_scheduled.load(Ordering::Relaxed),
                 startup_error: self.prefetch_startup_error.load(Ordering::Relaxed),
+                concurrency_limit: prefetch_snapshot.concurrency_limit,
+                available_permits: prefetch_snapshot.available_permits,
+                active_permits: prefetch_snapshot.active_permits,
+                active_background_tasks: prefetch_snapshot.active_background_tasks,
+                peak_active_background_tasks: prefetch_snapshot.peak_active_background_tasks,
+            },
+            chunk_coalescing: FilmuvfsChunkCoalescingStatusSnapshot {
+                in_flight_chunks: chunk_coalescing_snapshot.in_flight_chunks,
+                peak_in_flight_chunks: chunk_coalescing_snapshot.peak_in_flight_chunks,
+                waits_total: chunk_coalescing_snapshot.waits_total,
+                waits_hit: chunk_coalescing_snapshot.waits_hit,
+                waits_miss: chunk_coalescing_snapshot.waits_miss,
+                wait_average_duration_ms: chunk_coalescing_snapshot.wait_average_duration_ms,
+                wait_max_duration_ms: chunk_coalescing_snapshot.wait_max_duration_ms,
             },
             inline_refresh: FilmuvfsInlineRefreshStatusSnapshot {
                 success: self.inline_refresh_success.load(Ordering::Relaxed),

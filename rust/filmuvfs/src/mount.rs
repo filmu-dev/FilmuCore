@@ -35,13 +35,14 @@ use crate::{
         inode_for_entry_id as hashed_inode_for_entry_id, CatalogStateStore, ROOT_INODE,
     },
     chunk_engine::{
-        ChunkCacheSnapshot, ChunkEngine, ChunkEngineConfig, ChunkEngineError, ChunkReadRequest,
+        ChunkCacheSnapshot, ChunkCoalescingSnapshot, ChunkEngine, ChunkEngineConfig,
+        ChunkEngineError, ChunkReadRequest,
     },
     chunk_planner::ChunkPlannerConfig,
     config::{PrefetchConfig, ResolvedMountAdapterKind, SidecarConfig},
     hidden_paths::{is_hidden_path, is_ignored_path},
     media_path::{parse_media_semantic_path, MediaSemanticPathInfo},
-    prefetch::VelocityTracker,
+    prefetch::{PrefetchSchedulerSnapshot, VelocityTracker},
     proto::{
         catalog_entry::Details as CatalogEntryDetails,
         filmu::vfs::catalog::v1::{
@@ -319,6 +320,8 @@ pub struct MountRuntime {
     handle_velocity: Arc<DashMap<u64, VelocityTracker>>,
     next_handle_id: Arc<AtomicU64>,
     active_reads: Arc<AtomicU64>,
+    peak_open_handles: Arc<AtomicU64>,
+    peak_active_reads: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
     drain_notify: Arc<Notify>,
     session_id: Arc<String>,
@@ -406,6 +409,8 @@ impl MountRuntime {
             handle_velocity: Arc::new(DashMap::new()),
             next_handle_id: Arc::new(AtomicU64::new(1)),
             active_reads: Arc::new(AtomicU64::new(0)),
+            peak_open_handles: Arc::new(AtomicU64::new(0)),
+            peak_active_reads: Arc::new(AtomicU64::new(0)),
             shutting_down: Arc::new(AtomicBool::new(false)),
             drain_notify: Arc::new(Notify::new()),
             session_id: Arc::new(session_id),
@@ -454,8 +459,24 @@ impl MountRuntime {
         self.chunk_engine.cache_snapshot()
     }
 
+    pub fn prefetch_snapshot(&self) -> PrefetchSchedulerSnapshot {
+        self.chunk_engine.prefetch_snapshot()
+    }
+
+    pub fn chunk_coalescing_snapshot(&self) -> ChunkCoalescingSnapshot {
+        self.chunk_engine.chunk_coalescing_snapshot()
+    }
+
     pub fn active_read_count(&self) -> u64 {
         self.active_reads.load(Ordering::SeqCst)
+    }
+
+    pub fn peak_open_handle_count(&self) -> u64 {
+        self.peak_open_handles.load(Ordering::SeqCst)
+    }
+
+    pub fn peak_active_read_count(&self) -> u64 {
+        self.peak_active_reads.load(Ordering::SeqCst)
     }
 
     fn record_handle_startup_result(&self, handle_id: u64, result: &'static str) {
@@ -1146,6 +1167,7 @@ impl MountRuntime {
                 startup_recorded: false,
             },
         );
+        update_max(&self.peak_open_handles, self.handles.len() as u64);
         self.chunk_engine.register_handle(&handle_key);
         let semantic_path = self.semantic_path_info_for_entry(&entry);
 
@@ -1723,7 +1745,8 @@ struct ActiveReadGuard<'a> {
 
 impl<'a> ActiveReadGuard<'a> {
     fn new(runtime: &'a MountRuntime) -> Self {
-        runtime.active_reads.fetch_add(1, Ordering::SeqCst);
+        let active_reads = runtime.active_reads.fetch_add(1, Ordering::SeqCst) + 1;
+        update_max(&runtime.peak_active_reads, active_reads);
         Self { runtime }
     }
 }
@@ -1734,6 +1757,12 @@ impl Drop for ActiveReadGuard<'_> {
             self.runtime.drain_notify.notify_waiters();
         }
     }
+}
+
+fn update_max(target: &AtomicU64, candidate: u64) {
+    let _ = target.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        (candidate > current).then_some(candidate)
+    });
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]

@@ -218,7 +218,9 @@ class ServingGovernanceResponse(BaseModel):
     vfs_catalog_inline_refresh_not_found: int
     vfs_runtime_snapshot_available: int
     vfs_runtime_open_handles: int
+    vfs_runtime_peak_open_handles: int
     vfs_runtime_active_reads: int
+    vfs_runtime_peak_active_reads: int
     vfs_runtime_chunk_cache_weighted_bytes: int
     vfs_runtime_chunk_cache_backend: str
     vfs_runtime_chunk_cache_memory_bytes: int
@@ -276,9 +278,21 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_chunk_cache_misses: int
     vfs_runtime_chunk_cache_inserts: int
     vfs_runtime_chunk_cache_prefetch_hits: int
+    vfs_runtime_prefetch_concurrency_limit: int
+    vfs_runtime_prefetch_available_permits: int
+    vfs_runtime_prefetch_active_permits: int
+    vfs_runtime_prefetch_active_background_tasks: int
+    vfs_runtime_prefetch_peak_active_background_tasks: int
     vfs_runtime_prefetch_background_spawned: int
     vfs_runtime_prefetch_background_backpressure: int
     vfs_runtime_prefetch_background_error: int
+    vfs_runtime_chunk_coalescing_in_flight_chunks: int
+    vfs_runtime_chunk_coalescing_peak_in_flight_chunks: int
+    vfs_runtime_chunk_coalescing_waits_total: int
+    vfs_runtime_chunk_coalescing_waits_hit: int
+    vfs_runtime_chunk_coalescing_waits_miss: int
+    vfs_runtime_chunk_coalescing_wait_average_duration_ms: float
+    vfs_runtime_chunk_coalescing_wait_max_duration_ms: float
     vfs_runtime_inline_refresh_success: int
     vfs_runtime_inline_refresh_no_url: int
     vfs_runtime_inline_refresh_error: int

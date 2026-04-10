@@ -841,6 +841,25 @@ function Get-NestedRuntimeMetric {
     return [int64]$current
 }
 
+function Get-NestedRuntimeFloat {
+    param(
+        $Snapshot,
+        [string[]] $Path
+    )
+
+    $current = $Snapshot
+    foreach ($segment in $Path) {
+        if ($null -eq $current -or $current.PSObject.Properties.Match($segment).Count -eq 0) {
+            return 0.0
+        }
+        $current = $current.$segment
+    }
+    if ($null -eq $current) {
+        return 0.0
+    }
+    return [double]$current
+}
+
 function Get-NestedRuntimeText {
     param(
         $Snapshot,
@@ -922,9 +941,19 @@ function Get-FilmuvfsRuntimeDelta {
         chunk_cache_disk_writes = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_writes')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_writes'))
         chunk_cache_disk_write_errors = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_write_errors')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_write_errors'))
         chunk_cache_disk_evictions = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_cache', 'disk_evictions')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_cache', 'disk_evictions'))
+        prefetch_concurrency_limit = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('prefetch', 'concurrency_limit')
+        prefetch_available_permits = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('prefetch', 'available_permits')
+        prefetch_active_permits = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('prefetch', 'active_permits')
+        prefetch_active_background_tasks = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('prefetch', 'active_background_tasks')
         prefetch_background_spawned = ([int64]$AfterSnapshot.prefetch.background_spawned) - ([int64]$BeforeSnapshot.prefetch.background_spawned)
         prefetch_background_backpressure = ([int64]$AfterSnapshot.prefetch.background_backpressure) - ([int64]$BeforeSnapshot.prefetch.background_backpressure)
         prefetch_background_error = ([int64]$AfterSnapshot.prefetch.background_error) - ([int64]$BeforeSnapshot.prefetch.background_error)
+        chunk_coalescing_in_flight_chunks = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'in_flight_chunks')
+        chunk_coalescing_waits_total = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_total')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_total'))
+        chunk_coalescing_waits_hit = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_hit')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_hit'))
+        chunk_coalescing_waits_miss = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_miss')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_miss'))
+        chunk_coalescing_wait_average_duration_ms = Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_average_duration_ms')
+        chunk_coalescing_wait_max_duration_ms = Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_max_duration_ms')
         inline_refresh_success = ([int64]$AfterSnapshot.inline_refresh.success) - ([int64]$BeforeSnapshot.inline_refresh.success)
         inline_refresh_no_url = ([int64]$AfterSnapshot.inline_refresh.no_url) - ([int64]$BeforeSnapshot.inline_refresh.no_url)
         inline_refresh_error = ([int64]$AfterSnapshot.inline_refresh.error) - ([int64]$BeforeSnapshot.inline_refresh.error)
@@ -943,6 +972,8 @@ function Get-RuntimeDiagnostics {
     if ($null -eq $RuntimeDelta) {
         return [ordered]@{
             captured = $false
+            peak_open_handles = $null
+            peak_active_reads = $null
             chunk_cache_backend = $null
             chunk_cache_memory_bytes = $null
             chunk_cache_memory_max_bytes = $null
@@ -957,6 +988,18 @@ function Get-RuntimeDiagnostics {
             chunk_cache_disk_evictions = $null
             cache_cold_fetch_incidents = $null
             cache_pressure_incidents = $null
+            prefetch_concurrency_limit = $null
+            prefetch_available_permits = $null
+            prefetch_active_permits = $null
+            prefetch_active_background_tasks = $null
+            prefetch_peak_active_background_tasks = $null
+            chunk_coalescing_in_flight_chunks = $null
+            chunk_coalescing_peak_in_flight_chunks = $null
+            chunk_coalescing_waits_total = $null
+            chunk_coalescing_waits_hit = $null
+            chunk_coalescing_waits_miss = $null
+            chunk_coalescing_wait_average_duration_ms = $null
+            chunk_coalescing_wait_max_duration_ms = $null
             provider_pressure_incidents = $null
             unrecovered_stale_refresh_incidents = $null
             fatal_error_incidents = $null
@@ -1003,6 +1046,8 @@ function Get-RuntimeDiagnostics {
 
     return [ordered]@{
         captured = $true
+        peak_open_handles = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('runtime', 'peak_open_handles')
+        peak_active_reads = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('runtime', 'peak_active_reads')
         chunk_cache_backend = Get-NestedRuntimeText -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'backend') -Default 'unknown'
         chunk_cache_memory_bytes = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_bytes')
         chunk_cache_memory_max_bytes = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_max_bytes')
@@ -1017,6 +1062,18 @@ function Get-RuntimeDiagnostics {
         chunk_cache_disk_evictions = [int64]$RuntimeDelta.chunk_cache_disk_evictions
         cache_cold_fetch_incidents = [int64]$RuntimeDelta.chunk_cache_misses
         cache_pressure_incidents = $cachePressureIncidents
+        prefetch_concurrency_limit = [int64]$RuntimeDelta.prefetch_concurrency_limit
+        prefetch_available_permits = [int64]$RuntimeDelta.prefetch_available_permits
+        prefetch_active_permits = [int64]$RuntimeDelta.prefetch_active_permits
+        prefetch_active_background_tasks = [int64]$RuntimeDelta.prefetch_active_background_tasks
+        prefetch_peak_active_background_tasks = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('prefetch', 'peak_active_background_tasks')
+        chunk_coalescing_in_flight_chunks = [int64]$RuntimeDelta.chunk_coalescing_in_flight_chunks
+        chunk_coalescing_peak_in_flight_chunks = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_coalescing', 'peak_in_flight_chunks')
+        chunk_coalescing_waits_total = [int64]$RuntimeDelta.chunk_coalescing_waits_total
+        chunk_coalescing_waits_hit = [int64]$RuntimeDelta.chunk_coalescing_waits_hit
+        chunk_coalescing_waits_miss = [int64]$RuntimeDelta.chunk_coalescing_waits_miss
+        chunk_coalescing_wait_average_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms
+        chunk_coalescing_wait_max_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms
         provider_pressure_incidents = $providerPressureIncidents
         unrecovered_stale_refresh_incidents = [int64]$RuntimeDelta.mounted_reads_estale
         handle_startup_total = [int64]$RuntimeDelta.handle_startup_total
@@ -1151,6 +1208,8 @@ $backendStatusAfter = New-EmptyBackendStatusCapture
 $runtimeStatusDelta = $null
 $runtimeDiagnostics = [ordered]@{
     captured = $false
+    peak_open_handles = $null
+    peak_active_reads = $null
     chunk_cache_backend = $null
     chunk_cache_memory_bytes = $null
     chunk_cache_memory_max_bytes = $null
@@ -1165,6 +1224,18 @@ $runtimeDiagnostics = [ordered]@{
     chunk_cache_disk_evictions = $null
     cache_cold_fetch_incidents = $null
     cache_pressure_incidents = $null
+    prefetch_concurrency_limit = $null
+    prefetch_available_permits = $null
+    prefetch_active_permits = $null
+    prefetch_active_background_tasks = $null
+    prefetch_peak_active_background_tasks = $null
+    chunk_coalescing_in_flight_chunks = $null
+    chunk_coalescing_peak_in_flight_chunks = $null
+    chunk_coalescing_waits_total = $null
+    chunk_coalescing_waits_hit = $null
+    chunk_coalescing_waits_miss = $null
+    chunk_coalescing_wait_average_duration_ms = $null
+    chunk_coalescing_wait_max_duration_ms = $null
     provider_pressure_incidents = $null
     unrecovered_stale_refresh_incidents = $null
     handle_startup_total = $null
