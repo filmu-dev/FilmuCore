@@ -1,0 +1,100 @@
+name: Feature request
+description: Suggest an idea to improve FilmuCore
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to propose an improvement to FilmuCore.
+        Include enough detail to evaluate impact on API compatibility, playback, workers, or FilmuVFS behavior.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Pick the part of the system this request targets.
+      options:
+        - REST or GraphQL API
+        - Worker or queue pipeline
+        - Playback or byte streaming
+        - FilmuVFS catalog or gRPC
+        - Linux or Unix mount (FUSE3)
+        - Windows mount (ProjFS or WinFSP)
+        - Plugin system
+        - Build, CI, or release tooling
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve?
+      placeholder: Describe the limitation, friction, or missing capability.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or behaviour you want.
+      placeholder: Explain what should be added or changed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: How would this be used in practice, and who would benefit?
+      placeholder: Explain the real workflow or scenario.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any alternatives, workarounds, or related approaches you considered.
+      placeholder: Explain what you tried or considered and why it is not enough.
+
+  - type: dropdown
+    id: breaking_change
+    attributes:
+      label: Would this be a breaking change?
+      options:
+        - "No"
+        - "Yes"
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility or migration impact
+      description: If this touches public APIs, GraphQL schema, plugin contracts, config, or proto definitions, describe the impact here.
+      placeholder: Explain any migration, rollout, or compatibility concerns.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add mockups, screenshots, links, examples, or references.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues before opening this one
+          required: true
+        - label: I explained the problem this request would solve
+          required: true
+        - label: I included enough context to evaluate the request
+          required: true
