@@ -91,6 +91,49 @@ jobs:
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
+  dispatch-release-pr-verify:
+    name: Dispatch verify for release PRs
+    needs:
+      - release
+    if: ${{ needs.release.result == 'success' && needs.release.outputs.release_created != 'true' && needs.release.outputs.prs_created != '' && needs.release.outputs.prs_created != '[]' && vars.RELEASE_PLEASE_USE_PAT != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Trigger verify workflow for autorelease PR branches
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              base: 'main',
+              per_page: 100,
+            });
+            const releasePulls = pulls.filter((pr) =>
+              pr.head?.ref?.startsWith('release-please--branches--main') &&
+              pr.labels?.some((label) => label.name === 'autorelease: pending')
+            );
+
+            if (releasePulls.length === 0) {
+              core.info('No open autorelease PRs matched for verify dispatch.');
+              return;
+            }
+
+            for (const pr of releasePulls) {
+              core.info(`Dispatching verify.yml for PR #${pr.number} on ${pr.head.ref}`);
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'verify.yml',
+                ref: pr.head.ref,
+              });
+            }
+
   publish-release-images:
     name: Publish release image ${{ matrix.image }}
     needs:

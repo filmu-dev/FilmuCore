@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/filmu-dev/FilmuCore/compare/v0.2.0...v0.3.0) (2026-04-10)
+
+
+### Features
+
+* Codex/vfs semantic alias browse ([#8](https://github.com/filmu-dev/FilmuCore/issues/8)) ([878bc55](https://github.com/filmu-dev/FilmuCore/commit/878bc5503eeb6c7052a3a0c491a129ba3ef20b72))
+* **playback:** harden gate and soak stability ([#6](https://github.com/filmu-dev/FilmuCore/issues/6)) ([d6e3a12](https://github.com/filmu-dev/FilmuCore/commit/d6e3a12937486fd024d729850ae5916132f86c1e))
+
 ## [0.2.0](https://github.com/filmu-dev/FilmuCore/compare/v0.1.0...v0.2.0) (2026-04-08)
 
 
