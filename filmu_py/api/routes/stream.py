@@ -468,6 +468,12 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
         "vfs_runtime_inline_refresh_timeout": 0,
         "vfs_runtime_windows_callbacks_error": 0,
         "vfs_runtime_windows_callbacks_estale": 0,
+        "vfs_runtime_cache_hit_ratio": 0.0,
+        "vfs_runtime_fallback_success_ratio": 0.0,
+        "vfs_runtime_prefetch_pressure_ratio": 0.0,
+        "vfs_runtime_provider_pressure_incidents": 0,
+        "vfs_runtime_fairness_pressure_incidents": 0,
+        "vfs_runtime_rollout_readiness": "unknown",
     }
 
 
@@ -520,6 +526,14 @@ def _as_str(value: object, *, default: str = "") -> str:
         if stripped:
             return stripped
     return default
+
+
+def _safe_ratio(numerator: int, denominator: int) -> float:
+    """Return a bounded operator-facing ratio for additive governance counters."""
+
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
 
 
 def _nested_mapping_value(payload: object, *keys: str) -> object | None:
@@ -872,6 +886,50 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
     governance["vfs_runtime_windows_callbacks_estale"] = _as_int(
         _nested_mapping_value(payload, "windows_projfs", "callbacks_estale")
     )
+    total_cache_lookups = (
+        int(governance["vfs_runtime_chunk_cache_hits"])
+        + int(governance["vfs_runtime_chunk_cache_misses"])
+    )
+    governance["vfs_runtime_cache_hit_ratio"] = _safe_ratio(
+        int(governance["vfs_runtime_chunk_cache_hits"]),
+        total_cache_lookups,
+    )
+    governance["vfs_runtime_fallback_success_ratio"] = _safe_ratio(
+        int(governance["vfs_runtime_backend_fallback_success"]),
+        int(governance["vfs_runtime_backend_fallback_attempts"]),
+    )
+    governance["vfs_runtime_prefetch_pressure_ratio"] = _safe_ratio(
+        int(governance["vfs_runtime_prefetch_active_permits"]),
+        int(governance["vfs_runtime_prefetch_active_permits"])
+        + int(governance["vfs_runtime_prefetch_available_permits"]),
+    )
+    governance["vfs_runtime_provider_pressure_incidents"] = (
+        int(governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"])
+        + int(governance["vfs_runtime_upstream_fail_unexpected_status_server_error"])
+        + int(governance["vfs_runtime_upstream_retryable_status_too_many_requests"])
+        + int(governance["vfs_runtime_upstream_retryable_status_server_error"])
+        + int(governance["vfs_runtime_prefetch_background_backpressure"])
+    )
+    governance["vfs_runtime_fairness_pressure_incidents"] = (
+        int(governance["vfs_runtime_prefetch_fairness_denied"])
+        + int(governance["vfs_runtime_prefetch_global_backpressure_denied"])
+    )
+    if (
+        int(governance["vfs_runtime_backend_fallback_failure"]) > 0
+        or int(governance["vfs_runtime_mounted_reads_error"]) > 0
+        or int(governance["vfs_runtime_prefetch_background_error"]) > 0
+        or int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0
+    ):
+        governance["vfs_runtime_rollout_readiness"] = "blocked"
+    elif (
+        int(governance["vfs_runtime_provider_pressure_incidents"]) > 0
+        or int(governance["vfs_runtime_fairness_pressure_incidents"]) > 0
+        or int(governance["vfs_runtime_inline_refresh_error"]) > 0
+        or int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) > 0
+    ):
+        governance["vfs_runtime_rollout_readiness"] = "warning"
+    else:
+        governance["vfs_runtime_rollout_readiness"] = "ready"
     return governance
 
 

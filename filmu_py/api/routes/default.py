@@ -7,11 +7,12 @@ from secrets import token_hex
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import SecretStr
 
 from filmu_py.api.deps import get_auth_context, require_permissions
 from filmu_py.audit import audit_action
+from filmu_py.authz import evaluate_permissions
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.services.debrid import DownloaderAccountService
@@ -31,6 +32,7 @@ from ..models import (
     QueueAlertResponse,
     QueueStatusHistoryPointResponse,
     QueueStatusHistoryResponse,
+    QueueStatusHistorySummaryResponse,
     QueueStatusResponse,
     StatsMediaYearRelease,
     StatsResponse,
@@ -123,6 +125,57 @@ def _generate_api_key() -> str:
     return token_hex(32)
 
 
+def _summarize_queue_history(
+    history: list[QueueStatusHistoryPointResponse],
+) -> QueueStatusHistorySummaryResponse:
+    """Return operator rollups for one bounded queue-history response."""
+
+    latest = history[0].alert_level if history else "ok"
+    return QueueStatusHistorySummaryResponse(
+        points=len(history),
+        latest_alert_level=latest,
+        critical_points=sum(1 for item in history if item.alert_level == "critical"),
+        warning_points=sum(1 for item in history if item.alert_level == "warning"),
+        max_ready_jobs=max((item.ready_jobs for item in history), default=0),
+        max_dead_letter_jobs=max((item.dead_letter_jobs for item in history), default=0),
+        max_oldest_ready_age_seconds=max(
+            (
+                item.oldest_ready_age_seconds
+                for item in history
+                if item.oldest_ready_age_seconds is not None
+            ),
+            default=None,
+        ),
+    )
+
+
+def _resolve_target_tenant_id(
+    *,
+    auth_context: Any,
+    requested_tenant_id: str | None,
+    required_permissions: tuple[str, ...] = (),
+) -> str:
+    """Return the allowed tenant scope for one operator request."""
+
+    normalized_tenant_id = (requested_tenant_id or auth_context.tenant_id).strip()
+    if normalized_tenant_id == auth_context.tenant_id:
+        return normalized_tenant_id
+    decision = evaluate_permissions(
+        granted_permissions=auth_context.effective_permissions,
+        required_permissions=required_permissions,
+        actor_tenant_id=auth_context.tenant_id,
+        target_tenant_id=normalized_tenant_id,
+        authorized_tenant_ids=auth_context.authorized_tenant_ids,
+    )
+    if not decision.allowed:
+        detail = (
+            f"Authorization denied ({decision.reason}) for tenant "
+            f"'{decision.target_tenant_id}'"
+        )
+        raise PermissionError(detail)
+    return normalized_tenant_id
+
+
 @router.get("/", operation_id="default.root", response_model=MessageResponse)
 async def root() -> MessageResponse:
     """Compatibility root endpoint."""
@@ -170,9 +223,13 @@ async def get_auth_identity_context(request: Request) -> AuthContextResponse:
         actor_id=auth_context.actor_id,
         actor_type=auth_context.actor_type,
         tenant_id=auth_context.tenant_id,
+        authorized_tenant_ids=list(auth_context.authorized_tenant_ids),
+        authorization_tenant_scope=auth_context.authorization_tenant_scope,
         roles=list(auth_context.roles),
         scopes=list(auth_context.scopes),
         effective_permissions=list(auth_context.effective_permissions),
+        oidc_issuer=auth_context.oidc_issuer,
+        oidc_subject=auth_context.oidc_subject,
         principal_key=getattr(identity, "principal_key", None),
         principal_type=getattr(identity, "principal_type", None),
         service_account_api_key_id=getattr(identity, "service_account_api_key_id", None),
@@ -239,23 +296,25 @@ async def get_worker_queue_history(
     queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
     redis = resources.arq_redis or resources.redis
     history = await QueueStatusReader(redis, queue_name=queue_name).history(limit=limit)
+    history_points = [
+        QueueStatusHistoryPointResponse(
+            observed_at=item.observed_at,
+            total_jobs=item.total_jobs,
+            ready_jobs=item.ready_jobs,
+            deferred_jobs=item.deferred_jobs,
+            in_progress_jobs=item.in_progress_jobs,
+            retry_jobs=item.retry_jobs,
+            dead_letter_jobs=item.dead_letter_jobs,
+            oldest_ready_age_seconds=item.oldest_ready_age_seconds,
+            next_scheduled_in_seconds=item.next_scheduled_in_seconds,
+            alert_level=item.alert_level,
+        )
+        for item in history
+    ]
     return QueueStatusHistoryResponse(
         queue_name=queue_name,
-        history=[
-            QueueStatusHistoryPointResponse(
-                observed_at=item.observed_at,
-                total_jobs=item.total_jobs,
-                ready_jobs=item.ready_jobs,
-                deferred_jobs=item.deferred_jobs,
-                in_progress_jobs=item.in_progress_jobs,
-                retry_jobs=item.retry_jobs,
-                dead_letter_jobs=item.dead_letter_jobs,
-                oldest_ready_age_seconds=item.oldest_ready_age_seconds,
-                next_scheduled_in_seconds=item.next_scheduled_in_seconds,
-                alert_level=item.alert_level,
-            )
-            for item in history
-        ],
+        summary=_summarize_queue_history(history_points),
+        history=history_points,
     )
 
 
@@ -338,6 +397,16 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                         if success is not None
                         else None
                     ),
+                    publisher_policy_status=(
+                        getattr(success, "publisher_policy_status", None)
+                        if success is not None
+                        else None
+                    ),
+                    quarantine_recommended=(
+                        bool(getattr(success, "quarantine_recommended", False))
+                        if success is not None
+                        else False
+                    ),
                     source=getattr(failure, "source", None),
                     warnings=warnings,
                     error=getattr(failure, "reason", None),
@@ -372,6 +441,10 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                 quarantined=manifest.quarantined if manifest is not None else False,
                 quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
                 publisher_policy_decision=getattr(success, "publisher_policy_decision", None),
+                publisher_policy_status=getattr(success, "publisher_policy_status", None),
+                quarantine_recommended=bool(
+                    getattr(success, "quarantine_recommended", False)
+                ),
                 source=(
                     manifest.distribution
                     if manifest is not None
@@ -478,12 +551,23 @@ async def generate_apikey(request: Request) -> ApiKeyRotationResponse:
 
 
 @router.get("/stats", operation_id="default.stats", response_model=StatsResponse)
-async def get_stats(request: Request) -> StatsResponse:
+async def get_stats(
+    request: Request,
+    tenant_id: Annotated[str | None, Query()] = None,
+) -> StatsResponse:
     """Return aggregated statistics for the current dashboard compatibility surface."""
 
     resources = request.app.state.resources
     auth_context = get_auth_context(request)
-    snapshot = await resources.media_service.get_stats(tenant_id=auth_context.tenant_id)
+    try:
+        target_tenant_id = _resolve_target_tenant_id(
+            auth_context=auth_context,
+            requested_tenant_id=tenant_id,
+            required_permissions=("library:read",),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    snapshot = await resources.media_service.get_stats(tenant_id=target_tenant_id)
     return StatsResponse(
         total_items=snapshot.total_items,
         total_movies=snapshot.movies,
@@ -506,15 +590,24 @@ async def get_calendar(
     request: Request,
     start_date: Annotated[str | None, Query()] = None,
     end_date: Annotated[str | None, Query()] = None,
+    tenant_id: Annotated[str | None, Query()] = None,
 ) -> CalendarResponse:
     """Return calendar items for the current frontend calendar compatibility surface."""
 
     resources = request.app.state.resources
     auth_context = get_auth_context(request)
+    try:
+        target_tenant_id = _resolve_target_tenant_id(
+            auth_context=auth_context,
+            requested_tenant_id=tenant_id,
+            required_permissions=("library:read",),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     snapshot = await resources.media_service.get_calendar_snapshot(
         start_date=start_date,
         end_date=end_date,
-        tenant_id=auth_context.tenant_id,
+        tenant_id=target_tenant_id,
     )
     return CalendarResponse(
         data={

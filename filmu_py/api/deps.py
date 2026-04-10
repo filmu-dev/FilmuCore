@@ -8,7 +8,11 @@ from dataclasses import dataclass
 import structlog
 from fastapi import HTTPException, Request, status
 
-from filmu_py.authz import effective_permissions, has_permissions
+from filmu_py.authz import (
+    describe_tenant_scope,
+    effective_permissions,
+    evaluate_permissions,
+)
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
@@ -24,8 +28,11 @@ logger = structlog.get_logger("filmu.auth")
 _ACTOR_ID_HEADER = "x-actor-id"
 _ACTOR_TYPE_HEADER = "x-actor-type"
 _TENANT_ID_HEADER = "x-tenant-id"
+_AUTHORIZED_TENANTS_HEADER = "x-actor-authorized-tenants"
 _ACTOR_ROLES_HEADER = "x-actor-roles"
 _ACTOR_SCOPES_HEADER = "x-actor-scopes"
+_OIDC_ISSUER_HEADER = "x-auth-issuer"
+_OIDC_SUBJECT_HEADER = "x-auth-subject"
 _DEFAULT_ACTOR_TYPE = "service"
 _DEFAULT_TENANT_ID = "global"
 _DEFAULT_ROLES: tuple[str, ...] = ()
@@ -41,14 +48,25 @@ class AuthContext:
     actor_id: str
     actor_type: str
     tenant_id: str
+    authorized_tenant_ids: tuple[str, ...]
+    authorization_tenant_scope: str
     roles: tuple[str, ...]
     scopes: tuple[str, ...]
     effective_permissions: tuple[str, ...]
+    oidc_issuer: str | None
+    oidc_subject: str | None
 
 
 def _normalize_key_id(value: str | None) -> str | None:
     """Return a safe non-secret identifier for troubleshooting auth flows."""
 
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_optional_header(value: str | None) -> str | None:
     if value is None:
         return None
     normalized = value.strip()
@@ -70,6 +88,10 @@ def _build_auth_context(request: Request, *, api_key_id: str) -> AuthContext:
     actor_id = request.headers.get(_ACTOR_ID_HEADER) or f"api-key:{api_key_id}"
     actor_type = request.headers.get(_ACTOR_TYPE_HEADER) or _DEFAULT_ACTOR_TYPE
     tenant_id = request.headers.get(_TENANT_ID_HEADER) or _DEFAULT_TENANT_ID
+    authorized_tenant_ids = _split_header_values(
+        request.headers.get(_AUTHORIZED_TENANTS_HEADER),
+        fallback=(tenant_id,),
+    )
     roles = _split_header_values(
         request.headers.get(_ACTOR_ROLES_HEADER),
         fallback=_DEFAULT_ROLES,
@@ -78,15 +100,24 @@ def _build_auth_context(request: Request, *, api_key_id: str) -> AuthContext:
         request.headers.get(_ACTOR_SCOPES_HEADER),
         fallback=_DEFAULT_SCOPES,
     )
+    effective = effective_permissions(roles=roles, scopes=scopes)
     return AuthContext(
         authentication_mode="api_key",
         api_key_id=api_key_id,
         actor_id=actor_id,
         actor_type=actor_type,
         tenant_id=tenant_id,
+        authorized_tenant_ids=authorized_tenant_ids,
+        authorization_tenant_scope=describe_tenant_scope(
+            actor_tenant_id=tenant_id,
+            authorized_tenant_ids=authorized_tenant_ids,
+            granted_permissions=effective,
+        ),
         roles=roles,
         scopes=scopes,
-        effective_permissions=effective_permissions(roles=roles, scopes=scopes),
+        effective_permissions=effective,
+        oidc_issuer=_normalize_optional_header(request.headers.get(_OIDC_ISSUER_HEADER)),
+        oidc_subject=_normalize_optional_header(request.headers.get(_OIDC_SUBJECT_HEADER)),
     )
 
 
@@ -152,10 +183,20 @@ def require_permissions(
         auth_context = get_auth_context(request)
         if not normalized_permissions:
             return auth_context
-        if not has_permissions(auth_context.effective_permissions, normalized_permissions):
+        decision = evaluate_permissions(
+            granted_permissions=auth_context.effective_permissions,
+            required_permissions=normalized_permissions,
+            actor_tenant_id=auth_context.tenant_id,
+            target_tenant_id=auth_context.tenant_id,
+            authorized_tenant_ids=auth_context.authorized_tenant_ids,
+        )
+        if not decision.allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Missing required permissions: {', '.join(normalized_permissions)}",
+                detail=(
+                    f"Authorization denied ({decision.reason}) for tenant "
+                    f"'{decision.target_tenant_id}'"
+                ),
             )
         return auth_context
 
@@ -261,8 +302,12 @@ async def verify_api_key(request: Request) -> None:
         actor_id=auth_context.actor_id,
         actor_type=auth_context.actor_type,
         tenant_id=auth_context.tenant_id,
+        authorized_tenant_ids=",".join(auth_context.authorized_tenant_ids),
+        authorization_tenant_scope=auth_context.authorization_tenant_scope,
         actor_roles=",".join(auth_context.roles),
         actor_scopes=",".join(auth_context.scopes),
         effective_permissions=",".join(auth_context.effective_permissions),
         authentication_mode=auth_context.authentication_mode,
+        oidc_issuer=auth_context.oidc_issuer or "",
+        oidc_subject=auth_context.oidc_subject or "",
     )

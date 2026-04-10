@@ -8,6 +8,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+_ALLOWED_PUBLISHER_STATUSES = {"active", "suspended", "revoked"}
+_TRUST_LEVEL_ORDER = {"community": 0, "trusted": 1, "builtin": 2}
+
 
 @dataclass(frozen=True, slots=True)
 class TrustedSigningKey:
@@ -36,9 +39,14 @@ class TrustedPublisherPolicy:
 
     publisher: str
     allowed_release_channels: frozenset[str]
+    allowed_distributions: frozenset[str]
     allowed_sandbox_profiles: frozenset[str]
     allowed_tenancy_modes: frozenset[str]
+    allowed_permission_scopes: frozenset[str]
+    status: str = "active"
+    minimum_trust_level: str | None = None
     require_signature_verification: bool = True
+    quarantine_on_violation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +67,8 @@ class PluginPublisherPolicyEvaluation:
     decision: str
     reason: str | None
     trust_store_source: str | None
+    publisher_status: str | None = None
+    quarantine_recommended: bool = False
 
 
 def _load_policy_string_array(
@@ -90,6 +100,23 @@ def _load_policy_bool(
     if not isinstance(raw_value, bool):
         raise ValueError(f"plugin trust store publisher field '{field_name}' must be a boolean")
     return raw_value
+
+
+def _load_policy_optional_string(
+    payload: dict[str, object],
+    *,
+    field_name: str,
+    default: str | None = None,
+) -> str | None:
+    """Return one validated optional string publisher policy field."""
+
+    raw_value = payload.get(field_name, default)
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise ValueError(f"plugin trust store publisher field '{field_name}' must be a string")
+    normalized = raw_value.strip().lower()
+    return normalized or default
 
 
 def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
@@ -135,9 +162,21 @@ def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
             raise ValueError("plugin trust store publisher names must not be empty")
         publishers[normalized_publisher] = TrustedPublisherPolicy(
             publisher=normalized_publisher,
+            status=(
+                _load_policy_optional_string(
+                    payload,
+                    field_name="status",
+                    default="active",
+                )
+                or "active"
+            ),
             allowed_release_channels=_load_policy_string_array(
                 payload,
                 field_name="allowed_release_channels",
+            ),
+            allowed_distributions=_load_policy_string_array(
+                payload,
+                field_name="allowed_distributions",
             ),
             allowed_sandbox_profiles=_load_policy_string_array(
                 payload,
@@ -147,12 +186,36 @@ def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
                 payload,
                 field_name="allowed_tenancy_modes",
             ),
+            allowed_permission_scopes=_load_policy_string_array(
+                payload,
+                field_name="allowed_permission_scopes",
+            ),
+            minimum_trust_level=_load_policy_optional_string(
+                payload,
+                field_name="minimum_trust_level",
+            ),
             require_signature_verification=_load_policy_bool(
                 payload,
                 field_name="require_signature_verification",
                 default=True,
             ),
+            quarantine_on_violation=_load_policy_bool(
+                payload,
+                field_name="quarantine_on_violation",
+                default=False,
+            ),
         )
+        if publishers[normalized_publisher].status not in _ALLOWED_PUBLISHER_STATUSES:
+            raise ValueError(
+                "plugin trust store publisher field 'status' must be one of: "
+                "active, suspended, revoked"
+            )
+        minimum_trust_level = publishers[normalized_publisher].minimum_trust_level
+        if minimum_trust_level is not None and minimum_trust_level not in _TRUST_LEVEL_ORDER:
+            raise ValueError(
+                "plugin trust store publisher field 'minimum_trust_level' must be one of: "
+                "community, trusted, builtin"
+            )
 
     raw_revoked_key_ids = raw.get("revoked_key_ids", [])
     if not isinstance(raw_revoked_key_ids, list):
@@ -268,6 +331,8 @@ def evaluate_plugin_publisher_policy(
     sandbox_profile: str,
     tenancy_mode: str,
     distribution: str,
+    trust_level: str,
+    permission_scopes: frozenset[str],
     signature_verified: bool,
     trust_store: PluginTrustStore | None,
 ) -> PluginPublisherPolicyEvaluation:
@@ -280,6 +345,7 @@ def evaluate_plugin_publisher_policy(
             decision="builtin",
             reason=None,
             trust_store_source=trust_store_source,
+            publisher_status=None,
         )
     if trust_store is None:
         return PluginPublisherPolicyEvaluation(
@@ -287,6 +353,7 @@ def evaluate_plugin_publisher_policy(
             decision="unconfigured",
             reason="trust_store_unavailable",
             trust_store_source=None,
+            publisher_status=None,
         )
     if not trust_store.publishers:
         return PluginPublisherPolicyEvaluation(
@@ -294,6 +361,7 @@ def evaluate_plugin_publisher_policy(
             decision="unconfigured",
             reason="publisher_policy_unconfigured",
             trust_store_source=trust_store_source,
+            publisher_status=None,
         )
     if publisher is None:
         return PluginPublisherPolicyEvaluation(
@@ -301,6 +369,7 @@ def evaluate_plugin_publisher_policy(
             decision="rejected",
             reason="publisher_missing",
             trust_store_source=trust_store_source,
+            publisher_status=None,
         )
 
     policy = trust_store.publishers.get(publisher)
@@ -310,6 +379,16 @@ def evaluate_plugin_publisher_policy(
             decision="untrusted",
             reason="publisher_unapproved",
             trust_store_source=trust_store_source,
+            publisher_status=None,
+        )
+    if policy.status != "active":
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason=f"publisher_status_{policy.status}",
+            trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=(policy.status == "revoked"),
         )
     if policy.require_signature_verification and not signature_verified:
         return PluginPublisherPolicyEvaluation(
@@ -317,6 +396,8 @@ def evaluate_plugin_publisher_policy(
             decision="rejected",
             reason="publisher_requires_verified_signature",
             trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=policy.quarantine_on_violation,
         )
     if policy.allowed_release_channels and release_channel not in policy.allowed_release_channels:
         return PluginPublisherPolicyEvaluation(
@@ -324,6 +405,17 @@ def evaluate_plugin_publisher_policy(
             decision="rejected",
             reason="release_channel_disallowed",
             trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=policy.quarantine_on_violation,
+        )
+    if policy.allowed_distributions and distribution not in policy.allowed_distributions:
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="distribution_disallowed",
+            trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=policy.quarantine_on_violation,
         )
     if policy.allowed_sandbox_profiles and sandbox_profile not in policy.allowed_sandbox_profiles:
         return PluginPublisherPolicyEvaluation(
@@ -331,6 +423,8 @@ def evaluate_plugin_publisher_policy(
             decision="rejected",
             reason="sandbox_profile_disallowed",
             trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=policy.quarantine_on_violation,
         )
     if policy.allowed_tenancy_modes and tenancy_mode not in policy.allowed_tenancy_modes:
         return PluginPublisherPolicyEvaluation(
@@ -338,12 +432,39 @@ def evaluate_plugin_publisher_policy(
             decision="rejected",
             reason="tenancy_mode_disallowed",
             trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=policy.quarantine_on_violation,
+        )
+    if (
+        policy.minimum_trust_level is not None
+        and _TRUST_LEVEL_ORDER.get(trust_level, -1)
+        < _TRUST_LEVEL_ORDER[policy.minimum_trust_level]
+    ):
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="trust_level_below_policy",
+            trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=policy.quarantine_on_violation,
+        )
+    if policy.allowed_permission_scopes and not permission_scopes.issubset(
+        policy.allowed_permission_scopes
+    ):
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="permission_scope_disallowed",
+            trust_store_source=trust_store_source,
+            publisher_status=policy.status,
+            quarantine_recommended=policy.quarantine_on_violation,
         )
     return PluginPublisherPolicyEvaluation(
         allowed=True,
         decision="allowed",
         reason=None,
         trust_store_source=trust_store_source,
+        publisher_status=policy.status,
     )
 
 

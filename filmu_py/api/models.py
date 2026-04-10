@@ -42,6 +42,8 @@ class PluginCapabilityStatusResponse(BaseModel):
     quarantined: bool = False
     quarantine_reason: str | None = None
     publisher_policy_decision: str | None = None
+    publisher_policy_status: str | None = None
+    quarantine_recommended: bool = False
     source: str | None = None
     warnings: list[str] = []
     error: str | None = None
@@ -55,9 +57,13 @@ class AuthContextResponse(BaseModel):
     actor_id: str
     actor_type: str
     tenant_id: str
+    authorized_tenant_ids: list[str]
+    authorization_tenant_scope: str
     roles: list[str]
     scopes: list[str]
     effective_permissions: list[str]
+    oidc_issuer: str | None = None
+    oidc_subject: str | None = None
     principal_key: str | None = None
     principal_type: str | None = None
     service_account_api_key_id: str | None = None
@@ -114,10 +120,23 @@ class QueueStatusHistoryPointResponse(BaseModel):
     alert_level: Literal["ok", "warning", "critical"] = "ok"
 
 
+class QueueStatusHistorySummaryResponse(BaseModel):
+    """Derived operator rollup for one bounded queue-history response."""
+
+    points: int
+    latest_alert_level: Literal["ok", "warning", "critical"] = "ok"
+    critical_points: int
+    warning_points: int
+    max_ready_jobs: int
+    max_dead_letter_jobs: int
+    max_oldest_ready_age_seconds: float | None = None
+
+
 class QueueStatusHistoryResponse(BaseModel):
     """Bounded queue-history timeline for operator views."""
 
     queue_name: str
+    summary: QueueStatusHistorySummaryResponse
     history: list[QueueStatusHistoryPointResponse]
 
 
@@ -384,6 +403,12 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_inline_refresh_timeout: int
     vfs_runtime_windows_callbacks_error: int
     vfs_runtime_windows_callbacks_estale: int
+    vfs_runtime_cache_hit_ratio: float
+    vfs_runtime_fallback_success_ratio: float
+    vfs_runtime_prefetch_pressure_ratio: float
+    vfs_runtime_provider_pressure_incidents: int
+    vfs_runtime_fairness_pressure_incidents: int
+    vfs_runtime_rollout_readiness: str
 
 
 class ServingStatusResponse(BaseModel):

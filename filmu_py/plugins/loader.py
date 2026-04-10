@@ -83,6 +83,8 @@ class PluginLoadSuccess:
     quarantined: bool
     quarantine_reason: str | None
     publisher_policy_decision: str | None
+    publisher_policy_status: str | None
+    quarantine_recommended: bool
     registered_query_resolvers: int
     registered_mutation_resolvers: int
     registered_subscription_resolvers: int
@@ -234,6 +236,8 @@ def _register_plugin(
         sandbox_profile=manifest.sandbox_profile,
         tenancy_mode=manifest.tenancy_mode,
         distribution=manifest.distribution,
+        trust_level=manifest.trust_level,
+        permission_scopes=manifest.effective_permission_scopes(),
         signature_verified=signature_verification.verified,
         trust_store=trust_store,
     )
@@ -354,6 +358,8 @@ def _register_plugin(
         quarantined=manifest.quarantined,
         quarantine_reason=manifest.quarantine_reason,
         publisher_policy_decision=publisher_policy.decision,
+        publisher_policy_status=publisher_policy.publisher_status,
+        quarantine_recommended=publisher_policy.quarantine_recommended,
         registered_query_resolvers=registered_counts[GraphQLResolverKind.QUERY],
         registered_mutation_resolvers=registered_counts[GraphQLResolverKind.MUTATION],
         registered_subscription_resolvers=registered_counts[GraphQLResolverKind.SUBSCRIPTION],

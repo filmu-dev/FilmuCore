@@ -71,8 +71,17 @@ The control plane is also stricter than the earlier baseline:
 - privileged compatibility mutations now require explicit `x-actor-roles` values such as `platform:admin`
 - API-key authentication no longer implies admin privileges automatically
 - the backend now computes `effective_permissions` from roles and scopes and exposes them on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
+- the backend now also evaluates tenant-aware authorization decisions through [`evaluate_permissions()`](../filmu_py/authz.py) instead of only checking whether a permission string exists
 - tenant-aware intake paths now persist the resolved `tenant_id` on created `media_items` and `item_requests`
 - tenant-scoped reads now also reach item detail/listing, calendar, and stats surfaces instead of stopping at write-time persistence
+
+The request identity surface now also carries delegated tenant scope and OIDC-ready identity fields:
+
+- `x-actor-authorized-tenants` can declare delegated tenant scope for cross-tenant control-plane reads
+- `x-auth-issuer` and `x-auth-subject` can carry upstream IdP identity shape without changing the current API-key gateway contract
+- [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py) now returns `authorized_tenant_ids`, `authorization_tenant_scope`, `oidc_issuer`, and `oidc_subject` alongside `effective_permissions`
+
+This is still not a full OIDC or SSO implementation. It is an authorization-ready control-plane shape that narrows the migration path away from one shared backend secret.
 
 ---
 
@@ -132,8 +141,8 @@ The current API-key model is acceptable for the present BFF architecture, but th
 - stronger service-to-service auth
 - scoped machine credentials above the new persisted `ServiceAccountORM` baseline
 - internal admin/service roles
-- RBAC/ABAC policy evaluation above the current `effective_permissions` baseline
+- broader RBAC/ABAC policy evaluation above the current `effective_permissions` and tenant-aware authorization baseline
 - plugin/service capability boundaries
-- eventual user-aware audit trails and tenant-scoped authorization above the new persisted identity catalog
+- eventual user-aware audit trails, real OIDC/SSO integration, and tenant-scoped authorization beyond the current delegated-tenant compatibility headers
 
 That evolution should not break the current principle that frontend sessions and backend execution auth are separate concerns unless there is a clear product reason to merge them.

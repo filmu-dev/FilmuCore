@@ -147,6 +147,16 @@ class DummyMediaService:
         _ = tenant_id
         return self.snapshot
 
+    async def get_calendar_snapshot(
+        self,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        _ = (start_date, end_date, tenant_id)
+        return {}
+
 
 def _build_settings(*, arq_enabled: bool = False, temporal_enabled: bool = False) -> Settings:
     """Create deterministic settings payload for dashboard compatibility tests."""
@@ -329,6 +339,8 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": None,
             "warnings": [],
             "error": None,
@@ -359,6 +371,8 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": None,
             "warnings": [],
             "error": None,
@@ -477,6 +491,8 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": "builtin",
             "warnings": [],
             "error": None,
@@ -527,6 +543,8 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": "entry_point",
             "warnings": [],
             "error": "api_version_incompatible",
@@ -557,9 +575,13 @@ def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> 
         "actor_id": "operator-1",
         "actor_type": "service",
         "tenant_id": "tenant-main",
+        "authorized_tenant_ids": ["tenant-main"],
+        "authorization_tenant_scope": "all",
         "roles": ["platform:admin", "playback:operator"],
         "scopes": ["backend:admin", "playback:read"],
         "effective_permissions": ["*", "playback:operate", "playback:read"],
+        "oidc_issuer": None,
+        "oidc_subject": None,
         "principal_key": "operator-1",
         "principal_type": "service",
         "service_account_api_key_id": "primary",
@@ -610,11 +632,52 @@ def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
-    history = second.json()["history"]
+    body = second.json()
+    history = body["history"]
     assert len(history) == 1
     assert history[0]["total_jobs"] == 1
     assert history[0]["ready_jobs"] == 1
     assert history[0]["alert_level"] == "ok"
+    assert body["summary"] == {
+        "points": 1,
+        "latest_alert_level": "ok",
+        "critical_points": 0,
+        "warning_points": 0,
+        "max_ready_jobs": 1,
+        "max_dead_letter_jobs": 0,
+        "max_oldest_ready_age_seconds": history[0]["oldest_ready_age_seconds"],
+    }
+
+
+def test_stats_route_rejects_cross_tenant_requests_without_delegated_scope() -> None:
+    client = _build_client()
+
+    response = client.get(
+        "/api/v1/stats?tenant_id=tenant-other",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "library:read",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_calendar_route_allows_cross_tenant_requests_with_authorized_tenants() -> None:
+    client = _build_client()
+
+    response = client.get(
+        "/api/v1/calendar?tenant_id=tenant-analytics",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "library:read",
+            "x-actor-authorized-tenants": "tenant-main,tenant-analytics",
+        },
+    )
+
+    assert response.status_code == 200
 
 
 def test_dashboard_routes_require_api_key() -> None:

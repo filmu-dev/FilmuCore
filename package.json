@@ -16,6 +16,7 @@
     "proof:playback:providers": "pwsh -NoProfile -File ./scripts/run_media_server_proof_gate.ps1 -Providers plex,emby -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
     "proof:playback:stability": "pwsh -NoProfile -File ./scripts/run_playback_proof_stability.ps1",
     "proof:playback:gate": "pwsh -NoProfile -File ./scripts/run_playback_proof_stability.ps1 -RepeatCount 2 -ProofStaleDirectRefresh -RequirePreferredClientPlayback -ReuseExistingItem -RequireCompletedState -TmdbId 603 -Title \"The Matrix\"",
+    "proof:playback:gate:enterprise": "pwsh -NoProfile -File ./scripts/run_playback_proof_stability.ps1 -RepeatCount 2 -ProofStaleDirectRefresh -RequirePreferredClientPlayback -RequireMediaServerProof -ReuseExistingItem -RequireCompletedState -MaxRunDurationSeconds 180 -MaxReconnectIncidentCount 0 -TmdbId 603 -Title \"The Matrix\"",
     "proof:playback:providers:gate": "pwsh -NoProfile -File ./scripts/run_media_server_proof_gate.ps1 -Providers plex,emby -RepeatCount 2 -FailFast -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
     "proof:playback:providers:stability": "pwsh -NoProfile -File ./scripts/run_media_server_proof_gate.ps1 -Providers plex,emby -RepeatCount 3 -FailFast -SkipStart -ReuseExistingItem -TmdbId 603 -Title \"The Matrix\"",
     "proof:playback:policy": "pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate",
