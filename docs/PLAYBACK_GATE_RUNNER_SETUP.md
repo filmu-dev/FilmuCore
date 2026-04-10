@@ -98,6 +98,11 @@ Required-check policy note:
 - the workflow has already gone green on the last playback-gate PR before merge to `main`
 - whether `Playback Gate / Playback Gate` is currently configured as a required protected-branch check is still an external GitHub policy question; validate it with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) from a host with `gh` installed and authenticated with repo-admin access
 - that remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
+Required-check promotion note:
+
+- the workflow code path is already in place for `pull_request`, `push` to `main`, and `merge_group`
+- once the target GitHub-hosted runner configuration and secrets are available and the workflow has produced green runs on the protected branch path, mark the GitHub required check for this workflow, typically shown as `Playback Gate / Playback Gate`
+- this remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
 - the workflow and [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now also emit the canonical required-check name into the CI artifact bundle so the repo-settings step can key off the exact check label instead of manual memory
 
 ## 2a. Validate GitHub `main` policy deterministically

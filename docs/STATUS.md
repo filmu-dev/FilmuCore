@@ -9,6 +9,11 @@ The current priority order is:
 3. Expand the plugin platform from the now-real runtime baseline into stronger trust/isolation and external-author distribution policy now that provenance metadata, digest validation, sandbox posture, and quarantine enforcement are live.
 4. Extend observability beyond the new layer-1 baseline with shipper/search-ready logs, queue-history/alerting rollups, and deeper mount/VFS data-plane visibility.
 5. Harden orchestration semantics further (idempotency, outbox, replay safety, queue-backed resolver breadth, and real identity/tenant boundaries) before durable-bridge work.
+1. Provision and enforce the new GitHub-hosted playback-gate CI path, then keep it green. The runner-readiness path now exists in [PLAYBACK_GATE_RUNNER_SETUP.md](PLAYBACK_GATE_RUNNER_SETUP.md) and [../scripts/check_playback_gate_runner.ps1](../scripts/check_playback_gate_runner.ps1); Windows dev hosts are expected to fail that check because the merge gate targets a Linux /dev/fuse runner.
+2. Deepen the mounted FilmuVFS data plane now that chunk-engine reads, adaptive prefetch, and optional L2 cache exist: longer-running soak/backpressure validation, richer mounted metrics, and rollout hardening.
+3. Expand the plugin platform from the now-real runtime baseline into richer packaged distribution, explicit compatibility/version policy, and real non-stub built-in integrations.
+4. Extend observability beyond the new layer-1 baseline with rate-limiter, GraphQL, queue/control-plane, and mount/VFS data-plane visibility.
+5. Harden orchestration semantics further (idempotency, outbox, replay safety) before durable-bridge work.
 
 ## Current live-stack issues
 
