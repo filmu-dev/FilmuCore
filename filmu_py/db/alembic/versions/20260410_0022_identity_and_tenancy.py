@@ -191,7 +191,6 @@ def downgrade() -> None:
     op.drop_column("media_items", "tenant_id")
 
     op.drop_index(op.f("ix_service_accounts_api_key_id"), table_name="service_accounts")
-    op.drop_index(op.f("ix_service_accounts_principal_id"), table_name="service_accounts")
     op.drop_table("service_accounts")
 
     op.drop_index(op.f("ix_principals_principal_type"), table_name="principals")
