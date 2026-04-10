@@ -529,7 +529,10 @@ class LoggingSettings(CompatibilityModel):
     clean_interval: int = 3600
     retention_hours: int = 24
     rotation_mb: int = 10
+    retention_files: int = 7
     compression: str = "disabled"
+    directory: str = "logs"
+    structured_filename: str = "ecs.json"
 
 
 class StreamSettings(CompatibilityModel):

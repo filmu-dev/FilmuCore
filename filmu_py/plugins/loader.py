@@ -47,8 +47,12 @@ class PluginLoadSuccess:
     source: str
     api_version: str
     distribution: str
+    publisher: str | None
+    release_channel: str
+    trust_level: str
     min_host_version: str | None
     max_host_version: str | None
+    permission_scopes: tuple[str, ...]
     registered_query_resolvers: int
     registered_mutation_resolvers: int
     registered_subscription_resolvers: int
@@ -179,10 +183,16 @@ def _register_plugin(
         if isinstance(manifest_data, PluginManifest)
         else PluginManifest.model_validate(manifest_data)
     )
+    manifest.validate_policy()
     manifest.ensure_host_compatibility(host_version, supported_api_versions=("1",))
     registry.register_manifest(manifest)
 
     skipped_messages: list[str] = []
+    if manifest.uses_implicit_permission_scopes() and manifest.distribution != "builtin":
+        skipped_messages.append(
+            "permission scopes were inferred from declared capabilities; "
+            "set explicit permission_scopes for stricter policy review"
+        )
     registered_counts: dict[GraphQLResolverKind, int] = {
         GraphQLResolverKind.QUERY: 0,
         GraphQLResolverKind.MUTATION: 0,
@@ -252,8 +262,12 @@ def _register_plugin(
         source=manifest.distribution,
         api_version=manifest.api_version,
         distribution=manifest.distribution,
+        publisher=manifest.publisher,
+        release_channel=manifest.release_channel,
+        trust_level=manifest.trust_level,
         min_host_version=manifest.min_host_version,
         max_host_version=manifest.max_host_version,
+        permission_scopes=tuple(sorted(manifest.effective_permission_scopes())),
         registered_query_resolvers=registered_counts[GraphQLResolverKind.QUERY],
         registered_mutation_resolvers=registered_counts[GraphQLResolverKind.MUTATION],
         registered_subscription_resolvers=registered_counts[GraphQLResolverKind.SUBSCRIPTION],

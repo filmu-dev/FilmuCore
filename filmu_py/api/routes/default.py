@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import SecretStr
 
 from filmu_py.config import set_runtime_settings
+from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
@@ -22,6 +23,7 @@ from ..models import (
     MessageResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
+    QueueStatusResponse,
     StatsMediaYearRelease,
     StatsResponse,
 )
@@ -126,6 +128,33 @@ async def get_logs(request: Request) -> LogsResponse:
     return LogsResponse(logs=resources.log_stream.history())
 
 
+@router.get(
+    "/workers/queue",
+    operation_id="default.worker_queue",
+    response_model=QueueStatusResponse,
+)
+async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
+    """Return ARQ queue depth, lag, retry, and dead-letter visibility."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    snapshot = await QueueStatusReader(redis, queue_name=queue_name).snapshot()
+    return QueueStatusResponse(
+        queue_name=snapshot.queue_name,
+        arq_enabled=resources.settings.arq_enabled,
+        total_jobs=snapshot.total_jobs,
+        ready_jobs=snapshot.ready_jobs,
+        deferred_jobs=snapshot.deferred_jobs,
+        in_progress_jobs=snapshot.in_progress_jobs,
+        retry_jobs=snapshot.retry_jobs,
+        result_jobs=snapshot.result_jobs,
+        dead_letter_jobs=snapshot.dead_letter_jobs,
+        oldest_ready_age_seconds=snapshot.oldest_ready_age_seconds,
+        next_scheduled_in_seconds=snapshot.next_scheduled_in_seconds,
+    )
+
+
 @router.get("/services", operation_id="default.services", response_model=dict[str, dict[str, bool]])
 async def get_services(request: Request) -> dict[str, dict[str, bool]]:
     """Return a real provider enablement map for dashboard compatibility."""
@@ -185,6 +214,14 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                     api_version=manifest.api_version if manifest is not None else None,
                     min_host_version=manifest.min_host_version if manifest is not None else None,
                     max_host_version=manifest.max_host_version if manifest is not None else None,
+                    publisher=manifest.publisher if manifest is not None else None,
+                    release_channel=manifest.release_channel if manifest is not None else None,
+                    trust_level=manifest.trust_level if manifest is not None else None,
+                    permission_scopes=(
+                        sorted(manifest.effective_permission_scopes())
+                        if manifest is not None
+                        else []
+                    ),
                     source=getattr(failure, "source", None),
                     warnings=warnings,
                     error=getattr(failure, "reason", None),
@@ -203,6 +240,14 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                 api_version=manifest.api_version if manifest is not None else None,
                 min_host_version=manifest.min_host_version if manifest is not None else None,
                 max_host_version=manifest.max_host_version if manifest is not None else None,
+                publisher=manifest.publisher if manifest is not None else None,
+                release_channel=manifest.release_channel if manifest is not None else None,
+                trust_level=manifest.trust_level if manifest is not None else None,
+                permission_scopes=(
+                    sorted(manifest.effective_permission_scopes())
+                    if manifest is not None
+                    else []
+                ),
                 source=(
                     manifest.distribution
                     if manifest is not None
@@ -232,6 +277,11 @@ async def get_plugin_events(request: Request) -> list[PluginEventStatusResponse]
     return [
         PluginEventStatusResponse(
             name=plugin_name,
+            publisher=(
+                plugin_registry.manifest(plugin_name).publisher
+                if plugin_registry.manifest(plugin_name) is not None
+                else None
+            ),
             publishable_events=list(publishable_by_plugin.get(plugin_name, ())),
             hook_subscriptions=list(subscriptions_by_plugin.get(plugin_name, ())),
         )

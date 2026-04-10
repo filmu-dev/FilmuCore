@@ -26,6 +26,10 @@ class PluginCapabilityStatusResponse(BaseModel):
     api_version: str | None = None
     min_host_version: str | None = None
     max_host_version: str | None = None
+    publisher: str | None = None
+    release_channel: str | None = None
+    trust_level: str | None = None
+    permission_scopes: list[str] = []
     source: str | None = None
     warnings: list[str] = []
     error: str | None = None
@@ -35,8 +39,25 @@ class PluginEventStatusResponse(BaseModel):
     """One plugin event-governance and hook-subscription summary."""
 
     name: str
+    publisher: str | None = None
     publishable_events: list[str]
     hook_subscriptions: list[str]
+
+
+class QueueStatusResponse(BaseModel):
+    """Current ARQ queue control-plane snapshot."""
+
+    queue_name: str
+    arq_enabled: bool
+    total_jobs: int
+    ready_jobs: int
+    deferred_jobs: int
+    in_progress_jobs: int
+    retry_jobs: int
+    result_jobs: int
+    dead_letter_jobs: int
+    oldest_ready_age_seconds: float | None = None
+    next_scheduled_in_seconds: float | None = None
 
 
 class ApiKeyRotationResponse(BaseModel):

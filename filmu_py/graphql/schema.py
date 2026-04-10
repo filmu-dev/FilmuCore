@@ -14,6 +14,7 @@ from strawberry.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL, GRAPHQL_WS_P
 from strawberry.types import Info
 
 from filmu_py.graphql.deps import GraphQLContext, get_graphql_context
+from filmu_py.graphql.observability import GraphQLOperationMetricsExtension
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry, GraphQLResolverKind
 from filmu_py.graphql.resolvers import (
     CoreMutationResolver,
@@ -151,7 +152,12 @@ def build_schema(plugin_registry: GraphQLPluginRegistry) -> strawberry.Schema:
     """Build Strawberry schema from the current plugin registration snapshot."""
 
     query, mutation, subscription = _build_root_types(plugin_registry)
-    return strawberry.Schema(query=query, mutation=mutation, subscription=subscription)
+    return strawberry.Schema(
+        query=query,
+        mutation=mutation,
+        subscription=subscription,
+        extensions=[GraphQLOperationMetricsExtension],
+    )
 
 
 def create_graphql_router(plugin_registry: GraphQLPluginRegistry) -> GraphQLRouter:

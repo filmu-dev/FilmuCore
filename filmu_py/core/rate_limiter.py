@@ -7,6 +7,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, cast
 
+from prometheus_client import Counter, Histogram
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
@@ -42,6 +43,36 @@ redis.call('EXPIRE', key, ttl_seconds)
 
 return {allowed, tokens}
 """
+
+RATE_LIMIT_ACQUIRE_TOTAL = Counter(
+    "filmu_py_rate_limit_acquire_total",
+    "Rate limiter acquire outcomes by bucket class",
+    ["bucket_class", "outcome"],
+)
+RATE_LIMIT_REMAINING_TOKENS = Histogram(
+    "filmu_py_rate_limit_remaining_tokens",
+    "Remaining token count observed after rate limiter decisions",
+    ["bucket_class", "outcome"],
+    buckets=[0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+)
+RATE_LIMIT_RETRY_AFTER_SECONDS = Histogram(
+    "filmu_py_rate_limit_retry_after_seconds",
+    "Retry-after guidance emitted by rate limiter denials",
+    ["bucket_class"],
+    buckets=[0.0, 0.1, 0.5, 1.0, 2.5, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0],
+)
+
+
+def _bucket_class(bucket_key: str) -> str:
+    """Reduce raw bucket keys into a bounded-cardinality operator label."""
+
+    normalized = bucket_key.strip().lower()
+    if not normalized:
+        return "unknown"
+    parts = [part for part in normalized.split(":") if part]
+    if not parts:
+        return "unknown"
+    return ":".join(parts[: min(3, len(parts))])
 
 
 @dataclass(frozen=True)
@@ -128,6 +159,16 @@ class DistributedRateLimiter:
         remaining = float(result[1])
         deficit = max(0.0, requested_tokens - remaining)
         retry_after = 0.0 if allowed else (deficit / refill_rate_per_second)
+        bucket_class = _bucket_class(bucket_key)
+        outcome = "allowed" if allowed else "denied"
+        RATE_LIMIT_ACQUIRE_TOTAL.labels(bucket_class=bucket_class, outcome=outcome).inc()
+        RATE_LIMIT_REMAINING_TOKENS.labels(bucket_class=bucket_class, outcome=outcome).observe(
+            max(0.0, remaining)
+        )
+        if not allowed:
+            RATE_LIMIT_RETRY_AFTER_SECONDS.labels(bucket_class=bucket_class).observe(
+                max(0.0, retry_after)
+            )
         return RateLimitDecision(
             allowed=allowed,
             remaining_tokens=remaining,

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -27,6 +28,8 @@ class DummyRedis:
 
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
+        self.sorted_sets: dict[str, dict[str, float]] = {}
+        self.lists: dict[str, list[bytes]] = {}
 
     def ping(self, **kwargs: Any) -> bool:
         _ = kwargs
@@ -45,6 +48,70 @@ class DummyRedis:
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
         return None
+
+    async def zcard(self, key: str) -> int:
+        return len(self.sorted_sets.get(key, {}))
+
+    async def zcount(self, key: str, minimum: str | int, maximum: str | int) -> int:
+        return sum(
+            1
+            for score in self.sorted_sets.get(key, {}).values()
+            if _score_in_range(score, minimum=minimum, maximum=maximum)
+        )
+
+    async def zrangebyscore(
+        self,
+        key: str,
+        minimum: str | int,
+        maximum: str | int,
+        *,
+        start: int = 0,
+        num: int | None = None,
+        withscores: bool = False,
+    ) -> list[Any]:
+        items = [
+            (member, score)
+            for member, score in self.sorted_sets.get(key, {}).items()
+            if _score_in_range(score, minimum=minimum, maximum=maximum)
+        ]
+        items.sort(key=lambda item: item[1])
+        if start:
+            items = items[start:]
+        if num is not None:
+            items = items[:num]
+        if withscores:
+            return items
+        return [member for member, _score in items]
+
+    async def llen(self, key: str) -> int:
+        return len(self.lists.get(key, []))
+
+    def scan_iter(self, *, match: str | None = None) -> Any:
+        prefix = match[:-1] if isinstance(match, str) and match.endswith("*") else match
+        keys = list(self.values)
+
+        async def _iterator() -> Any:
+            for key in keys:
+                if prefix is None or key.startswith(prefix):
+                    yield key
+
+        return _iterator()
+
+
+def _score_in_range(score: float, *, minimum: str | int, maximum: str | int) -> bool:
+    return _score_matches(score, minimum, lower=True) and _score_matches(score, maximum, lower=False)
+
+
+def _score_matches(score: float, bound: str | int, *, lower: bool) -> bool:
+    if bound == "-inf":
+        return True
+    if bound == "+inf":
+        return True
+    if isinstance(bound, str) and bound.startswith("("):
+        target = float(bound[1:])
+        return score > target if lower else score < target
+    target = float(bound)
+    return score >= target if lower else score <= target
 
 
 class DummyDatabaseRuntime:
@@ -221,6 +288,10 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "api_version": None,
             "min_host_version": None,
             "max_host_version": None,
+            "publisher": None,
+            "release_channel": None,
+            "trust_level": None,
+            "permission_scopes": [],
             "source": None,
             "warnings": [],
             "error": None,
@@ -235,6 +306,10 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "api_version": None,
             "min_host_version": None,
             "max_host_version": None,
+            "publisher": None,
+            "release_channel": None,
+            "trust_level": None,
+            "permission_scopes": [],
             "source": None,
             "warnings": [],
             "error": None,
@@ -283,11 +358,13 @@ def test_plugin_events_route_returns_declared_events_and_hook_subscriptions() ->
     assert response.json() == [
         {
             "name": "hook-plugin",
+            "publisher": None,
             "publishable_events": [],
             "hook_subscriptions": ["item.completed", "item.state.changed"],
         },
         {
             "name": "torrentio",
+            "publisher": None,
             "publishable_events": ["torrentio.scan.completed"],
             "hook_subscriptions": [],
         },
@@ -330,6 +407,10 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
             "api_version": "1",
             "min_host_version": "0.1.0",
             "max_host_version": None,
+            "publisher": None,
+            "release_channel": "stable",
+            "trust_level": "community",
+            "permission_scopes": ["download:transfer"],
             "source": "builtin",
             "warnings": [],
             "error": None,
@@ -364,11 +445,45 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "api_version": None,
             "min_host_version": None,
             "max_host_version": None,
+            "publisher": None,
+            "release_channel": None,
+            "trust_level": None,
+            "permission_scopes": [],
             "source": "entry_point",
             "warnings": [],
             "error": "api_version_incompatible",
         }
     ]
+
+
+def test_worker_queue_route_returns_control_plane_snapshot() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    now_milliseconds = time.time() * 1000.0
+    redis.sorted_sets["filmu-py"] = {
+        "job-ready": now_milliseconds - 1_000.0,
+        "job-deferred": now_milliseconds + 3_000.0,
+    }
+    redis.values["arq:in-progress:job-ready"] = b"active"
+    redis.values["arq:retry:job-ready"] = b"retry"
+    redis.values["arq:result:job-done"] = b"done"
+    redis.lists["arq:dead-letter:filmu-py"] = [b"dlq"]
+
+    response = client.get("/api/v1/workers/queue", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queue_name"] == "filmu-py"
+    assert body["arq_enabled"] is True
+    assert body["total_jobs"] == 2
+    assert body["ready_jobs"] == 1
+    assert body["deferred_jobs"] == 1
+    assert body["in_progress_jobs"] == 1
+    assert body["retry_jobs"] == 1
+    assert body["result_jobs"] == 1
+    assert body["dead_letter_jobs"] == 1
+    assert 0.5 <= body["oldest_ready_age_seconds"] <= 3.0
+    assert 0.0 <= body["next_scheduled_in_seconds"] <= 5.0
 
 
 def test_dashboard_routes_require_api_key() -> None:

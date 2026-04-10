@@ -48,7 +48,15 @@ def register_builtin_plugins(
 
 
 def _manifest(**payload: object) -> PluginManifest:
-    return PluginManifest.model_validate({"distribution": "builtin", **payload})
+    return PluginManifest.model_validate(
+        {
+            "distribution": "builtin",
+            "publisher": "filmu",
+            "release_channel": "builtin",
+            "trust_level": "builtin",
+            **payload,
+        }
+    )
 
 
 def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCapabilityKind, object]]:
@@ -59,6 +67,7 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
                 version="1.0.0",
                 api_version="1",
                 capabilities=["scraper"],
+                permission_scopes=["scrape:search"],
                 entry_module="plugin.py",
                 scraper="TorrentioScraper",
             ),
@@ -71,6 +80,7 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
                 version="1.0.0",
                 api_version="1",
                 capabilities=["scraper"],
+                permission_scopes=["scrape:search"],
                 entry_module="plugin.py",
                 scraper="ProwlarrScraper",
             ),
@@ -83,6 +93,7 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
                 version="1.0.0",
                 api_version="1",
                 capabilities=["scraper"],
+                permission_scopes=["scrape:search"],
                 entry_module="plugin.py",
                 scraper="RarbgScraper",
             ),
@@ -95,6 +106,7 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
                 version="1.0.0",
                 api_version="1",
                 capabilities=["content_service"],
+                permission_scopes=["content:ingest", "datasource:host", "events:publish"],
                 entry_module="plugin.py",
                 content_service="MDBListContentService",
                 datasource="host",
@@ -109,6 +121,7 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
                 version="1.0.0",
                 api_version="1",
                 capabilities=["downloader"],
+                permission_scopes=["download:transfer", "datasource:host", "events:publish"],
                 entry_module="plugin.py",
                 downloader="StremThruDownloader",
                 datasource="host",
@@ -123,6 +136,7 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
                 version="1.0.0",
                 api_version="1",
                 capabilities=["notification"],
+                permission_scopes=["notify:send", "datasource:host", "events:publish"],
                 entry_module="plugin.py",
                 notification="WebhookNotificationPlugin",
                 datasource="host",
@@ -137,6 +151,12 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
                 version="1.0.0",
                 api_version="1",
                 capabilities=["notification", "event_hook"],
+                permission_scopes=[
+                    "notify:send",
+                    "events:subscribe",
+                    "events:publish",
+                    "datasource:host",
+                ],
                 entry_module="plugin.py",
                 notification="WebhookNotificationPlugin",
                 event_hook="WebhookNotificationPlugin",
