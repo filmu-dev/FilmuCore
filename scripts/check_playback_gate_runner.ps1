@@ -1,6 +1,7 @@
 param(
     [switch] $RequireProviderGate,
-    [switch] $AsJson
+    [switch] $AsJson,
+    [switch] $NoExitOnFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -149,6 +150,9 @@ else {
 }
 
 if ($requiredFailures.Count -gt 0) {
+    if ($NoExitOnFailure) {
+        return
+    }
     if ([string]::Equals([string] $env:GITHUB_ACTIONS, 'true', [System.StringComparison]::OrdinalIgnoreCase)) {
         foreach ($failure in $requiredFailures) {
             Write-Host ("::error title=playback gate readiness::{0} - {1}" -f $failure.name, $failure.details)

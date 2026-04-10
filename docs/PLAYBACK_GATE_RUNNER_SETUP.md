@@ -51,6 +51,12 @@ Provider-parity requirement note:
 - the GitHub workflow now enables the provider parity gate automatically only when both `PLEX_TOKEN` and `EMBY_API_KEY` are configured
 - when either secret is missing, the base playback gate still runs and the provider parity stage is reported as skipped rather than failing readiness up front
 
+Base-playback secret fallback note:
+
+- full playback proof still requires `TMDB_API_KEY` plus at least one debrid provider token/key
+- when those base secrets are absent on GitHub, the workflow now falls back to an explicit `dry_run` playback-proof mode instead of failing the entire PR check on secret wiring alone
+- that fallback is reported in `playback-proof-artifacts/ci-execution-summary.json` as `gate_mode: "dry_run"` so operators can distinguish a real playback proof from configuration-only CI
+
 ## 2. Configure GitHub runner inputs
 
 The workflow [`../.github/workflows/playback-gate.yml`](../.github/workflows/playback-gate.yml) expects:

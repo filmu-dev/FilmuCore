@@ -56,9 +56,9 @@ export PLEX_URL="${PLEX_URL:-http://localhost:32401}"
 export EMBY_URL="${EMBY_URL:-http://localhost:8097}"
 export FILMU_REQUIRE_PROVIDER_GATE="${FILMU_REQUIRE_PROVIDER_GATE:-1}"
 export FILMU_PLAYBACK_REQUIRED_CHECK_NAME="${FILMU_PLAYBACK_REQUIRED_CHECK_NAME:-Playback Gate / Playback Gate}"
+export FILMU_PLAYBACK_DRY_RUN="${FILMU_PLAYBACK_DRY_RUN:-0}"
 export FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE="${FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE:-}"
 
-require_nonempty_env TMDB_API_KEY
 require_nonempty_env FILMU_FRONTEND_CONTEXT
 
 if [[ -z "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
@@ -67,6 +67,10 @@ if [[ -z "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
 fi
 
 require_nonempty_env FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE
+
+if [[ "$FILMU_PLAYBACK_DRY_RUN" != "1" ]]; then
+  require_nonempty_env TMDB_API_KEY
+fi
 
 if [[ ! -d "$FILMU_FRONTEND_CONTEXT" ]]; then
   echo "[playback-gate-ci] frontend source path not found: $FILMU_FRONTEND_CONTEXT" >&2
@@ -78,12 +82,12 @@ if [[ ! -x "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
   exit 1
 fi
 
-if [[ -z "${FILMU_PY_REALDEBRID_API_TOKEN:-}${REAL_DEBRID_API_KEY:-}${FILMU_PY_ALLDEBRID_API_TOKEN:-}${ALL_DEBRID_API_KEY:-}${FILMU_PY_DEBRIDLINK_API_TOKEN:-}${DEBRID_LINK_API_KEY:-}" ]]; then
+if [[ "$FILMU_PLAYBACK_DRY_RUN" != "1" && -z "${FILMU_PY_REALDEBRID_API_TOKEN:-}${REAL_DEBRID_API_KEY:-}${FILMU_PY_ALLDEBRID_API_TOKEN:-}${ALL_DEBRID_API_KEY:-}${FILMU_PY_DEBRIDLINK_API_TOKEN:-}${DEBRID_LINK_API_KEY:-}" ]]; then
   echo "[playback-gate-ci] at least one debrid provider token is required for the playback gate" >&2
   exit 1
 fi
 
-if [[ ! -e /dev/fuse ]]; then
+if [[ "$FILMU_PLAYBACK_DRY_RUN" != "1" && ! -e /dev/fuse ]]; then
   echo "[playback-gate-ci] /dev/fuse is required on the Linux playback runner" >&2
   exit 1
 fi
@@ -96,8 +100,26 @@ fi
 echo "[playback-gate-ci] validating runner readiness"
 pwsh "${readiness_args[@]}"
 
-mkdir -p /mnt/filmuvfs
 mkdir -p playback-proof-artifacts
+
+if [[ "$FILMU_PLAYBACK_DRY_RUN" == "1" ]]; then
+  echo "[playback-gate-ci] base playback secrets are unavailable; running dry-run fallback"
+  pwsh -NoProfile -File ./scripts/run_playback_proof_stability.ps1 \
+    -RepeatCount 1 \
+    -DryRun
+
+  cat > playback-proof-artifacts/ci-execution-summary.json <<EOF
+{
+  "required_check_name": "${FILMU_PLAYBACK_REQUIRED_CHECK_NAME}",
+  "gate_mode": "dry_run",
+  "provider_gate_required": false,
+  "provider_gate_ran": false
+}
+EOF
+  exit 0
+fi
+
+mkdir -p /mnt/filmuvfs
 
 cleanup() {
   docker compose -f docker-compose.local.yml down --remove-orphans || true
@@ -161,6 +183,7 @@ fi
 cat > playback-proof-artifacts/ci-execution-summary.json <<EOF
 {
   "required_check_name": "${FILMU_PLAYBACK_REQUIRED_CHECK_NAME}",
+  "gate_mode": "full",
   "provider_gate_required": ${FILMU_REQUIRE_PROVIDER_GATE},
   "provider_gate_ran": $(if [[ -n "${PLEX_TOKEN:-}" && -n "${EMBY_API_KEY:-}" ]]; then echo true; else echo false; fi)
 }

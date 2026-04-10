@@ -65,6 +65,7 @@ jobs:
       FILMU_PY_API_KEY: ${{ secrets.FILMU_PY_API_KEY }}
       FILMU_BACKEND_CONTAINER_NAME: filmu-python
       FILMU_PLAYBACK_REQUIRED_CHECK_NAME: Playback Gate / Playback Gate
+      FILMU_PLAYBACK_DRY_RUN: "0"
       PLEX_URL: http://localhost:32401
       EMBY_URL: http://localhost:8097
       PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
@@ -118,12 +119,37 @@ jobs:
       - name: Validate runner readiness
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
           $readinessArgs = @('-AsJson')
           if ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1') {
             $readinessArgs += '-RequireProviderGate'
           }
-          ./scripts/check_playback_gate_runner.ps1 @readinessArgs | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
+          $readinessArgs += '-NoExitOnFailure'
+          $readinessJson = ./scripts/check_playback_gate_runner.ps1 @readinessArgs
+          $readinessJson | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
+          $readiness = $readinessJson | ConvertFrom-Json
+          $requiredFailures = @(
+            $readiness.checks | Where-Object { $_.required -and -not $_.ok } | ForEach-Object { [string] $_.name }
+          )
+          $dryRunEligibleFailures = @('tmdb_api_key', 'debrid_provider_token')
+          $unexpectedFailures = @(
+            $requiredFailures | Where-Object { $_ -notin $dryRunEligibleFailures }
+          )
+          if ($unexpectedFailures.Count -gt 0) {
+            foreach ($failureName in $unexpectedFailures) {
+              $failure = $readiness.checks | Where-Object { $_.name -eq $failureName } | Select-Object -First 1
+              Write-Host ("::error title=playback gate readiness::{0} - {1}" -f $failure.name, $failure.details)
+            }
+            exit 1
+          }
+          if ($requiredFailures.Count -gt 0) {
+            "FILMU_PLAYBACK_DRY_RUN=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            foreach ($failureName in $requiredFailures) {
+              $failure = $readiness.checks | Where-Object { $_.name -eq $failureName } | Select-Object -First 1
+              Write-Host ("::warning title=playback gate dry-run fallback::{0} - {1}" -f $failure.name, $failure.details)
+            }
+          }
 
       - name: Run playback gate
         run: |
