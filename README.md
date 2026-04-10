@@ -116,9 +116,9 @@ This is a working compatibility backend with real acquisition, playback, and Fil
 
 Release Please is now intended to operate from squash-merged PRs into `main`, not from arbitrary branch history or merge-commit subjects.
 
-- Release policy and required GitHub settings: [docs/RELEASE_PROCESS.md](/E:/Dev/Filmu/FilmuCore/docs/RELEASE_PROCESS.md)
-- PR title gate workflow: [.github/workflows/semantic-pr-title.yml](/E:/Dev/Filmu/FilmuCore/.github/workflows/semantic-pr-title.yml)
-- Release workflow: [.github/workflows/release.yml](/E:/Dev/Filmu/FilmuCore/.github/workflows/release.yml)
+- Release policy and required GitHub settings: [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md)
+- PR title gate workflow: [.github/workflows/semantic-pr-title.yml](.github/workflows/semantic-pr-title.yml)
+- Release workflow: [.github/workflows/release.yml](.github/workflows/release.yml)
 
 
 
