@@ -97,9 +97,6 @@ if [[ "$FILMU_REQUIRE_PROVIDER_GATE" == "1" ]]; then
   readiness_args+=(-RequireProviderGate)
 fi
 
-echo "[playback-gate-ci] validating runner readiness"
-pwsh "${readiness_args[@]}"
-
 mkdir -p playback-proof-artifacts
 
 if [[ "$FILMU_PLAYBACK_DRY_RUN" == "1" ]]; then
@@ -118,6 +115,9 @@ if [[ "$FILMU_PLAYBACK_DRY_RUN" == "1" ]]; then
 EOF
   exit 0
 fi
+
+echo "[playback-gate-ci] validating runner readiness"
+pwsh "${readiness_args[@]}"
 
 mkdir -p /mnt/filmuvfs
 

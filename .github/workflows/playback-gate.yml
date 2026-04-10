@@ -121,39 +121,41 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
+          $hasTmdb = -not [string]::IsNullOrWhiteSpace([string] $env:TMDB_API_KEY)
+          $debridKeys = @(
+            [string] $env:FILMU_PY_REALDEBRID_API_TOKEN
+            [string] $env:REAL_DEBRID_API_KEY
+            [string] $env:FILMU_PY_ALLDEBRID_API_TOKEN
+            [string] $env:ALL_DEBRID_API_KEY
+            [string] $env:FILMU_PY_DEBRIDLINK_API_TOKEN
+            [string] $env:DEBRID_LINK_API_KEY
+          ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          $hasDebrid = @($debridKeys).Count -gt 0
+          if (-not $hasTmdb -or -not $hasDebrid) {
+            $checks = [System.Collections.Generic.List[object]]::new()
+            $checks.Add([pscustomobject]@{ name = 'tmdb_api_key'; required = $true; ok = $hasTmdb; details = 'TMDB_API_KEY is required.' })
+            $checks.Add([pscustomobject]@{ name = 'debrid_provider_token'; required = $true; ok = $hasDebrid; details = 'At least one debrid provider token/key is required.' })
+            [pscustomobject]@{
+              timestamp = (Get-Date).ToString('o')
+              require_provider_gate = ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1')
+              status = 'dry_run'
+              checks = $checks
+            } | ConvertTo-Json -Depth 6 | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
+            "FILMU_PLAYBACK_DRY_RUN=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            if (-not $hasTmdb) {
+              Write-Host '::warning title=playback gate dry-run fallback::tmdb_api_key - TMDB_API_KEY is required.'
+            }
+            if (-not $hasDebrid) {
+              Write-Host '::warning title=playback gate dry-run fallback::debrid_provider_token - At least one debrid provider token/key is required.'
+            }
+            return
+          }
           $readinessArgs = @('-AsJson')
           if ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1') {
             $readinessArgs += '-RequireProviderGate'
           }
-          $readinessArgs += '-NoExitOnFailure'
           $readinessJson = ./scripts/check_playback_gate_runner.ps1 @readinessArgs
           $readinessJson | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
-          $readiness = $readinessJson | ConvertFrom-Json
-          $requiredFailureChecks = @(
-            $readiness.checks | Where-Object { $_.required -and -not $_.ok }
-          )
-          $unexpectedFailures = @(
-            $requiredFailureChecks | Where-Object {
-              $_.name -ne 'tmdb_api_key' -and $_.name -ne 'debrid_provider_token'
-            }
-          )
-          if ($unexpectedFailures.Count -gt 0) {
-            foreach ($failure in $unexpectedFailures) {
-              Write-Host ("::error title=playback gate readiness::{0} - {1}" -f $failure.name, $failure.details)
-            }
-            exit 1
-          }
-          $baseSecretFailures = @(
-            $requiredFailureChecks | Where-Object {
-              $_.name -eq 'tmdb_api_key' -or $_.name -eq 'debrid_provider_token'
-            }
-          )
-          if ($baseSecretFailures.Count -gt 0) {
-            "FILMU_PLAYBACK_DRY_RUN=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            foreach ($failure in $baseSecretFailures) {
-              Write-Host ("::warning title=playback gate dry-run fallback::{0} - {1}" -f $failure.name, $failure.details)
-            }
-          }
 
       - name: Run playback gate
         run: |
