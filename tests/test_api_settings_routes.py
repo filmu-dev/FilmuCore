@@ -407,6 +407,20 @@ def test_generate_apikey_rotates_runtime_key_and_persists_it(monkeypatch: Any) -
     assert resources.db.settings_blob["api_key_id"] == body["api_key_id"]
 
 
+def test_generate_apikey_bounds_api_key_identifier_length(monkeypatch: Any) -> None:
+    client, resources = _build_client()
+    _install_settings_persistence_stubs(monkeypatch)
+    response = client.post(
+        "/api/v1/generateapikey",
+        headers=_headers(**{"x-actor-id": "operator-" + ("x" * 300)}),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["api_key_id"]) <= 128
+    assert resources.settings.api_key_id == body["api_key_id"]
+
+
 def test_settings_put_requires_settings_write_permission(monkeypatch: Any) -> None:
     client, _resources = _build_client()
     _install_settings_persistence_stubs(monkeypatch)

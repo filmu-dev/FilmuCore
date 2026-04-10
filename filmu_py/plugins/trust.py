@@ -61,6 +61,37 @@ class PluginPublisherPolicyEvaluation:
     trust_store_source: str | None
 
 
+def _load_policy_string_array(
+    payload: dict[str, object],
+    *,
+    field_name: str,
+) -> frozenset[str]:
+    """Return one normalized string set for a publisher policy field."""
+
+    raw_values = payload.get(field_name, [])
+    if not isinstance(raw_values, list):
+        raise ValueError(f"plugin trust store publisher field '{field_name}' must be an array")
+    return frozenset(
+        str(value).strip().lower()
+        for value in raw_values
+        if str(value).strip()
+    )
+
+
+def _load_policy_bool(
+    payload: dict[str, object],
+    *,
+    field_name: str,
+    default: bool,
+) -> bool:
+    """Return one validated boolean publisher policy field."""
+
+    raw_value = payload.get(field_name, default)
+    if not isinstance(raw_value, bool):
+        raise ValueError(f"plugin trust store publisher field '{field_name}' must be a boolean")
+    return raw_value
+
+
 def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
     """Load one plugin trust store from JSON when configured."""
 
@@ -104,22 +135,23 @@ def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
             raise ValueError("plugin trust store publisher names must not be empty")
         publishers[normalized_publisher] = TrustedPublisherPolicy(
             publisher=normalized_publisher,
-            allowed_release_channels=frozenset(
-                str(value).strip().lower()
-                for value in payload.get("allowed_release_channels", [])
-                if str(value).strip()
+            allowed_release_channels=_load_policy_string_array(
+                payload,
+                field_name="allowed_release_channels",
             ),
-            allowed_sandbox_profiles=frozenset(
-                str(value).strip().lower()
-                for value in payload.get("allowed_sandbox_profiles", [])
-                if str(value).strip()
+            allowed_sandbox_profiles=_load_policy_string_array(
+                payload,
+                field_name="allowed_sandbox_profiles",
             ),
-            allowed_tenancy_modes=frozenset(
-                str(value).strip().lower()
-                for value in payload.get("allowed_tenancy_modes", [])
-                if str(value).strip()
+            allowed_tenancy_modes=_load_policy_string_array(
+                payload,
+                field_name="allowed_tenancy_modes",
             ),
-            require_signature_verification=bool(payload.get("require_signature_verification", True)),
+            require_signature_verification=_load_policy_bool(
+                payload,
+                field_name="require_signature_verification",
+                default=True,
+            ),
         )
 
     raw_revoked_key_ids = raw.get("revoked_key_ids", [])

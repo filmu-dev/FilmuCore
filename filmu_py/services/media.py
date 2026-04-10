@@ -4723,6 +4723,7 @@ class MediaService:
                     external_ref=item.external_ref,
                     title=item.title,
                     state=ItemState(item.state),
+                    tenant_id=item.tenant_id,
                     attributes=dict(cast(dict[str, object], item.attributes or {})),
                 )
                 for item in items
@@ -5750,6 +5751,7 @@ class MediaService:
                 external_ref=row.external_ref,
                 title=row.title,
                 state=ItemState(row.state),
+                tenant_id=row.tenant_id,
                 attributes=cast(dict[str, object], row.attributes or {}),
             )
             for row in rows

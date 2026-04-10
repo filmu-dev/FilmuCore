@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from secrets import token_hex
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
@@ -36,6 +37,8 @@ from ..models import (
 )
 
 router = APIRouter(tags=["default"])
+_MAX_API_KEY_ID_LENGTH = 128
+_API_KEY_ID_SUFFIX_LENGTH = 12
 
 API_KEY_ROTATION_WARNING = (
     "Update BACKEND_API_KEY in your frontend environment and restart the frontend "
@@ -101,8 +104,11 @@ def _plugin_signature_fields(*, manifest: Any, success: Any) -> dict[str, Any]:
 def _next_api_key_id(auth_context: Any) -> str:
     """Return a non-secret service-account key identifier for rotations."""
 
-    actor_prefix = str(getattr(auth_context, "actor_id", "service")).replace(":", "-")
-    return f"{actor_prefix}-{uuid4().hex[:12]}"
+    raw_actor_id = str(getattr(auth_context, "actor_id", "service"))
+    normalized_prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_actor_id).strip("-._") or "service"
+    max_prefix_length = _MAX_API_KEY_ID_LENGTH - _API_KEY_ID_SUFFIX_LENGTH - 1
+    bounded_prefix = normalized_prefix[:max_prefix_length].rstrip("-._") or "service"
+    return f"{bounded_prefix}-{uuid4().hex[:_API_KEY_ID_SUFFIX_LENGTH]}"
 
 
 def _generate_api_key() -> str:
