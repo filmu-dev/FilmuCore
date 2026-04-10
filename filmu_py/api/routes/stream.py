@@ -571,7 +571,7 @@ def _load_vfs_runtime_status_payload() -> dict[str, object] | None:
     return None
 
 
-def _vfs_runtime_governance_snapshot() -> dict[str, int | str]:
+def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
     """Return additive governance counters extracted from the Rust runtime snapshot."""
 
     payload = _load_vfs_runtime_status_payload()

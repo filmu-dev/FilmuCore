@@ -69,6 +69,40 @@ function New-ExpectedPolicy {
     }
 }
 
+function Test-MappingKey {
+    param(
+        [object] $Mapping,
+        [Parameter(Mandatory = $true)][string] $Key
+    )
+
+    if ($null -eq $Mapping) {
+        return $false
+    }
+
+    if ($Mapping -is [System.Collections.IDictionary]) {
+        return $Mapping.Contains($Key)
+    }
+
+    return $Mapping.PSObject.Properties.Name -contains $Key
+}
+
+function Get-MappingValue {
+    param(
+        [object] $Mapping,
+        [Parameter(Mandatory = $true)][string] $Key
+    )
+
+    if (-not (Test-MappingKey -Mapping $Mapping -Key $Key)) {
+        return $null
+    }
+
+    if ($Mapping -is [System.Collections.IDictionary]) {
+        return $Mapping[$Key]
+    }
+
+    return $Mapping.$Key
+}
+
 function Get-ValidationExitCode {
     param([object] $Validation)
 
@@ -76,10 +110,7 @@ function Get-ValidationExitCode {
         return 0
     }
 
-    if (
-        ($Validation.PSObject.Properties.Name -contains 'status') -and
-        ([string] $Validation.status -eq 'ready')
-    ) {
+    if ([string] (Get-MappingValue -Mapping $Validation -Key 'status') -eq 'ready') {
         return 0
     }
 
@@ -162,15 +193,15 @@ foreach ($check in $expected.branch_protection.required_status_checks) {
 Write-Host ("[github-main-policy] expected merge policy: squash={0} merge_commit={1} rebase={2}" -f $expected.repository.allow_squash_merge, $expected.repository.allow_merge_commit, $expected.repository.allow_rebase_merge)
 
 if ($null -ne $result.validation) {
-    Write-Host ("[github-main-policy] validation status: {0}" -f $result.validation.status)
-    if ($result.validation.PSObject.Properties.Name -contains 'details') {
-        Write-Host ("[github-main-policy] {0}" -f $result.validation.details)
+    Write-Host ("[github-main-policy] validation status: {0}" -f (Get-MappingValue -Mapping $result.validation -Key 'status'))
+    if (Test-MappingKey -Mapping $result.validation -Key 'details') {
+        Write-Host ("[github-main-policy] {0}" -f (Get-MappingValue -Mapping $result.validation -Key 'details'))
     }
     elseif (
-        ($result.validation.PSObject.Properties.Name -contains 'missing_required_checks') -and
-        ($result.validation.missing_required_checks.Count -gt 0)
+        (Test-MappingKey -Mapping $result.validation -Key 'missing_required_checks') -and
+        (@(Get-MappingValue -Mapping $result.validation -Key 'missing_required_checks')).Count -gt 0
     ) {
-        foreach ($check in $result.validation.missing_required_checks) {
+        foreach ($check in @(Get-MappingValue -Mapping $result.validation -Key 'missing_required_checks')) {
             Write-Host ("[github-main-policy] missing required check: {0}" -f $check)
         }
     }

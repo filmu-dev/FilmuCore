@@ -97,6 +97,8 @@ What it does:
 - prints the canonical required-check set for `main`
 - prints the expected merge-method policy (`squash` on, `merge commit` off, `rebase` off)
 - when `gh` is installed and authenticated with repo-admin access, validates the current GitHub repository and branch-protection state instead of relying on manual memory
+- exits non-zero for `-ValidateCurrent` when the live policy is `not_ready` or `unverified`, so the checker can be used as a real CI gate instead of a report-only helper
+- keeps the print-only mode (`proof:playback:policy` without `-ValidateCurrent`) exit-zero so operators can inspect the canonical expected policy on machines that do not have `gh` configured
 
 ## 3. CI behavior
 
