@@ -83,6 +83,7 @@ class SecurityIdentityService:
         """Upsert tenant, principal, and service-account rows for one auth context."""
 
         now = datetime.now(UTC)
+        tenant_status = "active"
         async with self._db.session() as session:
             tenant = await session.get(TenantORM, auth_context.tenant_id)
             if tenant is None:
@@ -94,6 +95,7 @@ class SecurityIdentityService:
                     status="active",
                 )
                 session.add(tenant)
+            tenant_status = tenant.status
 
             principal = (
                 await session.execute(
@@ -151,7 +153,7 @@ class SecurityIdentityService:
 
         return IdentityResolution(
             tenant_id=auth_context.tenant_id,
-            tenant_status="active",
+            tenant_status=tenant_status,
             principal_key=auth_context.actor_id,
             principal_type=auth_context.actor_type,
             service_account_api_key_id=service_account_key,
@@ -171,7 +173,20 @@ class SecurityIdentityService:
             return await self.record_auth_context(auth_context)
 
         now = datetime.now(UTC)
+        tenant_status = "active"
         async with self._db.session() as session:
+            tenant = await session.get(TenantORM, auth_context.tenant_id)
+            if tenant is None:
+                tenant = TenantORM(
+                    id=auth_context.tenant_id,
+                    slug=auth_context.tenant_id.lower(),
+                    display_name=_display_name_for(auth_context.tenant_id),
+                    kind="system" if auth_context.tenant_id == "global" else "tenant",
+                    status="active",
+                )
+                session.add(tenant)
+            tenant_status = tenant.status
+
             principal = (
                 await session.execute(
                     select(PrincipalORM).where(PrincipalORM.principal_key == auth_context.actor_id)
@@ -215,7 +230,7 @@ class SecurityIdentityService:
 
         return IdentityResolution(
             tenant_id=auth_context.tenant_id,
-            tenant_status="active",
+            tenant_status=tenant_status,
             principal_key=auth_context.actor_id,
             principal_type=auth_context.actor_type,
             service_account_api_key_id=new_api_key_id,

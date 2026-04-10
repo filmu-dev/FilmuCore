@@ -135,18 +135,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("principal_id"),
     )
-    op.create_index(
-        op.f("ix_service_accounts_principal_id"),
-        "service_accounts",
-        ["principal_id"],
-        unique=True,
-    )
-    op.create_index(
-        op.f("ix_service_accounts_api_key_id"),
-        "service_accounts",
-        ["api_key_id"],
-        unique=True,
-    )
+    op.create_index(op.f("ix_service_accounts_api_key_id"), "service_accounts", ["api_key_id"], unique=True)
 
     op.add_column(
         "media_items",

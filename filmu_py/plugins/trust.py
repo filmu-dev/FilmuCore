@@ -122,10 +122,17 @@ def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
             require_signature_verification=bool(payload.get("require_signature_verification", True)),
         )
 
-    revoked_key_ids = frozenset(str(value).strip() for value in raw.get("revoked_key_ids", []))
+    raw_revoked_key_ids = raw.get("revoked_key_ids", [])
+    if not isinstance(raw_revoked_key_ids, list):
+        raise ValueError("plugin trust store revoked_key_ids must be an array")
+    revoked_key_ids = frozenset(str(value).strip() for value in raw_revoked_key_ids if str(value).strip())
+
+    raw_revoked_signatures = raw.get("revoked_signatures", [])
+    if not isinstance(raw_revoked_signatures, list):
+        raise ValueError("plugin trust store revoked_signatures must be an array")
     revoked_signatures = frozenset(
         _normalize_signature(str(value))
-        for value in raw.get("revoked_signatures", [])
+        for value in raw_revoked_signatures
         if str(value).strip()
     )
     return PluginTrustStore(
@@ -147,13 +154,6 @@ def verify_plugin_signature(
 ) -> PluginSignatureVerification:
     """Verify one plugin signature against the configured trust store."""
 
-    if distribution == "builtin":
-        return PluginSignatureVerification(
-            verified=True,
-            reason="builtin_trusted",
-            trust_policy_decision="builtin",
-            trust_store_source=(trust_store.source if trust_store is not None else None),
-        )
     if signature is None:
         return PluginSignatureVerification(
             verified=False,

@@ -331,6 +331,13 @@ class ItemRequestORM(Base):
     """Persistent request-intent record kept separate from media lifecycle state."""
 
     __tablename__ = "item_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "external_ref",
+            name="uq_item_requests_tenant_external_ref",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(
         UUID(as_uuid=False),
@@ -345,7 +352,7 @@ class ItemRequestORM(Base):
         server_default=text("'global'"),
         index=True,
     )
-    external_ref: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    external_ref: Mapped[str] = mapped_column(String(128), index=True)
     media_item_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False),
         ForeignKey("media_items.id", ondelete="SET NULL"),

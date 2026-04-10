@@ -4164,7 +4164,10 @@ class MediaService:
 
         existing = (
             await session.execute(
-                select(ItemRequestORM).where(ItemRequestORM.external_ref == external_ref)
+                select(ItemRequestORM).where(
+                    ItemRequestORM.tenant_id == tenant_id,
+                    ItemRequestORM.external_ref == external_ref,
+                )
             )
         ).scalar_one_or_none()
         if existing is None:
@@ -4190,7 +4193,6 @@ class MediaService:
 
         return update_item_request_record(
             existing,
-            tenant_id=tenant_id,
             media_item_id=media_item_id,
             requested_title=requested_title,
             media_type=media_type,
