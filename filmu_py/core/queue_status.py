@@ -326,10 +326,7 @@ class QueueStatusReader:
         )
         history: list[QueueStatusHistoryPoint] = []
         for row in cast(list[object], rows):
-            if isinstance(row, bytes):
-                raw = row.decode("utf-8")
-            else:
-                raw = str(row)
+            raw = row.decode("utf-8") if isinstance(row, bytes) else str(row)
             try:
                 payload = cast(dict[str, Any], json.loads(raw))
             except Exception:

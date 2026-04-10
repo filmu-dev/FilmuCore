@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from filmu_py.graphql.plugin_registry import GraphQLResolverKind
 
-
 _ALLOWED_DISTRIBUTIONS = {"filesystem", "entry_point", "builtin"}
 _ALLOWED_RELEASE_CHANNELS = {"stable", "beta", "experimental", "builtin"}
 _ALLOWED_TRUST_LEVELS = {"builtin", "trusted", "community"}

@@ -12,8 +12,8 @@ from pydantic import ValidationError
 
 from filmu_py.api.deps import get_db
 from filmu_py.api.deps import get_settings as dep_get_settings
-from filmu_py.audit import audit_action
 from filmu_py.api.models import MessageResponse
+from filmu_py.audit import audit_action
 from filmu_py.config import Settings, set_runtime_settings
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.services.settings_service import save_settings as persist_settings_blob

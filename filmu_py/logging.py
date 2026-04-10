@@ -75,9 +75,9 @@ class CorrelationContextFilter(logging.Filter):
 
         trace_context = _current_trace_context()
         if not hasattr(record, "trace_id") and trace_context["trace_id"] is not None:
-            setattr(record, "trace_id", trace_context["trace_id"])
+            record.trace_id = trace_context["trace_id"]
         if not hasattr(record, "span_id") and trace_context["span_id"] is not None:
-            setattr(record, "span_id", trace_context["span_id"])
+            record.span_id = trace_context["span_id"]
         return True
 
 
