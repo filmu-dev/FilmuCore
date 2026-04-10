@@ -69,7 +69,7 @@ jobs:
       EMBY_URL: http://localhost:8097
       PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
       EMBY_API_KEY: ${{ secrets.EMBY_API_KEY }}
-      FILMU_REQUIRE_PROVIDER_GATE: "1"
+      FILMU_REQUIRE_PROVIDER_GATE: ${{ secrets.PLEX_TOKEN != '' && secrets.EMBY_API_KEY != '' && '1' || '0' }}
     steps:
       - name: Checkout backend repo
         uses: actions/checkout@v4
@@ -109,6 +109,10 @@ jobs:
 
           if [[ ! -e /dev/fuse ]]; then
             sudo modprobe fuse || true
+          fi
+
+          if [[ ! -e /dev/fuse ]]; then
+            sudo mknod -m 666 /dev/fuse c 10 229 || true
           fi
 
       - name: Validate runner readiness

@@ -46,6 +46,11 @@ Additional prerequisites for the provider parity gate:
 - `PLEX_TOKEN`
 - `EMBY_API_KEY`
 
+Provider-parity requirement note:
+
+- the GitHub workflow now enables the provider parity gate automatically only when both `PLEX_TOKEN` and `EMBY_API_KEY` are configured
+- when either secret is missing, the base playback gate still runs and the provider parity stage is reported as skipped rather than failing readiness up front
+
 ## 2. Configure GitHub runner inputs
 
 The workflow [`../.github/workflows/playback-gate.yml`](../.github/workflows/playback-gate.yml) expects:
@@ -77,7 +82,7 @@ GitHub-hosted frontend checkout note:
 - when `FILMU_FRONTEND_REPOSITORY` is unset, the workflow now falls back to the current public frontend repository `S0lidByte/CineFlow-frontend`
 - `FILMU_FRONTEND_CONTEXT` now defaults to that checkout path when no explicit override is provided
 - the workflow now auto-discovers a Chrome/Chromium/Edge binary on the hosted Ubuntu image and exports it into `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE` when the repo variable is unset
-- the workflow also attempts `sudo modprobe fuse` before readiness validation so `/dev/fuse` is not treated as a manual pre-step on the standard GitHub-hosted Linux runner
+- the workflow also attempts `sudo modprobe fuse` and a `/dev/fuse` node creation fallback before readiness validation so FUSE device setup is not treated as a manual pre-step on the standard GitHub-hosted Linux runner
 - override `FILMU_FRONTEND_REPOSITORY` only if CI should use a different frontend repo than that default
 
 Required-check promotion note:
