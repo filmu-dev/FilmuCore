@@ -48,7 +48,7 @@ What this baseline is good at:
 
 What it does **not** yet provide:
 
-- richer publisher lifecycle controls and runtime sandboxing above the new trust-store-backed signature verification baseline
+- cryptographic signature verification/trust-store governance beyond the new provenance metadata and digest-validation baseline
 - richer external-author packaging/distribution guidance
 - durable/queue-backed hook execution if operational pressure eventually requires it
 - deeper runtime sandboxing/revocation and broader plugin health/status rollups beyond the new baseline telemetry

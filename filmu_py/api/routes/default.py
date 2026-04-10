@@ -323,6 +323,7 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                     **signature_fields,
                 )
             )
+        )
             continue
 
         responses.append(
