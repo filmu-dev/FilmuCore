@@ -68,15 +68,15 @@ pub struct ChunkCacheSnapshot {
     pub disk_evictions: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChunkCoalescingSnapshot {
     pub in_flight_chunks: u64,
     pub peak_in_flight_chunks: u64,
     pub waits_total: u64,
     pub waits_hit: u64,
     pub waits_miss: u64,
-    pub wait_average_duration_ms: u64,
-    pub wait_max_duration_ms: u64,
+    pub wait_average_duration_ms: f64,
+    pub wait_max_duration_ms: f64,
 }
 
 #[derive(Debug, Error)]
@@ -699,13 +699,13 @@ fn update_max(target: &AtomicU64, candidate: u64) {
     });
 }
 
-fn average_millis(total_micros: u64, count: u64) -> u64 {
+fn average_millis(total_micros: u64, count: u64) -> f64 {
     if count == 0 {
-        return 0;
+        return 0.0;
     }
-    duration_to_millis(total_micros / count)
+    total_micros as f64 / count as f64 / 1000.0
 }
 
-fn duration_to_millis(micros: u64) -> u64 {
-    micros / 1000
+fn duration_to_millis(micros: u64) -> f64 {
+    micros as f64 / 1000.0
 }

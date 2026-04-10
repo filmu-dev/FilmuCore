@@ -64,19 +64,24 @@ jobs:
       - name: Summarize release-please outcome
         if: always()
         shell: bash
+        env:
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          PRS_CREATED: ${{ steps.release.outputs.prs_created }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG_NAME: ${{ steps.release.outputs.tag_name }}
         run: |
           {
             echo "## Release Please"
             echo
             echo "- Branch: \`${GITHUB_REF}\`"
-            echo "- release_created: \`${{ steps.release.outputs.release_created }}\`"
-            echo "- prs_created: \`${{ steps.release.outputs.prs_created }}\`"
-            echo "- version: \`${{ steps.release.outputs.version }}\`"
-            echo "- tag_name: \`${{ steps.release.outputs.tag_name }}\`"
+            echo "- release_created: \`${RELEASE_CREATED}\`"
+            echo "- prs_created: \`${PRS_CREATED}\`"
+            echo "- version: \`${RELEASE_VERSION}\`"
+            echo "- tag_name: \`${RELEASE_TAG_NAME}\`"
             echo
-            if [[ "${{ steps.release.outputs.release_created }}" == "true" ]]; then
+            if [[ "${RELEASE_CREATED}" == "true" ]]; then
               echo "A release was created from this \`main\` push."
-            elif [[ -n "${{ steps.release.outputs.prs_created }}" && "${{ steps.release.outputs.prs_created }}" != "[]" ]]; then
+            elif [[ -n "${PRS_CREATED}" && "${PRS_CREATED}" != "[]" ]]; then
               echo "A release PR was opened or updated from this \`main\` push."
             else
               echo "No release PR or tag was created from this \`main\` push."

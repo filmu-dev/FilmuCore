@@ -303,8 +303,8 @@ pub struct FilmuvfsChunkCoalescingStatusSnapshot {
     pub waits_total: u64,
     pub waits_hit: u64,
     pub waits_miss: u64,
-    pub wait_average_duration_ms: u64,
-    pub wait_max_duration_ms: u64,
+    pub wait_average_duration_ms: f64,
+    pub wait_max_duration_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]

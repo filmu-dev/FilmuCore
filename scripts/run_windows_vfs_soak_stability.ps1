@@ -47,6 +47,7 @@ $singleRunScript = Join-Path $scriptRoot 'run_windows_vfs_soak.ps1'
 $artifactsRoot = Join-Path (Split-Path -Parent $scriptRoot) 'playback-proof-artifacts\windows-native-stack'
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $summaryPath = Join-Path $artifactsRoot ("soak-stability-{0}.json" -f $timestamp)
+New-Item -ItemType Directory -Force -Path $artifactsRoot | Out-Null
 $shellExecutable = (Get-Process -Id $PID).Path
 if ([string]::IsNullOrWhiteSpace($shellExecutable)) {
     $shellExecutable = 'pwsh'
@@ -122,7 +123,12 @@ foreach ($profile in $Profiles) {
             if (Test-Path -LiteralPath $artifactSummaryPath) {
                 $summaryExists = $true
                 $artifactSummary = Get-Content -LiteralPath $artifactSummaryPath -Raw | ConvertFrom-Json
-                $thresholdFailureCount = @($artifactSummary.threshold_failures).Count
+                $thresholdFailures = if ($artifactSummary.PSObject.Properties.Name -contains 'threshold_failures') {
+                    @($artifactSummary.threshold_failures | Where-Object { $null -ne $_ })
+                } else {
+                    @()
+                }
+                $thresholdFailureCount = $thresholdFailures.Count
                 $mountSurvived = [bool]$artifactSummary.mount_survived
                 $reconnectIncidents = [int]($artifactSummary.diagnostics.reconnect_incidents ?? 0)
                 $providerPressureIncidents = [int]($artifactSummary.runtime_diagnostics.provider_pressure_incidents ?? 0)

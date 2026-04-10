@@ -379,7 +379,7 @@ def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
     }
 
 
-def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | str]:
+def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
     """Return the default Rust runtime governance payload for /stream/status."""
 
     return {
@@ -458,8 +458,8 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | str]:
         "vfs_runtime_chunk_coalescing_waits_total": 0,
         "vfs_runtime_chunk_coalescing_waits_hit": 0,
         "vfs_runtime_chunk_coalescing_waits_miss": 0,
-        "vfs_runtime_chunk_coalescing_wait_average_duration_ms": 0,
-        "vfs_runtime_chunk_coalescing_wait_max_duration_ms": 0,
+        "vfs_runtime_chunk_coalescing_wait_average_duration_ms": 0.0,
+        "vfs_runtime_chunk_coalescing_wait_max_duration_ms": 0.0,
         "vfs_runtime_inline_refresh_success": 0,
         "vfs_runtime_inline_refresh_no_url": 0,
         "vfs_runtime_inline_refresh_error": 0,
@@ -490,6 +490,24 @@ def _as_int(value: object) -> int:
             except ValueError:
                 return 0
     return 0
+
+
+def _as_float(value: object) -> float:
+    """Normalize Rust runtime JSON numbers into additive float durations."""
+
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return 0.0
+        try:
+            return float(stripped)
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 def _as_str(value: object, *, default: str = "") -> str:
@@ -822,10 +840,10 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | str]:
     governance["vfs_runtime_chunk_coalescing_waits_miss"] = _as_int(
         _nested_mapping_value(payload, "chunk_coalescing", "waits_miss")
     )
-    governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] = _as_int(
+    governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] = _as_float(
         _nested_mapping_value(payload, "chunk_coalescing", "wait_average_duration_ms")
     )
-    governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] = _as_int(
+    governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] = _as_float(
         _nested_mapping_value(payload, "chunk_coalescing", "wait_max_duration_ms")
     )
     governance["vfs_runtime_inline_refresh_success"] = _as_int(

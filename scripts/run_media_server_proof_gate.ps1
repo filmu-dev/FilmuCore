@@ -26,6 +26,7 @@ $proofScript = Join-Path $scriptRoot 'run_playback_proof.ps1'
 $artifactsRoot = Join-Path (Split-Path -Parent $scriptRoot) 'playback-proof-artifacts'
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $summaryPath = Join-Path $artifactsRoot ("media-server-gate-{0}.json" -f $timestamp)
+New-Item -ItemType Directory -Force -Path $artifactsRoot | Out-Null
 $shellExecutable = (Get-Process -Id $PID).Path
 if ([string]::IsNullOrWhiteSpace($shellExecutable)) {
     $shellExecutable = 'pwsh'
@@ -185,16 +186,16 @@ $summary = [pscustomobject]@{
     tmdb_id    = $TmdbId
     title      = $Title
     media_type = $MediaType
-    all_green  = (@($results | Where-Object { $_.exit_code -ne 0 })).Count -eq 0
+    all_green  = (@($results | Where-Object { $_.status -ne 'passed' })).Count -eq 0
     results    = $results
 }
 $summary | ConvertTo-Json -Depth 8 | Set-Content -Path $summaryPath -Encoding UTF8
 
-$failed = @($results | Where-Object { $_.exit_code -ne 0 })
+$failed = @($results | Where-Object { $_.status -ne 'passed' })
 if ($failed.Count -gt 0) {
     Write-Host ("[media-server-gate] FAIL. Summary: {0}" -f $summaryPath)
     foreach ($failure in $failed) {
-        Write-Host ("[media-server-gate] {0} failed; artifact={1}" -f $failure.provider, $failure.artifact_dir)
+        Write-Host ("[media-server-gate] {0} failed; status={1}; exit_code={2}; artifact={3}" -f $failure.provider, $failure.status, $failure.exit_code, $failure.artifact_dir)
     }
     exit 1
 }

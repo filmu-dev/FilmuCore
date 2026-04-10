@@ -192,10 +192,11 @@ impl PrefetchScheduler {
         let active_background_tasks = Arc::clone(&self.active_background_tasks);
         let active_count = active_background_tasks.fetch_add(1, Ordering::Relaxed) + 1;
         update_max(&self.peak_active_background_tasks, active_count);
+        let active_background_guard =
+            BackgroundTaskGuard::new(Arc::clone(&active_background_tasks));
 
         tokio::spawn(async move {
-            let _active_background_guard =
-                BackgroundTaskGuard::new(Arc::clone(&active_background_tasks));
+            let _active_background_guard = active_background_guard;
             tokio::select! {
                 _ = token.cancelled() => {}
                 _ = async move {

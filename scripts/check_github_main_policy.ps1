@@ -69,6 +69,23 @@ function New-ExpectedPolicy {
     }
 }
 
+function Get-ValidationExitCode {
+    param([object] $Validation)
+
+    if ($null -eq $Validation) {
+        return 0
+    }
+
+    if (
+        ($Validation.PSObject.Properties.Name -contains 'status') -and
+        ([string] $Validation.status -eq 'ready')
+    ) {
+        return 0
+    }
+
+    return 1
+}
+
 $expected = New-ExpectedPolicy -RequirePlaybackGate:$RequirePlaybackGate
 $result = [ordered]@{
     timestamp = (Get-Date).ToString('o')
@@ -132,7 +149,7 @@ if ($ValidateCurrent) {
 
 if ($AsJson) {
     $result | ConvertTo-Json -Depth 10
-    exit 0
+    exit (Get-ValidationExitCode -Validation $result.validation)
 }
 
 Write-Host ("[github-main-policy] repository: {0}" -f $Repository)
@@ -158,3 +175,5 @@ if ($null -ne $result.validation) {
         }
     }
 }
+
+exit (Get-ValidationExitCode -Validation $result.validation)

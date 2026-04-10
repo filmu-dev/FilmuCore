@@ -291,8 +291,8 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_chunk_coalescing_waits_total: int
     vfs_runtime_chunk_coalescing_waits_hit: int
     vfs_runtime_chunk_coalescing_waits_miss: int
-    vfs_runtime_chunk_coalescing_wait_average_duration_ms: int
-    vfs_runtime_chunk_coalescing_wait_max_duration_ms: int
+    vfs_runtime_chunk_coalescing_wait_average_duration_ms: float
+    vfs_runtime_chunk_coalescing_wait_max_duration_ms: float
     vfs_runtime_inline_refresh_success: int
     vfs_runtime_inline_refresh_no_url: int
     vfs_runtime_inline_refresh_error: int

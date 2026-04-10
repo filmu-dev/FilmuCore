@@ -9536,8 +9536,8 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "waits_total": 6,
                     "waits_hit": 5,
                     "waits_miss": 1,
-                    "wait_average_duration_ms": 14,
-                    "wait_max_duration_ms": 89,
+                    "wait_average_duration_ms": 14.25,
+                    "wait_max_duration_ms": 89.5,
                 },
                 "inline_refresh": {
                     "success": 3,
@@ -9641,8 +9641,8 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_chunk_coalescing_waits_total"] == 6
     assert governance["vfs_runtime_chunk_coalescing_waits_hit"] == 5
     assert governance["vfs_runtime_chunk_coalescing_waits_miss"] == 1
-    assert governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] == 14
-    assert governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] == 89
+    assert governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] == 14.25
+    assert governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] == 89.5
     assert governance["vfs_runtime_inline_refresh_success"] == 3
     assert governance["vfs_runtime_inline_refresh_no_url"] == 1
     assert governance["vfs_runtime_inline_refresh_error"] == 2
