@@ -212,7 +212,8 @@ foreach ($provider in $Providers) {
             }
         }
 
-        $status = if (($exitCode -eq 0) -and $summaryExists -and ($topology -eq 'native_windows')) { 'passed' } else { 'failed' }
+        $topologySatisfied = $DryRun -or ($topology -eq 'native_windows')
+        $status = if (($exitCode -eq 0) -and $summaryExists -and $topologySatisfied) { 'passed' } else { 'failed' }
         $results.Add([pscustomobject]@{
             environment_class = $EnvironmentClass
             provider = $provider
@@ -220,6 +221,7 @@ foreach ($provider in $Providers) {
             status = $status
             exit_code = $exitCode
             topology = $topology
+            dry_run = [bool] $DryRun
             artifact_dir = $artifactDir
             summary_exists = $summaryExists
             playback_start_status = $playbackStartStatus

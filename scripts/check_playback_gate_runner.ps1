@@ -67,7 +67,7 @@ $checks.Add([pscustomobject]@{ name = 'frontend_context'; required = $true; ok =
 $checks.Add([pscustomobject]@{ name = 'browser_executable'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($browserPath) -and (Test-Path -LiteralPath $browserPath)); details = 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE must point to an executable browser.' })
 $checks.Add([pscustomobject]@{ name = 'tmdb_api_key'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($tmdbKey)); details = 'TMDB_API_KEY is required.' })
 $checks.Add([pscustomobject]@{ name = 'debrid_provider_token'; required = $true; ok = ($debridKeys.Count -gt 0); details = 'At least one debrid provider token/key is required.' })
-$checks.Add([pscustomobject]@{ name = 'linux_fuse'; required = $true; ok = ($isLinuxHost -and (Test-Path -LiteralPath '/dev/fuse')); details = 'The self-hosted playback gate currently requires Linux with /dev/fuse.' })
+$checks.Add([pscustomobject]@{ name = 'linux_fuse'; required = $true; ok = ($isLinuxHost -and (Test-Path -LiteralPath '/dev/fuse')); details = 'The playback gate requires a Linux runner with /dev/fuse.' })
 $checks.Add([pscustomobject]@{ name = 'plex_token'; required = $RequireProviderGate.IsPresent; ok = (-not [string]::IsNullOrWhiteSpace($plexToken)); details = 'PLEX_TOKEN enables the provider parity gate.' })
 $checks.Add([pscustomobject]@{ name = 'emby_api_key'; required = $RequireProviderGate.IsPresent; ok = (-not [string]::IsNullOrWhiteSpace($embyApiKey)); details = 'EMBY_API_KEY enables the provider parity gate.' })
 

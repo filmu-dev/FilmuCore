@@ -841,6 +841,25 @@ function Get-NestedRuntimeMetric {
     return [int64]$current
 }
 
+function Get-NestedRuntimeFloat {
+    param(
+        $Snapshot,
+        [string[]] $Path
+    )
+
+    $current = $Snapshot
+    foreach ($segment in $Path) {
+        if ($null -eq $current -or $current.PSObject.Properties.Match($segment).Count -eq 0) {
+            return 0.0
+        }
+        $current = $current.$segment
+    }
+    if ($null -eq $current) {
+        return 0.0
+    }
+    return [double]$current
+}
+
 function Get-NestedRuntimeText {
     param(
         $Snapshot,
@@ -933,8 +952,8 @@ function Get-FilmuvfsRuntimeDelta {
         chunk_coalescing_waits_total = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_total')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_total'))
         chunk_coalescing_waits_hit = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_hit')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_hit'))
         chunk_coalescing_waits_miss = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_miss')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_miss'))
-        chunk_coalescing_wait_average_duration_ms = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_average_duration_ms')
-        chunk_coalescing_wait_max_duration_ms = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_max_duration_ms')
+        chunk_coalescing_wait_average_duration_ms = Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_average_duration_ms')
+        chunk_coalescing_wait_max_duration_ms = Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_max_duration_ms')
         inline_refresh_success = ([int64]$AfterSnapshot.inline_refresh.success) - ([int64]$BeforeSnapshot.inline_refresh.success)
         inline_refresh_no_url = ([int64]$AfterSnapshot.inline_refresh.no_url) - ([int64]$BeforeSnapshot.inline_refresh.no_url)
         inline_refresh_error = ([int64]$AfterSnapshot.inline_refresh.error) - ([int64]$BeforeSnapshot.inline_refresh.error)
@@ -1053,8 +1072,8 @@ function Get-RuntimeDiagnostics {
         chunk_coalescing_waits_total = [int64]$RuntimeDelta.chunk_coalescing_waits_total
         chunk_coalescing_waits_hit = [int64]$RuntimeDelta.chunk_coalescing_waits_hit
         chunk_coalescing_waits_miss = [int64]$RuntimeDelta.chunk_coalescing_waits_miss
-        chunk_coalescing_wait_average_duration_ms = [int64]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms
-        chunk_coalescing_wait_max_duration_ms = [int64]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms
+        chunk_coalescing_wait_average_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms
+        chunk_coalescing_wait_max_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms
         provider_pressure_incidents = $providerPressureIncidents
         unrecovered_stale_refresh_incidents = [int64]$RuntimeDelta.mounted_reads_estale
         handle_startup_total = [int64]$RuntimeDelta.handle_startup_total

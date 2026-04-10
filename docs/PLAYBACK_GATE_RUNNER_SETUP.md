@@ -14,7 +14,7 @@ Current gate surfaces:
 
 ## 1. Check Linux runner readiness
 
-From the repository root on the self-hosted Linux runner:
+From the repository root on the GitHub-hosted Linux runner job, or on a matching local Linux host when validating the same prerequisites manually:
 
 ```bash
 pwsh -NoProfile -File ./scripts/check_playback_gate_runner.ps1
@@ -65,14 +65,23 @@ Secrets:
 
 Variables:
 
-- `FILMU_FRONTEND_CONTEXT`
+- optional `FILMU_FRONTEND_CONTEXT`
+- `FILMU_FRONTEND_REPOSITORY`
+- optional `FILMU_FRONTEND_REF`
 - `FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE`
 - optional `FILMU_FRONTEND_USERNAME`
+
+GitHub-hosted frontend checkout note:
+
+- the workflow now runs on `ubuntu-latest`
+- when `FILMU_FRONTEND_REPOSITORY` is set, the workflow checks out that external frontend repo into `${GITHUB_WORKSPACE}/Triven_frontend`
+- `FILMU_FRONTEND_CONTEXT` now defaults to that checkout path when no explicit override is provided
+- if `FILMU_FRONTEND_REPOSITORY` is unset, readiness will fail unless `FILMU_FRONTEND_CONTEXT` already points to a readable frontend checkout inside the runner workspace
 
 Required-check promotion note:
 
 - the workflow code path is already in place for `pull_request`, `push` to `main`, and `merge_group`
-- once the target self-hosted runner and secrets are available and the workflow has produced green runs on the protected branch path, mark the GitHub required check for this workflow, typically shown as `Playback Gate / Playback Gate`
+- once the target GitHub-hosted runner configuration and secrets are available and the workflow has produced green runs on the protected branch path, mark the GitHub required check for this workflow, typically shown as `Playback Gate / Playback Gate`
 - this remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
 - the workflow and [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now also emit the canonical required-check name into the CI artifact bundle so the repo-settings step can key off the exact check label instead of manual memory
 

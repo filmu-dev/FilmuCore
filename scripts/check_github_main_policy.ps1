@@ -64,7 +64,7 @@ function New-ExpectedPolicy {
         }
         gh_commands = [ordered]@{
             inspect_repository = "gh api repos/$Repository"
-            inspect_branch_protection = "gh api repos/$Repository/branches/$Branch/protection"
+            inspect_branch_protection = "gh api repos/$Repository/branches/$([System.Uri]::EscapeDataString($Branch))/protection"
         }
     }
 }
@@ -118,6 +118,7 @@ function Get-ValidationExitCode {
 }
 
 $expected = New-ExpectedPolicy -RequirePlaybackGate:$RequirePlaybackGate
+$escapedBranch = [System.Uri]::EscapeDataString($Branch)
 $result = [ordered]@{
     timestamp = (Get-Date).ToString('o')
     repository = $Repository
@@ -129,7 +130,7 @@ $result = [ordered]@{
 
 if ($ValidateCurrent) {
     $repoPayload = Invoke-GhApiJson -Path "repos/$Repository"
-    $branchProtectionPayload = Invoke-GhApiJson -Path "repos/$Repository/branches/$Branch/protection"
+    $branchProtectionPayload = Invoke-GhApiJson -Path "repos/$Repository/branches/$escapedBranch/protection"
 
     $canValidate = ($null -ne $repoPayload) -and ($null -ne $branchProtectionPayload)
     if (-not $canValidate) {
