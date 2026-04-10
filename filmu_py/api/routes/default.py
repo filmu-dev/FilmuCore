@@ -21,6 +21,8 @@ from filmu_py.services.settings_service import save_settings
 from ..models import (
     ApiKeyRotationResponse,
     AuthContextResponse,
+    AuthPolicyDecisionResponse,
+    AuthPolicyResponse,
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
@@ -29,6 +31,8 @@ from ..models import (
     MessageResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
+    PluginGovernanceResponse,
+    PluginGovernanceSummaryResponse,
     QueueAlertResponse,
     QueueStatusHistoryPointResponse,
     QueueStatusHistoryResponse,
@@ -45,6 +49,12 @@ _API_KEY_ID_SUFFIX_LENGTH = 12
 API_KEY_ROTATION_WARNING = (
     "Update BACKEND_API_KEY in your frontend environment and restart the frontend "
     "server before your next request, or all API calls will fail."
+)
+_AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("library_read", ("library:read",)),
+    ("playback_operate", ("playback:operate",)),
+    ("settings_write", ("settings:write",)),
+    ("api_key_rotate", ("security:apikey.rotate",)),
 )
 
 
@@ -101,6 +111,83 @@ def _plugin_signature_fields(*, manifest: Any, success: Any) -> dict[str, Any]:
         "trust_policy_decision": getattr(success, "trust_policy_decision", None),
         "trust_store_source": getattr(success, "trust_store_source", None),
     }
+
+
+def _plugin_recommended_actions(
+    plugin: PluginCapabilityStatusResponse,
+) -> tuple[str, ...]:
+    """Return stable operator actions for one plugin governance row."""
+
+    actions: set[str] = set()
+    if plugin.status == "load_failed":
+        actions.add("investigate_plugin_load_failure")
+    if plugin.quarantined or plugin.quarantine_recommended:
+        actions.add("review_plugin_quarantine")
+    if plugin.publisher_policy_decision in {"rejected", "untrusted"}:
+        actions.add("review_publisher_policy")
+    if plugin.trust_policy_decision in {"rejected", "untrusted"}:
+        actions.add("review_signature_trust")
+    if (
+        plugin.release_channel != "builtin"
+        and plugin.source != "builtin"
+        and not plugin.signature_present
+    ):
+        actions.add("require_external_plugin_signature")
+    if not plugin.ready:
+        actions.add("resolve_plugin_readiness")
+    return tuple(sorted(actions))
+
+
+def _plugin_governance_summary(
+    plugins: list[PluginCapabilityStatusResponse],
+) -> PluginGovernanceSummaryResponse:
+    """Return a bounded plugin trust/isolation rollup for operators."""
+
+    sandbox_profile_counts: dict[str, int] = {}
+    tenancy_mode_counts: dict[str, int] = {}
+    recommended_actions: set[str] = set()
+    for plugin in plugins:
+        sandbox_profile = plugin.sandbox_profile or "unspecified"
+        sandbox_profile_counts[sandbox_profile] = sandbox_profile_counts.get(sandbox_profile, 0) + 1
+        tenancy_mode = plugin.tenancy_mode or "unspecified"
+        tenancy_mode_counts[tenancy_mode] = tenancy_mode_counts.get(tenancy_mode, 0) + 1
+        recommended_actions.update(_plugin_recommended_actions(plugin))
+
+    return PluginGovernanceSummaryResponse(
+        total_plugins=len(plugins),
+        loaded_plugins=sum(1 for plugin in plugins if plugin.status == "loaded"),
+        load_failed_plugins=sum(1 for plugin in plugins if plugin.status == "load_failed"),
+        ready_plugins=sum(1 for plugin in plugins if plugin.ready),
+        unready_plugins=sum(1 for plugin in plugins if not plugin.ready),
+        quarantined_plugins=sum(1 for plugin in plugins if plugin.quarantined),
+        quarantine_recommended_plugins=sum(1 for plugin in plugins if plugin.quarantine_recommended),
+        unsigned_external_plugins=sum(
+            1
+            for plugin in plugins
+            if plugin.release_channel != "builtin"
+            and plugin.source != "builtin"
+            and not plugin.signature_present
+        ),
+        unverified_signature_plugins=sum(
+            1 for plugin in plugins if plugin.signature_present and not plugin.signature_verified
+        ),
+        publisher_policy_rejections=sum(
+            1
+            for plugin in plugins
+            if plugin.publisher_policy_decision in {"rejected", "untrusted"}
+        ),
+        trust_policy_rejections=sum(
+            1 for plugin in plugins if plugin.trust_policy_decision in {"rejected", "untrusted"}
+        ),
+        sandbox_profile_counts=dict(sorted(sandbox_profile_counts.items())),
+        tenancy_mode_counts=dict(sorted(tenancy_mode_counts.items())),
+        recommended_actions=sorted(recommended_actions),
+        remaining_gaps=[
+            "runtime sandbox isolation is still in-process",
+            "operator quarantine/revocation persistence is still trust-store driven",
+            "external plugin artifact provenance is not yet SBOM/signing-policy complete",
+        ],
+    )
 
 
 def _next_api_key_id(auth_context: Any) -> str:
@@ -176,6 +263,33 @@ def _resolve_target_tenant_id(
     return normalized_tenant_id
 
 
+def _auth_policy_decisions(auth_context: Any) -> list[AuthPolicyDecisionResponse]:
+    """Return standard authorization probes for the current actor."""
+
+    responses: list[AuthPolicyDecisionResponse] = []
+    for name, required_permissions in _AUTH_POLICY_PROBES:
+        decision = evaluate_permissions(
+            granted_permissions=auth_context.effective_permissions,
+            required_permissions=required_permissions,
+            actor_tenant_id=auth_context.tenant_id,
+            target_tenant_id=auth_context.tenant_id,
+            authorized_tenant_ids=auth_context.authorized_tenant_ids,
+        )
+        responses.append(
+            AuthPolicyDecisionResponse(
+                name=name,
+                allowed=decision.allowed,
+                reason=decision.reason,
+                required_permissions=list(required_permissions),
+                matched_permissions=list(decision.matched_permissions),
+                missing_permissions=list(decision.missing_permissions),
+                target_tenant_id=decision.target_tenant_id,
+                tenant_scope=decision.tenant_scope,
+            )
+        )
+    return responses
+
+
 @router.get("/", operation_id="default.root", response_model=MessageResponse)
 async def root() -> MessageResponse:
     """Compatibility root endpoint."""
@@ -233,6 +347,44 @@ async def get_auth_identity_context(request: Request) -> AuthContextResponse:
         principal_key=getattr(identity, "principal_key", None),
         principal_type=getattr(identity, "principal_type", None),
         service_account_api_key_id=getattr(identity, "service_account_api_key_id", None),
+    )
+
+
+@router.get(
+    "/auth/policy",
+    operation_id="default.auth_policy",
+    response_model=AuthPolicyResponse,
+)
+async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
+    """Return tenant-aware authorization posture for the current actor."""
+
+    auth_context = get_auth_context(request)
+    warnings: list[str] = []
+    if auth_context.authentication_mode == "api_key":
+        warnings.append("authentication is still API-key anchored")
+    if auth_context.oidc_issuer is None or auth_context.oidc_subject is None:
+        warnings.append("oidc claims are not present on this request")
+    if auth_context.authorization_tenant_scope == "all":
+        warnings.append("actor has global tenant scope")
+
+    return AuthPolicyResponse(
+        authentication_mode=auth_context.authentication_mode,
+        actor_id=auth_context.actor_id,
+        actor_type=auth_context.actor_type,
+        tenant_id=auth_context.tenant_id,
+        authorization_tenant_scope=auth_context.authorization_tenant_scope,
+        authorized_tenant_ids=list(auth_context.authorized_tenant_ids),
+        oidc_claims_present=(
+            auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None
+        ),
+        permissions_model="role_scope_effective_permissions_with_tenant_scope",
+        decisions=_auth_policy_decisions(auth_context),
+        warnings=warnings,
+        remaining_gaps=[
+            "OIDC/SSO validation is not yet active",
+            "ABAC policy is limited to permission and tenant-scope checks",
+            "policy inventory is not yet persisted as first-class operator configuration",
+        ],
     )
 
 
@@ -455,6 +607,21 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
             )
         )
     return responses
+
+
+@router.get(
+    "/plugins/governance",
+    operation_id="default.plugin_governance",
+    response_model=PluginGovernanceResponse,
+)
+async def get_plugin_governance(request: Request) -> PluginGovernanceResponse:
+    """Return plugin trust, quarantine, and isolation posture for operators."""
+
+    plugins = await get_plugins(request)
+    return PluginGovernanceResponse(
+        summary=_plugin_governance_summary(plugins),
+        plugins=plugins,
+    )
 
 
 @router.get(

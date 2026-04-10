@@ -379,7 +379,7 @@ def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
     }
 
 
-def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
+def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str]]:
     """Return the default Rust runtime governance payload for /stream/status."""
 
     return {
@@ -474,6 +474,8 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
         "vfs_runtime_provider_pressure_incidents": 0,
         "vfs_runtime_fairness_pressure_incidents": 0,
         "vfs_runtime_rollout_readiness": "unknown",
+        "vfs_runtime_rollout_reasons": ["runtime_snapshot_unavailable"],
+        "vfs_runtime_rollout_next_action": "capture_runtime_status",
     }
 
 
@@ -587,7 +589,7 @@ def _load_vfs_runtime_status_payload() -> dict[str, object] | None:
     return None
 
 
-def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
+def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str]]:
     """Return additive governance counters extracted from the Rust runtime snapshot."""
 
     payload = _load_vfs_runtime_status_payload()
@@ -887,49 +889,62 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
         _nested_mapping_value(payload, "windows_projfs", "callbacks_estale")
     )
     total_cache_lookups = (
-        int(governance["vfs_runtime_chunk_cache_hits"])
-        + int(governance["vfs_runtime_chunk_cache_misses"])
+        _as_int(governance["vfs_runtime_chunk_cache_hits"])
+        + _as_int(governance["vfs_runtime_chunk_cache_misses"])
     )
     governance["vfs_runtime_cache_hit_ratio"] = _safe_ratio(
-        int(governance["vfs_runtime_chunk_cache_hits"]),
+        _as_int(governance["vfs_runtime_chunk_cache_hits"]),
         total_cache_lookups,
     )
     governance["vfs_runtime_fallback_success_ratio"] = _safe_ratio(
-        int(governance["vfs_runtime_backend_fallback_success"]),
-        int(governance["vfs_runtime_backend_fallback_attempts"]),
+        _as_int(governance["vfs_runtime_backend_fallback_success"]),
+        _as_int(governance["vfs_runtime_backend_fallback_attempts"]),
     )
     governance["vfs_runtime_prefetch_pressure_ratio"] = _safe_ratio(
-        int(governance["vfs_runtime_prefetch_active_permits"]),
-        int(governance["vfs_runtime_prefetch_active_permits"])
-        + int(governance["vfs_runtime_prefetch_available_permits"]),
+        _as_int(governance["vfs_runtime_prefetch_active_permits"]),
+        _as_int(governance["vfs_runtime_prefetch_active_permits"])
+        + _as_int(governance["vfs_runtime_prefetch_available_permits"]),
     )
     governance["vfs_runtime_provider_pressure_incidents"] = (
-        int(governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"])
-        + int(governance["vfs_runtime_upstream_fail_unexpected_status_server_error"])
-        + int(governance["vfs_runtime_upstream_retryable_status_too_many_requests"])
-        + int(governance["vfs_runtime_upstream_retryable_status_server_error"])
-        + int(governance["vfs_runtime_prefetch_background_backpressure"])
+        _as_int(governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"])
+        + _as_int(governance["vfs_runtime_upstream_fail_unexpected_status_server_error"])
+        + _as_int(governance["vfs_runtime_upstream_retryable_status_too_many_requests"])
+        + _as_int(governance["vfs_runtime_upstream_retryable_status_server_error"])
+        + _as_int(governance["vfs_runtime_prefetch_background_backpressure"])
     )
     governance["vfs_runtime_fairness_pressure_incidents"] = (
-        int(governance["vfs_runtime_prefetch_fairness_denied"])
-        + int(governance["vfs_runtime_prefetch_global_backpressure_denied"])
+        _as_int(governance["vfs_runtime_prefetch_fairness_denied"])
+        + _as_int(governance["vfs_runtime_prefetch_global_backpressure_denied"])
     )
-    if (
-        int(governance["vfs_runtime_backend_fallback_failure"]) > 0
-        or int(governance["vfs_runtime_mounted_reads_error"]) > 0
-        or int(governance["vfs_runtime_prefetch_background_error"]) > 0
-        or int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0
-    ):
+    rollout_reasons: list[str] = []
+    if _as_int(governance["vfs_runtime_backend_fallback_failure"]) > 0:
+        rollout_reasons.append("backend_fallback_failures")
+    if _as_int(governance["vfs_runtime_mounted_reads_error"]) > 0:
+        rollout_reasons.append("mounted_read_errors")
+    if _as_int(governance["vfs_runtime_prefetch_background_error"]) > 0:
+        rollout_reasons.append("prefetch_background_errors")
+    if _as_int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0:
+        rollout_reasons.append("disk_cache_write_errors")
+    if rollout_reasons:
         governance["vfs_runtime_rollout_readiness"] = "blocked"
-    elif (
-        int(governance["vfs_runtime_provider_pressure_incidents"]) > 0
-        or int(governance["vfs_runtime_fairness_pressure_incidents"]) > 0
-        or int(governance["vfs_runtime_inline_refresh_error"]) > 0
-        or int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) > 0
-    ):
-        governance["vfs_runtime_rollout_readiness"] = "warning"
+        governance["vfs_runtime_rollout_next_action"] = "resolve_blocking_runtime_failures"
     else:
+        if _as_int(governance["vfs_runtime_provider_pressure_incidents"]) > 0:
+            rollout_reasons.append("provider_pressure_incidents")
+        if _as_int(governance["vfs_runtime_fairness_pressure_incidents"]) > 0:
+            rollout_reasons.append("fairness_pressure_incidents")
+        if _as_int(governance["vfs_runtime_inline_refresh_error"]) > 0:
+            rollout_reasons.append("inline_refresh_errors")
+        if _as_int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) > 0:
+            rollout_reasons.append("chunk_coalescing_misses")
+    if governance["vfs_runtime_rollout_readiness"] != "blocked" and rollout_reasons:
+        governance["vfs_runtime_rollout_readiness"] = "warning"
+        governance["vfs_runtime_rollout_next_action"] = "repeat_soak_and_tune_thresholds"
+    elif governance["vfs_runtime_rollout_readiness"] != "blocked":
         governance["vfs_runtime_rollout_readiness"] = "ready"
+        governance["vfs_runtime_rollout_next_action"] = "promote_to_next_environment_class"
+        rollout_reasons.append("no_blocking_runtime_signals")
+    governance["vfs_runtime_rollout_reasons"] = rollout_reasons
     return governance
 
 

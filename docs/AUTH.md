@@ -72,6 +72,7 @@ The control plane is also stricter than the earlier baseline:
 - API-key authentication no longer implies admin privileges automatically
 - the backend now computes `effective_permissions` from roles and scopes and exposes them on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
 - the backend now also evaluates tenant-aware authorization decisions through [`evaluate_permissions()`](../filmu_py/authz.py) instead of only checking whether a permission string exists
+- [`GET /api/v1/auth/policy`](../filmu_py/api/routes/default.py) exposes standard authorization probes, matched and missing permissions, tenant-scope classification, OIDC-claim presence, warnings, and remaining policy gaps for the current actor
 - tenant-aware intake paths now persist the resolved `tenant_id` on created `media_items` and `item_requests`
 - tenant-scoped reads now also reach item detail/listing, calendar, and stats surfaces instead of stopping at write-time persistence
 

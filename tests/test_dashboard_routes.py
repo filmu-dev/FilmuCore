@@ -434,6 +434,60 @@ def test_plugin_events_route_returns_declared_events_and_hook_subscriptions() ->
     ]
 
 
+def test_plugin_governance_route_returns_operator_policy_summary() -> None:
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "external-scraper",
+                "version": "1.0.0",
+                "api_version": "1",
+                "distribution": "filesystem",
+                "publisher": "community",
+                "release_channel": "stable",
+                "trust_level": "community",
+                "sandbox_profile": "restricted",
+                "tenancy_mode": "tenant",
+                "entry_module": "plugin.py",
+                "scraper": "ExternalScraper",
+            }
+        )
+    )
+    plugin_registry.register_capability(
+        plugin_name="external-scraper",
+        kind=PluginCapabilityKind.SCRAPER,
+        implementation=object(),
+    )
+
+    client = _build_client(plugin_registry=plugin_registry)
+    response = client.get("/api/v1/plugins/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"] == {
+        "total_plugins": 1,
+        "loaded_plugins": 1,
+        "load_failed_plugins": 0,
+        "ready_plugins": 1,
+        "unready_plugins": 0,
+        "quarantined_plugins": 0,
+        "quarantine_recommended_plugins": 0,
+        "unsigned_external_plugins": 1,
+        "unverified_signature_plugins": 0,
+        "publisher_policy_rejections": 0,
+        "trust_policy_rejections": 0,
+        "sandbox_profile_counts": {"restricted": 1},
+        "tenancy_mode_counts": {"tenant": 1},
+        "recommended_actions": ["require_external_plugin_signature"],
+        "remaining_gaps": [
+            "runtime sandbox isolation is still in-process",
+            "operator quarantine/revocation persistence is still trust-store driven",
+            "external plugin artifact provenance is not yet SBOM/signing-policy complete",
+        ],
+    }
+    assert body["plugins"][0]["name"] == "external-scraper"
+
+
 def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness() -> None:
     plugin_registry = PluginRegistry()
     plugin_registry.register_manifest(
@@ -586,6 +640,39 @@ def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> 
         "principal_type": "service",
         "service_account_api_key_id": "primary",
     }
+
+
+def test_auth_policy_route_returns_authorization_posture() -> None:
+    client = _build_client()
+
+    response = client.get(
+        "/api/v1/auth/policy",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "library:read,playback:operate",
+            "x-auth-issuer": "https://issuer.example.test",
+            "x-auth-subject": "user-123",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["permissions_model"] == "role_scope_effective_permissions_with_tenant_scope"
+    assert body["authorization_tenant_scope"] == "self"
+    assert body["oidc_claims_present"] is True
+    assert body["warnings"] == ["authentication is still API-key anchored"]
+    decisions = {decision["name"]: decision for decision in body["decisions"]}
+    assert decisions["library_read"]["allowed"] is True
+    assert decisions["playback_operate"]["allowed"] is True
+    assert decisions["settings_write"]["allowed"] is False
+    assert decisions["settings_write"]["missing_permissions"] == ["settings:write"]
+    assert decisions["api_key_rotate"]["allowed"] is False
+    assert body["remaining_gaps"] == [
+        "OIDC/SSO validation is not yet active",
+        "ABAC policy is limited to permission and tenant-scope checks",
+        "policy inventory is not yet persisted as first-class operator configuration",
+    ]
 
 
 def test_worker_queue_route_returns_control_plane_snapshot() -> None:

@@ -69,6 +69,35 @@ class AuthContextResponse(BaseModel):
     service_account_api_key_id: str | None = None
 
 
+class AuthPolicyDecisionResponse(BaseModel):
+    """One operator-visible authorization policy probe for the current actor."""
+
+    name: str
+    allowed: bool
+    reason: str
+    required_permissions: list[str]
+    matched_permissions: list[str]
+    missing_permissions: list[str]
+    target_tenant_id: str
+    tenant_scope: str
+
+
+class AuthPolicyResponse(BaseModel):
+    """Current actor access-policy posture for operator/admin views."""
+
+    authentication_mode: str
+    actor_id: str
+    actor_type: str
+    tenant_id: str
+    authorization_tenant_scope: str
+    authorized_tenant_ids: list[str]
+    oidc_claims_present: bool
+    permissions_model: str
+    decisions: list[AuthPolicyDecisionResponse]
+    warnings: list[str] = []
+    remaining_gaps: list[str] = []
+
+
 class PluginEventStatusResponse(BaseModel):
     """One plugin event-governance and hook-subscription summary."""
 
@@ -76,6 +105,33 @@ class PluginEventStatusResponse(BaseModel):
     publisher: str | None = None
     publishable_events: list[str]
     hook_subscriptions: list[str]
+
+
+class PluginGovernanceSummaryResponse(BaseModel):
+    """Derived plugin trust/isolation rollup for operator views."""
+
+    total_plugins: int
+    loaded_plugins: int
+    load_failed_plugins: int
+    ready_plugins: int
+    unready_plugins: int
+    quarantined_plugins: int
+    quarantine_recommended_plugins: int
+    unsigned_external_plugins: int
+    unverified_signature_plugins: int
+    publisher_policy_rejections: int
+    trust_policy_rejections: int
+    sandbox_profile_counts: dict[str, int]
+    tenancy_mode_counts: dict[str, int]
+    recommended_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class PluginGovernanceResponse(BaseModel):
+    """Plugin trust/isolation policy summary plus current plugin rows."""
+
+    summary: PluginGovernanceSummaryResponse
+    plugins: list[PluginCapabilityStatusResponse]
 
 
 class QueueStatusResponse(BaseModel):
@@ -409,6 +465,8 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_provider_pressure_incidents: int
     vfs_runtime_fairness_pressure_incidents: int
     vfs_runtime_rollout_readiness: str
+    vfs_runtime_rollout_reasons: list[str]
+    vfs_runtime_rollout_next_action: str
 
 
 class ServingStatusResponse(BaseModel):

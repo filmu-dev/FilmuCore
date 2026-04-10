@@ -92,7 +92,7 @@ Remaining orchestration gaps:
 Detailed plugin-platform breakdown: [`PLUGIN_CAPABILITY_MODEL_MATRIX.md`](PLUGIN_CAPABILITY_MODEL_MATRIX.md).
 
 Current plugin support now includes packaged entry-point discovery, plugin-scoped settings, datasource-aware `PluginContext` construction, runtime capability registration across scraper/downloader/indexer/content-service/notification/event-hook capabilities, namespaced publishable-event governance, built-in Torrentio plus real MDBList/webhook-notification/StremThru integrations, runtime visibility through `/api/v1/plugins` plus `/api/v1/plugins/events`, and an explicit trust/policy baseline for `publisher`, `release_channel`, `trust_level`, `permission_scopes`, `tenancy_mode`, and publisher-policy evaluation.
-Current plugin support now also includes provenance/isolation metadata (`source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, quarantine fields), loader-side digest verification, trust-store-backed signature verification, quarantine refusal, publisher lifecycle/distribution/permission-scope policy, minimum-trust enforcement, and operator-visible provenance/isolation/policy fields on `/api/v1/plugins`.
+Current plugin support now also includes provenance/isolation metadata (`source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, quarantine fields), loader-side digest verification, trust-store-backed signature verification, quarantine refusal, publisher lifecycle/distribution/permission-scope policy, minimum-trust enforcement, operator-visible provenance/isolation/policy fields on `/api/v1/plugins`, and the `/api/v1/plugins/governance` summary for quarantine, signature, publisher-policy, sandbox, tenancy, readiness, and recommended operator action posture.
 
 Next capability layers should include:
 
@@ -129,7 +129,7 @@ Recent baseline completed here:
 - the Rust sidecar now also deduplicates concurrent inline stale-link refreshes per catalog entry and reuses already-refreshed catalog URLs for later mounted stale reads instead of fanning out duplicate refresh RPCs
 - the Rust sidecar now also enforces a first explicit per-handle background-prefetch fairness cap, and the runtime snapshot exposes that operator policy alongside live prefetch depth so multi-reader pressure is diagnosable instead of implicit
 - the Rust sidecar now also counts fairness denials and global backpressure denials, and `/api/v1/stream/status` exposes both via `vfs_runtime_prefetch_*` fields so operator soak evidence can distinguish per-handle starvation from global saturation
-- `/api/v1/stream/status` now also derives `vfs_runtime_cache_hit_ratio`, `vfs_runtime_fallback_success_ratio`, `vfs_runtime_prefetch_pressure_ratio`, provider/fairness pressure incident counts, and a first `vfs_runtime_rollout_readiness` classification from the mounted runtime snapshot so soak artifacts can be compared as readiness signals instead of only raw counters
+- `/api/v1/stream/status` now also derives `vfs_runtime_cache_hit_ratio`, `vfs_runtime_fallback_success_ratio`, `vfs_runtime_prefetch_pressure_ratio`, provider/fairness pressure incident counts, `vfs_runtime_rollout_readiness`, `vfs_runtime_rollout_reasons`, and `vfs_runtime_rollout_next_action` from the mounted runtime snapshot so soak artifacts can be compared as readiness signals instead of only raw counters
 
 Build toward:
 
