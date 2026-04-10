@@ -33,6 +33,8 @@ pub struct PrefetchScheduler {
     active_background_tasks: Arc<AtomicU64>,
     peak_active_background_tasks: Arc<AtomicU64>,
     handle_active_background_tasks: Arc<DashMap<String, u64>>,
+    fairness_denied_total: Arc<AtomicU64>,
+    global_backpressure_denied_total: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,8 @@ pub struct PrefetchSchedulerSnapshot {
     pub active_background_tasks: u64,
     pub peak_active_background_tasks: u64,
     pub handles_with_background_tasks: u64,
+    pub fairness_denied_total: u64,
+    pub global_backpressure_denied_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +160,8 @@ impl PrefetchScheduler {
             active_background_tasks: Arc::new(AtomicU64::new(0)),
             peak_active_background_tasks: Arc::new(AtomicU64::new(0)),
             handle_active_background_tasks: Arc::new(DashMap::new()),
+            fairness_denied_total: Arc::new(AtomicU64::new(0)),
+            global_backpressure_denied_total: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -190,6 +196,10 @@ impl PrefetchScheduler {
             active_background_tasks: self.active_background_tasks.load(Ordering::Relaxed),
             peak_active_background_tasks: self.peak_active_background_tasks.load(Ordering::Relaxed),
             handles_with_background_tasks: self.handle_active_background_tasks.len() as u64,
+            fairness_denied_total: self.fairness_denied_total.load(Ordering::Relaxed),
+            global_backpressure_denied_total: self
+                .global_backpressure_denied_total
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -208,11 +218,14 @@ impl PrefetchScheduler {
             .entry(handle_key.to_owned())
             .or_default();
         if (*handle_task_count as usize) >= self.max_background_per_handle {
+            self.fairness_denied_total.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         *handle_task_count = handle_task_count.saturating_add(1);
         drop(handle_task_count);
         let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
+            self.global_backpressure_denied_total
+                .fetch_add(1, Ordering::Relaxed);
             decrement_handle_task_count(&handle_active_background_tasks, handle_key);
             return false;
         };

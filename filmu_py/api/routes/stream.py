@@ -452,6 +452,8 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
         "vfs_runtime_prefetch_peak_active_background_tasks": 0,
         "vfs_runtime_prefetch_background_spawned": 0,
         "vfs_runtime_prefetch_background_backpressure": 0,
+        "vfs_runtime_prefetch_fairness_denied": 0,
+        "vfs_runtime_prefetch_global_backpressure_denied": 0,
         "vfs_runtime_prefetch_background_error": 0,
         "vfs_runtime_chunk_coalescing_in_flight_chunks": 0,
         "vfs_runtime_chunk_coalescing_peak_in_flight_chunks": 0,
@@ -821,6 +823,12 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str]:
     )
     governance["vfs_runtime_prefetch_background_backpressure"] = _as_int(
         _nested_mapping_value(payload, "prefetch", "background_backpressure")
+    )
+    governance["vfs_runtime_prefetch_fairness_denied"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "fairness_denied")
+    )
+    governance["vfs_runtime_prefetch_global_backpressure_denied"] = _as_int(
+        _nested_mapping_value(payload, "prefetch", "global_backpressure_denied")
     )
     governance["vfs_runtime_prefetch_background_error"] = _as_int(
         _nested_mapping_value(payload, "prefetch", "background_error")

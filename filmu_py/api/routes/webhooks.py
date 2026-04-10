@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, model_validator
 
-from filmu_py.api.deps import get_auth_context, get_media_service, require_roles
+from filmu_py.api.deps import get_auth_context, get_media_service, require_permissions
 from filmu_py.services.media import MediaService
 
 router = APIRouter(prefix="/webhook", tags=["webhooks"])
@@ -50,7 +50,7 @@ class OverseerrWebhookPayload(BaseModel):
 
 @router.post(
     "/overseerr",
-    dependencies=[Depends(require_roles("platform:admin"))],
+    dependencies=[Depends(require_permissions("webhook:intake"))],
 )
 async def overseerr_webhook(
     request: Request,

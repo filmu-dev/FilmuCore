@@ -282,6 +282,8 @@ pub struct FilmuvfsPrefetchStatusSnapshot {
     pub background_spawned: u64,
     pub background_populated: u64,
     pub background_backpressure: u64,
+    pub fairness_denied: u64,
+    pub global_backpressure_denied: u64,
     pub background_error: u64,
     pub skipped_pattern: u64,
     pub skipped_cached: u64,
@@ -1375,6 +1377,8 @@ impl FilmuvfsMetrics {
                 background_backpressure: self
                     .prefetch_background_backpressure
                     .load(Ordering::Relaxed),
+                fairness_denied: prefetch_snapshot.fairness_denied_total,
+                global_backpressure_denied: prefetch_snapshot.global_backpressure_denied_total,
                 background_error: self.prefetch_background_error.load(Ordering::Relaxed),
                 skipped_pattern: self.prefetch_skipped_pattern.load(Ordering::Relaxed),
                 skipped_cached: self.prefetch_skipped_cached.load(Ordering::Relaxed),

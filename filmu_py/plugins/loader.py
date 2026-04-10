@@ -20,6 +20,7 @@ from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.plugins.trust import (
     PluginTrustStore,
+    evaluate_plugin_publisher_policy,
     load_plugin_trust_store,
     verify_plugin_signature,
 )
@@ -47,6 +48,8 @@ def _plugin_load_result(reason: str) -> str:
         "trust_store_required",
     }:
         return "skipped_signature"
+    if reason.startswith("plugin_publisher_policy_"):
+        return "skipped_policy"
     if "plugin.json" in reason or "manifest" in reason:
         return "skipped_manifest"
     return "failed"
@@ -76,8 +79,10 @@ class PluginLoadSuccess:
     trust_policy_decision: str | None
     trust_store_source: str | None
     sandbox_profile: str
+    tenancy_mode: str
     quarantined: bool
     quarantine_reason: str | None
+    publisher_policy_decision: str | None
     registered_query_resolvers: int
     registered_mutation_resolvers: int
     registered_subscription_resolvers: int
@@ -223,6 +228,15 @@ def _register_plugin(
         distribution=manifest.distribution,
         trust_store=trust_store,
     )
+    publisher_policy = evaluate_plugin_publisher_policy(
+        publisher=manifest.publisher,
+        release_channel=manifest.release_channel,
+        sandbox_profile=manifest.sandbox_profile,
+        tenancy_mode=manifest.tenancy_mode,
+        distribution=manifest.distribution,
+        signature_verified=signature_verification.verified,
+        trust_store=trust_store,
+    )
     if strict_signatures and manifest.distribution != "builtin":
         if manifest.signature is None:
             raise ValueError("unsigned_plugin_disallowed")
@@ -230,6 +244,8 @@ def _register_plugin(
             raise ValueError("trust_store_required")
         if not signature_verification.verified:
             raise ValueError(f"plugin_signature_{signature_verification.reason}")
+    if not publisher_policy.allowed:
+        raise ValueError(f"plugin_publisher_policy_{publisher_policy.reason}")
     registry.register_manifest(manifest)
 
     skipped_messages: list[str] = []
@@ -245,6 +261,11 @@ def _register_plugin(
     if manifest.distribution != "builtin" and not signature_verification.verified:
         skipped_messages.append(
             f"signature verification state: {signature_verification.reason}"
+        )
+    if manifest.distribution != "builtin" and publisher_policy.decision != "allowed":
+        skipped_messages.append(
+            f"publisher policy state: {publisher_policy.decision}"
+            + (f" ({publisher_policy.reason})" if publisher_policy.reason is not None else "")
         )
     registered_counts: dict[GraphQLResolverKind, int] = {
         GraphQLResolverKind.QUERY: 0,
@@ -329,8 +350,10 @@ def _register_plugin(
         trust_policy_decision=signature_verification.trust_policy_decision,
         trust_store_source=signature_verification.trust_store_source,
         sandbox_profile=manifest.sandbox_profile,
+        tenancy_mode=manifest.tenancy_mode,
         quarantined=manifest.quarantined,
         quarantine_reason=manifest.quarantine_reason,
+        publisher_policy_decision=publisher_policy.decision,
         registered_query_resolvers=registered_counts[GraphQLResolverKind.QUERY],
         registered_mutation_resolvers=registered_counts[GraphQLResolverKind.MUTATION],
         registered_subscription_resolvers=registered_counts[GraphQLResolverKind.SUBSCRIPTION],

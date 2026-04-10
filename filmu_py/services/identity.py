@@ -159,6 +159,70 @@ class SecurityIdentityService:
             scopes=auth_context.scopes,
         )
 
+    async def rotate_service_account_api_key_id(
+        self,
+        *,
+        auth_context: AuthContextLike,
+        new_api_key_id: str,
+    ) -> IdentityResolution:
+        """Persist a rotated API-key identifier for the authenticated service actor."""
+
+        if auth_context.actor_type != "service":
+            return await self.record_auth_context(auth_context)
+
+        now = datetime.now(UTC)
+        async with self._db.session() as session:
+            principal = (
+                await session.execute(
+                    select(PrincipalORM).where(PrincipalORM.principal_key == auth_context.actor_id)
+                )
+            ).scalar_one_or_none()
+            if principal is None:
+                await session.commit()
+                return await self.record_auth_context(
+                    _BootstrapAuthContext(
+                        authentication_mode=auth_context.authentication_mode,
+                        api_key_id=new_api_key_id,
+                        actor_id=auth_context.actor_id,
+                        actor_type=auth_context.actor_type,
+                        tenant_id=auth_context.tenant_id,
+                        roles=auth_context.roles,
+                        scopes=auth_context.scopes,
+                    )
+                )
+
+            service_account = (
+                await session.execute(
+                    select(ServiceAccountORM).where(ServiceAccountORM.principal_id == principal.id)
+                )
+            ).scalar_one_or_none()
+            if service_account is None:
+                service_account = ServiceAccountORM(
+                    principal_id=principal.id,
+                    api_key_id=new_api_key_id,
+                    status="active",
+                    description=f"Service account for {new_api_key_id}",
+                    last_authenticated_at=now,
+                )
+                session.add(service_account)
+            else:
+                service_account.api_key_id = new_api_key_id
+                service_account.status = "active"
+                service_account.last_authenticated_at = now
+
+            principal.last_authenticated_at = now
+            await session.commit()
+
+        return IdentityResolution(
+            tenant_id=auth_context.tenant_id,
+            tenant_status="active",
+            principal_key=auth_context.actor_id,
+            principal_type=auth_context.actor_type,
+            service_account_api_key_id=new_api_key_id,
+            roles=auth_context.roles,
+            scopes=auth_context.scopes,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class _BootstrapAuthContext:

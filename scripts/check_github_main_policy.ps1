@@ -49,7 +49,6 @@ function New-ExpectedPolicy {
         [int] $MinimumApprovingReviewCount,
         [switch] $RequireAdminsEnforced
     )
-    param([switch] $RequirePlaybackGate)
 
     $requiredChecks = @(
         'Verify - Python Lint / Python Lint'
@@ -83,7 +82,6 @@ function New-ExpectedPolicy {
                 windows_vfs_gate_expected_inside_playback_gate = [bool] $RequireWindowsVfsGate
                 windows_provider_gate_expected_inside_playback_gate = [bool] $RequireWindowsVfsProvidersGate
             }
-            required_status_checks = $requiredChecks
         }
         gh_commands = [ordered]@{
             inspect_repository = "gh api repos/$Repository"
@@ -148,7 +146,6 @@ $expected = New-ExpectedPolicy `
     -RequireWindowsVfsProvidersGate:$RequireWindowsVfsProvidersGate `
     -MinimumApprovingReviewCount $MinimumApprovingReviewCount `
     -RequireAdminsEnforced:$RequireAdminsEnforced
-$expected = New-ExpectedPolicy -RequirePlaybackGate:$RequirePlaybackGate
 $escapedBranch = [System.Uri]::EscapeDataString($Branch)
 $result = [ordered]@{
     timestamp = (Get-Date).ToString('o')
@@ -207,8 +204,6 @@ if ($ValidateCurrent) {
         )
         $adminsOk = if ($expected.branch_protection.require_admins_enforced) { $adminsEnforced } else { $true }
         $status = if ($mergePolicyOk -and $pullRequestRequired -and $reviewsOk -and $adminsOk -and $strictChecks -and $missingChecks.Count -eq 0) {
-        $strictChecks = [bool] $branchProtectionPayload.required_status_checks.strict
-        $status = if ($mergePolicyOk -and $pullRequestRequired -and $strictChecks -and $missingChecks.Count -eq 0) {
             'ready'
         } else {
             'not_ready'

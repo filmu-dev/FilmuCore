@@ -1227,6 +1227,7 @@ class MediaItemRecord:
     external_ref: str
     title: str
     state: ItemState
+    tenant_id: str = "global"
     attributes: dict[str, object] = field(default_factory=dict)
     has_media_entries: bool = False
 
@@ -1245,6 +1246,7 @@ def _build_media_item_record_from_orm(item: MediaItemORM) -> MediaItemRecord:
         external_ref=item.external_ref,
         title=item.title,
         state=ItemState(item.state),
+        tenant_id=item.tenant_id,
         attributes=dict(cast(dict[str, object], item.attributes or {})),
         has_media_entries=has_media_entries,
     )
@@ -4024,6 +4026,8 @@ class MediaService:
         item_id: str,
         db: AsyncSession,
         arq_pool: ArqRedis | None,
+        *,
+        tenant_id: str | None = None,
     ) -> MediaItemORM:
         """Retry one item immediately, re-enqueueing scrape work."""
 
@@ -4032,9 +4036,10 @@ class MediaService:
                 "ARQ is not enabled; retry/reset requires the worker to be running"
             )
 
-        item = (
-            await db.execute(select(MediaItemORM).where(MediaItemORM.id == item_id))
-        ).scalar_one_or_none()
+        statement = select(MediaItemORM).where(MediaItemORM.id == item_id)
+        if tenant_id is not None:
+            statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+        item = (await db.execute(statement)).scalar_one_or_none()
         if item is None:
             raise ItemNotFoundError(f"unknown item_id={item_id}")
 
@@ -4065,6 +4070,8 @@ class MediaService:
         item_id: str,
         db: AsyncSession,
         arq_pool: ArqRedis | None,
+        *,
+        tenant_id: str | None = None,
     ) -> MediaItemORM:
         """Reset one item by blacklisting current streams and re-enqueueing scrape work."""
 
@@ -4073,9 +4080,10 @@ class MediaService:
                 "ARQ is not enabled; retry/reset requires the worker to be running"
             )
 
-        item = (
-            await db.execute(select(MediaItemORM).where(MediaItemORM.id == item_id))
-        ).scalar_one_or_none()
+        statement = select(MediaItemORM).where(MediaItemORM.id == item_id)
+        if tenant_id is not None:
+            statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+        item = (await db.execute(statement)).scalar_one_or_none()
         if item is None:
             raise ItemNotFoundError(f"unknown item_id={item_id}")
 
@@ -4755,26 +4763,23 @@ class MediaService:
             media_year_releases=projection.media_year_releases,
         )
 
-    async def get_stats(self) -> StatsProjection:
+    async def get_stats(self, *, tenant_id: str | None = None) -> StatsProjection:
         """Return a first-class domain-backed stats projection for dashboard reads."""
 
         async with self._db.session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(MediaItemORM)
-                        .options(
-                            selectinload(MediaItemORM.movie),
-                            selectinload(MediaItemORM.show),
-                            selectinload(MediaItemORM.season),
-                            selectinload(MediaItemORM.episode),
-                        )
-                        .order_by(MediaItemORM.created_at.desc())
-                    )
+            statement = (
+                select(MediaItemORM)
+                .options(
+                    selectinload(MediaItemORM.movie),
+                    selectinload(MediaItemORM.show),
+                    selectinload(MediaItemORM.season),
+                    selectinload(MediaItemORM.episode),
                 )
-                .scalars()
-                .all()
+                .order_by(MediaItemORM.created_at.desc())
             )
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            rows = ((await session.execute(statement)).scalars().all())
 
         state_counts: Counter[str] = Counter()
         activity_counts: Counter[str] = Counter()
@@ -4858,6 +4863,7 @@ class MediaService:
         sort: list[str] | None = None,
         search: str | None = None,
         extended: bool = False,
+        tenant_id: str | None = None,
     ) -> MediaItemsPage:
         """Return paginated item summaries for current library compatibility routes."""
 
@@ -4865,15 +4871,10 @@ class MediaService:
         bounded_page = max(1, page)
 
         async with self._db.session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(MediaItemORM).order_by(MediaItemORM.created_at.desc())
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            statement = select(MediaItemORM).order_by(MediaItemORM.created_at.desc())
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            rows = ((await session.execute(statement)).scalars().all())
 
         items = [_build_summary_record(item, extended=extended) for item in rows]
         filtered = [
@@ -4951,30 +4952,28 @@ class MediaService:
         *,
         media_type: str,
         extended: bool = False,
+        tenant_id: str | None = None,
     ) -> MediaItemSummaryRecord | None:
         """Return one item detail record for the current item-detail compatibility route."""
 
         playback_service = PlaybackSourceService(self._db)
         async with self._db.session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(MediaItemORM)
-                        .options(
-                            selectinload(MediaItemORM.item_requests),
-                            selectinload(MediaItemORM.playback_attachments),
-                            selectinload(MediaItemORM.media_entries).selectinload(
-                                MediaEntryORM.source_attachment
-                            ),
-                            selectinload(MediaItemORM.subtitle_entries),
-                            selectinload(MediaItemORM.active_streams),
-                        )
-                        .order_by(MediaItemORM.created_at.desc())
-                    )
+            statement = (
+                select(MediaItemORM)
+                .options(
+                    selectinload(MediaItemORM.item_requests),
+                    selectinload(MediaItemORM.playback_attachments),
+                    selectinload(MediaItemORM.media_entries).selectinload(
+                        MediaEntryORM.source_attachment
+                    ),
+                    selectinload(MediaItemORM.subtitle_entries),
+                    selectinload(MediaItemORM.active_streams),
                 )
-                .scalars()
-                .all()
+                .order_by(MediaItemORM.created_at.desc())
             )
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            rows = ((await session.execute(statement)).scalars().all())
 
         for item in rows:
             detail = _build_detail_record(
@@ -5071,10 +5070,15 @@ class MediaService:
         *,
         start_date: str | None = None,
         end_date: str | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, CalendarItemRecord]:
         """Return a calendar payload keyed by stable item identifiers."""
 
-        projection = await self.get_calendar(start_date=start_date, end_date=end_date)
+        projection = await self.get_calendar(
+            start_date=start_date,
+            end_date=end_date,
+            tenant_id=tenant_id,
+        )
         return {
             item.item_id: CalendarItemRecord(
                 item_id=item.item_id,
@@ -5096,27 +5100,25 @@ class MediaService:
         *,
         start_date: str | None = None,
         end_date: str | None = None,
+        tenant_id: str | None = None,
     ) -> list[CalendarProjectionRecord]:
         """Return calendar rows ordered by air date for both compatibility and GraphQL projections."""
 
         async with self._db.session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(MediaItemORM)
-                        .options(
-                            selectinload(MediaItemORM.show),
-                            selectinload(MediaItemORM.season).selectinload(SeasonORM.show),
-                            selectinload(MediaItemORM.episode)
-                            .selectinload(EpisodeORM.season)
-                            .selectinload(SeasonORM.show),
-                        )
-                        .order_by(MediaItemORM.created_at.desc())
-                    )
+            statement = (
+                select(MediaItemORM)
+                .options(
+                    selectinload(MediaItemORM.show),
+                    selectinload(MediaItemORM.season).selectinload(SeasonORM.show),
+                    selectinload(MediaItemORM.episode)
+                    .selectinload(EpisodeORM.season)
+                    .selectinload(SeasonORM.show),
                 )
-                .scalars()
-                .all()
+                .order_by(MediaItemORM.created_at.desc())
             )
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            rows = ((await session.execute(statement)).scalars().all())
 
         result: list[CalendarProjectionRecord] = []
         child_show_item_ids: set[str] = set()
@@ -5254,7 +5256,7 @@ class MediaService:
 
         return await self._set_items_state(ids, event_name="retry", message="Items retried.")
 
-    async def remove_items(self, ids: list[str]) -> ItemActionResult:
+    async def remove_items(self, ids: list[str], *, tenant_id: str | None = None) -> ItemActionResult:
         """Remove compatible items and their lifecycle events."""
 
         unique_ids = list(dict.fromkeys(ids))
@@ -5262,15 +5264,10 @@ class MediaService:
             return ItemActionResult(message="Items removed.", ids=[])
 
         async with self._db.session() as session:
-            matched_ids = list(
-                (
-                    await session.execute(
-                        select(MediaItemORM.id).where(MediaItemORM.id.in_(unique_ids))
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            statement = select(MediaItemORM.id).where(MediaItemORM.id.in_(unique_ids))
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            matched_ids = list((await session.execute(statement)).scalars().all())
             if matched_ids:
                 await session.execute(
                     delete(ItemStateEventORM).where(ItemStateEventORM.item_id.in_(matched_ids))
@@ -5286,6 +5283,7 @@ class MediaService:
         *,
         event_name: str,
         message: str,
+        tenant_id: str | None = None,
     ) -> ItemActionResult:
         """Move compatible items back to the requested state for reset/retry routes."""
 
@@ -5294,11 +5292,10 @@ class MediaService:
             return ItemActionResult(message=message, ids=[])
 
         async with self._db.session() as session:
-            rows = (
-                (await session.execute(select(MediaItemORM).where(MediaItemORM.id.in_(unique_ids))))
-                .scalars()
-                .all()
-            )
+            statement = select(MediaItemORM).where(MediaItemORM.id.in_(unique_ids))
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            rows = ((await session.execute(statement)).scalars().all())
             matched_ids: list[str] = []
             for item in rows:
                 previous_state = item.state
@@ -5319,19 +5316,20 @@ class MediaService:
 
         return ItemActionResult(message=message, ids=matched_ids)
 
-    async def get_item(self, item_id: str) -> MediaItemRecord | None:
+    async def get_item(self, item_id: str, *, tenant_id: str | None = None) -> MediaItemRecord | None:
         """Fetch one media item by internal UUID identifier."""
 
         normalized_item_id = _normalize_internal_item_id(item_id)
 
         async with self._db.session() as session:
-            row = (
-                await session.execute(
-                    select(MediaItemORM)
-                    .options(selectinload(MediaItemORM.media_entries))
-                    .where(MediaItemORM.id == normalized_item_id)
-                )
-            ).scalar_one_or_none()
+            statement = (
+                select(MediaItemORM)
+                .options(selectinload(MediaItemORM.media_entries))
+                .where(MediaItemORM.id == normalized_item_id)
+            )
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            row = (await session.execute(statement)).scalar_one_or_none()
 
         if row is None:
             return None
@@ -5343,6 +5341,7 @@ class MediaService:
         external_id: str,
         *,
         media_type: str | None = None,
+        tenant_id: str | None = None,
     ) -> MediaItemRecord | None:
         """Fetch one media item by supported external identifier families."""
 
@@ -5358,6 +5357,8 @@ class MediaService:
 
         async with self._db.session() as session:
             async def _lookup_item(statement: Any) -> MediaItemORM | None:
+                if tenant_id is not None:
+                    statement = statement.where(MediaItemORM.tenant_id == tenant_id)
                 return (
                     await session.execute(
                         statement.options(selectinload(MediaItemORM.media_entries))

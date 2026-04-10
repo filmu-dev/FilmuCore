@@ -47,8 +47,9 @@ class DummyMediaService:
         *,
         start_date: str | None = None,
         end_date: str | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, CalendarItemRecord]:
-        _ = (start_date, end_date)
+        _ = (start_date, end_date, tenant_id)
         return {
             "item-1": CalendarItemRecord(
                 item_id="item-1",

@@ -174,7 +174,8 @@ class DummyDatabaseRuntime:
 class DummyMediaService:
     snapshot: StatsProjection
 
-    async def get_stats(self) -> StatsProjection:
+    async def get_stats(self, *, tenant_id: str | None = None) -> StatsProjection:
+        _ = tenant_id
         return self.snapshot
 
     async def get_item_detail(
@@ -183,8 +184,9 @@ class DummyMediaService:
         *,
         media_type: str,
         extended: bool,
+        tenant_id: str | None = None,
     ) -> None:
-        _ = (item_identifier, media_type, extended)
+        _ = (item_identifier, media_type, extended, tenant_id)
         return None
 
     async def search_items(self, **kwargs: Any) -> Any:

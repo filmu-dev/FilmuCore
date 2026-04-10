@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import structlog
 from fastapi import HTTPException, Request, status
 
+from filmu_py.authz import effective_permissions, has_permissions
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
@@ -42,6 +43,7 @@ class AuthContext:
     tenant_id: str
     roles: tuple[str, ...]
     scopes: tuple[str, ...]
+    effective_permissions: tuple[str, ...]
 
 
 def _normalize_key_id(value: str | None) -> str | None:
@@ -84,6 +86,7 @@ def _build_auth_context(request: Request, *, api_key_id: str) -> AuthContext:
         tenant_id=tenant_id,
         roles=roles,
         scopes=scopes,
+        effective_permissions=effective_permissions(roles=roles, scopes=scopes),
     )
 
 
@@ -130,6 +133,29 @@ def require_scopes(*required_scopes: str) -> Callable[[Request], Awaitable[AuthC
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Missing required scopes: {', '.join(normalized_scopes)}",
+            )
+        return auth_context
+
+    return _dependency
+
+
+def require_permissions(
+    *required_permissions: str,
+) -> Callable[[Request], Awaitable[AuthContext]]:
+    """Return one dependency that rejects requests missing effective permissions."""
+
+    normalized_permissions = tuple(
+        permission.strip().lower() for permission in required_permissions if permission.strip()
+    )
+
+    async def _dependency(request: Request) -> AuthContext:
+        auth_context = get_auth_context(request)
+        if not normalized_permissions:
+            return auth_context
+        if not has_permissions(auth_context.effective_permissions, normalized_permissions):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required permissions: {', '.join(normalized_permissions)}",
             )
         return auth_context
 
@@ -237,5 +263,6 @@ async def verify_api_key(request: Request) -> None:
         tenant_id=auth_context.tenant_id,
         actor_roles=",".join(auth_context.roles),
         actor_scopes=",".join(auth_context.scopes),
+        effective_permissions=",".join(auth_context.effective_permissions),
         authentication_mode=auth_context.authentication_mode,
     )

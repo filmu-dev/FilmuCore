@@ -70,7 +70,9 @@ The control plane is also stricter than the earlier baseline:
 
 - privileged compatibility mutations now require explicit `x-actor-roles` values such as `platform:admin`
 - API-key authentication no longer implies admin privileges automatically
+- the backend now computes `effective_permissions` from roles and scopes and exposes them on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
 - tenant-aware intake paths now persist the resolved `tenant_id` on created `media_items` and `item_requests`
+- tenant-scoped reads now also reach item detail/listing, calendar, and stats surfaces instead of stopping at write-time persistence
 
 ---
 
@@ -104,6 +106,7 @@ Separate historical planning notes exist outside this workspace, but the operati
 Current compatibility note:
 
 - [`/api/v1/generateapikey`](../filmu_py/api/routes/default.py) now rotates the live backend runtime key immediately and persists it through the backend settings store
+- that same route now rotates and returns `api_key_id`, and the identity baseline persists the new key identifier onto the resolved service account when actor context is available
 - the response also includes an explicit operator warning telling the caller to update `BACKEND_API_KEY` in the frontend/BFF environment and restart the frontend server before making the next protected request
 - this means rotation is now real, but rollover is still **operator-coordinated**, not automatically synchronized across backend and frontend
 - generic settings persistence should still treat API key changes as an operationally sensitive workflow, not as a casual background mutation
@@ -129,6 +132,7 @@ The current API-key model is acceptable for the present BFF architecture, but th
 - stronger service-to-service auth
 - scoped machine credentials above the new persisted `ServiceAccountORM` baseline
 - internal admin/service roles
+- RBAC/ABAC policy evaluation above the current `effective_permissions` baseline
 - plugin/service capability boundaries
 - eventual user-aware audit trails and tenant-scoped authorization above the new persisted identity catalog
 

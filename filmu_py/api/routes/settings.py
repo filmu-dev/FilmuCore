@@ -10,7 +10,7 @@ from typing import Annotated, Any, cast
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, status
 from pydantic import ValidationError
 
-from filmu_py.api.deps import get_db, require_roles
+from filmu_py.api.deps import get_db, require_permissions
 from filmu_py.api.deps import get_settings as dep_get_settings
 from filmu_py.api.models import MessageResponse
 from filmu_py.audit import audit_action
@@ -203,7 +203,7 @@ async def get_current_settings(
     "",
     operation_id="settings.put_current",
     response_model=dict[str, Any],
-    dependencies=[Depends(require_roles("platform:admin"))],
+    dependencies=[Depends(require_permissions("settings:write"))],
 )
 async def put_current_settings(
     request: Request,
@@ -327,7 +327,7 @@ async def get_settings_for_paths(
     "/set/all",
     operation_id="settings.set_all",
     response_model=MessageResponse,
-    dependencies=[Depends(require_roles("platform:admin"))],
+    dependencies=[Depends(require_permissions("settings:write"))],
 )
 async def set_all_settings(
     request: Request,
@@ -350,7 +350,7 @@ async def set_all_settings(
     "/set/{paths}",
     operation_id="settings.set",
     response_model=MessageResponse,
-    dependencies=[Depends(require_roles("platform:admin"))],
+    dependencies=[Depends(require_permissions("settings:write"))],
 )
 async def set_settings_for_paths(
     request: Request,

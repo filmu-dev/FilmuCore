@@ -104,6 +104,7 @@ Required-check promotion note:
 - once the target GitHub-hosted runner configuration and secrets are available and the workflow has produced green runs on the protected branch path, mark the GitHub required check for this workflow, typically shown as `Playback Gate / Playback Gate`
 - this remaining step is GitHub repository policy setup, not an additional code change in the workflow itself
 - the workflow and [`../run_playback_gate_ci.sh`](../run_playback_gate_ci.sh) now also emit the canonical required-check name into the CI artifact bundle so the repo-settings step can key off the exact check label instead of manual memory
+- the workflow also captures `playback-proof-artifacts/github-main-policy-expected.json`, which contains the canonical expected branch-protection/required-check profile produced by [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1)
 
 ## 2a. Validate GitHub `main` policy deterministically
 

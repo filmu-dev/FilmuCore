@@ -57,7 +57,13 @@ class DummyMediaService:
     detailed_items: dict[str, str]
     created_items: dict[str, MediaItemRecord]
 
-    async def get_item(self, item_id: str) -> MediaItemRecord | None:
+    async def get_item(
+        self,
+        item_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> MediaItemRecord | None:
+        _ = tenant_id
         created_item = self.created_items.get(item_id)
         if created_item is not None:
             return created_item
@@ -98,8 +104,9 @@ class DummyMediaService:
         *,
         media_type: str,
         extended: bool = False,
+        tenant_id: str | None = None,
     ) -> MediaItemSummaryRecord | None:
-        _ = (media_type, extended)
+        _ = (media_type, extended, tenant_id)
         resolved_id = self.detailed_items.get(item_identifier)
         if resolved_id is None:
             return None
@@ -116,6 +123,19 @@ class DummyMediaService:
             else None,
             external_ref=item.external_ref,
         )
+
+    async def get_item_by_external_id(
+        self,
+        external_id: str,
+        *,
+        media_type: str | None = None,
+        tenant_id: str | None = None,
+    ) -> MediaItemRecord | None:
+        _ = (media_type, tenant_id)
+        resolved_id = self.detailed_items.get(external_id)
+        if resolved_id is None:
+            return None
+        return await self.get_item(resolved_id)
 
     async def retry_items(self, ids: list[str]) -> ItemActionResult:
         self.retried_ids.extend(ids)

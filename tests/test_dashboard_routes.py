@@ -143,7 +143,8 @@ class DummyMediaService:
 
     snapshot: StatsProjection
 
-    async def get_stats(self) -> StatsProjection:
+    async def get_stats(self, *, tenant_id: str | None = None) -> StatsProjection:
+        _ = tenant_id
         return self.snapshot
 
 
@@ -324,8 +325,10 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "trust_policy_decision": None,
             "trust_store_source": None,
             "sandbox_profile": None,
+            "tenancy_mode": None,
             "quarantined": False,
             "quarantine_reason": None,
+            "publisher_policy_decision": None,
             "source": None,
             "warnings": [],
             "error": None,
@@ -352,8 +355,10 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "trust_policy_decision": None,
             "trust_store_source": None,
             "sandbox_profile": None,
+            "tenancy_mode": None,
             "quarantined": False,
             "quarantine_reason": None,
+            "publisher_policy_decision": None,
             "source": None,
             "warnings": [],
             "error": None,
@@ -428,6 +433,7 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
                 "release_channel": "builtin",
                 "trust_level": "builtin",
                 "sandbox_profile": "host",
+                "tenancy_mode": "control_plane",
                 "entry_module": "plugin.py",
                 "downloader": "StremThruDownloader",
                 "min_host_version": "0.1.0",
@@ -467,8 +473,10 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
             "trust_policy_decision": None,
             "trust_store_source": None,
             "sandbox_profile": "host",
+            "tenancy_mode": "control_plane",
             "quarantined": False,
             "quarantine_reason": None,
+            "publisher_policy_decision": None,
             "source": "builtin",
             "warnings": [],
             "error": None,
@@ -515,8 +523,10 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "trust_policy_decision": None,
             "trust_store_source": None,
             "sandbox_profile": None,
+            "tenancy_mode": None,
             "quarantined": False,
             "quarantine_reason": None,
+            "publisher_policy_decision": None,
             "source": "entry_point",
             "warnings": [],
             "error": "api_version_incompatible",
@@ -549,6 +559,7 @@ def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> 
         "tenant_id": "tenant-main",
         "roles": ["platform:admin", "playback:operator"],
         "scopes": ["backend:admin", "playback:read"],
+        "effective_permissions": ["*", "playback:operate", "playback:read"],
         "principal_key": "operator-1",
         "principal_type": "service",
         "service_account_api_key_id": "primary",

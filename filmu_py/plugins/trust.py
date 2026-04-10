@@ -24,9 +24,21 @@ class PluginTrustStore:
     """Parsed operator-managed trust store for plugin signature policy."""
 
     keys: dict[str, TrustedSigningKey]
+    publishers: dict[str, TrustedPublisherPolicy]
     revoked_key_ids: frozenset[str]
     revoked_signatures: frozenset[str]
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedPublisherPolicy:
+    """One operator-approved publisher policy loaded from the trust store."""
+
+    publisher: str
+    allowed_release_channels: frozenset[str]
+    allowed_sandbox_profiles: frozenset[str]
+    allowed_tenancy_modes: frozenset[str]
+    require_signature_verification: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +48,16 @@ class PluginSignatureVerification:
     verified: bool
     reason: str
     trust_policy_decision: str
+    trust_store_source: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PluginPublisherPolicyEvaluation:
+    """Result of evaluating one manifest against operator publisher policy."""
+
+    allowed: bool
+    decision: str
+    reason: str | None
     trust_store_source: str | None
 
 
@@ -70,6 +92,36 @@ def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
             status=status,
         )
 
+    raw_publishers = raw.get("publishers", {})
+    if not isinstance(raw_publishers, dict):
+        raise ValueError("plugin trust store publishers must be an object")
+    publishers: dict[str, TrustedPublisherPolicy] = {}
+    for publisher, payload in raw_publishers.items():
+        if not isinstance(payload, dict):
+            raise ValueError(f"plugin trust store publisher '{publisher}' must be an object")
+        normalized_publisher = str(publisher).strip()
+        if not normalized_publisher:
+            raise ValueError("plugin trust store publisher names must not be empty")
+        publishers[normalized_publisher] = TrustedPublisherPolicy(
+            publisher=normalized_publisher,
+            allowed_release_channels=frozenset(
+                str(value).strip().lower()
+                for value in payload.get("allowed_release_channels", [])
+                if str(value).strip()
+            ),
+            allowed_sandbox_profiles=frozenset(
+                str(value).strip().lower()
+                for value in payload.get("allowed_sandbox_profiles", [])
+                if str(value).strip()
+            ),
+            allowed_tenancy_modes=frozenset(
+                str(value).strip().lower()
+                for value in payload.get("allowed_tenancy_modes", [])
+                if str(value).strip()
+            ),
+            require_signature_verification=bool(payload.get("require_signature_verification", True)),
+        )
+
     revoked_key_ids = frozenset(str(value).strip() for value in raw.get("revoked_key_ids", []))
     revoked_signatures = frozenset(
         _normalize_signature(str(value))
@@ -78,6 +130,7 @@ def load_plugin_trust_store(path: Path | None) -> PluginTrustStore | None:
     )
     return PluginTrustStore(
         keys=keys,
+        publishers=publishers,
         revoked_key_ids=revoked_key_ids,
         revoked_signatures=revoked_signatures,
         source=str(path),
@@ -173,6 +226,92 @@ def verify_plugin_signature(
         reason="signature_verified",
         trust_policy_decision="trusted",
         trust_store_source=trust_store.source,
+    )
+
+
+def evaluate_plugin_publisher_policy(
+    *,
+    publisher: str | None,
+    release_channel: str,
+    sandbox_profile: str,
+    tenancy_mode: str,
+    distribution: str,
+    signature_verified: bool,
+    trust_store: PluginTrustStore | None,
+) -> PluginPublisherPolicyEvaluation:
+    """Evaluate one plugin manifest against operator publisher policy."""
+
+    trust_store_source = trust_store.source if trust_store is not None else None
+    if distribution == "builtin":
+        return PluginPublisherPolicyEvaluation(
+            allowed=True,
+            decision="builtin",
+            reason=None,
+            trust_store_source=trust_store_source,
+        )
+    if trust_store is None:
+        return PluginPublisherPolicyEvaluation(
+            allowed=True,
+            decision="unconfigured",
+            reason="trust_store_unavailable",
+            trust_store_source=None,
+        )
+    if not trust_store.publishers:
+        return PluginPublisherPolicyEvaluation(
+            allowed=True,
+            decision="unconfigured",
+            reason="publisher_policy_unconfigured",
+            trust_store_source=trust_store_source,
+        )
+    if publisher is None:
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="publisher_missing",
+            trust_store_source=trust_store_source,
+        )
+
+    policy = trust_store.publishers.get(publisher)
+    if policy is None:
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="untrusted",
+            reason="publisher_unapproved",
+            trust_store_source=trust_store_source,
+        )
+    if policy.require_signature_verification and not signature_verified:
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="publisher_requires_verified_signature",
+            trust_store_source=trust_store_source,
+        )
+    if policy.allowed_release_channels and release_channel not in policy.allowed_release_channels:
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="release_channel_disallowed",
+            trust_store_source=trust_store_source,
+        )
+    if policy.allowed_sandbox_profiles and sandbox_profile not in policy.allowed_sandbox_profiles:
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="sandbox_profile_disallowed",
+            trust_store_source=trust_store_source,
+        )
+    if policy.allowed_tenancy_modes and tenancy_mode not in policy.allowed_tenancy_modes:
+        return PluginPublisherPolicyEvaluation(
+            allowed=False,
+            decision="rejected",
+            reason="tenancy_mode_disallowed",
+            trust_store_source=trust_store_source,
+        )
+    return PluginPublisherPolicyEvaluation(
+        allowed=True,
+        decision="allowed",
+        reason=None,
+        trust_store_source=trust_store_source,
     )
 
 

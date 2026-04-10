@@ -859,6 +859,7 @@ class Settings(BaseSettings):
         return {
             "version": self.version,
             "api_key": self.api_key.get_secret_value(),
+            "api_key_id": self.api_key_id,
             "tmdb_api_key": self.tmdb_api_key,
             "log_level": self.log_level,
             "enable_network_tracing": self.enable_network_tracing,
@@ -894,7 +895,9 @@ class Settings(BaseSettings):
             FILMU_PY_API_KEY=SecretStr(
                 str(payload.get("api_key") or os.getenv("FILMU_PY_API_KEY", ""))
             ),
-            FILMU_PY_API_KEY_ID=os.getenv("FILMU_PY_API_KEY_ID", "primary"),
+            FILMU_PY_API_KEY_ID=str(
+                payload.get("api_key_id") or os.getenv("FILMU_PY_API_KEY_ID", "primary")
+            ),
             TMDB_API_KEY=payload.get("tmdb_api_key") or env_tmdb_api_key,
             FILMU_PY_LOG_LEVEL=payload.get("log_level", "INFO"),
             FILMU_PY_ENABLE_NETWORK_TRACING=payload.get("enable_network_tracing", False),

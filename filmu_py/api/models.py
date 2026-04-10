@@ -38,8 +38,10 @@ class PluginCapabilityStatusResponse(BaseModel):
     trust_policy_decision: str | None = None
     trust_store_source: str | None = None
     sandbox_profile: str | None = None
+    tenancy_mode: str | None = None
     quarantined: bool = False
     quarantine_reason: str | None = None
+    publisher_policy_decision: str | None = None
     source: str | None = None
     warnings: list[str] = []
     error: str | None = None
@@ -55,6 +57,7 @@ class AuthContextResponse(BaseModel):
     tenant_id: str
     roles: list[str]
     scopes: list[str]
+    effective_permissions: list[str]
     principal_key: str | None = None
     principal_type: str | None = None
     service_account_api_key_id: str | None = None
@@ -122,6 +125,7 @@ class ApiKeyRotationResponse(BaseModel):
     """Response payload returned after a real backend API-key rotation."""
 
     key: str
+    api_key_id: str
     warning: str
 
 
@@ -364,6 +368,8 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_prefetch_peak_active_background_tasks: int
     vfs_runtime_prefetch_background_spawned: int
     vfs_runtime_prefetch_background_backpressure: int
+    vfs_runtime_prefetch_fairness_denied: int
+    vfs_runtime_prefetch_global_backpressure_denied: int
     vfs_runtime_prefetch_background_error: int
     vfs_runtime_chunk_coalescing_in_flight_chunks: int
     vfs_runtime_chunk_coalescing_peak_in_flight_chunks: int
