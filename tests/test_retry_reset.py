@@ -221,6 +221,10 @@ def _build_route_client(*, arq_enabled: bool) -> TestClient:
     return TestClient(app)
 
 
+def _route_headers() -> dict[str, str]:
+    return {"x-api-key": "a" * 32, "x-actor-roles": "platform:admin"}
+
+
 @dataclass
 class FakeGraphqlMediaService:
     arq_enabled: bool = True
@@ -404,28 +408,28 @@ async def test_reset_item_raises_when_arq_disabled() -> None:
 
 def test_retry_route_returns_item_action_response_shape() -> None:
     client = _build_route_client(arq_enabled=True)
-    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 200
     assert response.json() == {"message": "Items retried.", "ids": ["item-1"]}
 
 
 def test_reset_route_returns_item_action_response_shape() -> None:
     client = _build_route_client(arq_enabled=True)
-    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 200
     assert response.json() == {"message": "Items reset.", "ids": ["item-1"]}
 
 
 def test_retry_route_returns_400_when_arq_disabled() -> None:
     client = _build_route_client(arq_enabled=False)
-    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/retry", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 400
     assert response.json() == {"detail": "ARQ is not enabled; retry/reset requires the worker to be running"}
 
 
 def test_reset_route_returns_400_when_arq_disabled() -> None:
     client = _build_route_client(arq_enabled=False)
-    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers={"x-api-key": "a" * 32})
+    response = client.post("/api/v1/items/reset", json={"ids": ["item-1"]}, headers=_route_headers())
     assert response.status_code == 400
     assert response.json() == {"detail": "ARQ is not enabled; retry/reset requires the worker to be running"}
 

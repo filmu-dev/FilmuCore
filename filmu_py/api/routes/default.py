@@ -5,9 +5,10 @@ import json
 from secrets import token_hex
 from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import SecretStr
 
+from filmu_py.api.deps import get_auth_context, require_roles
 from filmu_py.audit import audit_action
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.queue_status import QueueStatusReader
@@ -16,6 +17,7 @@ from filmu_py.services.settings_service import save_settings
 
 from ..models import (
     ApiKeyRotationResponse,
+    AuthContextResponse,
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
@@ -81,6 +83,20 @@ def _plugin_runtime_health(
     return True, configured, warnings
 
 
+def _plugin_signature_fields(*, manifest: Any, success: Any) -> dict[str, Any]:
+    """Return operator-facing trust-store verification details when available."""
+
+    return {
+        "signature_present": bool(
+            getattr(success, "signature_present", False) or (manifest and manifest.signature)
+        ),
+        "signature_verified": bool(getattr(success, "signature_verified", False)),
+        "signature_verification_reason": getattr(success, "signature_verification_reason", None),
+        "trust_policy_decision": getattr(success, "trust_policy_decision", None),
+        "trust_store_source": getattr(success, "trust_store_source", None),
+    }
+
+
 def _generate_api_key() -> str:
     """Return a strong API key candidate for compatibility-driven admin flows.
 
@@ -121,6 +137,30 @@ async def health(request: Request) -> HealthResponse:
         service=resources.settings.service_name,
         status=status,
         checks=checks,
+    )
+
+
+@router.get(
+    "/auth/context",
+    operation_id="default.auth_context",
+    response_model=AuthContextResponse,
+)
+async def get_auth_identity_context(request: Request) -> AuthContextResponse:
+    """Return the current authenticated actor plus persisted identity-plane mapping."""
+
+    auth_context = get_auth_context(request)
+    identity = getattr(request.state, "auth_identity", None)
+    return AuthContextResponse(
+        authentication_mode=auth_context.authentication_mode,
+        api_key_id=auth_context.api_key_id,
+        actor_id=auth_context.actor_id,
+        actor_type=auth_context.actor_type,
+        tenant_id=auth_context.tenant_id,
+        roles=list(auth_context.roles),
+        scopes=list(auth_context.scopes),
+        principal_key=getattr(identity, "principal_key", None),
+        principal_type=getattr(identity, "principal_type", None),
+        service_account_api_key_id=getattr(identity, "service_account_api_key_id", None),
     )
 
 
@@ -250,6 +290,7 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
         success = loaded_report.get(plugin_name)
         failure = failed_report.get(plugin_name)
         ready, configured, warnings = _plugin_runtime_health(plugin_name, resources)
+        signature_fields = _plugin_signature_fields(manifest=manifest, success=success)
         if success is not None:
             warnings.extend(list(getattr(success, "skipped", ())))
         if failure is not None and not registrations:
@@ -264,24 +305,24 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                     min_host_version=manifest.min_host_version if manifest is not None else None,
                     max_host_version=manifest.max_host_version if manifest is not None else None,
                 publisher=manifest.publisher if manifest is not None else None,
-                release_channel=manifest.release_channel if manifest is not None else None,
-                trust_level=manifest.trust_level if manifest is not None else None,
-                permission_scopes=(
-                    sorted(manifest.effective_permission_scopes())
-                    if manifest is not None
-                    else []
-                ),
-                source_sha256=manifest.source_sha256 if manifest is not None else None,
-                signing_key_id=manifest.signing_key_id if manifest is not None else None,
-                signature_present=bool(manifest and manifest.signature),
-                sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
-                quarantined=manifest.quarantined if manifest is not None else False,
-                quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
-                source=getattr(failure, "source", None),
-                warnings=warnings,
-                error=getattr(failure, "reason", None),
+                    release_channel=manifest.release_channel if manifest is not None else None,
+                    trust_level=manifest.trust_level if manifest is not None else None,
+                    permission_scopes=(
+                        sorted(manifest.effective_permission_scopes())
+                        if manifest is not None
+                        else []
+                    ),
+                    source_sha256=manifest.source_sha256 if manifest is not None else None,
+                    signing_key_id=manifest.signing_key_id if manifest is not None else None,
+                    sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
+                    quarantined=manifest.quarantined if manifest is not None else False,
+                    quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
+                    source=getattr(failure, "source", None),
+                    warnings=warnings,
+                    error=getattr(failure, "reason", None),
+                    **signature_fields,
+                )
             )
-        )
             continue
 
         responses.append(
@@ -305,7 +346,6 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                 ),
                 source_sha256=manifest.source_sha256 if manifest is not None else None,
                 signing_key_id=manifest.signing_key_id if manifest is not None else None,
-                signature_present=bool(manifest and manifest.signature),
                 sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
                 quarantined=manifest.quarantined if manifest is not None else False,
                 quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
@@ -315,6 +355,7 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                     else getattr(success, "source", None)
                 ),
                 warnings=warnings,
+                **signature_fields,
             )
         )
     return responses
@@ -377,6 +418,7 @@ async def get_downloader_user_info(request: Request) -> dict[str, Any]:
     "/generateapikey",
     operation_id="default.generate_apikey",
     response_model=ApiKeyRotationResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
 )
 async def generate_apikey(request: Request) -> ApiKeyRotationResponse:
     """Rotate the live backend API key and persist the new compatibility payload.

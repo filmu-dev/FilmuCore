@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from filmu_py.api.deps import get_media_service, get_resources
+from filmu_py.api.deps import get_auth_context, get_media_service, get_resources, require_roles
 from filmu_py.api.models import MessageResponse, ScrapeAutoPayload, ScrapeSessionStateResponse
 from filmu_py.services.media import ItemActionResult, MediaItemRecord, MediaService
 from filmu_py.state.item import InvalidItemTransition, ItemEvent, ItemState
@@ -222,6 +222,7 @@ async def _request_missing_item_for_scrape(
     scrape_request: AutoScrapeRequest,
     requested_seasons: list[int] | None,
     requested_episodes: dict[str, list[int]] | None,
+    tenant_id: str,
 ) -> MediaItemRecord:
     """Create one missing item while reusing the add-items path when available."""
 
@@ -231,10 +232,11 @@ async def _request_missing_item_for_scrape(
         result = cast(
             ItemActionResult,
             await requester(
-            media_type=scrape_request.media_type,
-            identifiers=[item_identifier],
-            requested_seasons=requested_seasons,
-            requested_episodes=requested_episodes,
+                media_type=scrape_request.media_type,
+                identifiers=[item_identifier],
+                requested_seasons=requested_seasons,
+                requested_episodes=requested_episodes,
+                tenant_id=tenant_id,
             ),
         )
         if result.ids:
@@ -248,6 +250,7 @@ async def _request_missing_item_for_scrape(
         media_type=scrape_request.media_type,
         requested_seasons=requested_seasons,
         requested_episodes=requested_episodes,
+        tenant_id=tenant_id,
     )
 
 
@@ -327,6 +330,7 @@ async def _queue_real_scrape(
 ) -> tuple[str, str]:
     """Resolve an item, transition it into indexed state when needed, and enqueue scrape."""
 
+    auth_context = get_auth_context(request)
     requested_seasons: list[int] | None = None
     requested_episodes: dict[str, list[int]] | None = None
     partial_scope_requested = False
@@ -358,6 +362,7 @@ async def _queue_real_scrape(
                 scrape_request=scrape_request,
                 requested_seasons=requested_seasons,
                 requested_episodes=requested_episodes,
+                tenant_id=auth_context.tenant_id,
             )
             created_from_request = True
         except ValueError as exc:
@@ -384,6 +389,7 @@ async def _queue_real_scrape(
             title=item.title,
             requested_seasons=requested_seasons,
             requested_episodes=requested_episodes,
+            tenant_id=auth_context.tenant_id,
         )
         logger.info(
             "scrape_auto.partial_scope_upserted_for_existing_item",
@@ -590,7 +596,12 @@ async def _iter_scrape_events(title: str) -> AsyncIterator[bytes]:
     )
 
 
-@router.post("/auto", operation_id="scrape.auto", response_model=MessageResponse)
+@router.post(
+    "/auto",
+    operation_id="scrape.auto",
+    response_model=MessageResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def auto_scrape(
     http_request: Request,
     request: AutoScrapeRequest,
@@ -618,6 +629,7 @@ async def auto_scrape(
     "/start_session",
     operation_id="scrape.start_session",
     response_model=StartSessionResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
 )
 async def start_manual_session(
     request_context: Request,
@@ -711,6 +723,7 @@ async def get_session_state(
     "/session/{session_id}",
     operation_id="scrape.session_action",
     response_model=MessageResponse | SelectFilesResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
 )
 async def session_action(
     session_id: str,

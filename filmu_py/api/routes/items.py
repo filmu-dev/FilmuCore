@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, status
 
-from filmu_py.api.deps import get_media_service, get_resources
+from filmu_py.api.deps import get_auth_context, get_media_service, get_resources, require_roles
 from filmu_py.api.models import (
     ActiveStreamDetailResponse,
     ActiveStreamOwnerResponse,
@@ -276,12 +276,18 @@ async def get_items(
     )
 
 
-@router.post("/add", operation_id="items.add_items", response_model=MessageResponse)
+@router.post(
+    "/add",
+    operation_id="items.add_items",
+    response_model=MessageResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def add_items(
     payload: Annotated[AddMediaItemPayload, Body(...)],
     media_service: Annotated[MediaService, Depends(get_media_service)],
     request: Request,
 ) -> MessageResponse:
+    auth_context = get_auth_context(request)
     try:
         if payload.requested_seasons is not None or payload.requested_episodes is not None:
             result = await media_service.request_items_by_identifiers(
@@ -290,12 +296,14 @@ async def add_items(
                 tvdb_ids=payload.tvdb_ids,
                 requested_seasons=payload.requested_seasons,
                 requested_episodes=payload.requested_episodes,
+                tenant_id=auth_context.tenant_id,
             )
         else:
             result = await media_service.request_items_by_identifiers(
                 media_type=payload.media_type,
                 tmdb_ids=payload.tmdb_ids,
                 tvdb_ids=payload.tvdb_ids,
+                tenant_id=auth_context.tenant_id,
             )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -403,7 +411,12 @@ async def get_item(
     )
 
 
-@router.post("/reset", operation_id="items.reset", response_model=ItemActionResponse)
+@router.post(
+    "/reset",
+    operation_id="items.reset",
+    response_model=ItemActionResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def reset_items(
     payload: Annotated[IdListPayload, Body(...)],
     request: Request,
@@ -424,7 +437,12 @@ async def reset_items(
     return ItemActionResponse(message="Items reset.", ids=matched_ids)
 
 
-@router.post("/retry", operation_id="items.retry", response_model=ItemActionResponse)
+@router.post(
+    "/retry",
+    operation_id="items.retry",
+    response_model=ItemActionResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def retry_items(
     payload: Annotated[IdListPayload, Body(...)],
     request: Request,
@@ -445,7 +463,12 @@ async def retry_items(
     return ItemActionResponse(message="Items retried.", ids=matched_ids)
 
 
-@router.delete("/remove", operation_id="items.remove", response_model=ItemActionResponse)
+@router.delete(
+    "/remove",
+    operation_id="items.remove",
+    response_model=ItemActionResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def remove_items(
     payload: Annotated[IdListPayload, Body(...)],
     media_service: Annotated[MediaService, Depends(get_media_service)],

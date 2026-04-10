@@ -18,6 +18,11 @@ from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry, GraphQLResol
 from filmu_py.plugins.context import PluginContextProvider
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
+from filmu_py.plugins.trust import (
+    PluginTrustStore,
+    load_plugin_trust_store,
+    verify_plugin_signature,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +42,11 @@ def _plugin_load_result(reason: str) -> str:
         return "skipped_quarantined"
     if reason == "source_digest_mismatch":
         return "skipped_integrity"
+    if reason.startswith("plugin_signature_") or reason in {
+        "unsigned_plugin_disallowed",
+        "trust_store_required",
+    }:
+        return "skipped_signature"
     if "plugin.json" in reason or "manifest" in reason:
         return "skipped_manifest"
     return "failed"
@@ -61,6 +71,10 @@ class PluginLoadSuccess:
     source_sha256: str | None
     signing_key_id: str | None
     signature_present: bool
+    signature_verified: bool
+    signature_verification_reason: str | None
+    trust_policy_decision: str | None
+    trust_store_source: str | None
     sandbox_profile: str
     quarantined: bool
     quarantine_reason: str | None
@@ -183,6 +197,8 @@ def _register_plugin(
     module: object,
     registry: PluginRegistry,
     host_version: str,
+    trust_store: PluginTrustStore | None = None,
+    strict_signatures: bool = False,
     context_provider: PluginContextProvider | None = None,
     register_graphql: bool = True,
     register_capabilities: bool = True,
@@ -200,6 +216,20 @@ def _register_plugin(
     manifest.ensure_host_compatibility(host_version, supported_api_versions=("1",))
     source_path = _resolve_source_path(manifest_source=manifest_source, manifest=manifest, module=module)
     _validate_source_digest(manifest=manifest, source_path=source_path)
+    signature_verification = verify_plugin_signature(
+        source_sha256=manifest.source_sha256,
+        signature=manifest.signature,
+        signing_key_id=manifest.signing_key_id,
+        distribution=manifest.distribution,
+        trust_store=trust_store,
+    )
+    if strict_signatures and manifest.distribution != "builtin":
+        if manifest.signature is None:
+            raise ValueError("unsigned_plugin_disallowed")
+        if trust_store is None:
+            raise ValueError("trust_store_required")
+        if not signature_verification.verified:
+            raise ValueError(f"plugin_signature_{signature_verification.reason}")
     registry.register_manifest(manifest)
 
     skipped_messages: list[str] = []
@@ -212,6 +242,10 @@ def _register_plugin(
         skipped_messages.append("source digest is not declared; provenance is not fully pinned")
     if manifest.distribution != "builtin" and manifest.signature is None:
         skipped_messages.append("plugin is unsigned; provenance is not independently verifiable")
+    if manifest.distribution != "builtin" and not signature_verification.verified:
+        skipped_messages.append(
+            f"signature verification state: {signature_verification.reason}"
+        )
     registered_counts: dict[GraphQLResolverKind, int] = {
         GraphQLResolverKind.QUERY: 0,
         GraphQLResolverKind.MUTATION: 0,
@@ -290,6 +324,10 @@ def _register_plugin(
         source_sha256=manifest.source_sha256,
         signing_key_id=manifest.signing_key_id,
         signature_present=manifest.signature is not None,
+        signature_verified=signature_verification.verified,
+        signature_verification_reason=signature_verification.reason,
+        trust_policy_decision=signature_verification.trust_policy_decision,
+        trust_store_source=signature_verification.trust_store_source,
         sandbox_profile=manifest.sandbox_profile,
         quarantined=manifest.quarantined,
         quarantine_reason=manifest.quarantine_reason,
@@ -339,6 +377,8 @@ def load_plugins(
     *,
     context_provider: PluginContextProvider | None = None,
     host_version: str = "0.1.0",
+    trust_store_path: Path | None = None,
+    strict_signatures: bool = False,
     register_graphql: bool = True,
     register_capabilities: bool = True,
 ) -> PluginLoadReport:
@@ -346,6 +386,7 @@ def load_plugins(
 
     resolved_plugins_dir = plugins_dir if plugins_dir.is_absolute() else (Path.cwd() / plugins_dir)
     report = PluginLoadReport()
+    trust_store = load_plugin_trust_store(trust_store_path)
 
     if not resolved_plugins_dir.exists():
         logger.info(
@@ -373,6 +414,8 @@ def load_plugins(
                     module=module,
                     registry=registry,
                     host_version=host_version,
+                    trust_store=trust_store,
+                    strict_signatures=strict_signatures,
                     context_provider=context_provider,
                     register_graphql=register_graphql,
                     register_capabilities=register_capabilities,
@@ -429,6 +472,8 @@ def load_plugins(
                 module=loaded_module,
                 registry=registry,
                 host_version=host_version,
+                trust_store=trust_store,
+                strict_signatures=strict_signatures,
                 context_provider=context_provider,
                 register_graphql=register_graphql,
                 register_capabilities=register_capabilities,
@@ -484,6 +529,8 @@ def load_graphql_plugins(
     registry: GraphQLPluginRegistry,
     *,
     host_version: str = "0.1.0",
+    trust_store_path: Path | None = None,
+    strict_signatures: bool = False,
 ) -> PluginLoadReport:
     """Backward-compatible wrapper that preserves the GraphQL-only loader surface."""
 
@@ -493,6 +540,8 @@ def load_graphql_plugins(
         capability_registry,
         context_provider=None,
         host_version=host_version,
+        trust_store_path=trust_store_path,
+        strict_signatures=strict_signatures,
         register_graphql=True,
         register_capabilities=False,
     )

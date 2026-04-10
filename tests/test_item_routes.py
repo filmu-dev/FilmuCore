@@ -243,7 +243,9 @@ class DummyMediaService:
         media_type: str,
         tmdb_ids: list[str] | None = None,
         tvdb_ids: list[str] | None = None,
+        tenant_id: str = "global",
     ) -> ItemActionResult:
+        _ = tenant_id
         identifiers = tmdb_ids if media_type == "movie" else tvdb_ids
         resolved = [identifier for identifier in identifiers or [] if identifier]
         if not resolved:
@@ -287,7 +289,11 @@ def _build_client(*, media_service: DummyMediaService | None = None) -> TestClie
 
 
 def _headers() -> dict[str, str]:
-    return {"x-api-key": "a" * 32}
+    return {
+        "x-api-key": "a" * 32,
+        "x-actor-roles": "platform:admin",
+        "x-tenant-id": "tenant-main",
+    }
 
 
 def test_items_route_returns_paginated_payload() -> None:
@@ -392,6 +398,17 @@ def test_add_items_route_returns_404_when_media_type_has_no_identifiers() -> Non
     )
 
     assert response.status_code == 404
+
+
+def test_add_items_route_requires_admin_role() -> None:
+    client = _build_client()
+    response = client.post(
+        "/api/v1/items/add",
+        json={"media_type": "movie", "tmdb_ids": ["123"], "tvdb_ids": []},
+        headers={"x-api-key": "a" * 32, "x-actor-roles": "library:viewer"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_item_identifier_matching_accepts_namespaced_external_refs() -> None:

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from .graphql.plugin_registry import GraphQLPluginRegistry
     from .plugins.registry import PluginRegistry
+    from .services.identity import SecurityIdentityService
     from .services.playback import (
         InProcessDirectPlaybackRefreshController,
         InProcessHlsFailedLeaseRefreshController,
@@ -46,6 +47,7 @@ class AppResources:
     graphql_plugin_registry: GraphQLPluginRegistry
     chunk_cache: ChunkCache | None = None
     plugin_registry: PluginRegistry | None = None
+    security_identity_service: SecurityIdentityService | None = None
     plugin_settings_payload: Mapping[str, Any] | None = None
     playback_service: PlaybackSourceService | None = None
     playback_refresh_controller: InProcessDirectPlaybackRefreshController | None = None

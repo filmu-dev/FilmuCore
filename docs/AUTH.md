@@ -22,6 +22,7 @@ The current system uses a split auth model:
 2. **Backend API authentication**
    - handled by a backend API key
    - validated by [`verify_api_key()`](../filmu_py/api/deps.py)
+   - now also persisted into first-class tenant/principal/service-account records through [`SecurityIdentityService`](../filmu_py/services/identity.py)
 
 This means the backend currently authenticates the frontend server/BFF layer, not the end user directly.
 
@@ -55,6 +56,21 @@ The backend currently accepts the API key from standard compatibility locations 
 - `api_key` query parameter
 
 All `/api/v1/*` routes are protected by router-level dependency wiring in [`create_api_router()`](../filmu_py/api/router.py).
+
+The request dependency also now persists a first-class identity-plane baseline:
+
+- [`TenantORM`](../filmu_py/db/models.py), [`PrincipalORM`](../filmu_py/db/models.py), and [`ServiceAccountORM`](../filmu_py/db/models.py) are created by migration [`20260410_0022_identity_and_tenancy.py`](../filmu_py/db/alembic/versions/20260410_0022_identity_and_tenancy.py)
+- the startup path bootstraps the default `global` tenant plus the primary service account in [`create_app()`](../filmu_py/app.py)
+- authenticated requests now upsert tenant/principal/service-account metadata for auditability instead of leaving actor headers purely ephemeral
+- operators can inspect the resolved request identity on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
+
+This is still not full authz. It is a persisted control-plane baseline above the earlier header-only model.
+
+The control plane is also stricter than the earlier baseline:
+
+- privileged compatibility mutations now require explicit `x-actor-roles` values such as `platform:admin`
+- API-key authentication no longer implies admin privileges automatically
+- tenant-aware intake paths now persist the resolved `tenant_id` on created `media_items` and `item_requests`
 
 ---
 
@@ -111,9 +127,9 @@ Readiness details are maintained in the authoritative document [`LOCAL_FRONTEND_
 The current API-key model is acceptable for the present BFF architecture, but the backend should stay open to future evolution if needed:
 
 - stronger service-to-service auth
-- scoped machine credentials
+- scoped machine credentials above the new persisted `ServiceAccountORM` baseline
 - internal admin/service roles
 - plugin/service capability boundaries
-- eventual user-aware audit trails where appropriate
+- eventual user-aware audit trails and tenant-scoped authorization above the new persisted identity catalog
 
 That evolution should not break the current principle that frontend sessions and backend execution auth are separate concerns unless there is a clear product reason to merge them.

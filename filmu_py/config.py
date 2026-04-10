@@ -677,6 +677,14 @@ class Settings(BaseSettings):
 
     prometheus_enabled: bool = Field(default=True, alias="FILMU_PY_PROMETHEUS_ENABLED")
     plugins_dir: Path = Field(default=Path("plugins"), alias="FILMU_PY_PLUGINS_DIR")
+    plugin_trust_store_path: Path | None = Field(
+        default=None,
+        alias="FILMU_PY_PLUGIN_TRUST_STORE_PATH",
+    )
+    plugin_strict_signatures: bool = Field(
+        default=False,
+        alias="FILMU_PY_PLUGIN_STRICT_SIGNATURES",
+    )
 
     @field_validator("api_key")
     @classmethod

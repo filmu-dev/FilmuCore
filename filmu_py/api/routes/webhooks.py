@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Annotated, Self
 
 import structlog
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, model_validator
 
-from filmu_py.api.deps import get_media_service
+from filmu_py.api.deps import get_auth_context, get_media_service, require_roles
 from filmu_py.services.media import MediaService
 
 router = APIRouter(prefix="/webhook", tags=["webhooks"])
@@ -48,8 +48,12 @@ class OverseerrWebhookPayload(BaseModel):
         return self
 
 
-@router.post("/overseerr")
+@router.post(
+    "/overseerr",
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def overseerr_webhook(
+    request: Request,
     payload: Annotated[OverseerrWebhookPayload, Body(...)],
     media_service: Annotated[MediaService, Depends(get_media_service)],
 ) -> dict[str, str | None]:
@@ -61,11 +65,13 @@ async def overseerr_webhook(
             detail="missing tmdbId in media block",
         )
 
+    auth_context = get_auth_context(request)
     requested_seasons = payload.request.seasons if payload.request is not None else None
     result = await media_service.request_items_by_identifiers(
         identifiers=[f"tmdb:{payload.media.tmdbId}"],
         media_type=payload.media.media_type,
         requested_seasons=requested_seasons,
+        tenant_id=auth_context.tenant_id,
     )
     item_id = result.ids[0] if result.ids else None
     logger.info(

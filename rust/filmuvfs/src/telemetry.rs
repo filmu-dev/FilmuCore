@@ -290,10 +290,12 @@ pub struct FilmuvfsPrefetchStatusSnapshot {
     pub startup_scheduled: u64,
     pub startup_error: u64,
     pub concurrency_limit: u64,
+    pub max_background_per_handle: u64,
     pub available_permits: u64,
     pub active_permits: u64,
     pub active_background_tasks: u64,
     pub peak_active_background_tasks: u64,
+    pub handles_with_background_tasks: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1381,10 +1383,12 @@ impl FilmuvfsMetrics {
                 startup_scheduled: self.prefetch_startup_scheduled.load(Ordering::Relaxed),
                 startup_error: self.prefetch_startup_error.load(Ordering::Relaxed),
                 concurrency_limit: prefetch_snapshot.concurrency_limit,
+                max_background_per_handle: prefetch_snapshot.max_background_per_handle,
                 available_permits: prefetch_snapshot.available_permits,
                 active_permits: prefetch_snapshot.active_permits,
                 active_background_tasks: prefetch_snapshot.active_background_tasks,
                 peak_active_background_tasks: prefetch_snapshot.peak_active_background_tasks,
+                handles_with_background_tasks: prefetch_snapshot.handles_with_background_tasks,
             },
             chunk_coalescing: FilmuvfsChunkCoalescingStatusSnapshot {
                 in_flight_chunks: chunk_coalescing_snapshot.in_flight_chunks,

@@ -24,6 +24,7 @@ use crate::{
 pub struct ChunkEngineConfig {
     pub planner: ChunkPlannerConfig,
     pub prefetch_concurrency: usize,
+    pub prefetch_max_background_per_handle: usize,
 }
 
 impl Default for ChunkEngineConfig {
@@ -31,6 +32,7 @@ impl Default for ChunkEngineConfig {
         Self {
             planner: ChunkPlannerConfig::default(),
             prefetch_concurrency: 4,
+            prefetch_max_background_per_handle: 2,
         }
     }
 }
@@ -140,7 +142,10 @@ impl ChunkEngine {
         Ok(Self {
             planner: ChunkPlanner::new(config.planner),
             cache,
-            scheduler: PrefetchScheduler::new(config.prefetch_concurrency)?,
+            scheduler: PrefetchScheduler::new(
+                config.prefetch_concurrency,
+                config.prefetch_max_background_per_handle,
+            )?,
             upstream_reader,
             handle_reads: Arc::new(DashMap::new()),
             in_flight_chunks: Arc::new(DashMap::new()),

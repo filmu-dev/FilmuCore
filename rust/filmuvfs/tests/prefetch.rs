@@ -153,6 +153,7 @@ async fn test_prefetch_triggers_background_fetch() {
         ChunkEngineConfig {
             planner,
             prefetch_concurrency: 4,
+            prefetch_max_background_per_handle: 2,
         },
         UpstreamReader::new(),
     )
@@ -181,6 +182,68 @@ async fn test_prefetch_triggers_background_fetch() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert!(request_count.load(Ordering::SeqCst) >= 2);
+
+    let _ = shutdown_tx.send(());
+    server_task
+        .await
+        .expect("range server task should shut down cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_prefetch_enforces_per_handle_background_fairness() {
+    let body = patterned_bytes(900_000);
+    let (url, request_count, shutdown_tx, server_task) = spawn_range_response_server(body).await;
+    let cache: Arc<dyn CacheEngine> = Arc::new(MemoryCache::new(1024 * 1024));
+    let planner = ChunkPlannerConfig {
+        scan_chunk_size: 1024,
+        random_chunk_size: 512,
+        sequential_prefetch_chunks: 0,
+        ..ChunkPlannerConfig::default()
+    };
+    let engine = ChunkEngine::new(
+        cache,
+        ChunkEngineConfig {
+            planner,
+            prefetch_concurrency: 8,
+            prefetch_max_background_per_handle: 1,
+        },
+        UpstreamReader::new(),
+    )
+    .expect("chunk engine should initialize");
+
+    let request = ChunkReadRequest {
+        handle_key: "fairness-handle".to_owned(),
+        file_id: "provider-file-movie-2".to_owned(),
+        url,
+        provider_file_id: Some("provider-file-movie-2".to_owned()),
+        offset: 131_072,
+        length: 1024,
+        file_size: Some(900_000),
+    };
+
+    engine
+        .read(request.clone())
+        .await
+        .expect("foreground read should succeed");
+    let before_prefetch_requests = request_count.load(Ordering::SeqCst);
+
+    engine
+        .prefetch_ahead(request.clone(), 4)
+        .await
+        .expect("first prefetch should schedule");
+    engine
+        .prefetch_ahead(request, 4)
+        .await
+        .expect("second prefetch call should not error");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let snapshot = engine.prefetch_snapshot();
+    assert_eq!(snapshot.max_background_per_handle, 1);
+    assert!(snapshot.peak_active_background_tasks <= snapshot.concurrency_limit);
+    assert!(
+        request_count.load(Ordering::SeqCst) <= before_prefetch_requests + 2,
+        "per-handle fairness should cap background fan-out"
+    );
 
     let _ = shutdown_tx.send(());
     server_task

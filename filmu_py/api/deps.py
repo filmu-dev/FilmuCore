@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
@@ -26,8 +27,8 @@ _ACTOR_ROLES_HEADER = "x-actor-roles"
 _ACTOR_SCOPES_HEADER = "x-actor-scopes"
 _DEFAULT_ACTOR_TYPE = "service"
 _DEFAULT_TENANT_ID = "global"
-_DEFAULT_ROLES = ("platform:admin",)
-_DEFAULT_SCOPES = ("backend:admin",)
+_DEFAULT_ROLES: tuple[str, ...] = ()
+_DEFAULT_SCOPES: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +98,44 @@ def get_auth_context(request: Request) -> AuthContext:
     return _build_auth_context(request, api_key_id=api_key_id or "primary")
 
 
+def require_roles(*required_roles: str) -> Callable[[Request], Awaitable[AuthContext]]:
+    """Return one dependency that rejects requests missing any required role."""
+
+    normalized_roles = tuple(role.strip() for role in required_roles if role.strip())
+
+    async def _dependency(request: Request) -> AuthContext:
+        auth_context = get_auth_context(request)
+        if not normalized_roles:
+            return auth_context
+        if not set(normalized_roles).issubset(set(auth_context.roles)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required roles: {', '.join(normalized_roles)}",
+            )
+        return auth_context
+
+    return _dependency
+
+
+def require_scopes(*required_scopes: str) -> Callable[[Request], Awaitable[AuthContext]]:
+    """Return one dependency that rejects requests missing any required scope."""
+
+    normalized_scopes = tuple(scope.strip() for scope in required_scopes if scope.strip())
+
+    async def _dependency(request: Request) -> AuthContext:
+        auth_context = get_auth_context(request)
+        if not normalized_scopes:
+            return auth_context
+        if not set(normalized_scopes).issubset(set(auth_context.scopes)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required scopes: {', '.join(normalized_scopes)}",
+            )
+        return auth_context
+
+    return _dependency
+
+
 def get_resources(request: Request) -> AppResources:
     """Return typed application resources from request state."""
 
@@ -156,7 +195,7 @@ def get_playback_refresh_controller(
     return get_resources(request).playback_refresh_controller
 
 
-def verify_api_key(request: Request) -> None:
+async def verify_api_key(request: Request) -> None:
     """Validate API key from standard Filmu-compatible request locations."""
 
     settings = get_settings(request)
@@ -188,6 +227,9 @@ def verify_api_key(request: Request) -> None:
         api_key_id=key_id,
     )
     request.state.auth_context = auth_context
+    identity_service = get_resources(request).security_identity_service
+    if identity_service is not None:
+        request.state.auth_identity = await identity_service.record_auth_context(auth_context)
     structlog.contextvars.bind_contextvars(
         api_key_id=auth_context.api_key_id,
         actor_id=auth_context.actor_id,

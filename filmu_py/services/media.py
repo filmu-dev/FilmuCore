@@ -129,6 +129,7 @@ def _clone_media_item_snapshot(item: MediaItemORM) -> MediaItemORM:
 
     return MediaItemORM(
         id=item.id,
+        tenant_id=item.tenant_id,
         external_ref=item.external_ref,
         title=item.title,
         state=item.state,
@@ -2394,6 +2395,7 @@ def update_media_specialization_record(
 
 def build_item_request_record(
     *,
+    tenant_id: str = "global",
     external_ref: str,
     media_item_id: str | None,
     requested_title: str,
@@ -2408,6 +2410,7 @@ def build_item_request_record(
 
     now = requested_at or datetime.now(UTC)
     return ItemRequestORM(
+        tenant_id=tenant_id,
         external_ref=external_ref,
         media_item_id=media_item_id,
         requested_title=requested_title,
@@ -2427,6 +2430,7 @@ def build_item_request_record(
 def update_item_request_record(
     record: ItemRequestORM,
     *,
+    tenant_id: str | None = None,
     media_item_id: str | None,
     requested_title: str,
     media_type: str,
@@ -2439,6 +2443,8 @@ def update_item_request_record(
     """Update one request-intent record when the same external reference is requested again."""
 
     now = requested_at or datetime.now(UTC)
+    if tenant_id is not None:
+        record.tenant_id = tenant_id
     record.media_item_id = media_item_id
     record.requested_title = requested_title
     record.media_type = media_type
@@ -4136,6 +4142,7 @@ class MediaService:
         self,
         session: Any,
         *,
+        tenant_id: str = "global",
         external_ref: str,
         media_item_id: str | None,
         requested_title: str,
@@ -4154,6 +4161,7 @@ class MediaService:
         ).scalar_one_or_none()
         if existing is None:
             request_record = build_item_request_record(
+                tenant_id=tenant_id,
                 external_ref=external_ref,
                 media_item_id=media_item_id,
                 requested_title=requested_title,
@@ -4174,6 +4182,7 @@ class MediaService:
 
         return update_item_request_record(
             existing,
+            tenant_id=tenant_id,
             media_item_id=media_item_id,
             requested_title=requested_title,
             media_type=media_type,
@@ -4996,6 +5005,7 @@ class MediaService:
         tvdb_ids: list[str] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        tenant_id: str = "global",
     ) -> ItemActionResult:
         """Create request records for the current `/api/v1/items/add` compatibility route."""
 
@@ -5033,6 +5043,7 @@ class MediaService:
                     attributes=attributes,
                     requested_seasons=requested_seasons,
                     requested_episodes=requested_episodes,
+                    tenant_id=tenant_id,
                 )
             else:
                 record = await self.request_item(
@@ -5044,6 +5055,7 @@ class MediaService:
                     media_type=media_type,
                     title=request_title,
                     attributes=attributes,
+                    tenant_id=tenant_id,
                 )
             requested_ids.append(record.id)
 
@@ -5749,6 +5761,7 @@ class MediaService:
         attributes: dict[str, object] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        tenant_id: str = "global",
     ) -> RequestItemServiceResult:
         """Create a requested media item when it does not already exist."""
 
@@ -5833,6 +5846,8 @@ class MediaService:
                     merged_attributes = {**existing_attributes, **candidate_attributes}
                     if merged_attributes != existing_attributes:
                         existing.attributes = merged_attributes
+                if existing.tenant_id == "global" and tenant_id != "global":
+                    existing.tenant_id = tenant_id
                 await self._upsert_media_specialization(
                     session,
                     item=existing,
@@ -5842,6 +5857,7 @@ class MediaService:
                 if partial_request_fields_provided:
                     await self._upsert_item_request(
                         session,
+                        tenant_id=tenant_id,
                         external_ref=normalized_external_ref,
                         media_item_id=existing.id,
                         requested_title=existing.title,
@@ -5853,6 +5869,7 @@ class MediaService:
                 else:
                     await self._upsert_item_request(
                         session,
+                        tenant_id=tenant_id,
                         external_ref=normalized_external_ref,
                         media_item_id=existing.id,
                         requested_title=existing.title,
@@ -5873,6 +5890,7 @@ class MediaService:
                 return RequestItemServiceResult(item=existing_record, enrichment=enrichment)
 
             item = MediaItemORM(
+                tenant_id=tenant_id,
                 external_ref=normalized_external_ref,
                 title=candidate_title,
                 state=ItemState.REQUESTED.value,
@@ -5900,6 +5918,7 @@ class MediaService:
                 if partial_request_fields_provided:
                     await self._upsert_item_request(
                         session,
+                        tenant_id=tenant_id,
                         external_ref=normalized_external_ref,
                         media_item_id=item.id,
                         requested_title=item.title,
@@ -5911,6 +5930,7 @@ class MediaService:
                 else:
                     await self._upsert_item_request(
                         session,
+                        tenant_id=tenant_id,
                         external_ref=normalized_external_ref,
                         media_item_id=item.id,
                         requested_title=item.title,
@@ -5944,6 +5964,8 @@ class MediaService:
                         )
                     ).scalar_one_or_none()
                     if retry_item is not None:
+                        if retry_item.tenant_id == "global" and tenant_id != "global":
+                            retry_item.tenant_id = tenant_id
                         await self._upsert_media_specialization(
                             retry_session,
                             item=retry_item,
@@ -5953,6 +5975,7 @@ class MediaService:
                     if partial_request_fields_provided:
                         await self._upsert_item_request(
                             retry_session,
+                            tenant_id=tenant_id,
                             external_ref=normalized_external_ref,
                             media_item_id=existing.id,
                             requested_title=existing.title,
@@ -5964,6 +5987,7 @@ class MediaService:
                     else:
                         await self._upsert_item_request(
                             retry_session,
+                            tenant_id=tenant_id,
                             external_ref=normalized_external_ref,
                             media_item_id=existing.id,
                             requested_title=existing.title,
@@ -6009,6 +6033,7 @@ class MediaService:
         attributes: dict[str, object] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        tenant_id: str = "global",
     ) -> MediaItemRecord:
         """Create a requested media item when it does not already exist."""
 
@@ -6020,6 +6045,7 @@ class MediaService:
                 attributes=attributes,
                 requested_seasons=requested_seasons,
                 requested_episodes=requested_episodes,
+                tenant_id=tenant_id,
             )
         ).item
 

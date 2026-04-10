@@ -193,6 +193,7 @@ def _build_client(
     temporal_enabled: bool = False,
     plugin_registry: PluginRegistry | None = None,
     plugin_load_report: Any | None = None,
+    security_identity_service: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
@@ -211,6 +212,7 @@ def _build_client(
         media_service=DummyMediaService(snapshot=_build_snapshot()),  # type: ignore[arg-type]
         graphql_plugin_registry=registry,
         plugin_registry=plugin_registry,
+        security_identity_service=security_identity_service,
     )
     app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
@@ -226,6 +228,7 @@ def _headers() -> dict[str, str]:
         "x-actor-id": "operator-1",
         "x-tenant-id": "tenant-main",
         "x-actor-roles": "platform:admin,playback:operator",
+        "x-actor-scopes": "backend:admin,playback:read",
     }
 
 
@@ -316,6 +319,10 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "source_sha256": None,
             "signing_key_id": None,
             "signature_present": False,
+            "signature_verified": False,
+            "signature_verification_reason": None,
+            "trust_policy_decision": None,
+            "trust_store_source": None,
             "sandbox_profile": None,
             "quarantined": False,
             "quarantine_reason": None,
@@ -340,6 +347,10 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "source_sha256": None,
             "signing_key_id": None,
             "signature_present": False,
+            "signature_verified": False,
+            "signature_verification_reason": None,
+            "trust_policy_decision": None,
+            "trust_store_source": None,
             "sandbox_profile": None,
             "quarantined": False,
             "quarantine_reason": None,
@@ -451,6 +462,10 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
             "source_sha256": None,
             "signing_key_id": None,
             "signature_present": False,
+            "signature_verified": False,
+            "signature_verification_reason": None,
+            "trust_policy_decision": None,
+            "trust_store_source": None,
             "sandbox_profile": "host",
             "quarantined": False,
             "quarantine_reason": None,
@@ -495,6 +510,10 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "source_sha256": None,
             "signing_key_id": None,
             "signature_present": False,
+            "signature_verified": False,
+            "signature_verification_reason": None,
+            "trust_policy_decision": None,
+            "trust_store_source": None,
             "sandbox_profile": None,
             "quarantined": False,
             "quarantine_reason": None,
@@ -503,6 +522,37 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "error": "api_version_incompatible",
         }
     ]
+
+
+def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> None:
+    class _IdentityService:
+        async def record_auth_context(self, auth_context: Any) -> Any:
+            return type(
+                "IdentityResolution",
+                (),
+                {
+                    "principal_key": auth_context.actor_id,
+                    "principal_type": auth_context.actor_type,
+                    "service_account_api_key_id": auth_context.api_key_id,
+                },
+            )()
+
+    client = _build_client(security_identity_service=_IdentityService())
+    response = client.get("/api/v1/auth/context", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "authentication_mode": "api_key",
+        "api_key_id": "primary",
+        "actor_id": "operator-1",
+        "actor_type": "service",
+        "tenant_id": "tenant-main",
+        "roles": ["platform:admin", "playback:operator"],
+        "scopes": ["backend:admin", "playback:read"],
+        "principal_key": "operator-1",
+        "principal_type": "service",
+        "service_account_api_key_id": "primary",
+    }
 
 
 def test_worker_queue_route_returns_control_plane_snapshot() -> None:

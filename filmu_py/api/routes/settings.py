@@ -10,7 +10,7 @@ from typing import Annotated, Any, cast
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, status
 from pydantic import ValidationError
 
-from filmu_py.api.deps import get_db
+from filmu_py.api.deps import get_db, require_roles
 from filmu_py.api.deps import get_settings as dep_get_settings
 from filmu_py.api.models import MessageResponse
 from filmu_py.audit import audit_action
@@ -199,7 +199,12 @@ async def get_current_settings(
     return _settings_dump(settings)
 
 
-@router.put("", operation_id="settings.put_current", response_model=dict[str, Any])
+@router.put(
+    "",
+    operation_id="settings.put_current",
+    response_model=dict[str, Any],
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def put_current_settings(
     request: Request,
     db: Annotated[DatabaseRuntime, Depends(get_db)],
@@ -318,7 +323,12 @@ async def get_settings_for_paths(
     return result
 
 
-@router.post("/set/all", operation_id="settings.set_all", response_model=MessageResponse)
+@router.post(
+    "/set/all",
+    operation_id="settings.set_all",
+    response_model=MessageResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def set_all_settings(
     request: Request,
     db: Annotated[DatabaseRuntime, Depends(get_db)],
@@ -336,7 +346,12 @@ async def set_all_settings(
     return MessageResponse(message="All settings updated successfully!")
 
 
-@router.post("/set/{paths}", operation_id="settings.set", response_model=MessageResponse)
+@router.post(
+    "/set/{paths}",
+    operation_id="settings.set",
+    response_model=MessageResponse,
+    dependencies=[Depends(require_roles("platform:admin"))],
+)
 async def set_settings_for_paths(
     request: Request,
     settings: Annotated[Settings, Depends(dep_get_settings)],

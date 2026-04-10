@@ -14,6 +14,7 @@ pub const DEFAULT_L2_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub const DEFAULT_PREFETCH_MIN_CHUNKS: u32 = 4;
 pub const DEFAULT_PREFETCH_MAX_CHUNKS: u32 = 16;
 pub const DEFAULT_PREFETCH_STARTUP_CHUNKS: u32 = 8;
+pub const DEFAULT_PREFETCH_MAX_BACKGROUND_PER_HANDLE: usize = 2;
 pub const DEFAULT_CHUNK_SIZE_SCAN_KB: usize = 8192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +109,7 @@ pub struct PrefetchConfig {
     pub min_chunks: u32,
     pub max_chunks: u32,
     pub startup_chunks: u32,
+    pub max_background_per_handle: usize,
 }
 
 impl Default for PrefetchConfig {
@@ -116,6 +118,7 @@ impl Default for PrefetchConfig {
             min_chunks: DEFAULT_PREFETCH_MIN_CHUNKS,
             max_chunks: DEFAULT_PREFETCH_MAX_CHUNKS,
             startup_chunks: DEFAULT_PREFETCH_STARTUP_CHUNKS,
+            max_background_per_handle: DEFAULT_PREFETCH_MAX_BACKGROUND_PER_HANDLE,
         }
     }
 }
@@ -198,6 +201,10 @@ impl SidecarConfig {
         let mut prefetch_startup_chunks = parse_u32(
             "FILMUVFS_PREFETCH_STARTUP_CHUNKS",
             DEFAULT_PREFETCH_STARTUP_CHUNKS,
+        )?;
+        let mut prefetch_max_background_per_handle = parse_usize(
+            "FILMUVFS_PREFETCH_MAX_BACKGROUND_PER_HANDLE",
+            DEFAULT_PREFETCH_MAX_BACKGROUND_PER_HANDLE,
         )?;
         let mut prefetch_concurrency = parse_usize("FILMUVFS_PREFETCH_CONCURRENCY", 4)?;
         let mut chunk_size_scan_kb =
@@ -297,6 +304,15 @@ impl SidecarConfig {
                             .parse::<u32>()
                             .with_context(|| "failed to parse --prefetch-startup-chunks as u32")?;
                 }
+                "--prefetch-max-background-per-handle" => {
+                    index += 1;
+                    prefetch_max_background_per_handle =
+                        required_arg_value(&args, index, "--prefetch-max-background-per-handle")?
+                            .parse::<usize>()
+                            .with_context(|| {
+                                "failed to parse --prefetch-max-background-per-handle as usize"
+                            })?;
+                }
                 "--prefetch-concurrency" => {
                     index += 1;
                     prefetch_concurrency =
@@ -350,6 +366,10 @@ impl SidecarConfig {
         ensure_positive_u32(prefetch_min_chunks, "prefetch.min_chunks")?;
         ensure_positive_u32(prefetch_max_chunks, "prefetch.max_chunks")?;
         ensure_positive_u32(prefetch_startup_chunks, "prefetch.startup_chunks")?;
+        ensure_positive_usize(
+            prefetch_max_background_per_handle,
+            "prefetch.max_background_per_handle",
+        )?;
         ensure_positive_usize(prefetch_concurrency, "prefetch_concurrency")?;
         ensure_positive_usize(chunk_size_scan_kb, "chunk_size_scan_kb")?;
         ensure_positive_usize(chunk_size_random_kb, "chunk_size_random_kb")?;
@@ -370,6 +390,7 @@ impl SidecarConfig {
             min_chunks: prefetch_min_chunks,
             max_chunks: prefetch_max_chunks,
             startup_chunks: prefetch_startup_chunks,
+            max_background_per_handle: prefetch_max_background_per_handle,
         };
 
         Ok(Self {
@@ -433,7 +454,7 @@ fn normalize_http_base_url(raw: &str) -> String {
 
 fn print_usage() {
     println!(
-        "usage: filmuvfs --mountpoint /mount --grpc-server localhost:50051 [--mount-adapter auto|fuse|projfs|winfsp] [--allow-other] [--otlp-endpoint http://localhost:4317] [--cache-size-mb 500] [--cache-l2-enabled --cache-l2-path ./filmuvfs-cache --cache-l2-max-bytes 10737418240] [--prefetch-min-chunks 4] [--prefetch-max-chunks 16] [--prefetch-startup-chunks 8] [--prefetch-concurrency 4] [--chunk-size-scan-kb 8192] [--chunk-size-random-kb 256] [--windows-projfs-summary-interval-seconds 300]"
+        "usage: filmuvfs --mountpoint /mount --grpc-server localhost:50051 [--mount-adapter auto|fuse|projfs|winfsp] [--allow-other] [--otlp-endpoint http://localhost:4317] [--cache-size-mb 500] [--cache-l2-enabled --cache-l2-path ./filmuvfs-cache --cache-l2-max-bytes 10737418240] [--prefetch-min-chunks 4] [--prefetch-max-chunks 16] [--prefetch-startup-chunks 8] [--prefetch-max-background-per-handle 2] [--prefetch-concurrency 4] [--chunk-size-scan-kb 8192] [--chunk-size-random-kb 256] [--windows-projfs-summary-interval-seconds 300]"
     );
 }
 

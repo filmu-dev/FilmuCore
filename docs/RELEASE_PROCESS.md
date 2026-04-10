@@ -72,6 +72,16 @@ Require:
 - pull requests before merge
 - up-to-date branches before merge
 - required status checks
+- at least one approving review for normal feature PRs
+- admin-enforcement for the production branch policy
+
+The release automation itself is now split by privilege:
+
+- [`../.github/workflows/release.yml`](../.github/workflows/release.yml) defaults `GITHUB_TOKEN` to read-only workflow-wide
+- the `release` job is the only place that gets write access for PR/tag/release operations
+- the release-PR verify redispatch job gets `actions: write` only at the job level so it can trigger [`../.github/workflows/verify.yml`](../.github/workflows/verify.yml) for release-please branches without granting workflow-wide action mutation rights
+
+This matters because release-please commonly updates the release PR with `GITHUB_TOKEN`, and those updates do not reliably trigger the normal `pull_request` verify workflow. The dispatch job closes that gap by explicitly re-running verify on open `autorelease: pending` PR branches.
 
 Required checks should include at least:
 
@@ -93,14 +103,18 @@ Add these as required when their runner paths are fully provisioned:
 - `Validate Platform Stack / Validate Platform Stack`
 
 The playback gate may stay path-conditional in practice, but the workflow itself is now merged and green. Whether it is already marked required on live protected-branch policy must still be validated from an admin-authenticated host with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1).
+
 The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
 
-The repository now also carries [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) plus package scripts `proof:playback:policy` and `proof:playback:policy:validate` so the exact expected `main` policy can be printed or, when `gh` is installed and authenticated, validated against the live repository settings instead of relying on screenshots or memory.
-For the stricter release-candidate posture, the repository also now carries `proof:playback:policy:enterprise` and `proof:playback:policy:enterprise:validate`, which add minimum-review/admin-enforcement expectations and the expected provider/Windows proof-profile contract behind the single playback gate.
-The playback gate may stay path-conditional in practice, but once the GitHub-hosted runner configuration is provisioned and green it should be marked required for the protected `main` workflow policy described in the playback-gate docs.
-The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
+The repository now also carries:
 
-The repository now also carries [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) plus package scripts `proof:playback:policy` and `proof:playback:policy:validate` so the exact expected `main` policy can be printed or, when `gh` is installed and authenticated, validated against the live repository settings instead of relying on screenshots or memory.
+- [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1)
+- `proof:playback:policy`
+- `proof:playback:policy:validate`
+- `proof:playback:policy:enterprise`
+- `proof:playback:policy:enterprise:validate`
+
+Use those instead of screenshots or memory to validate that live branch protection still matches the documented policy.
 
 ## Operational Flow
 

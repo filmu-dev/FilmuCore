@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import sys
 from collections.abc import AsyncGenerator
@@ -743,3 +744,130 @@ class NeverLoadedQuery:
     assert len(report.failed) == 1
     assert report.failed[0].plugin_name == "quarantined-plugin"
     assert report.failed[0].reason == "plugin_quarantined"
+
+
+def test_filesystem_plugin_loader_verifies_signature_against_trust_store(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    module_source = """import strawberry
+
+@strawberry.type
+class TrustedQuery:
+    @strawberry.field
+    def trusted_echo(self) -> str:
+        return "trusted"
+"""
+    _write_plugin(
+        plugins_dir / "trusted-plugin",
+        manifest={
+            "name": "trusted-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "publisher": "filmu-labs",
+            "signing_key_id": "filmu-labs-root",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["TrustedQuery"]},
+        },
+        module_source=module_source,
+    )
+    module_digest = hashlib.sha256(
+        (plugins_dir / "trusted-plugin" / "plugin.py").read_bytes()
+    ).hexdigest()
+    signature = hmac.new(b"top-secret", module_digest.encode("utf-8"), hashlib.sha256).hexdigest()
+    manifest_path = plugins_dir / "trusted-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_sha256"] = module_digest
+    manifest["signature"] = f"hmac-sha256:{signature}"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    trust_store_path = tmp_path / "plugin-trust-store.json"
+    trust_store_path.write_text(
+        json.dumps(
+            {
+                "keys": {
+                    "filmu-labs-root": {
+                        "secret": "top-secret",
+                        "algorithm": "hmac-sha256",
+                        "status": "active",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(
+        plugins_dir,
+        registry,
+        trust_store_path=trust_store_path,
+        strict_signatures=True,
+    )
+
+    assert len(report.loaded) == 1
+    assert report.failed == []
+    assert report.loaded[0].signature_verified is True
+    assert report.loaded[0].signature_verification_reason == "signature_verified"
+    assert report.loaded[0].trust_policy_decision == "trusted"
+    assert report.loaded[0].trust_store_source == str(trust_store_path)
+
+
+def test_filesystem_plugin_loader_strict_mode_rejects_invalid_signature(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    module_source = """import strawberry
+
+@strawberry.type
+class InvalidSignatureQuery:
+    @strawberry.field
+    def trusted_echo(self) -> str:
+        return "invalid"
+"""
+    _write_plugin(
+        plugins_dir / "invalid-signature-plugin",
+        manifest={
+            "name": "invalid-signature-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "publisher": "filmu-labs",
+            "signing_key_id": "filmu-labs-root",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["InvalidSignatureQuery"]},
+        },
+        module_source=module_source,
+    )
+    module_digest = hashlib.sha256(
+        (plugins_dir / "invalid-signature-plugin" / "plugin.py").read_bytes()
+    ).hexdigest()
+    manifest_path = plugins_dir / "invalid-signature-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_sha256"] = module_digest
+    manifest["signature"] = "hmac-sha256:" + ("b" * 64)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    trust_store_path = tmp_path / "plugin-trust-store.json"
+    trust_store_path.write_text(
+        json.dumps(
+            {
+                "keys": {
+                    "filmu-labs-root": {
+                        "secret": "top-secret",
+                        "algorithm": "hmac-sha256",
+                        "status": "active",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(
+        plugins_dir,
+        registry,
+        trust_store_path=trust_store_path,
+        strict_signatures=True,
+    )
+
+    assert report.loaded == []
+    assert len(report.failed) == 1
+    assert report.failed[0].plugin_name == "invalid-signature-plugin"
+    assert report.failed[0].reason == "plugin_signature_signature_invalid"

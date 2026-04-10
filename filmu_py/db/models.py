@@ -45,6 +45,141 @@ class SettingsORM(Base):
     )
 
 
+class TenantORM(Base):
+    """First-class tenant/org boundary for resource ownership and authz evolution."""
+
+    __tablename__ = "tenants"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="tenant",
+        server_default=text("'tenant'"),
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default=text("'active'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    principals: Mapped[list[PrincipalORM]] = relationship(back_populates="tenant")
+    media_items: Mapped[list[MediaItemORM]] = relationship(back_populates="tenant")
+    item_requests: Mapped[list[ItemRequestORM]] = relationship(back_populates="tenant")
+
+
+class PrincipalORM(Base):
+    """Persisted operator or service identity resolved from authenticated requests."""
+
+    __tablename__ = "principals"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    principal_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    principal_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    authentication_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(256), default=None)
+    roles: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    scopes: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default=text("'active'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    last_authenticated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        default=None,
+    )
+
+    tenant: Mapped[TenantORM] = relationship(back_populates="principals")
+    service_account: Mapped[ServiceAccountORM | None] = relationship(back_populates="principal")
+
+
+class ServiceAccountORM(Base):
+    """Persisted machine credential anchored to one principal and API key identifier."""
+
+    __tablename__ = "service_accounts"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    principal_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("principals.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    api_key_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default=text("'active'"),
+    )
+    description: Mapped[str | None] = mapped_column(String(512), default=None)
+    last_authenticated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    principal: Mapped[PrincipalORM] = relationship(back_populates="service_account")
+
+
 class MediaItemORM(Base):
     """Persistent media item tracked through pipeline lifecycle states."""
 
@@ -54,6 +189,14 @@ class MediaItemORM(Base):
         UUID(as_uuid=False),
         primary_key=True,
         default=lambda: str(uuid4()),
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+        default="global",
+        server_default=text("'global'"),
+        index=True,
     )
     external_ref: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(512))
@@ -75,6 +218,7 @@ class MediaItemORM(Base):
         onupdate=func.now(),
     )
 
+    tenant: Mapped[TenantORM] = relationship(back_populates="media_items")
     events: Mapped[list[ItemStateEventORM]] = relationship(
         back_populates="item",
         cascade="all, delete-orphan",
@@ -193,6 +337,14 @@ class ItemRequestORM(Base):
         primary_key=True,
         default=lambda: str(uuid4()),
     )
+    tenant_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+        default="global",
+        server_default=text("'global'"),
+        index=True,
+    )
     external_ref: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     media_item_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False),
@@ -238,6 +390,7 @@ class ItemRequestORM(Base):
         onupdate=func.now(),
     )
 
+    tenant: Mapped[TenantORM] = relationship(back_populates="item_requests")
     media_item: Mapped[MediaItemORM | None] = relationship(back_populates="item_requests")
 
 

@@ -33,12 +33,31 @@ class PluginCapabilityStatusResponse(BaseModel):
     source_sha256: str | None = None
     signing_key_id: str | None = None
     signature_present: bool = False
+    signature_verified: bool = False
+    signature_verification_reason: str | None = None
+    trust_policy_decision: str | None = None
+    trust_store_source: str | None = None
     sandbox_profile: str | None = None
     quarantined: bool = False
     quarantine_reason: str | None = None
     source: str | None = None
     warnings: list[str] = []
     error: str | None = None
+
+
+class AuthContextResponse(BaseModel):
+    """Operator-visible authenticated identity context for the current request."""
+
+    authentication_mode: str
+    api_key_id: str
+    actor_id: str
+    actor_type: str
+    tenant_id: str
+    roles: list[str]
+    scopes: list[str]
+    principal_key: str | None = None
+    principal_type: str | None = None
+    service_account_api_key_id: str | None = None
 
 
 class PluginEventStatusResponse(BaseModel):
