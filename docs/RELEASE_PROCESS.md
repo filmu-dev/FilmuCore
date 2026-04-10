@@ -75,19 +75,20 @@ Require:
 
 Required checks should include at least:
 
-- `PR Title / Semantic PR Title`
-- `Verify / Verify - Python Lint`
-- `Verify / Verify - Python Tests`
-- `Verify / Verify - Rust Format`
-- `Verify / Verify - Rust Check`
-- `Verify / Verify - Rust Tests`
+- `Verify - Python Lint / Python Lint`
+- `Verify - Python Tests / Python Tests`
+- `Verify - Rust Format / Rust Format`
+- `Verify - Rust Check / Rust Check`
+- `Verify - Rust Tests / Rust Tests`
 
 Add these as required when their runner paths are fully provisioned:
 
+- `PR Title / Semantic PR Title`
 - `Playback Gate / Playback Gate`
 - `Validate Platform Stack / Validate Platform Stack`
 
 The playback gate may stay path-conditional in practice, but once the self-hosted runner is provisioned it should be marked required for the protected `main` workflow policy described in the playback-gate docs.
+The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
 
 ## Operational Flow
 
@@ -98,6 +99,8 @@ The playback gate may stay path-conditional in practice, but once the self-hoste
 3. Set a Conventional Commit PR title immediately.
 4. Let CI, review, and follow-up commits happen on the PR.
 5. When green and approved, use **Squash and merge**.
+
+Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub shows `Merge pull request` instead of `Squash and merge`, the repository merge settings are still misconfigured.
 
 ### Release creation
 

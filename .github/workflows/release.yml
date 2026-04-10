@@ -61,6 +61,31 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      - name: Summarize release-please outcome
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Release Please"
+            echo
+            echo "- Branch: \`${GITHUB_REF}\`"
+            echo "- release_created: \`${{ steps.release.outputs.release_created }}\`"
+            echo "- prs_created: \`${{ steps.release.outputs.prs_created }}\`"
+            echo "- version: \`${{ steps.release.outputs.version }}\`"
+            echo "- tag_name: \`${{ steps.release.outputs.tag_name }}\`"
+            echo
+            if [[ "${{ steps.release.outputs.release_created }}" == "true" ]]; then
+              echo "A release was created from this \`main\` push."
+            elif [[ -n "${{ steps.release.outputs.prs_created }}" && "${{ steps.release.outputs.prs_created }}" != "[]" ]]; then
+              echo "A release PR was opened or updated from this \`main\` push."
+            else
+              echo "No release PR or tag was created from this \`main\` push."
+              echo
+              echo "The usual cause is that the commits on \`main\` since the last release were not releasable Conventional Commits."
+              echo "This repository expects squash merges with Conventional Commit PR titles as described in \`docs/RELEASE_PROCESS.md\`."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   publish-release-images:
     name: Publish release image ${{ matrix.image }}
     needs:
