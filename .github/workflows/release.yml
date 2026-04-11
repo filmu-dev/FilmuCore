@@ -52,14 +52,27 @@ jobs:
       minor: ${{ steps.release.outputs.minor }}
       prs_created: ${{ steps.release.outputs.prs_created }}
     steps:
+      - name: Require PAT-backed release automation
+        shell: bash
+        env:
+          RELEASE_PLEASE_USE_PAT: ${{ vars.RELEASE_PLEASE_USE_PAT }}
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [[ "${RELEASE_PLEASE_USE_PAT}" != "true" ]]; then
+            echo "::error::RELEASE_PLEASE_USE_PAT must be set to true. Strict required checks need release-please PR updates to come from a PAT-backed token so GitHub creates real pull_request check suites on the release PR merge commit."
+            exit 1
+          fi
+
+          if [[ -z "${RELEASE_PLEASE_TOKEN}" ]]; then
+            echo "::error::RELEASE_PLEASE_TOKEN is not configured. Release Please must use a PAT-backed token or GitHub will leave required release PR checks in an expected/pending state."
+            exit 1
+          fi
+
       - name: Run release-please
         id: release
         uses: googleapis/release-please-action@v4
         with:
-          # The action defaults to github.token; keep PAT usage opt-in because
-          # an org-scoped fine-grained PAT that lacks repo approval/permissions
-          # will fail PR/tag creation.
-          token: ${{ vars.RELEASE_PLEASE_USE_PAT == 'true' && secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -92,49 +105,6 @@ jobs:
               echo "This repository expects squash merges with Conventional Commit PR titles as described in \`docs/RELEASE_PROCESS.md\`."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
-
-  dispatch-release-pr-verify:
-    name: Dispatch verify for release PRs
-    needs:
-      - release
-    if: ${{ needs.release.result == 'success' && needs.release.outputs.release_created != 'true' && needs.release.outputs.prs_created != '' && needs.release.outputs.prs_created != '[]' && vars.RELEASE_PLEASE_USE_PAT != 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-      contents: read
-      pull-requests: read
-    steps:
-      - name: Trigger verify workflow for autorelease PR branches
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const pulls = await github.paginate(github.rest.pulls.list, {
-              owner,
-              repo,
-              state: 'open',
-              base: 'main',
-              per_page: 100,
-            });
-            const releasePulls = pulls.filter((pr) =>
-              pr.head?.ref?.startsWith('release-please--branches--main') &&
-              pr.labels?.some((label) => label.name === 'autorelease: pending')
-            );
-
-            if (releasePulls.length === 0) {
-              core.info('No open autorelease PRs matched for verify dispatch.');
-              return;
-            }
-
-            for (const pr of releasePulls) {
-              core.info(`Dispatching verify.yml for PR #${pr.number} on ${pr.head.ref}`);
-              await github.rest.actions.createWorkflowDispatch({
-                owner,
-                repo,
-                workflow_id: 'verify.yml',
-                ref: pr.head.ref,
-              });
-            }
 
   publish-release-images:
     name: Publish release image ${{ matrix.image }}
