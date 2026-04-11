@@ -7,10 +7,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
-import pytest
 
 from filmu_py.api.router import create_api_router
 from filmu_py.api.routes import scrape as scrape_routes
