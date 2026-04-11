@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -12,6 +13,8 @@ from authlib.jose import JoseError, JsonWebKey, jwt  # type: ignore[import-untyp
 
 from filmu_py.config import OidcSettings
 from filmu_py.core.cache import CacheManager
+
+logger = logging.getLogger(__name__)
 
 
 class OidcValidationError(ValueError):
@@ -74,8 +77,13 @@ async def _load_jwks(settings: OidcSettings, cache: CacheManager | None) -> dict
         if cached:
             try:
                 decoded = json.loads(cached.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError) as exc:
-                raise OidcValidationError("Cached JWKS is malformed") from exc
+            except (ValueError, UnicodeDecodeError):
+                logger.warning(
+                    "oidc.cached_jwks_malformed",
+                    extra={"jwks_url": jwks_url},
+                    exc_info=True,
+                )
+                decoded = None
             if isinstance(decoded, dict):
                 return cast(dict[str, Any], decoded)
 

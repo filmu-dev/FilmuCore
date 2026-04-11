@@ -129,11 +129,20 @@ class EventBus:
             return
         self._known_topics.add(topic)
         if self._replay_backplane is not None:
-            await self._replay_backplane.publish(
-                topic,
-                payload,
-                tenant_id=payload.get("tenant_id") if isinstance(payload.get("tenant_id"), str) else None,
-            )
+            try:
+                await self._replay_backplane.publish(
+                    topic,
+                    payload,
+                    tenant_id=payload.get("tenant_id")
+                    if isinstance(payload.get("tenant_id"), str)
+                    else None,
+                )
+            except Exception:
+                logger.warning(
+                    "replay_backplane_publish_failed",
+                    extra={"topic": topic},
+                    exc_info=True,
+                )
         self._publish_envelope(EventEnvelope(topic=topic, payload=payload))
         self._schedule_hook_dispatch(topic, payload)
 

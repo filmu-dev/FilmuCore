@@ -70,9 +70,19 @@ try {
             } else {
                 $dbArtifact = Join-Path $ArtifactDir "filmu-backup.sql"
                 & $pgDump.Source --dbname $PostgresDsn --file $dbArtifact --no-owner --no-privileges
-                $summary.database_backup.captured = Test-Path -LiteralPath $dbArtifact
-                $summary.database_backup.artifact = $dbArtifact
-                Add-SmokeCheck -Name "database_backup_capture" -Status "passed" -Details $dbArtifact
+                if ($LASTEXITCODE -ne 0) {
+                    $summary.database_backup.error = "pg_dump exited with code $LASTEXITCODE"
+                    Add-SmokeCheck -Name "database_backup_capture" -Status "failed" -Details $summary.database_backup.error
+                } else {
+                    $summary.database_backup.captured = Test-Path -LiteralPath $dbArtifact
+                    $summary.database_backup.artifact = $dbArtifact
+                    if ($summary.database_backup.captured) {
+                        Add-SmokeCheck -Name "database_backup_capture" -Status "passed" -Details $dbArtifact
+                    } else {
+                        $summary.database_backup.error = "pg_dump completed but did not create $dbArtifact"
+                        Add-SmokeCheck -Name "database_backup_capture" -Status "failed" -Details $summary.database_backup.error
+                    }
+                }
             }
         }
 
@@ -84,8 +94,13 @@ try {
                 Add-SmokeCheck -Name "isolated_restore" -Status "skipped" -Details "dry run"
             } else {
                 & $psql.Source $RestorePostgresDsn -v ON_ERROR_STOP=1 -f $summary.database_backup.artifact
-                $summary.database_backup.restored = $true
-                Add-SmokeCheck -Name "isolated_restore" -Status "passed" -Details "restore target accepted backup SQL"
+                if ($LASTEXITCODE -ne 0) {
+                    $summary.database_backup.error = "psql exited with code $LASTEXITCODE"
+                    Add-SmokeCheck -Name "isolated_restore" -Status "failed" -Details $summary.database_backup.error
+                } else {
+                    $summary.database_backup.restored = $true
+                    Add-SmokeCheck -Name "isolated_restore" -Status "passed" -Details "restore target accepted backup SQL"
+                }
             }
         } else {
             Add-SmokeCheck -Name "isolated_restore" -Status "skipped" -Details "restore DSN or backup artifact missing"
