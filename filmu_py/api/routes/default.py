@@ -19,6 +19,7 @@ from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
+from .stream import _vfs_runtime_governance_snapshot
 from ..models import (
     AccessPolicyAuditResponse,
     AccessPolicyRevisionApprovalRequest,
@@ -371,9 +372,14 @@ def _vfs_data_plane_evidence(request: Request) -> list[str]:
     """Return bounded VFS runtime evidence for enterprise-governance posture."""
 
     resources = request.app.state.resources
+    runtime_governance = _vfs_runtime_governance_snapshot()
     evidence = [
         f"vfs_catalog_server_enabled={resources.vfs_catalog_server is not None}",
         f"chunk_cache_enabled={resources.chunk_cache is not None}",
+        (
+            "vfs_runtime_snapshot_available="
+            f"{runtime_governance['vfs_runtime_snapshot_available']}"
+        ),
     ]
     if resources.chunk_cache is not None:
         evidence.append(f"chunk_cache_max_bytes={resources.chunk_cache.max_bytes()}")
@@ -385,6 +391,56 @@ def _vfs_data_plane_evidence(request: Request) -> list[str]:
                 f"catalog_reconnect_delta_served={snapshot['vfs_catalog_reconnect_delta_served']}",
                 f"catalog_refresh_attempts={snapshot['vfs_catalog_refresh_attempts']}",
                 f"catalog_inline_refresh_succeeded={snapshot['vfs_catalog_inline_refresh_succeeded']}",
+            ]
+        )
+    if cast(int, runtime_governance["vfs_runtime_snapshot_available"]) > 0:
+        rollout_reasons = cast(list[str], runtime_governance["vfs_runtime_rollout_reasons"])
+        evidence.extend(
+            [
+                (
+                    "vfs_runtime_rollout_readiness="
+                    f"{runtime_governance['vfs_runtime_rollout_readiness']}"
+                ),
+                (
+                    "vfs_runtime_rollout_reasons="
+                    + (",".join(rollout_reasons) if rollout_reasons else "none")
+                ),
+                (
+                    "vfs_runtime_cache_hit_ratio="
+                    f"{cast(float, runtime_governance['vfs_runtime_cache_hit_ratio']):.3f}"
+                ),
+                (
+                    "vfs_runtime_fallback_success_ratio="
+                    f"{cast(float, runtime_governance['vfs_runtime_fallback_success_ratio']):.3f}"
+                ),
+                (
+                    "vfs_runtime_prefetch_pressure_ratio="
+                    f"{cast(float, runtime_governance['vfs_runtime_prefetch_pressure_ratio']):.3f}"
+                ),
+                (
+                    "vfs_runtime_provider_pressure_incidents="
+                    f"{runtime_governance['vfs_runtime_provider_pressure_incidents']}"
+                ),
+                (
+                    "vfs_runtime_fairness_pressure_incidents="
+                    f"{runtime_governance['vfs_runtime_fairness_pressure_incidents']}"
+                ),
+                (
+                    "vfs_runtime_mounted_reads_total="
+                    f"{runtime_governance['vfs_runtime_mounted_reads_total']}"
+                ),
+                (
+                    "vfs_runtime_mounted_reads_error="
+                    f"{runtime_governance['vfs_runtime_mounted_reads_error']}"
+                ),
+                (
+                    "vfs_runtime_handle_startup_average_duration_ms="
+                    f"{runtime_governance['vfs_runtime_handle_startup_average_duration_ms']}"
+                ),
+                (
+                    "vfs_runtime_prefetch_active_background_tasks="
+                    f"{runtime_governance['vfs_runtime_prefetch_active_background_tasks']}"
+                ),
             ]
         )
     return evidence
@@ -401,6 +457,7 @@ async def _enterprise_operations_governance(
     settings = resources.settings
     auth_context = get_auth_context(request)
     policy_decisions = _auth_policy_decisions(auth_context)
+    vfs_runtime_governance = _vfs_runtime_governance_snapshot()
 
     identity_required_actions = [
         "configure_real_oidc_issuer_and_audience"
@@ -444,6 +501,37 @@ async def _enterprise_operations_governance(
         log_required_actions.append("verify_trace_export_in_collector")
     else:
         log_required_actions.append("configure_otlp_trace_export")
+
+    vfs_data_plane_status = "partial"
+    vfs_required_actions = [
+        "repeat_multi_environment_soak_and_backpressure_runs",
+        "promote_rollout_readiness_thresholds_into_merge_policy",
+        "expand_tenant_attribution_for_mounted_runtime_metrics",
+    ]
+    vfs_remaining_gaps = [
+        "mounted rollout confidence still depends on repeated proof execution",
+        "cache correctness and fairness are observable but not yet policy-enforced in CI",
+        "tenant attribution is not yet complete across all mounted runtime counters",
+    ]
+    if cast(int, vfs_runtime_governance["vfs_runtime_snapshot_available"]) > 0:
+        rollout_readiness = cast(str, vfs_runtime_governance["vfs_runtime_rollout_readiness"])
+        rollout_next_action = cast(str, vfs_runtime_governance["vfs_runtime_rollout_next_action"])
+        rollout_reasons = cast(list[str], vfs_runtime_governance["vfs_runtime_rollout_reasons"])
+        if rollout_readiness == "blocked":
+            vfs_data_plane_status = "blocked"
+        if rollout_next_action and rollout_next_action not in vfs_required_actions:
+            vfs_required_actions.insert(0, rollout_next_action)
+        if rollout_reasons:
+            vfs_remaining_gaps.insert(
+                0,
+                "live runtime rollout reasons are present: " + ", ".join(rollout_reasons),
+            )
+    else:
+        vfs_required_actions.insert(0, "configure_vfs_runtime_status_export")
+        vfs_remaining_gaps.insert(
+            0,
+            "operations/governance cannot yet summarize live mounted rollout readiness without a runtime snapshot",
+        )
 
     return EnterpriseOperationsGovernanceResponse(
         generated_at=datetime.now(UTC).isoformat(),
@@ -511,18 +599,10 @@ async def _enterprise_operations_governance(
         ),
         vfs_data_plane=EnterpriseOperationsSliceResponse(
             name="FilmuVFS Enterprise Data Plane",
-            status="partial",
+            status=vfs_data_plane_status,
             evidence=_vfs_data_plane_evidence(request),
-            required_actions=[
-                "repeat_multi_environment_soak_and_backpressure_runs",
-                "promote_rollout_readiness_thresholds_into_merge_policy",
-                "expand_tenant_attribution_for_mounted_runtime_metrics",
-            ],
-            remaining_gaps=[
-                "mounted rollout confidence still depends on repeated proof execution",
-                "cache correctness and fairness are observable but not yet policy-enforced in CI",
-                "tenant attribution is not yet complete across all mounted runtime counters",
-            ],
+            required_actions=vfs_required_actions,
+            remaining_gaps=vfs_remaining_gaps,
         ),
         distributed_control_plane=EnterpriseOperationsSliceResponse(
             name="Distributed Control Plane",
