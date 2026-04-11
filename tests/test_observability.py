@@ -849,6 +849,7 @@ def test_worker_queue_metrics_track_status_cleanup_and_enqueue_decisions(monkeyp
         worker_tasks.WORKER_ENQUEUE_DEFER_SECONDS,
         stage="scrape_item",
     )
+    monkeypatch.setattr(worker_tasks, "get_settings", _build_settings)
 
     class FakeJob:
         def __init__(self, _job_id: str, redis: object) -> None:
