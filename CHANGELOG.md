@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/filmu-dev/FilmuCore/compare/v0.6.0...v0.7.0) (2026-04-11)
+
+
+### Features
+
+* Codex/enterprise governance hardening 20260411 2205 ([#21](https://github.com/filmu-dev/FilmuCore/issues/21)) ([4a4be56](https://github.com/filmu-dev/FilmuCore/commit/4a4be563fad95b73c92bbe554989f5422be95bf6))
+
 ## [0.6.0](https://github.com/filmu-dev/FilmuCore/compare/v0.5.0...v0.6.0) (2026-04-11)
 
 
