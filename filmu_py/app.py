@@ -240,7 +240,7 @@ def _build_lifespan(
         if runtime_settings.control_plane.event_backplane == "redis_stream":
             event_bus.attach_replay_backplane(
                 RedisReplayEventBackplane(
-                    redis,
+                    cast("Any", redis),
                     stream_name=runtime_settings.control_plane.event_stream_name,
                     maxlen=runtime_settings.control_plane.event_replay_maxlen,
                 )
