@@ -161,6 +161,45 @@ Use those instead of screenshots or memory to validate that live branch protecti
 
 ## Operational Flow
 
+### Safe local `dev` -> PR flow
+
+Use this when your working branch is local-only `dev` and GitHub PRs always target `main`.
+
+One-time setup:
+
+1. Run `npm run hooks:install`.
+2. Confirm pushes are now guarded by the local `pre-push` hygiene check.
+
+For each new piece of work:
+
+1. Keep `dev` local only. Do not push `dev` and do not open PRs from `dev`.
+2. Rebase `dev` onto `origin/main` before starting a new publish cycle.
+3. Do your work on `dev` and commit it locally.
+4. When you want the first PR branch, run `npm run branch:codex:publish -- <topic>`.
+5. Let that command create a fresh single-use `codex/<topic>-<utc>` branch from current `origin/main`.
+6. Push and open the PR from that fresh branch only.
+
+For updates to the same PR:
+
+1. Stay on the PR branch that was created for that PR.
+2. Commit review fixes on that same PR branch.
+3. Push normally. The local `pre-push` hook will block reused/behind branches before GitHub does.
+4. If the PR branch falls behind `origin/main`, rebase it onto current `origin/main` before pushing again.
+
+After the PR is squash-merged:
+
+1. Delete the PR branch locally and remotely.
+2. Switch back to `dev`.
+3. Rebase `dev` onto the new `origin/main`.
+4. Start the next publish cycle by creating a brand-new PR branch with `branch:codex:publish`.
+
+Never do these:
+
+- never push `dev`
+- never open more than one PR from the same `codex/*` branch name
+- never reuse a previously merged `codex/*` branch name
+- never keep opening new PRs from a branch that GitHub has already merged or closed
+
 ### Feature delivery
 
 1. Create or push a feature branch.

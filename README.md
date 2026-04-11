@@ -116,6 +116,7 @@ This is a working compatibility backend with real acquisition, playback, and Fil
 
 Release Please is now intended to operate from squash-merged PRs into `main`, not from arbitrary branch history or merge-commit subjects.
 
+- Safe day-to-day publish flow when local is `dev` and remote PRs target `main`: [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md#safe-local-dev---pr-flow)
 - Release policy and required GitHub settings: [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md)
 - PR title gate workflow: [.github/workflows/semantic-pr-title.yml](.github/workflows/semantic-pr-title.yml)
 - Release workflow: [.github/workflows/release.yml](.github/workflows/release.yml)
