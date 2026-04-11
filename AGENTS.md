@@ -9,6 +9,13 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - GraphQL surface under `/graphql`
 - Core startup wiring is in `filmu_py/app.py` and runtime entrypoints are in `filmu_py/main.py` and `filmu_py/workers/tasks.py`.
 
+## Git workflow
+- The active local development branch is `main`.
+- Push changes directly to `origin/main`.
+- Do not create local feature branches, detached publish branches, or extra worktrees for normal Codex work in this repository.
+- If local `main` is behind `origin/main`, update `main` first and continue work there instead of branching around it.
+- If a branch is created accidentally, move the intended changes back onto `main`, push `main`, and delete the accidental branch before continuing.
+
 ## Common commands
 - Install Python dev dependencies:
   - `python -m pip install -e .[dev]`
