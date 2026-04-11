@@ -33,6 +33,6 @@ Documentation updated:
 - docs/TODOS/DOMAIN_MODEL_EXPANSION_MATRIX.md
 - docs/TODOS/ORCHESTRATION_BREADTH_MATRIX.md
 - docs/TODOS/PLUGIN_CAPABILITY_MODEL_MATRIX.md
-- docs/TODOS/NEXT_IMPLEMENTATION_PRIORITIES.md
+- docs/STATUS.md
 
 Next session scope: VFS mounted read() → chunk engine, StremThru plugin, partial season scrape/rank handling, GraphQL subscription breadth.

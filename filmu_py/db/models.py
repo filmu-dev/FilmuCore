@@ -197,6 +197,17 @@ class AccessPolicyRevisionORM(Base):
         default="settings_bootstrap",
         server_default=text("'settings_bootstrap'"),
     )
+    approval_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="bootstrap",
+        server_default=text("'bootstrap'"),
+        index=True,
+    )
+    proposed_by: Mapped[str | None] = mapped_column(String(256), default=None)
+    approved_by: Mapped[str | None] = mapped_column(String(256), default=None)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    approval_notes: Mapped[str | None] = mapped_column(Text(), default=None)
     policy_data: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(
         Boolean,
@@ -206,6 +217,108 @@ class AccessPolicyRevisionORM(Base):
         index=True,
     )
     activated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class PluginGovernanceOverrideORM(Base):
+    """Persisted operator-managed quarantine/revocation/approval state per plugin."""
+
+    __tablename__ = "plugin_governance_overrides"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    plugin_name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    state: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="approved",
+        server_default=text("'approved'"),
+        index=True,
+    )
+    reason: Mapped[str | None] = mapped_column(String(512), default=None)
+    notes: Mapped[str | None] = mapped_column(Text(), default=None)
+    updated_by: Mapped[str | None] = mapped_column(String(256), default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class ControlPlaneSubscriberORM(Base):
+    """Durable resume and ownership ledger for distributed replay/control-plane consumers."""
+
+    __tablename__ = "control_plane_subscribers"
+    __table_args__ = (
+        UniqueConstraint(
+            "stream_name",
+            "group_name",
+            "consumer_name",
+            name="uq_control_plane_subscriber_identity",
+        ),
+        Index(
+            "ix_control_plane_subscribers_status_heartbeat",
+            "status",
+            "last_heartbeat_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    stream_name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    group_name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    consumer_name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    node_id: Mapped[str] = mapped_column(String(256), nullable=False, default="unknown")
+    tenant_id: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default=text("'active'"),
+        index=True,
+    )
+    last_read_offset: Mapped[str | None] = mapped_column(String(128), default=None)
+    last_delivered_event_id: Mapped[str | None] = mapped_column(String(128), default=None)
+    last_acked_event_id: Mapped[str | None] = mapped_column(String(128), default=None)
+    last_error: Mapped[str | None] = mapped_column(Text(), default=None)
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),

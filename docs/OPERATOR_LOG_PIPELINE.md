@@ -15,6 +15,8 @@ Current evidence:
 - `/api/v1/logs` and SSE streams remain compatibility surfaces.
 - `/api/v1/operations/governance` reports structured log posture, OTLP configuration state, log shipper settings, field mapping version, and durable replay posture, while plugin/runtime-isolation posture is now a separate adjacent governance slice.
 - [`../ops/vector/filmu-ndjson-vector.toml`](../ops/vector/filmu-ndjson-vector.toml) is the first concrete Vector tailing configuration for `logs/ecs.json*`.
+- [`../ops/log-pipeline/docker-compose.yml`](../ops/log-pipeline/docker-compose.yml) now provisions a local operator-owned OpenSearch plus Vector stack for search/collector validation.
+- [`../ops/opensearch/filmu-index-template.json`](../ops/opensearch/filmu-index-template.json) defines the baseline searchable field mapping contract used by that stack.
 - `pnpm proof:operations:log-pipeline` runs [`../scripts/check_log_pipeline_contract.ps1`](../scripts/check_log_pipeline_contract.ps1) and writes a search-contract artifact under `artifacts/operations/log-pipeline/`.
 
 ## Required Shipper Contract
@@ -31,6 +33,12 @@ Recommended local adapters:
 
 - Vector, Filebeat, Fluent Bit, or an equivalent NDJSON file tailer.
 - OpenTelemetry Collector for traces and future log/trace convergence.
+
+Provisioned local reference stack:
+
+- `docker compose -f ops/log-pipeline/docker-compose.yml up -d` starts OpenSearch, OpenSearch Dashboards, and Vector with the checked-in field contract.
+- Vector tails `logs/ecs.json*`, preserves the ECS/Filmu fields already emitted by the app, and writes them into the `filmu-logs-*` index pattern.
+- The OpenSearch index template is repo-owned so operator search fields stop depending on ad hoc environment clicks.
 
 ## Search Index Expectations
 
@@ -80,6 +88,7 @@ These event classes are a contract for future durable replay streams. Structured
 Current replay baseline:
 
 - [`../filmu_py/core/replay.py`](../filmu_py/core/replay.py) provides a Redis Streams journal with event ids, tenant id, payload JSON, offset-based replay, and consumer-group create/read/ack primitives.
+- That replay client now also emits durable subscriber delivery/ack/error observations into the control-plane ledger, and [`GET /api/v1/operations/control-plane/subscribers`](../filmu_py/api/routes/default.py) exposes those rows for operators.
 - [`../filmu_py/core/event_bus.py`](../filmu_py/core/event_bus.py) can attach that replay journal while preserving process-local subscribers.
 - `FILMU_PY_CONTROL_PLANE.event_backplane=redis_stream` enables the replay journal at startup.
 - Redis Streams is the first durable baseline, not the final HA story; durable subscriber resume persistence, node coordination, and failover promotion remain the next depth layer.
@@ -98,8 +107,7 @@ Alert on:
 
 ## Remaining Gaps
 
-- Logs have a concrete Vector tailing config, but deployment/provisioning is still external.
-- Search backend provisioning is external and validated by contract checks, not owned by this service.
+- The repo now owns a local collector/search stack, but environment promotion and secret management still need environment-specific rollout.
 - Trace/span coverage is partial.
-- Replay taxonomy has a Redis Streams plus consumer-group baseline but needs end-to-end operator rollout.
+- Replay taxonomy has a Redis Streams plus subscriber-ledger baseline but still needs HA failover automation.
 - Cross-node log-stream fanout is still not HA.

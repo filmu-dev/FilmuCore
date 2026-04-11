@@ -57,6 +57,47 @@ class RedisStreamClient(Protocol):
         pass
 
 
+class ReplaySubscriptionStateSink(Protocol):
+    """Observer sink used to persist durable replay consumer ownership/offset state."""
+
+    async def observe_delivery(
+        self,
+        *,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        node_id: str,
+        tenant_id: str | None = None,
+        offset: str | None = None,
+        event_id: str | None = None,
+    ) -> object:
+        pass
+
+    async def observe_ack(
+        self,
+        *,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        node_id: str,
+        tenant_id: str | None = None,
+        event_id: str | None = None,
+    ) -> object:
+        pass
+
+    async def observe_error(
+        self,
+        *,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        node_id: str,
+        tenant_id: str | None = None,
+        error: str,
+    ) -> object:
+        pass
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayEvent:
     """One event read from the durable replay stream."""
@@ -76,10 +117,12 @@ class RedisReplayEventBackplane:
         *,
         stream_name: str = "filmu:events",
         maxlen: int = 10_000,
+        subscription_state_sink: ReplaySubscriptionStateSink | None = None,
     ) -> None:
         self._redis = redis
         self.stream_name = stream_name
         self.maxlen = max(1, maxlen)
+        self._subscription_state_sink = subscription_state_sink
 
     async def publish(
         self,
@@ -137,32 +180,74 @@ class RedisReplayEventBackplane:
         *,
         group_name: str,
         consumer_name: str,
+        node_id: str | None = None,
+        tenant_id: str | None = None,
         count: int = 100,
         block_ms: int | None = None,
         offset: str = ">",
     ) -> list[ReplayEvent]:
         """Read events through one consumer group for durable subscription resume."""
 
-        streams = await self._redis.xreadgroup(
-            group_name,
-            consumer_name,
-            {self.stream_name: offset},
-            count=max(1, count),
-            block=block_ms,
-        )
-        return _decode_replay_events(streams)
+        try:
+            streams = await self._redis.xreadgroup(
+                group_name,
+                consumer_name,
+                {self.stream_name: offset},
+                count=max(1, count),
+                block=block_ms,
+            )
+        except Exception as exc:
+            if self._subscription_state_sink is not None:
+                await self._subscription_state_sink.observe_error(
+                    stream_name=self.stream_name,
+                    group_name=group_name,
+                    consumer_name=consumer_name,
+                    node_id=node_id or "unknown",
+                    tenant_id=tenant_id,
+                    error=str(exc),
+                )
+            raise
+        events = _decode_replay_events(streams)
+        if self._subscription_state_sink is not None:
+            await self._subscription_state_sink.observe_delivery(
+                stream_name=self.stream_name,
+                group_name=group_name,
+                consumer_name=consumer_name,
+                node_id=node_id or "unknown",
+                tenant_id=tenant_id,
+                offset=offset,
+                event_id=(events[-1].event_id if events else None),
+            )
+        return events
 
     async def ack(
         self,
         *,
         group_name: str,
+        consumer_name: str | None = None,
+        node_id: str | None = None,
+        tenant_id: str | None = None,
         event_ids: list[str] | tuple[str, ...],
     ) -> int:
         """Acknowledge processed events for one durable consumer group."""
 
         if not event_ids:
             return 0
-        return await self._redis.xack(self.stream_name, group_name, *event_ids)
+        acked = await self._redis.xack(self.stream_name, group_name, *event_ids)
+        if (
+            acked > 0
+            and self._subscription_state_sink is not None
+            and consumer_name is not None
+        ):
+            await self._subscription_state_sink.observe_ack(
+                stream_name=self.stream_name,
+                group_name=group_name,
+                consumer_name=consumer_name,
+                node_id=node_id or "unknown",
+                tenant_id=tenant_id,
+                event_id=event_ids[-1],
+            )
+        return acked
 
 
 def _decode_replay_events(

@@ -276,6 +276,11 @@ class DummyAccessPolicyService:
         record = type("AccessPolicyRevisionRecord", (), {})()
         record.version = snapshot.version
         record.source = snapshot.source
+        record.approval_status = "approved" if is_active else "draft"
+        record.proposed_by = "tenant-main:operator-1"
+        record.approved_by = "tenant-main:operator-1" if is_active else None
+        record.approved_at = at if is_active else None
+        record.approval_notes = "test"
         record.is_active = is_active
         record.activated_at = at
         record.created_at = at
@@ -301,9 +306,14 @@ class DummyAccessPolicyService:
         principal_scopes: dict[str, list[str]],
         principal_tenant_grants: dict[str, list[str]],
         audit_decisions: bool,
-        activate: bool = True,
+        proposed_by: str | None = None,
+        approval_notes: str | None = None,
+        auto_approve: bool = False,
+        activate: bool = False,
     ) -> Any:
         now = datetime(2026, 4, 11, 12, 30, tzinfo=UTC)
+        if activate and not auto_approve:
+            raise ValueError("access policy revision must be approved before activation")
         if activate:
             for revision in self.revisions:
                 revision.is_active = False
@@ -317,17 +327,107 @@ class DummyAccessPolicyService:
             audit_decisions=audit_decisions,
         )
         record = self._build_revision_record(snapshot, now, activate)
+        record.approval_status = "approved" if auto_approve else "draft"
+        record.proposed_by = proposed_by
+        record.approved_by = proposed_by if auto_approve else None
+        record.approved_at = now if auto_approve else None
+        record.approval_notes = approval_notes
         self.snapshot = snapshot if activate else self.snapshot
         self.revisions.insert(0, record)
         return record
 
     async def activate_revision(self, version: str) -> Any:
         for revision in self.revisions:
+            if revision.version == version and revision.approval_status not in {"approved", "bootstrap"}:
+                raise ValueError(
+                    f"access policy revision '{version}' must be approved before activation"
+                )
             revision.is_active = revision.version == version
             if revision.version == version:
                 self.snapshot = revision.to_snapshot()
                 return revision
         raise LookupError(f"unknown access policy revision '{version}'")
+
+    async def approve_revision(
+        self,
+        version: str,
+        *,
+        approved_by: str | None,
+        approval_notes: str | None = None,
+        activate: bool = False,
+    ) -> Any:
+        for revision in self.revisions:
+            if revision.version != version:
+                continue
+            revision.approval_status = "approved"
+            revision.approved_by = approved_by
+            revision.approved_at = datetime(2026, 4, 11, 12, 45, tzinfo=UTC)
+            revision.approval_notes = approval_notes
+            if activate:
+                for candidate in self.revisions:
+                    candidate.is_active = candidate.version == version
+                self.snapshot = revision.to_snapshot()
+            return revision
+        raise LookupError(f"unknown access policy revision '{version}'")
+
+    async def reject_revision(
+        self,
+        version: str,
+        *,
+        rejected_by: str | None,
+        approval_notes: str | None = None,
+    ) -> Any:
+        for revision in self.revisions:
+            if revision.version != version:
+                continue
+            revision.approval_status = "rejected"
+            revision.approved_by = rejected_by
+            revision.approval_notes = approval_notes
+            revision.is_active = False
+            return revision
+        raise LookupError(f"unknown access policy revision '{version}'")
+
+
+class DummyPluginGovernanceService:
+    """Minimal persisted plugin-governance override stub for route tests."""
+
+    def __init__(self) -> None:
+        self.overrides: dict[str, Any] = {}
+
+    async def list_overrides(self) -> dict[str, Any]:
+        return dict(self.overrides)
+
+    async def write_override(
+        self,
+        *,
+        plugin_name: str,
+        state: str,
+        reason: str | None = None,
+        notes: str | None = None,
+        updated_by: str | None = None,
+    ) -> Any:
+        now = datetime(2026, 4, 11, 12, 50, tzinfo=UTC)
+        record = type("PluginGovernanceOverrideRecord", (), {})()
+        record.plugin_name = plugin_name
+        record.state = state
+        record.reason = reason
+        record.notes = notes
+        record.updated_by = updated_by
+        record.created_at = now
+        record.updated_at = now
+        self.overrides[plugin_name] = record
+        return record
+
+
+class DummyControlPlaneService:
+    """Minimal control-plane subscriber ledger stub for route tests."""
+
+    def __init__(self) -> None:
+        self.records: list[Any] = []
+
+    async def list_subscribers(self, *, active_within_seconds: int = 120) -> list[Any]:
+        _ = active_within_seconds
+        return list(self.records)
 
 
 def _build_settings(
@@ -411,6 +511,8 @@ def _build_client(
         security_identity_service=security_identity_service,
         access_policy_service=DummyAccessPolicyService(settings),
         access_policy_snapshot=snapshot_from_settings(settings.access_policy),
+        control_plane_service=DummyControlPlaneService(),
+        plugin_governance_service=DummyPluginGovernanceService(),
     )
     app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
@@ -668,7 +770,7 @@ def test_plugin_governance_route_returns_operator_policy_summary() -> None:
         "recommended_actions": ["require_external_plugin_signature"],
         "remaining_gaps": [
             "runtime sandbox isolation is still in-process",
-            "operator quarantine/revocation persistence is still trust-store driven",
+            "operator quarantine/revocation still needs sandbox-enforced execution boundaries",
             "external plugin artifact provenance is not yet SBOM/signing-policy complete",
         ],
     }
@@ -791,6 +893,52 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "error": "api_version_incompatible",
         }
     ]
+
+
+def test_plugin_governance_override_route_persists_operator_state() -> None:
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/plugins/governance/stremthru",
+        headers=_headers(),
+        json={"state": "quarantined", "reason": "compatibility drift", "notes": "hold rollout"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_name"] == "stremthru"
+    assert response.json()["state"] == "quarantined"
+
+    list_response = client.get("/api/v1/plugins/governance/overrides", headers=_headers())
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["plugin_name"] == "stremthru"
+
+
+def test_control_plane_subscribers_route_returns_persisted_rows() -> None:
+    client = _build_client()
+    service = cast(Any, client.app.state.resources.control_plane_service)
+    record = type("ControlPlaneSubscriberRecord", (), {})()
+    now = datetime(2026, 4, 11, 13, 0, tzinfo=UTC)
+    record.stream_name = "filmu:events"
+    record.group_name = "filmu-api"
+    record.consumer_name = "consumer-1"
+    record.node_id = "node-a"
+    record.tenant_id = "tenant-main"
+    record.status = "active"
+    record.last_read_offset = ">"
+    record.last_delivered_event_id = "2-0"
+    record.last_acked_event_id = "1-0"
+    record.last_error = None
+    record.claimed_at = now
+    record.last_heartbeat_at = now
+    record.created_at = now
+    record.updated_at = now
+    service.records.append(record)
+
+    response = client.get("/api/v1/operations/control-plane/subscribers", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()[0]["consumer_name"] == "consumer-1"
+    assert response.json()[0]["last_delivered_event_id"] == "2-0"
 
 
 def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> None:
@@ -934,11 +1082,11 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     assert body["remaining_gaps"] == [
         "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
         "ABAC policy is limited to permission and tenant-scope checks",
-        "policy CRUD/version workflows now exist, but broader ABAC resources and audit search are still incomplete",
+        "policy approval/version workflows now exist, but broader ABAC resource policies still need rollout",
     ]
 
 
-def test_auth_policy_revision_routes_return_inventory_and_accept_writes() -> None:
+def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow() -> None:
     client = _build_client()
 
     list_response = client.get("/api/v1/auth/policy/revisions", headers=_headers())
@@ -965,6 +1113,7 @@ def test_auth_policy_revision_routes_return_inventory_and_accept_writes() -> Non
     body = write_response.json()
     assert body["version"] == "operator-v2"
     assert body["is_active"] is True
+    assert body["approval_status"] == "approved"
     assert body["role_grants"] == {"tenant:analyst": ["library:read"]}
 
     activate_response = client.post(
@@ -975,6 +1124,36 @@ def test_auth_policy_revision_routes_return_inventory_and_accept_writes() -> Non
     assert activate_response.status_code == 200
     assert activate_response.json()["version"] == "operator-v2"
     assert activate_response.json()["is_active"] is True
+
+    draft_response = client.post(
+        "/api/v1/auth/policy/revisions",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "settings:write",
+        },
+        json={
+            "version": "operator-v3",
+            "source": "operator_api",
+            "activate": False,
+            "role_grants": {"tenant:viewer": ["library:read"]},
+        },
+    )
+    assert draft_response.status_code == 200
+    assert draft_response.json()["approval_status"] == "draft"
+
+    approve_response = client.post(
+        "/api/v1/auth/policy/revisions/operator-v3/approve",
+        headers=_headers(),
+        json={"approval_notes": "approved for rollout", "activate": True},
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["approval_status"] == "approved"
+    assert approve_response.json()["is_active"] is True
+
+    audit_response = client.get("/api/v1/auth/policy/audit", headers=_headers())
+    assert audit_response.status_code == 200
+    assert "entries" in audit_response.json()
 
 
 def test_operations_governance_route_returns_enterprise_slice_posture() -> None:

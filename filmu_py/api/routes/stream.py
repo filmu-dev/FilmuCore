@@ -12,6 +12,7 @@ import tempfile
 from asyncio.subprocess import PIPE
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -24,7 +25,7 @@ from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from prometheus_client import Counter
 
-from filmu_py.api.deps import get_db, get_event_bus, get_log_stream, get_resources
+from filmu_py.api.deps import get_auth_context, get_db, get_event_bus, get_log_stream, get_resources
 from filmu_py.api.models import (
     EventTypesResponse,
     ServingGovernanceResponse,
@@ -356,6 +357,30 @@ def _record_inline_remote_hls_refresh(*, event: str) -> None:
     _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[event] += 1
 
 
+async def _allow_tenant_refresh_trigger(
+    *,
+    request: Request,
+    quota_name: str,
+) -> bool:
+    """Return whether the current tenant is within the configured refresh pressure budget."""
+
+    resources = get_resources(request)
+    settings = resources.settings
+    if not settings.tenant_quotas.enabled:
+        return True
+    auth_context = get_auth_context(request)
+    limits = settings.tenant_quotas.tenants.get(auth_context.tenant_id, settings.tenant_quotas.default)
+    limit = getattr(limits, quota_name, None)
+    if not isinstance(limit, int) or limit <= 0:
+        return True
+    minute = int(datetime.now(UTC).timestamp() // 60)
+    key = f"quota:tenant:{auth_context.tenant_id}:{quota_name}:{minute}"
+    current = int(await cast(Any, resources.redis).incr(key))
+    if current == 1 and hasattr(resources.redis, "expire"):
+        await cast(Any, resources.redis).expire(key, 120)
+    return current <= limit
+
+
 def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
     """Return additive governance counters for route-adjacent direct-play refresh triggering."""
 
@@ -476,6 +501,7 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | li
         "vfs_runtime_rollout_readiness": "unknown",
         "vfs_runtime_rollout_reasons": ["runtime_snapshot_unavailable"],
         "vfs_runtime_rollout_next_action": "capture_runtime_status",
+        "vfs_runtime_active_handle_summaries": [],
     }
 
 
@@ -528,6 +554,21 @@ def _as_str(value: object, *, default: str = "") -> str:
         if stripped:
             return stripped
     return default
+
+
+def _as_str_list(value: object) -> list[str]:
+    """Normalize list-like runtime snapshot strings into bounded operator summaries."""
+
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        stripped = item.strip()
+        if stripped:
+            normalized.append(stripped)
+    return normalized[:10]
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float:
@@ -945,6 +986,9 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str
         governance["vfs_runtime_rollout_next_action"] = "promote_to_next_environment_class"
         rollout_reasons.append("no_blocking_runtime_signals")
     governance["vfs_runtime_rollout_reasons"] = rollout_reasons
+    governance["vfs_runtime_active_handle_summaries"] = _as_str_list(
+        _nested_mapping_value(payload, "runtime", "active_handle_summaries")
+    )
     return governance
 
 
@@ -1314,6 +1358,12 @@ async def _run_app_scoped_refresh_trigger(
 async def _run_direct_playback_refresh_trigger(*, request: Request, item_identifier: str) -> None:
     """Trigger app-scoped direct-play refresh work without blocking the route response path."""
 
+    if not await _allow_tenant_refresh_trigger(
+        request=request,
+        quota_name="playback_refreshes_per_minute",
+    ):
+        _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["no_action"] += 1
+        return
     await _run_app_scoped_refresh_trigger(
         request=request,
         item_identifier=item_identifier,
@@ -1334,6 +1384,12 @@ def _is_selected_hls_failed_lease_error(exc: HTTPException) -> bool:
 async def _run_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier: str) -> None:
     """Trigger app-scoped selected-HLS failed-lease refresh work without blocking the route response path."""
 
+    if not await _allow_tenant_refresh_trigger(
+        request=request,
+        quota_name="provider_refreshes_per_minute",
+    ):
+        _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["no_action"] += 1
+        return
     await _run_app_scoped_refresh_trigger(
         request=request,
         item_identifier=item_identifier,
@@ -1347,6 +1403,12 @@ async def _run_hls_restricted_fallback_refresh_trigger(
 ) -> None:
     """Trigger app-scoped selected-HLS restricted-fallback refresh work without blocking the route response path."""
 
+    if not await _allow_tenant_refresh_trigger(
+        request=request,
+        quota_name="provider_refreshes_per_minute",
+    ):
+        _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["no_action"] += 1
+        return
     await _run_app_scoped_refresh_trigger(
         request=request,
         item_identifier=item_identifier,
@@ -1913,6 +1975,7 @@ async def get_stream_status(
         if resources.vfs_catalog_server is not None
         else build_empty_vfs_catalog_governance_snapshot()
     )
+    vfs_runtime_governance = _vfs_runtime_governance_snapshot()
     sessions = [
         ServingSessionResponse(
             session_id=session.session_id,
@@ -1964,7 +2027,14 @@ async def get_stream_status(
                 **_hls_restricted_fallback_trigger_governance_snapshot(),
                 **playback_governance,
                 **vfs_governance,
-                **_vfs_runtime_governance_snapshot(),
+                **vfs_runtime_governance,
+                "serving_active_session_summaries": [
+                    f"{session.session_id}:{session.category}:{session.resource}"
+                    for session in sessions[:10]
+                ],
+                "vfs_runtime_active_handle_summaries": vfs_runtime_governance.get(
+                    "vfs_runtime_active_handle_summaries", []
+                ),
             }
         ),
     )

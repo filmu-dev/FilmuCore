@@ -18,3 +18,18 @@ if err == null {
 type = "console"
 inputs = ["filmu_json"]
 encoding.codec = "json"
+
+[sinks.filmu_opensearch]
+type = "elasticsearch"
+inputs = ["filmu_json"]
+endpoints = ["${FILMU_OPENSEARCH_ENDPOINT:-http://opensearch:9200}"]
+mode = "bulk"
+bulk.index = "${FILMU_OPENSEARCH_INDEX:-filmu-logs-%Y.%m.%d}"
+healthcheck.enabled = true
+compression = "gzip"
+api_version = "v8"
+auth.strategy = "basic"
+auth.user = "${FILMU_OPENSEARCH_USER:-admin}"
+auth.password = "${FILMU_OPENSEARCH_PASSWORD:-adminadmin}"
+request.retry_attempts = 5
+encoding.codec = "json"

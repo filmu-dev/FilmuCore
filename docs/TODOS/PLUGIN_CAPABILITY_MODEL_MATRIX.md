@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Turn Priority 4 from [`NEXT_IMPLEMENTATION_PRIORITIES.md`](NEXT_IMPLEMENTATION_PRIORITIES.md) into an executable planning artifact.
+Turn the active plugin/platform track from [`../STATUS.md`](../STATUS.md) and [`../EXECUTION_PLAN.md`](../EXECUTION_PLAN.md) into an executable planning artifact.
 
 This document maps:
 

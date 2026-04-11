@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .graphql.plugin_registry import GraphQLPluginRegistry
     from .plugins.registry import PluginRegistry
     from .services.access_policy import AccessPolicyService, AccessPolicySnapshot
+    from .services.control_plane import ControlPlaneService
     from .services.identity import SecurityIdentityService
     from .services.playback import (
         InProcessDirectPlaybackRefreshController,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
         InProcessHlsRestrictedFallbackRefreshController,
         PlaybackSourceService,
     )
+    from .services.plugin_governance import PluginGovernanceService
     from .services.vfs_catalog import FilmuVfsCatalogSupplier
     from .services.vfs_server import FilmuVfsCatalogGrpcServer
 
@@ -51,6 +53,8 @@ class AppResources:
     security_identity_service: SecurityIdentityService | None = None
     access_policy_service: AccessPolicyService | None = None
     access_policy_snapshot: AccessPolicySnapshot | None = None
+    control_plane_service: ControlPlaneService | None = None
+    plugin_governance_service: PluginGovernanceService | None = None
     plugin_settings_payload: Mapping[str, Any] | None = None
     playback_service: PlaybackSourceService | None = None
     playback_refresh_controller: InProcessDirectPlaybackRefreshController | None = None

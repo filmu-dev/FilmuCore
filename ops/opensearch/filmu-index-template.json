@@ -1,0 +1,30 @@
+{
+  "index_patterns": ["filmu-logs-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index.refresh_interval": "5s"
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "message": { "type": "text" },
+        "log.level": { "type": "keyword" },
+        "request.id": { "type": "keyword" },
+        "trace.id": { "type": "keyword" },
+        "span.id": { "type": "keyword" },
+        "item.id": { "type": "keyword" },
+        "plugin.name": { "type": "keyword" },
+        "worker.stage": { "type": "keyword" },
+        "tenant.id": { "type": "keyword" },
+        "structlog.tenant_id": { "type": "keyword" },
+        "actor.id": { "type": "keyword" },
+        "structlog.actor_id": { "type": "keyword" }
+      }
+    }
+  },
+  "priority": 500,
+  "version": 1
+}

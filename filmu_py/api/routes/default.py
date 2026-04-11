@@ -20,6 +20,8 @@ from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
 from ..models import (
+    AccessPolicyAuditResponse,
+    AccessPolicyRevisionApprovalRequest,
     AccessPolicyRevisionListResponse,
     AccessPolicyRevisionResponse,
     AccessPolicyRevisionWriteRequest,
@@ -30,6 +32,7 @@ from ..models import (
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
+    ControlPlaneSubscriberResponse,
     EnterpriseOperationsGovernanceResponse,
     EnterpriseOperationsSliceResponse,
     HealthResponse,
@@ -37,6 +40,8 @@ from ..models import (
     MessageResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
+    PluginGovernanceOverrideResponse,
+    PluginGovernanceOverrideWriteRequest,
     PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
     QueueAlertResponse,
@@ -62,6 +67,7 @@ _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("playback_operate", ("playback:operate",)),
     ("settings_write", ("settings:write",)),
     ("policy_write", ("settings:write",)),
+    ("policy_approve", ("security:policy.approve",)),
     ("api_key_rotate", ("security:apikey.rotate",)),
 )
 
@@ -97,9 +103,16 @@ def _plugin_runtime_health(
 
     if plugin_name == "stremthru":
         stremthru = resources.settings.downloaders.stremthru
-        configured = bool(stremthru.enabled and stremthru.token.strip())
+        configured_url = str(getattr(stremthru, "base_url", getattr(stremthru, "url", ""))).strip()
+        configured = bool(
+            stremthru.enabled
+            and stremthru.token.strip()
+            and configured_url
+        )
         if stremthru.enabled and not stremthru.token.strip():
             warnings.append("enabled but token is missing")
+        if stremthru.enabled and not configured_url:
+            warnings.append("enabled but url is missing")
         if stremthru.token.strip() and not stremthru.enabled:
             warnings.append("token is configured but the plugin is disabled")
         return configured, configured, warnings
@@ -192,7 +205,7 @@ def _plugin_governance_summary(
         recommended_actions=sorted(recommended_actions),
         remaining_gaps=[
             "runtime sandbox isolation is still in-process",
-            "operator quarantine/revocation persistence is still trust-store driven",
+            "operator quarantine/revocation still needs sandbox-enforced execution boundaries",
             "external plugin artifact provenance is not yet SBOM/signing-policy complete",
         ],
     )
@@ -304,6 +317,11 @@ def _access_policy_revision_response(record: Any) -> AccessPolicyRevisionRespons
     return AccessPolicyRevisionResponse(
         version=record.version,
         source=record.source,
+        approval_status=record.approval_status,
+        proposed_by=record.proposed_by,
+        approved_by=record.approved_by,
+        approved_at=record.approved_at.isoformat() if record.approved_at is not None else None,
+        approval_notes=record.approval_notes,
         is_active=record.is_active,
         activated_at=record.activated_at.isoformat(),
         created_at=record.created_at.isoformat(),
@@ -322,6 +340,31 @@ def _access_policy_revision_response(record: Any) -> AccessPolicyRevisionRespons
         },
         audit_decisions=record.audit_decisions,
     )
+
+
+def _plugin_override_response(record: Any) -> PluginGovernanceOverrideResponse:
+    """Convert one persisted plugin governance override into an API response row."""
+
+    return PluginGovernanceOverrideResponse(
+        plugin_name=record.plugin_name,
+        state=record.state,
+        reason=record.reason,
+        notes=record.notes,
+        updated_by=record.updated_by,
+        created_at=record.created_at.isoformat(),
+        updated_at=record.updated_at.isoformat(),
+    )
+
+
+def _actor_key(auth_context: Any) -> str:
+    """Return a stable operator identity string for persisted governance actions."""
+
+    principal_key = getattr(auth_context, "principal_key", None)
+    if isinstance(principal_key, str) and principal_key.strip():
+        return principal_key.strip()
+    actor_id = str(getattr(auth_context, "actor_id", "operator")).strip() or "operator"
+    tenant_id = str(getattr(auth_context, "tenant_id", "global")).strip() or "global"
+    return f"{tenant_id}:{actor_id}"
 
 
 def _vfs_data_plane_evidence(request: Request) -> list[str]:
@@ -347,7 +390,7 @@ def _vfs_data_plane_evidence(request: Request) -> list[str]:
     return evidence
 
 
-def _enterprise_operations_governance(
+async def _enterprise_operations_governance(
     *,
     request: Request,
     plugins: list[PluginCapabilityStatusResponse],
@@ -369,6 +412,14 @@ def _enterprise_operations_governance(
     ]
     if any(not decision.allowed for decision in policy_decisions):
         identity_required_actions.append("grant_or_document_missing_control_plane_permissions")
+
+    plugin_override_count = 0
+    if resources.plugin_governance_service is not None:
+        plugin_override_count = len(await resources.plugin_governance_service.list_overrides())
+
+    control_plane_subscriber_count = 0
+    if resources.control_plane_service is not None:
+        control_plane_subscriber_count = len(await resources.control_plane_service.list_subscribers())
 
     tenant_required_actions = [
         "define_tenant_quota_policy"
@@ -430,6 +481,8 @@ def _enterprise_operations_governance(
                 ),
                 "GET /api/v1/auth/policy exposes standard authorization probes",
                 "GET /api/v1/auth/policy/revisions exposes persisted policy revision inventory",
+                "POST /api/v1/auth/policy/revisions/{version}/approve|reject adds approval workflow state",
+                "GET /api/v1/auth/policy/audit exposes bounded audit-search history",
             ],
             required_actions=identity_required_actions,
             remaining_gaps=[
@@ -483,19 +536,21 @@ def _enterprise_operations_governance(
                 f"event_stream_name={settings.control_plane.event_stream_name}",
                 f"event_replay_maxlen={settings.control_plane.event_replay_maxlen}",
                 f"consumer_group={settings.control_plane.consumer_group}",
+                f"subscriber_ledger_rows={control_plane_subscriber_count}",
                 "LogStreamBroker backend=process_local",
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
+                "GET /api/v1/operations/control-plane/subscribers exposes durable replay ownership",
             ],
             required_actions=[
                 "promote_redis_stream_consumer_groups_into_active_subscribers",
-                "add_subscription_resume_offsets",
-                "document_node_coordination_and_failover_semantics",
+                "expand_failover_automation_from_resume_offsets_to node fencing",
+                "document_and_exercise_node_coordination_failover_semantics",
             ],
             remaining_gaps=[
-                "event replay now supports consumer-group reads but is not yet the only bus",
+                "event replay now persists subscriber resume/heartbeat state but is not yet the only bus",
                 "log streaming history is bounded per process",
-                "node coordination and failover promotion are not fully implemented",
+                "node coordination and failover promotion are not fully automated",
             ],
         ),
         sre_program=EnterpriseOperationsSliceResponse(
@@ -535,7 +590,7 @@ def _enterprise_operations_governance(
             ],
             required_actions=log_required_actions,
             remaining_gaps=[
-                "shipper/search backend is configured externally and verified by contract checks",
+                "shipper/search backend still requires environment provisioning even though repo config is present",
                 "trace/span coverage is still partial",
                 "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
             ],
@@ -554,6 +609,7 @@ def _enterprise_operations_governance(
                     "plugin_quarantine_recommended="
                     f"{sum(1 for plugin in plugins if plugin.quarantine_recommended)}"
                 ),
+                f"plugin_operator_overrides={plugin_override_count}",
                 "GET /api/v1/plugins/governance summarizes signature, publisher-policy, and tenancy posture",
             ],
             required_actions=[
@@ -563,7 +619,7 @@ def _enterprise_operations_governance(
             ],
             remaining_gaps=[
                 "plugin runtime isolation remains process-local rather than sandboxed execution",
-                "quarantine and revocation remain loader-policy driven rather than lifecycle-managed records",
+                "quarantine and revocation are persisted but still enforced inside the host process",
                 "external plugin artifact provenance is not yet SBOM/signing-policy complete",
             ],
         ),
@@ -575,6 +631,7 @@ def _enterprise_operations_governance(
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
                 "worker stages include scrape_item, parse_scrape_results, rank_streams, debrid_item, and finalize_item",
                 "tenant worker enqueue quotas can deny downstream stage fan-out",
+                "rank_streams now executes RTN ranking/sorting in a bounded isolated executor",
                 "GET /api/v1/workers/queue and /api/v1/workers/queue/history expose queue pressure",
             ],
             required_actions=[
@@ -583,9 +640,9 @@ def _enterprise_operations_governance(
                 "add_crash_containment_and_retry_policy_for_heavy_jobs",
             ],
             remaining_gaps=[
-                "heavy parse/map/validate/index work still runs in the normal worker process",
-                "no per-stage sandbox profile or resource ceilings exist yet",
-                "crash containment is queue-level rather than sandbox-boundary level",
+                "parse/map/validate stages still need the same isolation treatment as rank_streams",
+                "no per-stage memory ceiling is enforced yet",
+                "crash containment exists for ranking but not every heavy stage",
             ],
         ),
         release_metadata_performance=EnterpriseOperationsSliceResponse(
@@ -594,7 +651,7 @@ def _enterprise_operations_governance(
             evidence=[
                 "release workflow requires PAT-authenticated release-please updates",
                 "package.json exposes security:audit, security:bandit, and perf:bench",
-                "docs/TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md tracks release, metadata, and chaos gaps explicitly",
+                "STATUS.md plus the active TODO matrix set track release, metadata, and chaos gaps explicitly",
                 "scripts/run_backup_restore_proof.ps1 and playback/VFS proof gates already produce promotion evidence inputs",
             ],
             required_actions=[
@@ -725,7 +782,7 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         remaining_gaps=[
             "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
             "ABAC policy is limited to permission and tenant-scope checks",
-            "policy CRUD/version workflows now exist, but broader ABAC resources and audit search are still incomplete",
+            "policy approval/version workflows now exist, but broader ABAC resource policies still need rollout",
         ],
     )
 
@@ -755,6 +812,11 @@ async def list_auth_policy_revisions(
                 AccessPolicyRevisionResponse(
                     version=snapshot.version,
                     source=snapshot.source,
+                    approval_status="bootstrap",
+                    proposed_by=None,
+                    approved_by="settings_bootstrap",
+                    approved_at=now,
+                    approval_notes="bootstrapped from runtime settings",
                     is_active=True,
                     activated_at=now,
                     created_at=now,
@@ -800,11 +862,15 @@ async def write_auth_policy_revision(
 ) -> AccessPolicyRevisionResponse:
     """Persist one operator-managed access-policy revision and optionally activate it."""
 
+    auth_context = get_auth_context(request)
     resources = request.app.state.resources
     service = resources.access_policy_service
     if service is None:
         raise HTTPException(status_code=503, detail="Access policy service unavailable")
 
+    can_approve = "*" in auth_context.effective_permissions or "security:policy.approve" in set(
+        auth_context.effective_permissions
+    )
     record = await service.write_revision(
         version=payload.version,
         source=payload.source,
@@ -813,6 +879,9 @@ async def write_auth_policy_revision(
         principal_scopes=payload.principal_scopes,
         principal_tenant_grants=payload.principal_tenant_grants,
         audit_decisions=payload.audit_decisions,
+        proposed_by=_actor_key(auth_context),
+        approval_notes=payload.approval_notes,
+        auto_approve=can_approve,
         activate=payload.activate,
     )
     if record.is_active:
@@ -821,7 +890,11 @@ async def write_auth_policy_revision(
         request,
         action="security.access_policy.write_revision",
         target=f"access_policy.{payload.version}",
-        details={"activate": payload.activate, "source": payload.source},
+        details={
+            "activate": payload.activate,
+            "source": payload.source,
+            "approval_status": record.approval_status,
+        },
     )
     return _access_policy_revision_response(record)
 
@@ -846,6 +919,8 @@ async def activate_auth_policy_revision(
         record = await service.activate_revision(version)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     resources.access_policy_snapshot = record.to_snapshot()
     audit_action(
@@ -854,6 +929,100 @@ async def activate_auth_policy_revision(
         target=f"access_policy.{record.version}",
     )
     return _access_policy_revision_response(record)
+
+
+@router.post(
+    "/auth/policy/revisions/{version}/approve",
+    operation_id="default.approve_auth_policy_revision",
+    response_model=AccessPolicyRevisionResponse,
+    dependencies=[Depends(require_permissions("security:policy.approve"))],
+)
+async def approve_auth_policy_revision(
+    request: Request,
+    version: str,
+    payload: AccessPolicyRevisionApprovalRequest,
+) -> AccessPolicyRevisionResponse:
+    """Approve one persisted access-policy revision and optionally activate it."""
+
+    auth_context = get_auth_context(request)
+    resources = request.app.state.resources
+    service = resources.access_policy_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="Access policy service unavailable")
+    try:
+        record = await service.approve_revision(
+            version,
+            approved_by=_actor_key(auth_context),
+            approval_notes=payload.approval_notes,
+            activate=payload.activate,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if record.is_active:
+        resources.access_policy_snapshot = record.to_snapshot()
+    audit_action(
+        request,
+        action="security.access_policy.approve_revision",
+        target=f"access_policy.{record.version}",
+        details={"activate": payload.activate},
+    )
+    return _access_policy_revision_response(record)
+
+
+@router.post(
+    "/auth/policy/revisions/{version}/reject",
+    operation_id="default.reject_auth_policy_revision",
+    response_model=AccessPolicyRevisionResponse,
+    dependencies=[Depends(require_permissions("security:policy.approve"))],
+)
+async def reject_auth_policy_revision(
+    request: Request,
+    version: str,
+    payload: AccessPolicyRevisionApprovalRequest,
+) -> AccessPolicyRevisionResponse:
+    """Reject one persisted access-policy revision while retaining its history."""
+
+    auth_context = get_auth_context(request)
+    resources = request.app.state.resources
+    service = resources.access_policy_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="Access policy service unavailable")
+    try:
+        record = await service.reject_revision(
+            version,
+            rejected_by=_actor_key(auth_context),
+            approval_notes=payload.approval_notes,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit_action(
+        request,
+        action="security.access_policy.reject_revision",
+        target=f"access_policy.{record.version}",
+    )
+    return _access_policy_revision_response(record)
+
+
+@router.get(
+    "/auth/policy/audit",
+    operation_id="default.auth_policy_audit",
+    response_model=AccessPolicyAuditResponse,
+    dependencies=[Depends(require_permissions("settings:write"))],
+)
+async def get_auth_policy_audit(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> AccessPolicyAuditResponse:
+    """Return bounded operator audit-search results for access-policy governance actions."""
+
+    history = request.app.state.resources.log_stream.history()
+    matches = [
+        line
+        for line in history
+        if "security.access_policy." in line or "access_policy." in line
+    ]
+    bounded = matches[-limit:]
+    return AccessPolicyAuditResponse(total_matches=len(matches), entries=bounded)
 
 
 @router.get("/logs", operation_id="default.logs", response_model=LogsResponse)
@@ -1008,6 +1177,8 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
     resources = request.app.state.resources
     plugin_registry = resources.plugin_registry
     loaded_report, failed_report = _plugin_load_report_maps(request)
+    override_service = resources.plugin_governance_service
+    overrides = await override_service.list_overrides() if override_service is not None else {}
     if plugin_registry is None:
         return [
             PluginCapabilityStatusResponse(
@@ -1031,6 +1202,7 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
         failure = failed_report.get(plugin_name)
         ready, configured, warnings = _plugin_runtime_health(plugin_name, resources)
         signature_fields = _plugin_signature_fields(manifest=manifest, success=success)
+        override = overrides.get(plugin_name)
         if success is not None:
             warnings.extend(list(getattr(success, "skipped", ())))
         if failure is not None and not registrations:
@@ -1056,8 +1228,16 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                     signing_key_id=manifest.signing_key_id if manifest is not None else None,
                     sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
                     tenancy_mode=manifest.tenancy_mode if manifest is not None else None,
-                    quarantined=manifest.quarantined if manifest is not None else False,
-                    quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
+                    quarantined=(
+                        (override.state == "quarantined")
+                        if override is not None
+                        else (manifest.quarantined if manifest is not None else False)
+                    ),
+                    quarantine_reason=(
+                        override.reason
+                        if override is not None and override.state == "quarantined"
+                        else (manifest.quarantine_reason if manifest is not None else None)
+                    ),
                     publisher_policy_decision=(
                         getattr(success, "publisher_policy_decision", None)
                         if success is not None
@@ -1081,12 +1261,18 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
             )
             continue
 
+        is_revoked = override is not None and override.state == "revoked"
+        is_quarantined = override is not None and override.state == "quarantined"
+        if is_revoked:
+            warnings.append("operator override revoked this plugin")
+        elif is_quarantined:
+            warnings.append("operator override quarantined this plugin")
         responses.append(
             PluginCapabilityStatusResponse(
                 name=plugin_name,
                 capabilities=sorted({registration.kind.value for registration in registrations}),
                 status="loaded",
-                ready=ready,
+                ready=ready and not is_revoked and not is_quarantined,
                 configured=configured,
                 version=manifest.version if manifest is not None else None,
                 api_version=manifest.api_version if manifest is not None else None,
@@ -1104,8 +1290,14 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                 signing_key_id=manifest.signing_key_id if manifest is not None else None,
                 sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
                 tenancy_mode=manifest.tenancy_mode if manifest is not None else None,
-                quarantined=manifest.quarantined if manifest is not None else False,
-                quarantine_reason=manifest.quarantine_reason if manifest is not None else None,
+                quarantined=(
+                    is_quarantined if override is not None else (manifest.quarantined if manifest is not None else False)
+                ),
+                quarantine_reason=(
+                    override.reason
+                    if is_quarantined and override is not None
+                    else (manifest.quarantine_reason if manifest is not None else None)
+                ),
                 publisher_policy_decision=getattr(success, "publisher_policy_decision", None),
                 publisher_policy_status=getattr(success, "publisher_policy_status", None),
                 quarantine_recommended=bool(
@@ -1139,6 +1331,59 @@ async def get_plugin_governance(request: Request) -> PluginGovernanceResponse:
 
 
 @router.get(
+    "/plugins/governance/overrides",
+    operation_id="default.plugin_governance_overrides",
+    response_model=list[PluginGovernanceOverrideResponse],
+    dependencies=[Depends(require_permissions("settings:write"))],
+)
+async def list_plugin_governance_overrides(
+    request: Request,
+) -> list[PluginGovernanceOverrideResponse]:
+    """Return persisted operator-managed plugin governance overrides."""
+
+    service = request.app.state.resources.plugin_governance_service
+    if service is None:
+        return []
+    return [
+        _plugin_override_response(record)
+        for record in (await service.list_overrides()).values()
+    ]
+
+
+@router.post(
+    "/plugins/governance/{plugin_name}",
+    operation_id="default.write_plugin_governance_override",
+    response_model=PluginGovernanceOverrideResponse,
+    dependencies=[Depends(require_permissions("settings:write"))],
+)
+async def write_plugin_governance_override(
+    request: Request,
+    plugin_name: str,
+    payload: PluginGovernanceOverrideWriteRequest,
+) -> PluginGovernanceOverrideResponse:
+    """Persist one plugin governance override for quarantine, revocation, or approval."""
+
+    auth_context = get_auth_context(request)
+    service = request.app.state.resources.plugin_governance_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="Plugin governance service unavailable")
+    record = await service.write_override(
+        plugin_name=plugin_name,
+        state=payload.state,
+        reason=payload.reason,
+        notes=payload.notes,
+        updated_by=_actor_key(auth_context),
+    )
+    audit_action(
+        request,
+        action="security.plugin_governance.write_override",
+        target=f"plugin.{record.plugin_name}",
+        details={"state": record.state},
+    )
+    return _plugin_override_response(record)
+
+
+@router.get(
     "/operations/governance",
     operation_id="default.enterprise_operations_governance",
     response_model=EnterpriseOperationsGovernanceResponse,
@@ -1149,7 +1394,44 @@ async def get_enterprise_operations_governance(
     """Return enterprise operations posture across the active roadmap slices."""
 
     plugins = await get_plugins(request)
-    return _enterprise_operations_governance(request=request, plugins=plugins)
+    return await _enterprise_operations_governance(request=request, plugins=plugins)
+
+
+@router.get(
+    "/operations/control-plane/subscribers",
+    operation_id="default.control_plane_subscribers",
+    response_model=list[ControlPlaneSubscriberResponse],
+    dependencies=[Depends(require_permissions("settings:write"))],
+)
+async def get_control_plane_subscribers(
+    request: Request,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> list[ControlPlaneSubscriberResponse]:
+    """Return durable replay/control-plane subscriber ownership and resume state."""
+
+    service = request.app.state.resources.control_plane_service
+    if service is None:
+        return []
+    records = await service.list_subscribers(active_within_seconds=active_within_seconds)
+    return [
+        ControlPlaneSubscriberResponse(
+            stream_name=record.stream_name,
+            group_name=record.group_name,
+            consumer_name=record.consumer_name,
+            node_id=record.node_id,
+            tenant_id=record.tenant_id,
+            status=record.status,
+            last_read_offset=record.last_read_offset,
+            last_delivered_event_id=record.last_delivered_event_id,
+            last_acked_event_id=record.last_acked_event_id,
+            last_error=record.last_error,
+            claimed_at=record.claimed_at.isoformat(),
+            last_heartbeat_at=record.last_heartbeat_at.isoformat(),
+            created_at=record.created_at.isoformat(),
+            updated_at=record.updated_at.isoformat(),
+        )
+        for record in records
+    ]
 
 
 @router.get(

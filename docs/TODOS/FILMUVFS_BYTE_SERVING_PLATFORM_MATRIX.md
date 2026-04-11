@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Turn Priority 5 from [`NEXT_IMPLEMENTATION_PRIORITIES.md`](NEXT_IMPLEMENTATION_PRIORITIES.md) into an executable planning artifact.
+Turn the active FilmuVFS/platform track from [`../STATUS.md`](../STATUS.md) and [`../EXECUTION_PLAN.md`](../EXECUTION_PLAN.md) into an executable planning artifact.
 
 This document maps the full FilmuVFS-first byte-serving platform into concrete capability areas, showing:
 
