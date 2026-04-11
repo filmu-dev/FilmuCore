@@ -75,12 +75,13 @@ class AccessPolicyService:
                 revision = active
             else:
                 revision = active
+            snapshot = _snapshot_from_payload(
+                version=revision.version,
+                source=revision.source,
+                payload=revision.policy_data,
+            )
             await session.commit()
-        return _snapshot_from_payload(
-            version=revision.version,
-            source=revision.source,
-            payload=revision.policy_data,
-        )
+        return snapshot
 
     async def load_active(self) -> AccessPolicySnapshot | None:
         """Return the active persisted access policy when available."""
@@ -93,13 +94,13 @@ class AccessPolicyService:
                     )
                 )
             ).scalar_one_or_none()
-        if active is None:
-            return None
-        return _snapshot_from_payload(
-            version=active.version,
-            source=active.source,
-            payload=active.policy_data,
-        )
+            if active is None:
+                return None
+            return _snapshot_from_payload(
+                version=active.version,
+                source=active.source,
+                payload=active.policy_data,
+            )
 
 
 def snapshot_from_settings(policy: AccessPolicySettings) -> AccessPolicySnapshot:

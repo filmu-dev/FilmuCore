@@ -411,7 +411,7 @@ async def verify_api_key(request: Request) -> None:
     expected = settings.api_key.get_secret_value()
     key_id = _normalize_key_id(settings.api_key_id) or "primary"
     authorization = request.headers.get("authorization", "")
-    bearer_token = authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else None
+    bearer_token = authorization[7:].strip() if authorization[:7].lower() == "bearer " else None
 
     if settings.oidc.enabled and bearer_token and bearer_token != expected:
         try:

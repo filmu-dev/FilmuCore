@@ -658,11 +658,14 @@ async def get_tenant_quota_policy(
     """Return current quota boundaries for one authorized tenant."""
 
     auth_context = get_auth_context(request)
-    resolved_tenant_id = _resolve_target_tenant_id(
-        auth_context=auth_context,
-        requested_tenant_id=tenant_id,
-        required_permissions=("tenant:quota.read",),
-    )
+    try:
+        resolved_tenant_id = _resolve_target_tenant_id(
+            auth_context=auth_context,
+            requested_tenant_id=tenant_id,
+            required_permissions=("tenant:quota.read",),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     settings = request.app.state.resources.settings
     limits = settings.tenant_quotas.tenants.get(
         resolved_tenant_id,

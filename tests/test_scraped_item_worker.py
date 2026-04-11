@@ -1323,6 +1323,26 @@ def test_enqueue_scrape_item_enforces_tenant_worker_quota(monkeypatch: Any) -> N
     assert len(redis.calls) == 1
 
 
+def test_enqueue_scrape_item_ignores_malformed_tenant_worker_quota(monkeypatch: Any) -> None:
+    settings = _build_worker_settings()
+    settings.tenant_quotas.enabled = True
+    settings.tenant_quotas.tenants = {"tenant-a": {"worker_enqueues_per_minute": "abc"}}
+    monkeypatch.setattr(tasks, "get_settings", lambda: settings)
+    redis = FakeArqRedis()
+
+    enqueued = asyncio.run(
+        tasks.enqueue_scrape_item(
+            redis,
+            item_id="item-1",
+            queue_name="filmu-py",
+            tenant_id="tenant-a",
+        )
+    )
+
+    assert enqueued is True
+    assert len(redis.calls) == 1
+
+
 def test_finalize_item_marks_downloaded_item_completed(monkeypatch: Any) -> None:
     item_id = "item-finalize"
     media_service = FakePipelineMediaService(item_id=item_id, state=ItemState.DOWNLOADED)
