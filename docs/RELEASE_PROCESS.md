@@ -79,9 +79,14 @@ The release automation itself is now split by privilege:
 
 - [`../.github/workflows/release.yml`](../.github/workflows/release.yml) defaults `GITHUB_TOKEN` to read-only workflow-wide
 - the `release` job is the only place that gets write access for PR/tag/release operations
-- the release-PR verify redispatch job gets `actions: write` only at the job level so it can trigger [`../.github/workflows/verify.yml`](../.github/workflows/verify.yml) for release-please branches without granting workflow-wide action mutation rights
+- release-please must run with `RELEASE_PLEASE_TOKEN` under `RELEASE_PLEASE_USE_PAT=true`
 
-This matters because release-please commonly updates the release PR with `GITHUB_TOKEN`, and those updates do not reliably trigger the normal `pull_request` verify workflow. The dispatch job closes that gap by explicitly re-running verify on open `autorelease: pending` PR branches.
+This is required because `main` now uses strict required status checks. GitHub only treats the required `Verify - ...` checks as satisfied when they are reported by a real `pull_request` workflow on the PR merge commit. Release PRs created or updated with plain `GITHUB_TOKEN` do not reliably trigger that path, and a manual `workflow_dispatch` verify run only reports against the branch head, which leaves the merge gate stuck at `Expected — Waiting for status to be reported`.
+
+Configure these repository settings before relying on release automation:
+
+- repository variable `RELEASE_PLEASE_USE_PAT=true`
+- repository secret `RELEASE_PLEASE_TOKEN` with repo/workflow permissions sufficient to create and update release PRs and tags
 
 Required checks should include at least:
 
@@ -138,7 +143,7 @@ Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub s
 
 1. The squash merge pushes one Conventional Commit onto `main`.
 2. [`../.github/workflows/release.yml`](../.github/workflows/release.yml) runs on that push.
-3. Release Please updates or opens the release PR branch.
+3. Release Please updates or opens the release PR branch using `RELEASE_PLEASE_TOKEN`.
 4. Merge the release PR.
 5. Release Please tags the repo and publishes the GitHub release.
 
@@ -147,6 +152,7 @@ Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub s
 - merging with the GitHub `Merge pull request` strategy
 - relying on arbitrary branch commit subjects instead of the PR title
 - expecting pushes to feature branches to create releases directly
+- running release-please with plain `GITHUB_TOKEN` while `main` enforces strict required status checks
 
 Feature-branch pushes should validate code, not create releases.
 
