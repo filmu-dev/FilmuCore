@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from filmu_py.config import Settings
 from filmu_py.db.models import ItemRequestORM, MediaItemORM
 from filmu_py.services.media import MediaItemRecord, ShowCompletionResult, _evaluate_show_completion
@@ -21,6 +23,11 @@ def _build_settings() -> Settings:
         FILMU_PY_REDIS_URL="redis://localhost:6379/0",
         FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def _show_completion_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tasks, "get_settings", _build_settings)
 
 
 @dataclass
