@@ -26,6 +26,13 @@ node_modules/
 
 playback-proof-artifacts/
 
+# Local comparison and research docs that should stay out of the shared repo.
+docs/RIVEN_TS_*.md
+docs/filmcore_vs_*.md
+docs/riven-ts-*.md
+docs/original riven settings.json schema.MD
+docs/rtn_research_report.md
+
 rust/filmuvfs/target/
 target/
 

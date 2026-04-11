@@ -172,7 +172,7 @@ function Test-GrpcReady {
     return $false
 }
 
-$repoRoot = $PSScriptRoot
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $composeFile = Join-Path $repoRoot 'docker-compose.windows.yml'
 $stateDirectory = Join-Path $repoRoot 'playback-proof-artifacts\windows-native-stack'
 $statePath = Join-Path $stateDirectory 'filmuvfs-windows-state.json'
