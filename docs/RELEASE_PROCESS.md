@@ -15,6 +15,27 @@ That means the release path must be predictable:
 7. Release Please opens or updates the release PR
 8. merging that release PR creates the GitHub release and tag
 
+## Single-Use Branch Rule
+
+Non-release branches are single-use.
+
+- create a fresh branch from current `main`
+- open exactly one PR from that branch
+- merge or close that PR
+- do not reuse that same branch name for later work
+
+This especially applies to `codex/*` branches. Reusing a previously merged branch causes stacked history, duplicated release notes, conflict-heavy PRs, and confusing required-check state because the new PR is no longer a clean delta from current `main`.
+
+The only branch family that is intentionally reused is `release-please--*`, because release automation manages that branch lifecycle itself.
+
+If a PR was opened from a reused branch, the recovery path is:
+
+1. create a fresh branch from current `main`
+2. cherry-pick or reapply only the intended commits
+3. open a replacement PR from that fresh branch name
+
+The repository now enforces this with [`../.github/workflows/pr-branch-hygiene.yml`](../.github/workflows/pr-branch-hygiene.yml).
+
 ## Why This Policy Exists
 
 Release Please reads commit subjects on `main`.
@@ -93,6 +114,7 @@ Required checks should include at least:
 
 Add these as required when their runner paths are fully provisioned:
 
+- `PR Branch Hygiene / PR Branch Hygiene`
 - `PR Title / Semantic PR Title`
 - `Verify / Verify - Python Lint`
 - `Verify / Verify - Python Tests`
@@ -131,6 +153,7 @@ Use those instead of screenshots or memory to validate that live branch protecti
 3. Set a Conventional Commit PR title immediately.
 4. Let CI, review, and follow-up commits happen on the PR.
 5. When green and approved, use **Squash and merge**.
+6. Delete the feature branch after merge, or enable GitHub auto-delete for merged branches.
 
 Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub shows `Merge pull request` instead of `Squash and merge`, the repository merge settings are still misconfigured.
 

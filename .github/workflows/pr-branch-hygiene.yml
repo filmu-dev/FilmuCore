@@ -1,0 +1,108 @@
+name: PR Branch Hygiene
+
+run-name: "PR Branch Hygiene #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.head.ref }}"
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-branch-hygiene-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: PR Branch Hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate branch reuse and freshness
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: |
+          set -euo pipefail
+
+          pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+          head_ref="$(jq -r '.pull_request.head.ref' "$GITHUB_EVENT_PATH")"
+          head_sha="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
+          head_repo="$(jq -r '.pull_request.head.repo.full_name' "$GITHUB_EVENT_PATH")"
+          base_ref="$(jq -r '.pull_request.base.ref' "$GITHUB_EVENT_PATH")"
+          base_sha="$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")"
+          is_draft="$(jq -r '.pull_request.draft' "$GITHUB_EVENT_PATH")"
+
+          echo "PR #$pr_number"
+          echo "head_ref=$head_ref"
+          echo "head_sha=$head_sha"
+          echo "base_ref=$base_ref"
+          echo "base_sha=$base_sha"
+          echo "head_repo=$head_repo"
+
+          if [[ "$is_draft" == "true" ]]; then
+            echo "Draft PR detected; hygiene checks still run for early feedback."
+          fi
+
+          if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
+            echo "Fork PR detected; skipping same-repository branch reuse checks."
+            exit 0
+          fi
+
+          if [[ "$head_ref" == release-please--* ]]; then
+            echo "Release-please branch detected; skipping single-use feature branch enforcement."
+          else
+            reused_json="$(curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls?state=closed&head=${GITHUB_REPOSITORY%%/*}:$head_ref&per_page=100")"
+
+            merged_match="$(
+              jq -r --argjson current "$pr_number" '
+                map(select(.number != $current and .merged_at != null))
+                | sort_by(.merged_at)
+                | reverse
+                | .[0]
+                | if . == null then "" else "#\(.number) merged at \(.merged_at)" end
+              ' <<<"$reused_json"
+            )"
+
+            if [[ -n "$merged_match" ]]; then
+              echo "::error::Branch '$head_ref' was already used by $merged_match. Feature and Codex branches are single-use. Create a fresh branch from current main and move only the intended commits."
+              exit 1
+            fi
+          fi
+
+          compare_json="$(curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/compare/$base_sha...$head_sha")"
+
+          behind_by="$(jq -r '.behind_by // 0' <<<"$compare_json")"
+          ahead_by="$(jq -r '.ahead_by // 0' <<<"$compare_json")"
+
+          echo "ahead_by=$ahead_by"
+          echo "behind_by=$behind_by"
+
+          if (( behind_by > 0 )); then
+            echo "::error::Branch '$head_ref' is behind '$base_ref' by $behind_by commit(s). Update the branch from current main before merge so required checks attach to the right merge state and conflicts do not accumulate."
+            exit 1
+          fi
+
+          if (( ahead_by == 0 )); then
+            echo "::error::Branch '$head_ref' does not contain any commits beyond '$base_ref'. Open the PR from a branch that actually carries the intended change."
+            exit 1
+          fi
+
+          echo "PR branch hygiene checks passed."
