@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/filmu-dev/FilmuCore/compare/v0.4.0...v0.5.0) (2026-04-11)
+
+
+### Features
+
+* Codex/vfs semantic alias browse ([#12](https://github.com/filmu-dev/FilmuCore/issues/12)) ([ea8eba1](https://github.com/filmu-dev/FilmuCore/commit/ea8eba1a4652e868e49c797168ad1241e649656c))
+
+
+### Bug Fixes
+
+* address enterprise review findings ([#14](https://github.com/filmu-dev/FilmuCore/issues/14)) ([24b771a](https://github.com/filmu-dev/FilmuCore/commit/24b771a11ee439f0931bd74bf64af0a0289f12fc))
+
 ## [0.4.0](https://github.com/filmu-dev/FilmuCore/compare/v0.3.0...v0.4.0) (2026-04-11)
 
 
