@@ -20,7 +20,8 @@ class RedisStreamClient(Protocol):
         id: str = "*",
         maxlen: int | None = None,
         approximate: bool = True,
-    ) -> bytes | str: ...
+    ) -> bytes | str:
+        pass
 
     async def xread(
         self,
@@ -28,7 +29,8 @@ class RedisStreamClient(Protocol):
         *,
         count: int | None = None,
         block: int | None = None,
-    ) -> list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]]: ...
+    ) -> list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]]:
+        pass
 
     async def xgroup_create(
         self,
@@ -37,7 +39,8 @@ class RedisStreamClient(Protocol):
         id: str = "$",
         *,
         mkstream: bool = False,
-    ) -> object: ...
+    ) -> object:
+        pass
 
     async def xreadgroup(
         self,
@@ -47,9 +50,11 @@ class RedisStreamClient(Protocol):
         *,
         count: int | None = None,
         block: int | None = None,
-    ) -> list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]]: ...
+    ) -> list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]]:
+        pass
 
-    async def xack(self, name: str, groupname: str, *ids: str) -> int: ...
+    async def xack(self, name: str, groupname: str, *ids: str) -> int:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
