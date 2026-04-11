@@ -35,6 +35,9 @@ jobs:
     name: ${{ inputs.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      UV_PROJECT_ENVIRONMENT: .venv-ci
+      UV_LINK_MODE: copy
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -62,4 +65,13 @@ jobs:
 
       - name: Run ${{ inputs.name }}
         run: ${{ inputs.command }}
+
+      - name: Upload check artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.name }}-artifacts-${{ github.run_id }}
+          path: ci-artifacts/**
+          if-no-files-found: ignore
+          retention-days: 14
 

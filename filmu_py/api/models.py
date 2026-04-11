@@ -42,6 +42,8 @@ class PluginCapabilityStatusResponse(BaseModel):
     quarantined: bool = False
     quarantine_reason: str | None = None
     publisher_policy_decision: str | None = None
+    publisher_policy_status: str | None = None
+    quarantine_recommended: bool = False
     source: str | None = None
     warnings: list[str] = []
     error: str | None = None
@@ -55,12 +57,54 @@ class AuthContextResponse(BaseModel):
     actor_id: str
     actor_type: str
     tenant_id: str
+    authorized_tenant_ids: list[str]
+    authorization_tenant_scope: str
     roles: list[str]
     scopes: list[str]
     effective_permissions: list[str]
+    oidc_issuer: str | None = None
+    oidc_subject: str | None = None
+    oidc_token_validated: bool = False
+    access_policy_version: str
+    access_policy_source: str
+    quota_policy_version: str | None = None
     principal_key: str | None = None
     principal_type: str | None = None
     service_account_api_key_id: str | None = None
+
+
+class AuthPolicyDecisionResponse(BaseModel):
+    """One operator-visible authorization policy probe for the current actor."""
+
+    name: str
+    allowed: bool
+    reason: str
+    required_permissions: list[str]
+    matched_permissions: list[str]
+    missing_permissions: list[str]
+    target_tenant_id: str
+    tenant_scope: str
+
+
+class AuthPolicyResponse(BaseModel):
+    """Current actor access-policy posture for operator/admin views."""
+
+    authentication_mode: str
+    actor_id: str
+    actor_type: str
+    tenant_id: str
+    authorization_tenant_scope: str
+    authorized_tenant_ids: list[str]
+    oidc_claims_present: bool
+    oidc_token_validated: bool
+    access_policy_version: str
+    quota_policy_version: str | None = None
+    permissions_model: str
+    policy_source: str
+    role_grants: dict[str, list[str]]
+    decisions: list[AuthPolicyDecisionResponse]
+    warnings: list[str] = []
+    remaining_gaps: list[str] = []
 
 
 class PluginEventStatusResponse(BaseModel):
@@ -70,6 +114,70 @@ class PluginEventStatusResponse(BaseModel):
     publisher: str | None = None
     publishable_events: list[str]
     hook_subscriptions: list[str]
+
+
+class PluginGovernanceSummaryResponse(BaseModel):
+    """Derived plugin trust/isolation rollup for operator views."""
+
+    total_plugins: int
+    loaded_plugins: int
+    load_failed_plugins: int
+    ready_plugins: int
+    unready_plugins: int
+    quarantined_plugins: int
+    quarantine_recommended_plugins: int
+    unsigned_external_plugins: int
+    unverified_signature_plugins: int
+    publisher_policy_rejections: int
+    trust_policy_rejections: int
+    sandbox_profile_counts: dict[str, int]
+    tenancy_mode_counts: dict[str, int]
+    recommended_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class PluginGovernanceResponse(BaseModel):
+    """Plugin trust/isolation policy summary plus current plugin rows."""
+
+    summary: PluginGovernanceSummaryResponse
+    plugins: list[PluginCapabilityStatusResponse]
+
+
+class EnterpriseOperationsSliceResponse(BaseModel):
+    """One enterprise-operations workstream posture summary."""
+
+    name: str
+    status: Literal["ready", "partial", "blocked", "not_ready"]
+    evidence: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class EnterpriseOperationsGovernanceResponse(BaseModel):
+    """Machine-readable posture for the current enterprise operations slices."""
+
+    generated_at: str
+    playback_gate: EnterpriseOperationsSliceResponse
+    identity_authz: EnterpriseOperationsSliceResponse
+    tenant_boundary: EnterpriseOperationsSliceResponse
+    vfs_data_plane: EnterpriseOperationsSliceResponse
+    distributed_control_plane: EnterpriseOperationsSliceResponse
+    sre_program: EnterpriseOperationsSliceResponse
+    operator_log_pipeline: EnterpriseOperationsSliceResponse
+
+
+class TenantQuotaPolicyResponse(BaseModel):
+    """Current tenant quota policy and request-intake visibility."""
+
+    tenant_id: str
+    enabled: bool
+    policy_version: str
+    api_requests_per_minute: int | None = None
+    worker_enqueues_per_minute: int | None = None
+    playback_refreshes_per_minute: int | None = None
+    provider_refreshes_per_minute: int | None = None
+    enforcement_points: list[str]
+    remaining_gaps: list[str] = []
 
 
 class QueueStatusResponse(BaseModel):
@@ -114,10 +222,23 @@ class QueueStatusHistoryPointResponse(BaseModel):
     alert_level: Literal["ok", "warning", "critical"] = "ok"
 
 
+class QueueStatusHistorySummaryResponse(BaseModel):
+    """Derived operator rollup for one bounded queue-history response."""
+
+    points: int
+    latest_alert_level: Literal["ok", "warning", "critical"] = "ok"
+    critical_points: int
+    warning_points: int
+    max_ready_jobs: int
+    max_dead_letter_jobs: int
+    max_oldest_ready_age_seconds: float | None = None
+
+
 class QueueStatusHistoryResponse(BaseModel):
     """Bounded queue-history timeline for operator views."""
 
     queue_name: str
+    summary: QueueStatusHistorySummaryResponse
     history: list[QueueStatusHistoryPointResponse]
 
 
@@ -384,6 +505,14 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_inline_refresh_timeout: int
     vfs_runtime_windows_callbacks_error: int
     vfs_runtime_windows_callbacks_estale: int
+    vfs_runtime_cache_hit_ratio: float
+    vfs_runtime_fallback_success_ratio: float
+    vfs_runtime_prefetch_pressure_ratio: float
+    vfs_runtime_provider_pressure_incidents: int
+    vfs_runtime_fairness_pressure_incidents: int
+    vfs_runtime_rollout_readiness: str
+    vfs_runtime_rollout_reasons: list[str]
+    vfs_runtime_rollout_next_action: str
 
 
 class ServingStatusResponse(BaseModel):

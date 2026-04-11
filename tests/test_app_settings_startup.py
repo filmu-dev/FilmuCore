@@ -84,6 +84,17 @@ class DummySecurityIdentityService:
         return None
 
 
+class DummyAccessPolicyService:
+    """Async access-policy stub for startup tests."""
+
+    def __init__(self) -> None:
+        self.bootstrapped = False
+
+    async def bootstrap(self, settings: Settings) -> object:
+        self.bootstrapped = True
+        return {"version": settings.access_policy.version, "source": "settings"}
+
+
 class DummyCatalogSupplier:
     """Small async supplier stand-in used to exercise the gRPC bridge during lifespan tests."""
 
@@ -261,6 +272,11 @@ def _patch_app_startup(
         app_module,
         "build_security_identity_service",
         lambda _resources: DummySecurityIdentityService(),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_access_policy_service",
+        lambda _resources: DummyAccessPolicyService(),
     )
     monkeypatch.setattr(app_module, "build_playback_refresh_controller", lambda _resources: None)
     monkeypatch.setattr(

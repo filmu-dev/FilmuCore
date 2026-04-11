@@ -17,9 +17,15 @@ These priorities should now be read together with [`ENTERPRISE_GRADE_GAP_MATRIX.
 
 Filmu is expected to become **enterprise-grade and state-of-the-art across all major areas**, not just locally parity-clean with current `riven-ts`.
 
+## Current Filmu vs `riven-ts` state
+
+- The exact comparison target is the clean local `riven-ts` checkout at `E:/Dev/Triven_riven-fork/Triven_backend - ts`, aligned directly to upstream `main` at `e64604a`.
+- Filmu already exceeds that baseline in several areas: cross-process VFS architecture, Windows-native adapter support, playback/operator governance surfaces, persisted OIDC/authz posture visibility, tenant quota posture, and plugin trust/publisher policy depth.
+- The remaining work is therefore not "reach first parity." It is to turn those advantages into enterprise-grade enforced operations while closing the smaller number of areas where `riven-ts` still leads, especially sandboxed heavy-stage breadth, package/plugin ecosystem breadth, and externally provisioned operations tooling.
+
 ---
 
-## Priority 1 - Close the remaining playback parity gap
+## Priority 1 - Promote playback proof into enforced merge policy
 
 Detailed playback/readiness breakdown: [`LOCAL_FRONTEND_TESTING_READINESS.md`](../LOCAL_FRONTEND_TESTING_READINESS.md) and [`PHASE_C_ROUTE_SURFACE_MATRIX.md`](PHASE_C_ROUTE_SURFACE_MATRIX.md).
 
@@ -30,7 +36,7 @@ The active next step is hardening the now-real playback surface for the current 
    - the playback gate workflow now also captures `playback-proof-artifacts/github-main-policy-expected.json`, so required-check promotion can use artifacted expected policy instead of screenshots or memory
 2. keep the GitHub-hosted Linux runner prerequisites, external frontend checkout variables, and media-server secrets intentionally configured for that workflow (`FILMU_FRONTEND_REPOSITORY` when overriding the default frontend checkout, plus `PLEX_TOKEN` / `EMBY_API_KEY` when provider parity should auto-run), and validate them with [`../scripts/check_playback_gate_runner.ps1`](../scripts/check_playback_gate_runner.ps1); Windows dev hosts are expected to fail the Linux `/dev/fuse` prerequisite
 3. continue using the optional Plex-compatible stub proof, the real Jellyfin/frontend proof stack, the native Windows WinFSP gate, the now-working Docker Plex path, and the local Emby container as regression layers beneath the merged workflow
-4. keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility in the proof artifact bundle
+4. keep the newly explicit Docker Plex proof checks green in repeated runs: host-binary freshness, entry-id refresh-identity visibility, foreground-fetch/coalescing visibility in the proof artifact bundle, and the new playback-proof enterprise wrapper now emits `environment_class` plus threshold policy in its summary JSON so merge-policy promotion can reason from artifacts instead of free-form notes
 5. keep the new thresholded Windows soak profiles green in repeated operator runs: `continuous`, `seek`, `concurrent`, and `full` now exist on top of [`../scripts/run_windows_vfs_soak.ps1`](../scripts/run_windows_vfs_soak.ps1), [`../scripts/run_windows_vfs_soak_stability.ps1`](../scripts/run_windows_vfs_soak_stability.ps1) now aggregates repeated runs across named environment classes, they now also capture backend `/api/v1/stream/status` VFS governance snapshots plus `backend_vfs_governance_delta`, live/peak prefetch-depth, and chunk-coalescing evidence when the backend is reachable, and the next step is repeatability across more than one environment class rather than inventing another soak harness
    - the stricter local wrapper now also exists as `proof:windows:vfs:soak:enterprise`, requiring runtime-status capture, backend-status capture, and zero tolerated reconnect/provider-pressure/fatal incidents for the selected repeated profile set
 
@@ -39,8 +45,8 @@ Why first:
 - Full current-frontend local playback proof is now present, the merged GitHub-hosted workflow has already gone green on the last playback PR, and the next risk is drift or policy mismatch rather than missing workflow wiring.
 - Local Plex and Emby containers are now provisioned in Compose, native Windows Jellyfin plus Emby are already validated on `C:\FilmuCoreVFS`, the isolated Docker Plex path reran green through repeatable proof coverage against the shared WSL host mount on April 9, 2026, and the repo now has a dedicated native Windows provider gate for Jellyfin/Emby/Plex in [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1). Native Windows Plex is now green too, so the next parity step is no longer bring-up; it is keeping the now-explicit Docker evidence checks and the native Windows provider gate green while promoting both into CI/merge policy.
 - It aligns with the backend-as-motor principle without reopening already-delivered Phase C breadth.
-- The playback harness now has live-green preferred-client proof plus repeated green local runs, the selected direct stale-link repair now persists refreshed leases across session boundaries, selected media-entry-backed remote-HLS winners can now also self-heal once inline on real upstream playlist/segment failure, that inline repair path is now explicitly visible on `/api/v1/stream/status`, and the GitHub-hosted CI workflow now fail-fast validates runner readiness, conditionally runs the provider gate, uploads artifacts, and covers `main`/`merge_group` traffic. The fastest next step is therefore repeated stability evidence plus explicit validation of live GitHub policy state, not more harness design.
-- The playback harness now has live-green preferred-client proof plus repeated green local runs, the selected direct stale-link repair now persists refreshed leases across session boundaries, selected media-entry-backed remote-HLS winners can now also self-heal once inline on real upstream playlist/segment failure, that inline repair path is now explicitly visible on `/api/v1/stream/status`, and the GitHub-hosted CI workflow now fail-fast validates runner readiness, enforces the provider gate, uploads artifacts, and covers `main`/`merge_group` traffic. The fastest next step is therefore runner provisioning plus branch-protection / merge-policy promotion rather than more harness design.
+- The playback harness now has live-green preferred-client proof plus repeated green local runs, the selected direct stale-link repair now persists refreshed leases across session boundaries, selected media-entry-backed remote-HLS winners can now also self-heal once inline on real upstream playlist/segment failure, that inline repair path is now explicitly visible on `/api/v1/stream/status`, and the GitHub-hosted CI workflow now fail-fast validates runner readiness, enforces the provider gate, uploads artifacts, and covers `main`/`merge_group` traffic. The fastest next step is therefore runner provisioning plus branch-protection / merge-policy promotion rather than more harness design or first-parity work.
+- [`GET /api/v1/operations/governance`](../../filmu_py/api/routes/default.py) now exposes playback-gate promotion posture and required actions so admin-host validation is visible as an explicit partial state instead of buried in docs.
 - Mounted/VFS operator visibility is also no longer split between the Python bridge and sidecar-local artifacts: `/api/v1/stream/status` now reports FilmuVFS catalog watch-session churn, reconnect-delta behavior, supplier failure classes, provider-backed refresh outcomes, explicit inline refresh request outcomes from the gRPC bridge, and additive `vfs_runtime_*` counters ingested from the Rust sidecar snapshot, so the next observability step is failure-taxonomy refinement and repeated soak evidence rather than first cross-process status exposure.
 - The Rust sidecar still emits a structured `filmuvfs-runtime-status.json` snapshot under the managed Windows-native state directory, and the soak/status scripts still consume it directly. With the Python API now ingesting the same file, the soak gate now using runtime-derived checks for upstream provider pressure, cold-fetch churn, unrecovered stale reads, fatal mounted-read failures, live prefetch scheduler depth, and chunk-coalescing wait behavior, the next mounted observability step is no longer first convergence between Rust and Python status vocabularies, first threshold attachment, first startup-latency exposure, or first coalescing/prefetch-depth surfacing; it is repeated real-environment proof plus any remaining active-stream/data-plane classes that still cannot be diagnosed from the current snapshots alone.
 - Backend HTTP fallback behavior is no longer one of those remaining blind spots either: the mounted runtime now reports fallback attempts/success/failure by reason through `vfs_runtime_backend_fallback_*`, so the next mounted observability step is narrower still: repeated live soak evidence under sustained load, threshold tuning against the richer runtime surfaces, and only then any additional data-plane counters that remain genuinely missing.
@@ -93,7 +99,7 @@ Remaining orchestration gaps:
 Detailed plugin-platform breakdown: [`PLUGIN_CAPABILITY_MODEL_MATRIX.md`](PLUGIN_CAPABILITY_MODEL_MATRIX.md).
 
 Current plugin support now includes packaged entry-point discovery, plugin-scoped settings, datasource-aware `PluginContext` construction, runtime capability registration across scraper/downloader/indexer/content-service/notification/event-hook capabilities, namespaced publishable-event governance, built-in Torrentio plus real MDBList/webhook-notification/StremThru integrations, runtime visibility through `/api/v1/plugins` plus `/api/v1/plugins/events`, and an explicit trust/policy baseline for `publisher`, `release_channel`, `trust_level`, `permission_scopes`, `tenancy_mode`, and publisher-policy evaluation.
-Current plugin support now also includes provenance/isolation metadata (`source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, quarantine fields), loader-side digest verification, trust-store-backed signature verification, quarantine refusal, publisher-policy enforcement, and operator-visible provenance/isolation/policy fields on `/api/v1/plugins`.
+Current plugin support now also includes provenance/isolation metadata (`source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, quarantine fields), loader-side digest verification, trust-store-backed signature verification, quarantine refusal, publisher lifecycle/distribution/permission-scope policy, minimum-trust enforcement, operator-visible provenance/isolation/policy fields on `/api/v1/plugins`, and the `/api/v1/plugins/governance` summary for quarantine, signature, publisher-policy, sandbox, tenancy, readiness, and recommended operator action posture.
 
 Next capability layers should include:
 
@@ -102,7 +108,7 @@ Next capability layers should include:
 - ✅ Webhook notifications — real NotificationPlugin + PluginEventHookWorker implementation
 - ✅ Overseerr webhook intake at `/api/v1/webhook/overseerr`
 - deepen the now-real StremThru integration with stronger operator-facing health/compatibility policy rather than treating it as a remaining stub; the first additive readiness metadata now ships on [`GET /api/v1/plugins`](../../filmu_py/api/routes/default.py)
-- deepen the now-landed trust-store/publisher-policy baseline into stronger runtime sandboxing, publisher lifecycle controls, artifact provenance/distribution policy, and operator quarantine/revocation workflows
+- deepen the now-landed trust-store/publisher-policy baseline into stronger runtime sandboxing, artifact provenance/distribution policy, and operator quarantine/revocation workflows above the newly landed publisher lifecycle/distribution/scope controls
 - decide whether hook execution should remain in-process or grow into a durable/queued model
 - continue broadening capabilities only where they improve real platform breadth (see `PLUGIN_CAPABILITY_MODEL_MATRIX.md` for more details)
 
@@ -130,6 +136,7 @@ Recent baseline completed here:
 - the Rust sidecar now also deduplicates concurrent inline stale-link refreshes per catalog entry and reuses already-refreshed catalog URLs for later mounted stale reads instead of fanning out duplicate refresh RPCs
 - the Rust sidecar now also enforces a first explicit per-handle background-prefetch fairness cap, and the runtime snapshot exposes that operator policy alongside live prefetch depth so multi-reader pressure is diagnosable instead of implicit
 - the Rust sidecar now also counts fairness denials and global backpressure denials, and `/api/v1/stream/status` exposes both via `vfs_runtime_prefetch_*` fields so operator soak evidence can distinguish per-handle starvation from global saturation
+- `/api/v1/stream/status` now also derives `vfs_runtime_cache_hit_ratio`, `vfs_runtime_fallback_success_ratio`, `vfs_runtime_prefetch_pressure_ratio`, provider/fairness pressure incident counts, `vfs_runtime_rollout_readiness`, `vfs_runtime_rollout_reasons`, and `vfs_runtime_rollout_next_action` from the mounted runtime snapshot so soak artifacts can be compared as readiness signals instead of only raw counters
 
 Build toward:
 
@@ -220,25 +227,29 @@ Detailed observability breakdown: [`OBSERVABILITY_MATURITY_MATRIX.md`](OBSERVABI
 
 After the shipped layer-1 baseline, deepen:
 
-- shipper/search workflow above the now-landed durable structured logs
-- queue/backlog/control-plane lag history and alerting are now baseline through `/api/v1/workers/queue`, `/api/v1/workers/queue/history`, and bounded alert classification; the remaining work is broader lag/backlog history depth, replay taxonomy, and stronger operator automation rather than first instrumentation
+- shipper/search workflow above the now-landed durable structured logs; the first Vector tailing config and log-pipeline contract proof exist, so the remaining work is external collector/search provisioning and alert integration
+- queue/backlog/control-plane lag history and alerting are now baseline through `/api/v1/workers/queue`, `/api/v1/workers/queue/history`, bounded alert classification, and a Redis Streams replay journal with consumer-group primitives; the remaining work is broader lag/backlog history depth, subscriber-resume/node-coordination semantics, and stronger operator automation rather than first instrumentation
 - mounted stream/VFS data-plane metrics
 - correlation across API, workers, plugins, and stream control-plane events
+- [`OPERATOR_LOG_PIPELINE.md`](../OPERATOR_LOG_PIPELINE.md) now defines the expected shipper/search/replay taxonomy and alerting baseline; the next implementation gap is promoting the Vector/search contract into an environment-owned collector path rather than deciding the vocabulary.
 
 ---
 
 ## Priority 7 — Turn interim auth context into a real enterprise identity plane
 
-Current implementation now carries additive actor/tenant/role/scope context through authenticated API requests, computes `effective_permissions`, emits structured audit logs for privileged settings/API-key mutations, rotates `api_key_id` alongside the secret itself, and persists actor-aware service-account key identity.
+Current implementation now carries additive actor/tenant/role/scope context through authenticated API requests, computes `effective_permissions` from persisted access-policy revisions, validates OIDC bearer JWTs against configured issuer/audience/JWKS when enabled, emits structured audit logs for privileged settings/API-key mutations plus authorization allow/deny decisions, rotates `api_key_id` alongside the secret itself, and persists actor-aware service-account key identity.
+Current implementation also exposes [`GET /api/v1/auth/policy`](../../filmu_py/api/routes/default.py), [`GET /api/v1/tenants/quota`](../../filmu_py/api/routes/default.py), and [`GET /api/v1/operations/governance`](../../filmu_py/api/routes/default.py), so access-policy posture, quota posture, OIDC validation state, worker-enqueue quota coverage, VFS data-plane posture, and remaining ABAC gaps are visible to operators.
 
 That is not yet a finished enterprise identity system.
 
 Next identity/authz work should include:
 
-- OIDC/SSO readiness instead of header-carried operator metadata
+- SSO rollout hardening above the current OIDC validation baseline: IdP docs, subject mapping policy, JWKS rotation operations, and deny/failure dashboards
 - deeper RBAC/ABAC policy evaluation across API, workers, plugins, and VFS control-plane actions
-- tenant-scoped authorization, quotas, audit retention, and operator-visible access policy state
+- operator-managed access-policy CRUD/version workflows, richer tenant quota enforcement across provider/playback/plugin/VFS paths, audit retention, and operator-managed approval workflows
 - broader tenancy propagation across plugin execution, VFS governance, metrics ownership, and control-plane attribution
+
+[`OPERATIONS_PROGRAM.md`](../OPERATIONS_PROGRAM.md) now provides the initial SRE/rollback/backup/incident/canary/capacity policy baseline plus a runnable backup/restore proof script. The next step is exercising those runbooks against real isolated environments and promoting proof artifacts into CI/release evidence, not drafting the first policy from scratch.
 
 Why continuously:
 
@@ -275,10 +286,10 @@ Next:
 Next 5 slices after that:
 
 1. Admin-authenticated live GitHub `main` policy validation plus enforced merge-policy promotion for the playback gate using the now-canonical expected-policy artifact/check names.
-2. Multi-environment Windows/Linux mounted-soak hardening with threshold tuning, rollout criteria, and richer mounted data-plane diagnostics backed by the new fairness/global-backpressure counters.
-3. Real RBAC/ABAC and tenant-scoped authorization depth across API, workers, plugins, and VFS control-plane actions on top of the new effective-permission baseline.
-4. Broader tenancy propagation into plugin execution, quotas, metrics ownership, and VFS/control-plane attribution so `tenant_id` becomes an operational boundary instead of only persisted metadata.
-5. Plugin trust/isolation deepening: runtime sandboxing, publisher lifecycle controls, artifact provenance/distribution policy, and operator quarantine/revocation workflows.
+2. Operator-managed access-policy CRUD/version approval flows plus broader RBAC/ABAC and audit-retention depth across API, workers, plugins, and VFS control-plane actions.
+3. Broader tenancy propagation into provider/playback pressure, plugin execution, metrics ownership, and VFS/control-plane attribution so `tenant_id` becomes an operational boundary instead of only persisted metadata.
+4. Multi-environment Windows/Linux mounted-soak hardening with threshold tuning, rollout criteria, and richer mounted data-plane diagnostics backed by the new fairness/global-backpressure counters.
+5. Distributed-control-plane promotion from consumer-group baseline to durable resume offsets, node coordination, failover semantics, and HA-ready operator workflows.
 
 ---
 

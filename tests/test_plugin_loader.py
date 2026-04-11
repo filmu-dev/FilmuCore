@@ -871,3 +871,56 @@ class InvalidSignatureQuery:
     assert len(report.failed) == 1
     assert report.failed[0].plugin_name == "invalid-signature-plugin"
     assert report.failed[0].reason == "plugin_signature_signature_invalid"
+
+
+def test_filesystem_plugin_loader_rejects_revoked_publisher_policy(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    _write_plugin(
+        plugins_dir / "revoked-publisher-plugin",
+        manifest={
+            "name": "revoked-publisher-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "publisher": "filmu-labs",
+            "trust_level": "trusted",
+            "permission_scopes": ["graphql:extend"],
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["RevokedPublisherQuery"]},
+        },
+        module_source="""import strawberry
+
+@strawberry.type
+class RevokedPublisherQuery:
+    @strawberry.field
+    def never_loaded(self) -> str:
+        return "nope"
+""",
+    )
+
+    trust_store_path = tmp_path / "plugin-trust-store.json"
+    trust_store_path.write_text(
+        json.dumps(
+            {
+                "keys": {},
+                "publishers": {
+                    "filmu-labs": {
+                        "status": "revoked",
+                        "quarantine_on_violation": True,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(
+        plugins_dir,
+        registry,
+        trust_store_path=trust_store_path,
+    )
+
+    assert report.loaded == []
+    assert len(report.failed) == 1
+    assert report.failed[0].plugin_name == "revoked-publisher-plugin"
+    assert report.failed[0].reason == "plugin_publisher_policy_publisher_status_revoked"

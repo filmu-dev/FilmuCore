@@ -292,6 +292,11 @@ class ChunkCache:
             self._cache.clear()
             CHUNK_CACHE_BYTES.set(0)
 
+    def max_bytes(self) -> int:
+        """Return the configured byte budget for operator/runtime surfaces."""
+
+        return self._max_bytes
+
     @property
     def stats(self) -> CacheStats:
         with self._lock:

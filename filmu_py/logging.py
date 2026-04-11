@@ -84,6 +84,10 @@ class CorrelationContextFilter(logging.Filter):
 class StructuredJsonFormatter(logging.Formatter):
     """Emit file-backed NDJSON records for operator search and shipping."""
 
+    def __init__(self, *, service_name: str) -> None:
+        super().__init__()
+        self._service_name = service_name
+
     def format(self, record: logging.LogRecord) -> str:
         timestamp = datetime.fromtimestamp(record.created, UTC).isoformat()
         message = record.getMessage()
@@ -96,6 +100,7 @@ class StructuredJsonFormatter(logging.Formatter):
             "log.level": record.levelname,
             "message": payload.get("event") if isinstance(payload.get("event"), str) else message,
             "event.original": message,
+            "service.name": self._service_name,
             "log.logger": record.name,
             "process.pid": record.process,
             "process.thread.name": record.threadName,
@@ -187,7 +192,7 @@ def configure_logging(settings: Settings) -> None:
             encoding="utf-8",
         )
         file_handler.setLevel(level)
-        file_handler.setFormatter(StructuredJsonFormatter())
+        file_handler.setFormatter(StructuredJsonFormatter(service_name=settings.service_name))
         file_handler.addFilter(correlation_filter)
         root_logger.addHandler(file_handler)
 

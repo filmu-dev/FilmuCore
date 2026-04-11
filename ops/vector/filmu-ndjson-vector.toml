@@ -1,0 +1,20 @@
+[sources.filmu_structured_logs]
+type = "file"
+include = ["logs/ecs.json", "logs/ecs.json.*"]
+read_from = "end"
+
+[transforms.filmu_json]
+type = "remap"
+inputs = ["filmu_structured_logs"]
+source = '''
+parsed, err = parse_json(.message)
+if err == null {
+  . = merge(., parsed)
+}
+.filmu.mapping_version = "filmu-ecs-v1"
+'''
+
+[sinks.filmu_search_contract]
+type = "console"
+inputs = ["filmu_json"]
+encoding.codec = "json"

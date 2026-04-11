@@ -20,7 +20,7 @@ The current system uses a split auth model:
    - the current frontend does this in [`hooks.server.ts`](../../../Triven_frontend/src/hooks.server.ts)
 
 2. **Backend API authentication**
-   - handled by a backend API key
+   - handled by a backend API key by default, or by validated OIDC bearer tokens when `FILMU_PY_OIDC` is enabled
    - validated by [`verify_api_key()`](../filmu_py/api/deps.py)
    - now also persisted into first-class tenant/principal/service-account records through [`SecurityIdentityService`](../filmu_py/services/identity.py)
 
@@ -57,6 +57,15 @@ The backend currently accepts the API key from standard compatibility locations 
 
 All `/api/v1/*` routes are protected by router-level dependency wiring in [`create_api_router()`](../filmu_py/api/router.py).
 
+When `FILMU_PY_OIDC.enabled=true`, `Authorization: Bearer ...` can instead carry an OIDC JWT. The backend validates:
+
+- configured issuer and audience
+- allowed signing algorithm
+- JWKS from either inline `jwks_json` or discovered/cached `jwks_url`
+- token signature, expiry, subject, and claims before building the actor context
+
+Invalid OIDC bearer tokens fail closed with `401`; they are not treated as unsigned identity hints.
+
 The request dependency also now persists a first-class identity-plane baseline:
 
 - [`TenantORM`](../filmu_py/db/models.py), [`PrincipalORM`](../filmu_py/db/models.py), and [`ServiceAccountORM`](../filmu_py/db/models.py) are created by migration [`20260410_0022_identity_and_tenancy.py`](../filmu_py/db/alembic/versions/20260410_0022_identity_and_tenancy.py)
@@ -70,9 +79,22 @@ The control plane is also stricter than the earlier baseline:
 
 - privileged compatibility mutations now require explicit `x-actor-roles` values such as `platform:admin`
 - API-key authentication no longer implies admin privileges automatically
-- the backend now computes `effective_permissions` from roles and scopes and exposes them on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
+- the backend now computes `effective_permissions` from roles, scopes, and settings-backed role grants and exposes them on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
+- the backend now also evaluates tenant-aware authorization decisions through [`evaluate_permissions()`](../filmu_py/authz.py) instead of only checking whether a permission string exists
+- [`GET /api/v1/auth/policy`](../filmu_py/api/routes/default.py) exposes standard authorization probes, matched and missing permissions, tenant-scope classification, OIDC validation state, access-policy version/source, role grants, warnings, and remaining policy gaps for the current actor
+- startup now bootstraps a persisted access-policy revision through [`AccessPolicyService`](../filmu_py/services/access_policy.py), and settings saves refresh the active revision instead of leaving policy inventory purely process-local
+- privileged authorization checks now emit allow/deny audit events when policy decision auditing is enabled, so policy evaluation is observable rather than only implicit in HTTP results
 - tenant-aware intake paths now persist the resolved `tenant_id` on created `media_items` and `item_requests`
 - tenant-scoped reads now also reach item detail/listing, calendar, and stats surfaces instead of stopping at write-time persistence
+
+The request identity surface now also carries delegated tenant scope and OIDC identity fields:
+
+- `x-actor-authorized-tenants` can declare delegated tenant scope for cross-tenant control-plane reads
+- `x-auth-issuer` and `x-auth-subject` remain compatibility hints for API-key gateway traffic, but they are explicitly reported as not token-validated
+- validated OIDC tokens can derive actor id, tenant id, authorized tenants, roles, and scopes from configured claims
+- [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py) now returns `authorized_tenant_ids`, `authorization_tenant_scope`, `oidc_issuer`, `oidc_subject`, `oidc_token_validated`, `access_policy_version`, and `quota_policy_version` alongside `effective_permissions`
+
+Remaining identity gaps: OIDC/SSO is now real but still rollout-gated; persisted policy revisions exist but operator-managed CRUD/version approval workflows do not; ABAC is still mostly permission plus tenant-scope based; frontend session-to-backend subject mapping still needs product-specific rollout.
 
 ---
 
@@ -132,8 +154,8 @@ The current API-key model is acceptable for the present BFF architecture, but th
 - stronger service-to-service auth
 - scoped machine credentials above the new persisted `ServiceAccountORM` baseline
 - internal admin/service roles
-- RBAC/ABAC policy evaluation above the current `effective_permissions` baseline
+- broader RBAC/ABAC policy evaluation above the current `effective_permissions`, persisted policy revision, and tenant-aware authorization baseline
 - plugin/service capability boundaries
-- eventual user-aware audit trails and tenant-scoped authorization above the new persisted identity catalog
+- eventual user-aware audit trails, real OIDC/SSO integration, and tenant-scoped authorization beyond the current delegated-tenant compatibility headers
 
 That evolution should not break the current principle that frontend sessions and backend execution auth are separate concerns unless there is a clear product reason to merge them.

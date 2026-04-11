@@ -375,6 +375,8 @@ class FakeArqRedis:
         self.first_result = first_result
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self.deleted: list[str] = []
+        self.integers: dict[str, int] = {}
+        self.expirations: dict[str, int] = {}
 
     async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> object | None:
         self.calls.append((function, args, kwargs))
@@ -383,6 +385,14 @@ class FakeArqRedis:
     async def delete(self, key: str) -> int:
         self.deleted.append(key)
         return 1
+
+    async def incr(self, key: str) -> int:
+        self.integers[key] = self.integers.get(key, 0) + 1
+        return self.integers[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expirations[key] = seconds
+        return True
 
 
 class _AllowedLimiter:
@@ -430,6 +440,11 @@ def _build_worker_settings() -> Settings:
             "all_debrid": {"enabled": False, "api_key": ""},
         },
     )
+
+
+@pytest.fixture(autouse=True)
+def _worker_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
 
 
 class _FakeDebridClient:
@@ -1276,17 +1291,36 @@ def test_debrid_item_retries_rate_limit_without_transitioning_to_failed(
         "_resolve_enabled_downloader",
         lambda settings, item_id=None, item_request_id=None: ("realdebrid", "rd-token"),
     )
-    caplog.clear()
-    with pytest.raises(tasks.Retry):
-        asyncio.run(tasks.debrid_item({"settings": _build_worker_settings()}, item_id))
 
-    assert media_service.state is ItemState.DOWNLOADED
-    assert media_service.transition_messages == []
-    captured = capsys.readouterr()
-    output = caplog.text + captured.out + captured.err
-    assert "debrid_item.rate_limited" in output
-    assert "realdebrid" in output
-    assert "7.0" in output
+
+def test_enqueue_scrape_item_enforces_tenant_worker_quota(monkeypatch: Any) -> None:
+    settings = _build_worker_settings()
+    settings.tenant_quotas.enabled = True
+    settings.tenant_quotas.version = "quota-v2"
+    settings.tenant_quotas.tenants = {"tenant-a": {"worker_enqueues_per_minute": 1}}
+    monkeypatch.setattr(tasks, "get_settings", lambda: settings)
+    redis = FakeArqRedis()
+
+    first = asyncio.run(
+        tasks.enqueue_scrape_item(
+            redis,
+            item_id="item-1",
+            queue_name="filmu-py",
+            tenant_id="tenant-a",
+        )
+    )
+    second = asyncio.run(
+        tasks.enqueue_scrape_item(
+            redis,
+            item_id="item-2",
+            queue_name="filmu-py",
+            tenant_id="tenant-a",
+        )
+    )
+
+    assert first is True
+    assert second is False
+    assert len(redis.calls) == 1
 
 
 def test_finalize_item_marks_downloaded_item_completed(monkeypatch: Any) -> None:

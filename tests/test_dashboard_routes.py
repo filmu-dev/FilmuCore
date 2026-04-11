@@ -6,19 +6,23 @@ import time
 from dataclasses import dataclass
 from typing import Any, cast
 
+from authlib.jose import jwt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
+from redis.exceptions import ResponseError
 
 from filmu_py.api.router import create_api_router
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
+from filmu_py.core.chunk_engine import ChunkCache
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
+from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.media import StatsProjection, StatsYearReleaseRecord
 
@@ -28,8 +32,11 @@ class DummyRedis:
 
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
+        self.integers: dict[str, int] = {}
         self.sorted_sets: dict[str, dict[str, float]] = {}
         self.lists: dict[str, list[bytes]] = {}
+        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self.stream_groups: dict[str, dict[str, set[str]]] = {}
 
     def ping(self, **kwargs: Any) -> bool:
         _ = kwargs
@@ -44,6 +51,98 @@ class DummyRedis:
 
     async def delete(self, key: str) -> None:
         self.values.pop(key, None)
+
+    async def incr(self, key: str) -> int:
+        self.integers[key] = self.integers.get(key, 0) + 1
+        return self.integers[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        _ = (key, seconds)
+        return True
+
+    async def xadd(
+        self,
+        name: str,
+        fields: dict[str, str],
+        *,
+        id: str = "*",
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        _ = (id, approximate)
+        bucket = self.streams.setdefault(name, [])
+        event_id = f"{len(bucket) + 1}-0"
+        bucket.append((event_id, fields))
+        if maxlen is not None and len(bucket) > maxlen:
+            del bucket[: len(bucket) - maxlen]
+        return event_id
+
+    async def xread(
+        self,
+        streams: dict[str, str],
+        *,
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        _ = block
+        rows: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        for stream_name, offset in streams.items():
+            selected = [
+                item for item in self.streams.get(stream_name, []) if _stream_id_gt(item[0], offset)
+            ]
+            if count is not None:
+                selected = selected[:count]
+            rows.append((stream_name, selected))
+        return rows
+
+    async def xgroup_create(
+        self,
+        name: str,
+        groupname: str,
+        id: str = "$",
+        *,
+        mkstream: bool = False,
+    ) -> bool:
+        _ = (id, mkstream)
+        groups = self.stream_groups.setdefault(name, {})
+        if groupname in groups:
+            raise ResponseError("BUSYGROUP Consumer Group name already exists")
+        groups[groupname] = set()
+        return True
+
+    async def xreadgroup(
+        self,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        *,
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        _ = (consumername, block)
+        rows: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        for stream_name, offset in streams.items():
+            selected = [
+                item for item in self.streams.get(stream_name, []) if _stream_id_gt(item[0], "0-0")
+            ]
+            if offset != ">":
+                selected = [item for item in selected if _stream_id_gt(item[0], offset)]
+            if count is not None:
+                selected = selected[:count]
+            self.stream_groups.setdefault(stream_name, {}).setdefault(groupname, set()).update(
+                item[0] for item in selected
+            )
+            rows.append((stream_name, selected))
+        return rows
+
+    async def xack(self, name: str, groupname: str, *ids: str) -> int:
+        group = self.stream_groups.setdefault(name, {}).setdefault(groupname, set())
+        acked = 0
+        for event_id in ids:
+            if event_id in group:
+                group.remove(event_id)
+                acked += 1
+        return acked
 
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
@@ -130,6 +229,12 @@ def _score_matches(score: float, bound: str | int, *, lower: bool) -> bool:
     return score >= target if lower else score <= target
 
 
+def _stream_id_gt(left: str, right: str) -> bool:
+    left_ms, left_seq = (int(part) for part in left.split("-", 1))
+    right_ms, right_seq = (int(part) for part in right.split("-", 1))
+    return (left_ms, left_seq) > (right_ms, right_seq)
+
+
 class DummyDatabaseRuntime:
     """No-op DB runtime placeholder for application resources in tests."""
 
@@ -147,19 +252,43 @@ class DummyMediaService:
         _ = tenant_id
         return self.snapshot
 
+    async def get_calendar_snapshot(
+        self,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        _ = (start_date, end_date, tenant_id)
+        return {}
 
-def _build_settings(*, arq_enabled: bool = False, temporal_enabled: bool = False) -> Settings:
+
+class DummyAccessPolicyService:
+    """Minimal access-policy inventory stub for route tests."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.snapshot = snapshot_from_settings(settings.access_policy)
+
+
+def _build_settings(
+    *,
+    arq_enabled: bool = False,
+    temporal_enabled: bool = False,
+    **overrides: Any,
+) -> Settings:
     """Create deterministic settings payload for dashboard compatibility tests."""
 
-    return Settings(
-        FILMU_PY_API_KEY=SecretStr("a" * 32),
-        FILMU_PY_POSTGRES_DSN="postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
-        FILMU_PY_REDIS_URL=AnyUrl("redis://localhost:6379/0"),
-        FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
-        FILMU_PY_LOG_LEVEL="INFO",
-        FILMU_PY_ARQ_ENABLED=arq_enabled,
-        FILMU_PY_TEMPORAL_ENABLED=temporal_enabled,
-    )
+    payload: dict[str, Any] = {
+        "FILMU_PY_API_KEY": SecretStr("a" * 32),
+        "FILMU_PY_POSTGRES_DSN": "postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
+        "FILMU_PY_REDIS_URL": AnyUrl("redis://localhost:6379/0"),
+        "FILMU_PY_RUN_MIGRATIONS_ON_STARTUP": False,
+        "FILMU_PY_LOG_LEVEL": "INFO",
+        "FILMU_PY_ARQ_ENABLED": arq_enabled,
+        "FILMU_PY_TEMPORAL_ENABLED": temporal_enabled,
+    }
+    payload.update(overrides)
+    return Settings(**payload)
 
 
 def _build_snapshot() -> StatsProjection:
@@ -192,13 +321,18 @@ def _build_client(
     *,
     arq_enabled: bool = False,
     temporal_enabled: bool = False,
+    settings_overrides: dict[str, Any] | None = None,
     plugin_registry: PluginRegistry | None = None,
     plugin_load_report: Any | None = None,
     security_identity_service: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
-    settings = _build_settings(arq_enabled=arq_enabled, temporal_enabled=temporal_enabled)
+    settings = _build_settings(
+        arq_enabled=arq_enabled,
+        temporal_enabled=temporal_enabled,
+        **(settings_overrides or {}),
+    )
     redis = DummyRedis()
     registry = GraphQLPluginRegistry()
 
@@ -207,6 +341,7 @@ def _build_client(
         settings=settings,
         redis=redis,  # type: ignore[arg-type]
         cache=CacheManager(redis=redis, namespace="test"),  # type: ignore[arg-type]
+        chunk_cache=ChunkCache(max_bytes=8 * 1024 * 1024),
         rate_limiter=DistributedRateLimiter(redis=redis),  # type: ignore[arg-type]
         event_bus=EventBus(),
         db=DummyDatabaseRuntime(),  # type: ignore[arg-type]
@@ -214,6 +349,8 @@ def _build_client(
         graphql_plugin_registry=registry,
         plugin_registry=plugin_registry,
         security_identity_service=security_identity_service,
+        access_policy_service=DummyAccessPolicyService(settings),
+        access_policy_snapshot=snapshot_from_settings(settings.access_policy),
     )
     app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
@@ -329,6 +466,8 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": None,
             "warnings": [],
             "error": None,
@@ -359,6 +498,8 @@ def test_plugins_route_returns_loaded_capability_plugins() -> None:
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": None,
             "warnings": [],
             "error": None,
@@ -420,6 +561,60 @@ def test_plugin_events_route_returns_declared_events_and_hook_subscriptions() ->
     ]
 
 
+def test_plugin_governance_route_returns_operator_policy_summary() -> None:
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "external-scraper",
+                "version": "1.0.0",
+                "api_version": "1",
+                "distribution": "filesystem",
+                "publisher": "community",
+                "release_channel": "stable",
+                "trust_level": "community",
+                "sandbox_profile": "restricted",
+                "tenancy_mode": "tenant",
+                "entry_module": "plugin.py",
+                "scraper": "ExternalScraper",
+            }
+        )
+    )
+    plugin_registry.register_capability(
+        plugin_name="external-scraper",
+        kind=PluginCapabilityKind.SCRAPER,
+        implementation=object(),
+    )
+
+    client = _build_client(plugin_registry=plugin_registry)
+    response = client.get("/api/v1/plugins/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"] == {
+        "total_plugins": 1,
+        "loaded_plugins": 1,
+        "load_failed_plugins": 0,
+        "ready_plugins": 1,
+        "unready_plugins": 0,
+        "quarantined_plugins": 0,
+        "quarantine_recommended_plugins": 0,
+        "unsigned_external_plugins": 1,
+        "unverified_signature_plugins": 0,
+        "publisher_policy_rejections": 0,
+        "trust_policy_rejections": 0,
+        "sandbox_profile_counts": {"restricted": 1},
+        "tenancy_mode_counts": {"tenant": 1},
+        "recommended_actions": ["require_external_plugin_signature"],
+        "remaining_gaps": [
+            "runtime sandbox isolation is still in-process",
+            "operator quarantine/revocation persistence is still trust-store driven",
+            "external plugin artifact provenance is not yet SBOM/signing-policy complete",
+        ],
+    }
+    assert body["plugins"][0]["name"] == "external-scraper"
+
+
 def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness() -> None:
     plugin_registry = PluginRegistry()
     plugin_registry.register_manifest(
@@ -477,6 +672,8 @@ def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness()
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": "builtin",
             "warnings": [],
             "error": None,
@@ -527,6 +724,8 @@ def test_plugins_route_surfaces_load_failures_from_startup_report() -> None:
             "quarantined": False,
             "quarantine_reason": None,
             "publisher_policy_decision": None,
+            "publisher_policy_status": None,
+            "quarantine_recommended": False,
             "source": "entry_point",
             "warnings": [],
             "error": "api_version_incompatible",
@@ -557,13 +756,190 @@ def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> 
         "actor_id": "operator-1",
         "actor_type": "service",
         "tenant_id": "tenant-main",
+        "authorized_tenant_ids": ["tenant-main"],
+        "authorization_tenant_scope": "all",
         "roles": ["platform:admin", "playback:operator"],
         "scopes": ["backend:admin", "playback:read"],
         "effective_permissions": ["*", "playback:operate", "playback:read"],
+        "oidc_issuer": None,
+        "oidc_subject": None,
+        "oidc_token_validated": False,
+        "access_policy_version": "default-v1",
+        "access_policy_source": "settings",
+        "quota_policy_version": None,
         "principal_key": "operator-1",
         "principal_type": "service",
         "service_account_api_key_id": "primary",
     }
+
+
+def test_auth_context_route_accepts_valid_oidc_bearer_token() -> None:
+    token = jwt.encode(
+        {"alg": "HS256", "kid": "test"},
+        {
+            "iss": "https://issuer.example.test",
+            "sub": "user-123",
+            "aud": "filmu-api",
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+            "tenant_id": "tenant-oidc",
+            "roles": ["playback:operator"],
+            "scope": "library:read playback:operate",
+        },
+        {"kty": "oct", "k": "c2VjcmV0", "kid": "test"},
+    )
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "issuer": "https://issuer.example.test",
+                "audience": "filmu-api",
+                "jwks_json": {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "test"}]},
+                "allowed_algorithms": ["HS256"],
+            }
+        }
+    )
+
+    token_value = token.decode("utf-8") if isinstance(token, bytes) else token
+    response = client.get(
+        "/api/v1/auth/context",
+        headers={"authorization": f"Bearer {token_value}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["authentication_mode"] == "oidc"
+    assert body["actor_id"] == "user-123"
+    assert body["tenant_id"] == "tenant-oidc"
+    assert body["oidc_issuer"] == "https://issuer.example.test"
+    assert body["oidc_subject"] == "user-123"
+    assert body["oidc_token_validated"] is True
+    assert body["effective_permissions"] == ["library:read", "playback:operate", "playback:read"]
+
+
+def test_oidc_can_disable_api_key_fallback() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "issuer": "https://issuer.example.test",
+                "audience": "filmu-api",
+                "jwks_json": {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "test"}]},
+                "allowed_algorithms": ["HS256"],
+                "allow_api_key_fallback": False,
+            }
+        }
+    )
+
+    response = client.get("/api/v1/auth/context", headers=_headers())
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "OIDC bearer token required"
+
+
+def test_auth_policy_route_returns_authorization_posture() -> None:
+    client = _build_client()
+
+    response = client.get(
+        "/api/v1/auth/policy",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "library:read,playback:operate",
+            "x-auth-issuer": "https://issuer.example.test",
+            "x-auth-subject": "user-123",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["permissions_model"] == "role_scope_effective_permissions_with_tenant_scope"
+    assert body["policy_source"] == "settings"
+    assert body["access_policy_version"] == "default-v1"
+    assert body["quota_policy_version"] is None
+    assert body["authorization_tenant_scope"] == "self"
+    assert body["oidc_claims_present"] is True
+    assert body["oidc_token_validated"] is False
+    assert body["warnings"] == [
+        "authentication is still API-key anchored",
+        "oidc claims were supplied by headers and were not token-validated",
+    ]
+    assert body["role_grants"]["platform:admin"] == ["*"]
+    decisions = {decision["name"]: decision for decision in body["decisions"]}
+    assert decisions["library_read"]["allowed"] is True
+    assert decisions["playback_operate"]["allowed"] is True
+    assert decisions["settings_write"]["allowed"] is False
+    assert decisions["settings_write"]["missing_permissions"] == ["settings:write"]
+    assert decisions["api_key_rotate"]["allowed"] is False
+    assert body["remaining_gaps"] == [
+        "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
+        "ABAC policy is limited to permission and tenant-scope checks",
+        "policy change workflow is not yet a full operator CRUD/audit surface",
+    ]
+
+
+def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
+    client = _build_client(arq_enabled=True)
+
+    response = client.get(
+        "/api/v1/operations/governance",
+        headers={
+            **_headers(),
+            "x-auth-issuer": "https://issuer.example.test",
+            "x-auth-subject": "operator-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {
+        "generated_at",
+        "playback_gate",
+        "identity_authz",
+        "tenant_boundary",
+        "vfs_data_plane",
+        "distributed_control_plane",
+        "sre_program",
+        "operator_log_pipeline",
+    }
+    assert body["playback_gate"]["status"] == "partial"
+    assert "proof:playback:gate:enterprise package entrypoint exists" in body[
+        "playback_gate"
+    ]["evidence"]
+    assert body["identity_authz"]["status"] == "partial"
+    assert "authentication_mode=api_key" in body["identity_authz"]["evidence"]
+    assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
+    assert body["tenant_boundary"]["status"] == "partial"
+    assert "request_tenant_id=tenant-main" in body["tenant_boundary"]["evidence"]
+    assert body["vfs_data_plane"]["status"] == "partial"
+    assert "chunk_cache_enabled=True" in body["vfs_data_plane"]["evidence"]
+    assert body["distributed_control_plane"]["status"] == "not_ready"
+    assert "EventBus backend=process_local" in body["distributed_control_plane"]["evidence"]
+    assert body["sre_program"]["status"] == "partial"
+    assert body["operator_log_pipeline"]["status"] == "partial"
+    assert "structured_logging_enabled=True" in body["operator_log_pipeline"]["evidence"]
+
+
+def test_tenant_quota_route_returns_current_policy_visibility() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_TENANT_QUOTAS": {
+                "enabled": True,
+                "version": "quota-v2",
+                "tenants": {"tenant-main": {"api_requests_per_minute": 25}},
+            }
+        }
+    )
+
+    response = client.get("/api/v1/tenants/quota", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tenant_id"] == "tenant-main"
+    assert body["enabled"] is True
+    assert body["policy_version"] == "quota-v2"
+    assert body["api_requests_per_minute"] == 25
+    assert body["enforcement_points"][0] == "api_request_intake"
 
 
 def test_worker_queue_route_returns_control_plane_snapshot() -> None:
@@ -610,11 +986,52 @@ def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
-    history = second.json()["history"]
+    body = second.json()
+    history = body["history"]
     assert len(history) == 1
     assert history[0]["total_jobs"] == 1
     assert history[0]["ready_jobs"] == 1
     assert history[0]["alert_level"] == "ok"
+    assert body["summary"] == {
+        "points": 1,
+        "latest_alert_level": "ok",
+        "critical_points": 0,
+        "warning_points": 0,
+        "max_ready_jobs": 1,
+        "max_dead_letter_jobs": 0,
+        "max_oldest_ready_age_seconds": history[0]["oldest_ready_age_seconds"],
+    }
+
+
+def test_stats_route_rejects_cross_tenant_requests_without_delegated_scope() -> None:
+    client = _build_client()
+
+    response = client.get(
+        "/api/v1/stats?tenant_id=tenant-other",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "library:read",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_calendar_route_allows_cross_tenant_requests_with_authorized_tenants() -> None:
+    client = _build_client()
+
+    response = client.get(
+        "/api/v1/calendar?tenant_id=tenant-analytics",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "library:read",
+            "x-actor-authorized-tenants": "tenant-main,tenant-analytics",
+        },
+    )
+
+    assert response.status_code == 200
 
 
 def test_dashboard_routes_require_api_key() -> None:

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from .graphql.plugin_registry import GraphQLPluginRegistry
     from .plugins.registry import PluginRegistry
+    from .services.access_policy import AccessPolicyService, AccessPolicySnapshot
     from .services.identity import SecurityIdentityService
     from .services.playback import (
         InProcessDirectPlaybackRefreshController,
@@ -48,6 +49,8 @@ class AppResources:
     chunk_cache: ChunkCache | None = None
     plugin_registry: PluginRegistry | None = None
     security_identity_service: SecurityIdentityService | None = None
+    access_policy_service: AccessPolicyService | None = None
+    access_policy_snapshot: AccessPolicySnapshot | None = None
     plugin_settings_payload: Mapping[str, Any] | None = None
     playback_service: PlaybackSourceService | None = None
     playback_refresh_controller: InProcessDirectPlaybackRefreshController | None = None

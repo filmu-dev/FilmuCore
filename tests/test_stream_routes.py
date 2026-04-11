@@ -9653,6 +9653,19 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_inline_refresh_timeout"] == 1
     assert governance["vfs_runtime_windows_callbacks_error"] == 4
     assert governance["vfs_runtime_windows_callbacks_estale"] == 2
+    assert governance["vfs_runtime_cache_hit_ratio"] == 0.75
+    assert governance["vfs_runtime_fallback_success_ratio"] == 0.7
+    assert governance["vfs_runtime_prefetch_pressure_ratio"] == 0.75
+    assert governance["vfs_runtime_provider_pressure_incidents"] == 22
+    assert governance["vfs_runtime_fairness_pressure_incidents"] == 2
+    assert governance["vfs_runtime_rollout_readiness"] == "blocked"
+    assert governance["vfs_runtime_rollout_reasons"] == [
+        "backend_fallback_failures",
+        "mounted_read_errors",
+        "prefetch_background_errors",
+        "disk_cache_write_errors",
+    ]
+    assert governance["vfs_runtime_rollout_next_action"] == "resolve_blocking_runtime_failures"
 
 
 def test_hls_route_failure_governance_counts_generation_timeout(

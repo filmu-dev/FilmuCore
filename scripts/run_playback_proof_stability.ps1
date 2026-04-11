@@ -15,8 +15,12 @@ param(
     [string] $JellyfinApiKey = '',
     [string] $MediaServerUrl = 'http://localhost:8096',
     [int] $PreferredClientPlaybackTimeoutSeconds = 90,
+    [string] $EnvironmentClass = '',
+    [int] $MaxRunDurationSeconds = 0,
+    [int] $MaxReconnectIncidentCount = 0,
     [switch] $ProofStaleDirectRefresh,
     [switch] $RequirePreferredClientPlayback,
+    [switch] $RequireMediaServerProof,
     [switch] $ReuseExistingItem,
     [switch] $RequireCompletedState,
     [switch] $StopWhenDone,
@@ -45,6 +49,10 @@ function Get-OptionalObjectPropertyValue {
 
 if ($RepeatCount -lt 1) {
     throw 'RepeatCount must be at least 1.'
+}
+
+if ([string]::IsNullOrWhiteSpace($EnvironmentClass)) {
+    $EnvironmentClass = "{0}:{1}" -f $env:COMPUTERNAME, [System.Environment]::OSVersion.VersionString
 }
 
 $scriptRoot = $PSScriptRoot
@@ -182,6 +190,8 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
     $completedState = $null
     $staleRefreshStatus = $null
     $preferredClientStatus = $null
+    $mediaServerVisibilityStatus = $null
+    $mediaServerStreamOpenStatus = $null
     $durationSeconds = $null
     $reconnectIncidentCount = $null
     $failureClassesObserved = @()
@@ -191,8 +201,11 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
         $completedState = [string] $summary.movie.final_state
         $staleRefreshStatus = [string] $summary.media_server.stale_refresh_status
         $preferredClient = Get-OptionalObjectPropertyValue -InputObject $summary -Name 'preferred_client'
+        $mediaServer = Get-OptionalObjectPropertyValue -InputObject $summary -Name 'media_server'
         $hardening = Get-OptionalObjectPropertyValue -InputObject $summary -Name 'hardening'
         $preferredClientStatus = [string] (Get-OptionalObjectPropertyValue -InputObject $preferredClient -Name 'status')
+        $mediaServerVisibilityStatus = [string] (Get-OptionalObjectPropertyValue -InputObject $mediaServer -Name 'visibility_status')
+        $mediaServerStreamOpenStatus = [string] (Get-OptionalObjectPropertyValue -InputObject $mediaServer -Name 'stream_open_status')
         $durationSeconds = Get-OptionalObjectPropertyValue -InputObject $hardening -Name 'duration_seconds'
         $reconnectIncidentCount = Get-OptionalObjectPropertyValue -InputObject $hardening -Name 'reconnect_incident_count'
         $failureClassesObserved = @(
@@ -210,9 +223,22 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
     if ($RequirePreferredClientPlayback -and -not $DryRun) {
         $runPassed = $runPassed -and ($preferredClientStatus -eq 'playing')
     }
+    if ($RequireMediaServerProof -and -not $DryRun) {
+        $runPassed = $runPassed -and (
+            ($mediaServerVisibilityStatus -eq 'visible') -and
+            ($mediaServerStreamOpenStatus -eq 'stream_open')
+        )
+    }
+    if (($MaxRunDurationSeconds -gt 0) -and -not $DryRun -and ($null -ne $durationSeconds)) {
+        $runPassed = $runPassed -and ([double] $durationSeconds -le $MaxRunDurationSeconds)
+    }
+    if (($MaxReconnectIncidentCount -gt 0 -or $MaxReconnectIncidentCount -eq 0) -and -not $DryRun -and ($null -ne $reconnectIncidentCount)) {
+        $runPassed = $runPassed -and ([int] $reconnectIncidentCount -le $MaxReconnectIncidentCount)
+    }
 
     $results.Add(
         [pscustomobject]@{
+            environment_class = $EnvironmentClass
             run = $index
             exit_code = $exitCode
             timestamp = (Get-Date).ToString('o')
@@ -223,8 +249,20 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
             final_state = $completedState
             stale_refresh_status = $staleRefreshStatus
             preferred_client_status = $preferredClientStatus
+            media_server_visibility_status = $mediaServerVisibilityStatus
+            media_server_stream_open_status = $mediaServerStreamOpenStatus
             duration_seconds = $durationSeconds
             reconnect_incident_count = $reconnectIncidentCount
+            run_duration_within_threshold = if ($MaxRunDurationSeconds -gt 0) {
+                (($null -ne $durationSeconds) -and ([double] $durationSeconds -le $MaxRunDurationSeconds))
+            } else {
+                $true
+            }
+            reconnect_within_threshold = if ($null -ne $reconnectIncidentCount) {
+                ([int] $reconnectIncidentCount -le $MaxReconnectIncidentCount)
+            } else {
+                $true
+            }
             failure_classes_observed = $failureClassesObserved
         }
     )
@@ -235,6 +273,8 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
 }
 
 $summary = [ordered]@{
+    timestamp = (Get-Date).ToString('o')
+    environment_class = $EnvironmentClass
     repeat_count = $RepeatCount
     dry_run = [bool] $DryRun
     tmdb_id = $TmdbId
@@ -247,6 +287,14 @@ $summary = [ordered]@{
     backend_container_name = $BackendContainerName
     reuse_existing_item = [bool] $ReuseExistingItem
     require_completed_state = [bool] $RequireCompletedState
+    enterprise_policy = [ordered]@{
+        require_completed_state = [bool] $RequireCompletedState
+        proof_stale_direct_refresh = [bool] $ProofStaleDirectRefresh
+        require_preferred_client_playback = [bool] $RequirePreferredClientPlayback
+        require_media_server_proof = [bool] $RequireMediaServerProof
+        max_run_duration_seconds = if ($MaxRunDurationSeconds -gt 0) { $MaxRunDurationSeconds } else { $null }
+        max_reconnect_incident_count = $MaxReconnectIncidentCount
+    }
     max_run_duration_seconds = @($results | ForEach-Object { [double]($_.duration_seconds ?? 0) } | Measure-Object -Maximum).Maximum
     max_reconnect_incident_count = @($results | ForEach-Object { [int]($_.reconnect_incident_count ?? 0) } | Measure-Object -Maximum).Maximum
     all_green = (@($results | Where-Object { -not $_.passed })).Count -eq 0

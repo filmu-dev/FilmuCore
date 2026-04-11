@@ -22,6 +22,7 @@ from .core.cache import CacheManager
 from .core.chunk_engine import ChunkCache
 from .core.event_bus import EventBus
 from .core.rate_limiter import DistributedRateLimiter
+from .core.replay import RedisReplayEventBackplane
 from .db import DatabaseRuntime, run_migrations
 from .graphql import GraphQLPluginRegistry, create_graphql_router
 from .logging import attach_log_stream, configure_logging, detach_log_stream
@@ -31,6 +32,7 @@ from .plugins import load_plugins, register_builtin_plugins
 from .plugins.context import HostPluginDatasource, PluginContextProvider
 from .plugins.registry import PluginRegistry
 from .resources import AppResources
+from .services.access_policy import AccessPolicyService
 from .services.identity import SecurityIdentityService
 from .services.media import MediaService
 from .services.playback import (
@@ -105,6 +107,12 @@ def build_security_identity_service(resources: AppResources) -> SecurityIdentity
     """Build the persisted identity-plane service for auth and tenant bootstrap."""
 
     return SecurityIdentityService(resources.db)
+
+
+def build_access_policy_service(resources: AppResources) -> AccessPolicyService:
+    """Build the persisted access-policy inventory service."""
+
+    return AccessPolicyService(resources.db)
 
 
 def build_plugin_registry(
@@ -236,6 +244,14 @@ def _build_lifespan(
         )
 
         event_bus = EventBus()
+        if runtime_settings.control_plane.event_backplane == "redis_stream":
+            event_bus.attach_replay_backplane(
+                RedisReplayEventBackplane(
+                    cast("Any", redis),
+                    stream_name=runtime_settings.control_plane.event_stream_name,
+                    maxlen=runtime_settings.control_plane.event_replay_maxlen,
+                )
+            )
         arq_redis: ArqRedis | None = None
         queue_name = _arq_queue_name(runtime_settings)
         if runtime_settings.arq_enabled:
@@ -299,6 +315,10 @@ def _build_lifespan(
         )
         resources.security_identity_service = build_security_identity_service(resources)
         await resources.security_identity_service.bootstrap(runtime_settings)
+        resources.access_policy_service = build_access_policy_service(resources)
+        resources.access_policy_snapshot = await resources.access_policy_service.bootstrap(
+            runtime_settings
+        )
         plugin_context_provider = build_plugin_context_provider(resources)
         app.state.plugin_capability_load_report = await asyncio.to_thread(
             load_plugins,
