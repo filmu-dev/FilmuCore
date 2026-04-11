@@ -430,12 +430,14 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | li
         "vfs_runtime_handle_startup_ok": 0,
         "vfs_runtime_handle_startup_error": 0,
         "vfs_runtime_handle_startup_estale": 0,
+        "vfs_runtime_handle_startup_cancelled": 0,
         "vfs_runtime_handle_startup_average_duration_ms": 0,
         "vfs_runtime_handle_startup_max_duration_ms": 0,
         "vfs_runtime_mounted_reads_total": 0,
         "vfs_runtime_mounted_reads_ok": 0,
         "vfs_runtime_mounted_reads_error": 0,
         "vfs_runtime_mounted_reads_estale": 0,
+        "vfs_runtime_mounted_reads_cancelled": 0,
         "vfs_runtime_mounted_reads_average_duration_ms": 0,
         "vfs_runtime_mounted_reads_max_duration_ms": 0,
         "vfs_runtime_upstream_fetch_operations": 0,
@@ -491,6 +493,7 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | li
         "vfs_runtime_inline_refresh_no_url": 0,
         "vfs_runtime_inline_refresh_error": 0,
         "vfs_runtime_inline_refresh_timeout": 0,
+        "vfs_runtime_windows_callbacks_cancelled": 0,
         "vfs_runtime_windows_callbacks_error": 0,
         "vfs_runtime_windows_callbacks_estale": 0,
         "vfs_runtime_cache_hit_ratio": 0.0,
@@ -698,6 +701,9 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str
     governance["vfs_runtime_handle_startup_estale"] = _as_int(
         _nested_mapping_value(payload, "handle_startup", "estale")
     )
+    governance["vfs_runtime_handle_startup_cancelled"] = _as_int(
+        _nested_mapping_value(payload, "handle_startup", "cancelled")
+    )
     governance["vfs_runtime_handle_startup_average_duration_ms"] = _as_int(
         _nested_mapping_value(payload, "handle_startup", "average_duration_ms")
     )
@@ -715,6 +721,9 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str
     )
     governance["vfs_runtime_mounted_reads_estale"] = _as_int(
         _nested_mapping_value(payload, "mounted_reads", "estale")
+    )
+    governance["vfs_runtime_mounted_reads_cancelled"] = _as_int(
+        _nested_mapping_value(payload, "mounted_reads", "cancelled")
     )
     governance["vfs_runtime_mounted_reads_average_duration_ms"] = _as_int(
         _nested_mapping_value(payload, "mounted_reads", "average_duration_ms")
@@ -922,6 +931,9 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str
     )
     governance["vfs_runtime_inline_refresh_timeout"] = _as_int(
         _nested_mapping_value(payload, "inline_refresh", "timeout")
+    )
+    governance["vfs_runtime_windows_callbacks_cancelled"] = _as_int(
+        _nested_mapping_value(payload, "windows_projfs", "callbacks_cancelled")
     )
     governance["vfs_runtime_windows_callbacks_error"] = _as_int(
         _nested_mapping_value(payload, "windows_projfs", "callbacks_error")

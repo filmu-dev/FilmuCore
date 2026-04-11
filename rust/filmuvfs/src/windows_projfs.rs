@@ -11,6 +11,7 @@ use std::{
 use anyhow::Result;
 use dashmap::{mapref::entry::Entry, DashMap};
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use windows_sys::{
     core::{GUID, HRESULT, PCWSTR},
@@ -18,7 +19,7 @@ use windows_sys::{
         Foundation::{
             ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_HANDLE,
             ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_NOT_ENOUGH_MEMORY,
-            ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, S_OK,
+            ERROR_NOT_SUPPORTED, ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, S_OK,
         },
         Storage::{
             FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY},
@@ -117,6 +118,7 @@ struct AsyncGetFileDataCommand {
     normalized_path: String,
     byte_offset: u64,
     length: u32,
+    cancel: CancellationToken,
 }
 
 unsafe impl Send for AsyncGetFileDataCommand {}
@@ -144,7 +146,7 @@ const PROJFS_CALLBACKS: PRJ_CALLBACKS = PRJ_CALLBACKS {
     GetFileDataCallback: Some(get_file_data_callback),
     QueryFileNameCallback: Some(query_file_name_callback),
     NotificationCallback: Some(notification_callback),
-    CancelCommandCallback: None,
+    CancelCommandCallback: Some(cancel_command_callback),
 };
 
 struct WindowsProjfsInstance {
@@ -155,6 +157,7 @@ struct WindowsProjfsInstance {
     enumerations: DashMap<GuidKey, DirectoryEnumerationState>,
     stream_handles: DashMap<StreamHandleKey, MountHandle>,
     tail_prefetch_started: DashMap<String, ()>,
+    pending_commands: DashMap<i32, CancellationToken>,
     _notification_root: Vec<u16>,
     notification_mappings: Vec<PRJ_NOTIFICATION_MAPPING>,
 }
@@ -185,6 +188,7 @@ impl WindowsProjfsInstance {
             enumerations: DashMap::new(),
             stream_handles: DashMap::new(),
             tail_prefetch_started: DashMap::new(),
+            pending_commands: DashMap::new(),
             notification_mappings: vec![PRJ_NOTIFICATION_MAPPING {
                 NotificationBitMask: PRJ_NOTIFY_FILE_HANDLE_CLOSED_NO_MODIFICATION
                     | PRJ_NOTIFY_FILE_HANDLE_CLOSED_FILE_MODIFIED
@@ -419,6 +423,7 @@ impl WindowsProjfsInstance {
             );
         }
 
+        let cancel = CancellationToken::new();
         let request = AsyncGetFileDataCommand {
             namespace_context: callback_data.NamespaceVirtualizationContext,
             command_id: callback_data.CommandId,
@@ -426,11 +431,14 @@ impl WindowsProjfsInstance {
             normalized_path: normalized_path.to_owned(),
             byte_offset,
             length,
+            cancel: cancel.clone(),
         };
+        self.pending_commands.insert(request.command_id, cancel);
 
         let instance = Arc::clone(self);
         self.runtime_handle.spawn(async move {
             let completion_result = instance.get_file_data_for_command(&request).await;
+            instance.pending_commands.remove(&request.command_id);
             let complete_hr = unsafe {
                 PrjCompleteCommand(
                     request.namespace_context,
@@ -458,6 +466,13 @@ impl WindowsProjfsInstance {
         let normalized_path = request.normalized_path.as_str();
         let byte_offset = request.byte_offset;
         let length = request.length;
+        if request.cancel.is_cancelled() {
+            let elapsed = started_at.elapsed();
+            record_windows_projfs_callback("cancelled");
+            record_windows_projfs_callback_duration(elapsed, "cancelled");
+            warn_if_slow_callback(normalized_path, byte_offset, length, elapsed, "cancelled");
+            return hresult_from_win32(ERROR_OPERATION_ABORTED);
+        }
 
         let handle = match self
             .get_or_create_stream_handle(&request.data_stream_id, normalized_path)
@@ -546,7 +561,13 @@ impl WindowsProjfsInstance {
                 );
                 match self
                     .mount_runtime
-                    .read_bytes(handle.handle_id, handle.inode, seed_offset, seed_length)
+                    .read_bytes_with_cancel(
+                        handle.handle_id,
+                        handle.inode,
+                        seed_offset,
+                        seed_length,
+                        Some(request.cancel.clone()),
+                    )
                     .await
                 {
                     Ok(bytes) if !bytes.is_empty() => {
@@ -652,11 +673,30 @@ impl WindowsProjfsInstance {
             }
             let read_result = self
                 .mount_runtime
-                .read_bytes(handle.handle_id, handle.inode, read_offset, read_length)
+                .read_bytes_with_cancel(
+                    handle.handle_id,
+                    handle.inode,
+                    read_offset,
+                    read_length,
+                    Some(request.cancel.clone()),
+                )
                 .await;
 
             let bytes = match read_result {
                 Ok(bytes) => bytes,
+                Err(MountRuntimeError::ReadAborted { .. }) => {
+                    let elapsed = started_at.elapsed();
+                    record_windows_projfs_callback("cancelled");
+                    record_windows_projfs_callback_duration(elapsed, "cancelled");
+                    warn_if_slow_callback(
+                        normalized_path,
+                        byte_offset,
+                        length,
+                        elapsed,
+                        "cancelled",
+                    );
+                    return hresult_from_win32(ERROR_OPERATION_ABORTED);
+                }
                 Err(error) => {
                     let result = if matches!(error, MountRuntimeError::StaleLease { .. }) {
                         "estale"
@@ -860,7 +900,18 @@ impl WindowsProjfsInstance {
 
     fn shutdown(&self) {
         self.enumerations.clear();
+        for entry in self.pending_commands.iter() {
+            entry.cancel();
+        }
+        self.pending_commands.clear();
         self.release_all_stream_handles();
+    }
+
+    fn cancel_command(&self, command_id: i32, normalized_path: &str) {
+        if let Some((_, token)) = self.pending_commands.remove(&command_id) {
+            token.cancel();
+            warn!(path = %normalized_path, command_id, "projfs.cancel_command");
+        }
     }
 
     fn build_directory_entries(
@@ -1198,6 +1249,16 @@ unsafe extern "system" fn query_file_name_callback(
     instance.query_file_name(&normalized_path)
 }
 
+unsafe extern "system" fn cancel_command_callback(callback_data: *const PRJ_CALLBACK_DATA) {
+    let Ok(instance) = instance_from_callback_data(callback_data) else {
+        return;
+    };
+    let Ok(normalized_path) = normalized_path_from_callback_data(instance, callback_data) else {
+        return;
+    };
+    instance.cancel_command(unsafe { (*callback_data).CommandId }, &normalized_path);
+}
+
 unsafe extern "system" fn notification_callback(
     callback_data: *const PRJ_CALLBACK_DATA,
     is_directory: bool,
@@ -1468,6 +1529,7 @@ fn hresult_from_mount_error(error: MountRuntimeError) -> HRESULT {
         MountRuntimeError::InvalidName { .. } | MountRuntimeError::HandleInodeMismatch { .. } => {
             hresult_from_win32(ERROR_INVALID_PARAMETER)
         }
+        MountRuntimeError::ReadAborted { .. } => hresult_from_win32(ERROR_OPERATION_ABORTED),
         MountRuntimeError::StaleLease { .. } | MountRuntimeError::Io { .. } => {
             hresult_from_win32(ERROR_NOT_SUPPORTED)
         }

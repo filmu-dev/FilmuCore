@@ -189,6 +189,7 @@ pub struct FilmuvfsHandleStartupStatusSnapshot {
     pub ok: u64,
     pub error: u64,
     pub estale: u64,
+    pub cancelled: u64,
     pub average_duration_ms: f64,
     pub max_duration_ms: f64,
 }
@@ -199,6 +200,7 @@ pub struct FilmuvfsMountedReadStatusSnapshot {
     pub ok: u64,
     pub error: u64,
     pub estale: u64,
+    pub cancelled: u64,
     pub average_duration_ms: f64,
     pub max_duration_ms: f64,
 }
@@ -328,6 +330,7 @@ pub struct FilmuvfsWindowsProjfsStatusSnapshot {
     pub callbacks_ok: u64,
     pub callbacks_error: u64,
     pub callbacks_estale: u64,
+    pub callbacks_cancelled: u64,
     pub callback_count: u64,
     pub callback_average_ms: f64,
     pub callback_max_ms: f64,
@@ -393,12 +396,14 @@ pub struct FilmuvfsMetrics {
     read_requests_ok: AtomicU64,
     read_requests_error: AtomicU64,
     read_requests_estale: AtomicU64,
+    read_requests_cancelled: AtomicU64,
     mounted_read_duration_count: AtomicU64,
     mounted_read_duration_micros_total: AtomicU64,
     mounted_read_duration_micros_max: AtomicU64,
     handle_startup_ok: AtomicU64,
     handle_startup_error: AtomicU64,
     handle_startup_estale: AtomicU64,
+    handle_startup_cancelled: AtomicU64,
     handle_startup_duration_count: AtomicU64,
     handle_startup_duration_micros_total: AtomicU64,
     handle_startup_duration_micros_max: AtomicU64,
@@ -461,6 +466,7 @@ pub struct FilmuvfsMetrics {
     windows_projfs_callbacks_ok: AtomicU64,
     windows_projfs_callbacks_error: AtomicU64,
     windows_projfs_callbacks_estale: AtomicU64,
+    windows_projfs_callbacks_cancelled: AtomicU64,
     windows_projfs_callback_duration_count: AtomicU64,
     windows_projfs_callback_duration_micros_total: AtomicU64,
     windows_projfs_callback_duration_micros_max: AtomicU64,
@@ -606,12 +612,14 @@ impl FilmuvfsMetrics {
             read_requests_ok: AtomicU64::new(0),
             read_requests_error: AtomicU64::new(0),
             read_requests_estale: AtomicU64::new(0),
+            read_requests_cancelled: AtomicU64::new(0),
             mounted_read_duration_count: AtomicU64::new(0),
             mounted_read_duration_micros_total: AtomicU64::new(0),
             mounted_read_duration_micros_max: AtomicU64::new(0),
             handle_startup_ok: AtomicU64::new(0),
             handle_startup_error: AtomicU64::new(0),
             handle_startup_estale: AtomicU64::new(0),
+            handle_startup_cancelled: AtomicU64::new(0),
             handle_startup_duration_count: AtomicU64::new(0),
             handle_startup_duration_micros_total: AtomicU64::new(0),
             handle_startup_duration_micros_max: AtomicU64::new(0),
@@ -674,6 +682,7 @@ impl FilmuvfsMetrics {
             windows_projfs_callbacks_ok: AtomicU64::new(0),
             windows_projfs_callbacks_error: AtomicU64::new(0),
             windows_projfs_callbacks_estale: AtomicU64::new(0),
+            windows_projfs_callbacks_cancelled: AtomicU64::new(0),
             windows_projfs_callback_duration_count: AtomicU64::new(0),
             windows_projfs_callback_duration_micros_total: AtomicU64::new(0),
             windows_projfs_callback_duration_micros_max: AtomicU64::new(0),
@@ -702,6 +711,9 @@ impl FilmuvfsMetrics {
             "estale" => {
                 self.read_requests_estale.fetch_add(1, Ordering::Relaxed);
             }
+            "cancelled" => {
+                self.read_requests_cancelled.fetch_add(1, Ordering::Relaxed);
+            }
             _ => {
                 self.read_requests_error.fetch_add(1, Ordering::Relaxed);
             }
@@ -729,6 +741,10 @@ impl FilmuvfsMetrics {
             }
             "estale" => {
                 self.handle_startup_estale.fetch_add(1, Ordering::Relaxed);
+            }
+            "cancelled" => {
+                self.handle_startup_cancelled
+                    .fetch_add(1, Ordering::Relaxed);
             }
             _ => {
                 self.handle_startup_error.fetch_add(1, Ordering::Relaxed);
@@ -1034,6 +1050,10 @@ impl FilmuvfsMetrics {
                 self.windows_projfs_callbacks_estale
                     .fetch_add(1, Ordering::Relaxed);
             }
+            "cancelled" => {
+                self.windows_projfs_callbacks_cancelled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             _ => {
                 self.windows_projfs_callbacks_error
                     .fetch_add(1, Ordering::Relaxed);
@@ -1192,7 +1212,8 @@ impl FilmuvfsMetrics {
         let read_ok = self.read_requests_ok.load(Ordering::Relaxed);
         let read_error = self.read_requests_error.load(Ordering::Relaxed);
         let read_estale = self.read_requests_estale.load(Ordering::Relaxed);
-        let read_total = read_ok + read_error + read_estale;
+        let read_cancelled = self.read_requests_cancelled.load(Ordering::Relaxed);
+        let read_total = read_ok + read_error + read_estale + read_cancelled;
         let read_duration_count = self.mounted_read_duration_count.load(Ordering::Relaxed);
         let read_duration_total = self
             .mounted_read_duration_micros_total
@@ -1203,7 +1224,11 @@ impl FilmuvfsMetrics {
         let handle_startup_ok = self.handle_startup_ok.load(Ordering::Relaxed);
         let handle_startup_error = self.handle_startup_error.load(Ordering::Relaxed);
         let handle_startup_estale = self.handle_startup_estale.load(Ordering::Relaxed);
-        let handle_startup_total = handle_startup_ok + handle_startup_error + handle_startup_estale;
+        let handle_startup_cancelled = self.handle_startup_cancelled.load(Ordering::Relaxed);
+        let handle_startup_total = handle_startup_ok
+            + handle_startup_error
+            + handle_startup_estale
+            + handle_startup_cancelled;
         let handle_startup_duration_count =
             self.handle_startup_duration_count.load(Ordering::Relaxed);
         let handle_startup_duration_total = self
@@ -1259,6 +1284,7 @@ impl FilmuvfsMetrics {
                 ok: handle_startup_ok,
                 error: handle_startup_error,
                 estale: handle_startup_estale,
+                cancelled: handle_startup_cancelled,
                 average_duration_ms: atomic_average_millis(
                     handle_startup_duration_total,
                     handle_startup_duration_count,
@@ -1270,6 +1296,7 @@ impl FilmuvfsMetrics {
                 ok: read_ok,
                 error: read_error,
                 estale: read_estale,
+                cancelled: read_cancelled,
                 average_duration_ms: atomic_average_millis(
                     read_duration_total,
                     read_duration_count,
@@ -1422,6 +1449,9 @@ impl FilmuvfsMetrics {
                 callbacks_ok: self.windows_projfs_callbacks_ok.load(Ordering::Relaxed),
                 callbacks_error: self.windows_projfs_callbacks_error.load(Ordering::Relaxed),
                 callbacks_estale: self.windows_projfs_callbacks_estale.load(Ordering::Relaxed),
+                callbacks_cancelled: self
+                    .windows_projfs_callbacks_cancelled
+                    .load(Ordering::Relaxed),
                 callback_count,
                 callback_average_ms: atomic_average_millis(callback_total, callback_count),
                 callback_max_ms: atomic_max_millis(callback_max),

@@ -42,6 +42,7 @@ Additional bar for enterprise-grade claims:
 Current incremental note:
 
 - `Slice G` now has an initial baseline landed: the enterprise `vfs_data_plane` governance slice consumes the same live runtime rollout posture already exposed by `/api/v1/stream/status`, including runtime-snapshot availability, rollout readiness, rollout reasons, cache/fallback/prefetch ratios, and provider/fairness pressure incidents.
+- `Slice H` now has an initial runtime hardening baseline landed in the Rust sidecar: mounted foreground reads inherit explicit per-handle cancellation, released handles can no longer repopulate chunk-engine tracking state after an interrupted read, ProjFS command cancellation is wired into the async callback path, and cancelled read outcomes now surface in runtime status and `/api/v1/stream/status`.
 
 ---
 

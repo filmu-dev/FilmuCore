@@ -9453,18 +9453,20 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "chunk_cache_weighted_bytes": 8192,
                 },
                 "handle_startup": {
-                    "total": 5,
+                    "total": 7,
                     "ok": 3,
                     "error": 1,
                     "estale": 1,
+                    "cancelled": 2,
                     "average_duration_ms": 104.8,
                     "max_duration_ms": 412.2,
                 },
                 "mounted_reads": {
-                    "total": 8,
+                    "total": 10,
                     "ok": 6,
                     "error": 1,
                     "estale": 1,
+                    "cancelled": 2,
                     "average_duration_ms": 12.6,
                     "max_duration_ms": 48.4,
                 },
@@ -9550,6 +9552,7 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "timeout": 1,
                 },
                 "windows_projfs": {
+                    "callbacks_cancelled": 3,
                     "callbacks_error": 4,
                     "callbacks_estale": 2,
                 },
@@ -9582,16 +9585,18 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_chunk_cache_disk_writes"] == 2
     assert governance["vfs_runtime_chunk_cache_disk_write_errors"] == 1
     assert governance["vfs_runtime_chunk_cache_disk_evictions"] == 4
-    assert governance["vfs_runtime_handle_startup_total"] == 5
+    assert governance["vfs_runtime_handle_startup_total"] == 7
     assert governance["vfs_runtime_handle_startup_ok"] == 3
     assert governance["vfs_runtime_handle_startup_error"] == 1
     assert governance["vfs_runtime_handle_startup_estale"] == 1
+    assert governance["vfs_runtime_handle_startup_cancelled"] == 2
     assert governance["vfs_runtime_handle_startup_average_duration_ms"] == 105
     assert governance["vfs_runtime_handle_startup_max_duration_ms"] == 412
-    assert governance["vfs_runtime_mounted_reads_total"] == 8
+    assert governance["vfs_runtime_mounted_reads_total"] == 10
     assert governance["vfs_runtime_mounted_reads_ok"] == 6
     assert governance["vfs_runtime_mounted_reads_error"] == 1
     assert governance["vfs_runtime_mounted_reads_estale"] == 1
+    assert governance["vfs_runtime_mounted_reads_cancelled"] == 2
     assert governance["vfs_runtime_mounted_reads_average_duration_ms"] == 13
     assert governance["vfs_runtime_mounted_reads_max_duration_ms"] == 48
     assert governance["vfs_runtime_upstream_fetch_operations"] == 5
@@ -9653,6 +9658,7 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_inline_refresh_no_url"] == 1
     assert governance["vfs_runtime_inline_refresh_error"] == 2
     assert governance["vfs_runtime_inline_refresh_timeout"] == 1
+    assert governance["vfs_runtime_windows_callbacks_cancelled"] == 3
     assert governance["vfs_runtime_windows_callbacks_error"] == 4
     assert governance["vfs_runtime_windows_callbacks_estale"] == 2
     assert governance["vfs_runtime_cache_hit_ratio"] == 0.75
