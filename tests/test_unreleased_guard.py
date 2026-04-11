@@ -185,7 +185,13 @@ def test_poll_unreleased_items_requeues_when_release_date_passed(monkeypatch: An
 
     enqueue_calls: list[str] = []
 
-    async def fake_enqueue(redis: Any, item_id: str, queue_name: str) -> None:
+    async def fake_enqueue(
+        redis: Any,
+        item_id: str,
+        queue_name: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        _ = (redis, queue_name, tenant_id)
         enqueue_calls.append(item_id)
 
     monkeypatch.setattr(tasks, "enqueue_scrape_item", fake_enqueue)
