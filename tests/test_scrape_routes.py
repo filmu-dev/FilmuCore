@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
+import pytest
 
 from filmu_py.api.router import create_api_router
 from filmu_py.api.routes import scrape as scrape_routes
-from filmu_py.config import Settings
+from filmu_py.config import Settings, reset_runtime_settings, set_runtime_settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
@@ -20,6 +22,7 @@ from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.media import ItemActionResult, MediaItemRecord, MediaItemSummaryRecord
 from filmu_py.state.item import ItemState
+from filmu_py.workers import tasks as worker_tasks
 
 
 class DummyRedis:
@@ -221,6 +224,15 @@ def _build_settings() -> Settings:
         FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
         FILMU_PY_LOG_LEVEL="INFO",
     )
+
+
+@pytest.fixture(autouse=True)
+def _route_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    settings = _build_settings()
+    set_runtime_settings(settings)
+    monkeypatch.setattr(worker_tasks, "get_settings", lambda: settings)
+    yield
+    reset_runtime_settings()
 
 
 def _build_client() -> tuple[TestClient, DummyMediaService]:
