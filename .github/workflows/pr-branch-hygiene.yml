@@ -57,10 +57,7 @@ jobs:
 
           if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
             echo "Fork PR detected; skipping same-repository branch reuse checks."
-            exit 0
-          fi
-
-          if [[ "$head_ref" == release-please--* ]]; then
+          elif [[ "$head_ref" == release-please--* ]]; then
             echo "Release-please branch detected; skipping single-use feature branch enforcement."
           else
             reused_json="$(curl -fsSL \
