@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/filmu-dev/FilmuCore/compare/v0.3.0...v0.4.0) (2026-04-11)
+
+
+### Features
+
+* add enterprise identity and operations baselines ([#11](https://github.com/filmu-dev/FilmuCore/issues/11)) ([f6a5097](https://github.com/filmu-dev/FilmuCore/commit/f6a50978556e83758a16505121502134222ffe70))
+* **control-plane:** harden authz release governance and tenancy ([#9](https://github.com/filmu-dev/FilmuCore/issues/9)) ([badc672](https://github.com/filmu-dev/FilmuCore/commit/badc6723b126907b46e10f59dadaa590ed4e2341))
+
 ## [0.3.0](https://github.com/filmu-dev/FilmuCore/compare/v0.2.0...v0.3.0) (2026-04-10)
 
 
