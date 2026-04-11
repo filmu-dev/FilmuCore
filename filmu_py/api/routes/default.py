@@ -20,6 +20,9 @@ from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
 from ..models import (
+    AccessPolicyRevisionListResponse,
+    AccessPolicyRevisionResponse,
+    AccessPolicyRevisionWriteRequest,
     ApiKeyRotationResponse,
     AuthContextResponse,
     AuthPolicyDecisionResponse,
@@ -58,6 +61,7 @@ _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("library_read", ("library:read",)),
     ("playback_operate", ("playback:operate",)),
     ("settings_write", ("settings:write",)),
+    ("policy_write", ("settings:write",)),
     ("api_key_rotate", ("security:apikey.rotate",)),
 )
 
@@ -294,6 +298,32 @@ def _auth_policy_decisions(auth_context: Any) -> list[AuthPolicyDecisionResponse
     return responses
 
 
+def _access_policy_revision_response(record: Any) -> AccessPolicyRevisionResponse:
+    """Convert one service-layer revision record into an API response row."""
+
+    return AccessPolicyRevisionResponse(
+        version=record.version,
+        source=record.source,
+        is_active=record.is_active,
+        activated_at=record.activated_at.isoformat(),
+        created_at=record.created_at.isoformat(),
+        updated_at=record.updated_at.isoformat(),
+        role_grants={role: list(permissions) for role, permissions in sorted(record.role_grants.items())},
+        principal_roles={
+            principal: list(roles) for principal, roles in sorted(record.principal_roles.items())
+        },
+        principal_scopes={
+            principal: list(scopes)
+            for principal, scopes in sorted(record.principal_scopes.items())
+        },
+        principal_tenant_grants={
+            principal: list(tenants)
+            for principal, tenants in sorted(record.principal_tenant_grants.items())
+        },
+        audit_decisions=record.audit_decisions,
+    )
+
+
 def _vfs_data_plane_evidence(request: Request) -> list[str]:
     """Return bounded VFS runtime evidence for enterprise-governance posture."""
 
@@ -335,7 +365,7 @@ def _enterprise_operations_governance(
         else "monitor_oidc_validation_failures",
         "promote_operator_managed_access_policy_revisions"
         if auth_context.access_policy_source == "settings"
-        else "review_access_policy_audit_trail",
+        else "review_access_policy_revision_history",
     ]
     if any(not decision.allowed for decision in policy_decisions):
         identity_required_actions.append("grant_or_document_missing_control_plane_permissions")
@@ -399,12 +429,13 @@ def _enterprise_operations_governance(
                     f"{auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None}"
                 ),
                 "GET /api/v1/auth/policy exposes standard authorization probes",
+                "GET /api/v1/auth/policy/revisions exposes persisted policy revision inventory",
             ],
             required_actions=identity_required_actions,
             remaining_gaps=[
                 "OIDC is setting-gated and must be enabled per environment",
                 "ABAC is currently permission plus tenant-scope based",
-                "policy change workflow is still bootstrap-first instead of full CRUD operator management",
+                "policy CRUD/version workflows exist but broader resource-level ABAC rollout is still incomplete",
             ],
         ),
         tenant_boundary=EnterpriseOperationsSliceResponse(
@@ -488,7 +519,7 @@ def _enterprise_operations_governance(
             ],
         ),
         operator_log_pipeline=EnterpriseOperationsSliceResponse(
-            name="Durable Operator Log Pipeline / Plugin Runtime Isolation",
+            name="Durable Operator Log Pipeline",
             status="partial" if settings.logging.enabled else "blocked",
             evidence=[
                 f"structured_logging_enabled={settings.logging.enabled}",
@@ -500,20 +531,81 @@ def _enterprise_operations_governance(
                 f"log_shipper_type={settings.log_shipper.type}",
                 f"log_shipper_target_configured={bool(settings.log_shipper.target)}",
                 f"log_field_mapping_version={settings.log_shipper.field_mapping_version}",
-                f"plugin_total={len(plugins)}",
-                (
-                    "plugin_sandbox_profiles="
-                    + ",".join(sorted({plugin.sandbox_profile or "unspecified" for plugin in plugins}))
-                ),
-                f"plugin_quarantined={sum(1 for plugin in plugins if plugin.quarantined)}",
                 "docs/OPERATOR_LOG_PIPELINE.md defines shipping/search/replay taxonomy",
             ],
             required_actions=log_required_actions,
             remaining_gaps=[
                 "shipper/search backend is configured externally and verified by contract checks",
                 "trace/span coverage is still partial",
-                "plugin runtime isolation remains process-local rather than sandboxed execution",
                 "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
+            ],
+        ),
+        plugin_runtime_isolation=EnterpriseOperationsSliceResponse(
+            name="Plugin Trust / Runtime Isolation",
+            status="partial",
+            evidence=[
+                f"plugin_total={len(plugins)}",
+                (
+                    "plugin_sandbox_profiles="
+                    + ",".join(sorted({plugin.sandbox_profile or 'unspecified' for plugin in plugins}))
+                ),
+                f"plugin_quarantined={sum(1 for plugin in plugins if plugin.quarantined)}",
+                (
+                    "plugin_quarantine_recommended="
+                    f"{sum(1 for plugin in plugins if plugin.quarantine_recommended)}"
+                ),
+                "GET /api/v1/plugins/governance summarizes signature, publisher-policy, and tenancy posture",
+            ],
+            required_actions=[
+                "promote_plugin_quarantine_and_revocation_into_persisted_operator_workflows",
+                "move_runtime_plugin_execution_into_real_sandbox_boundaries",
+                "require_external_plugin_artifact_provenance_and_signing_policy",
+            ],
+            remaining_gaps=[
+                "plugin runtime isolation remains process-local rather than sandboxed execution",
+                "quarantine and revocation remain loader-policy driven rather than lifecycle-managed records",
+                "external plugin artifact provenance is not yet SBOM/signing-policy complete",
+            ],
+        ),
+        heavy_stage_workload_isolation=EnterpriseOperationsSliceResponse(
+            name="Heavy-Stage Workload Isolation",
+            status="partial" if settings.arq_enabled else "not_ready",
+            evidence=[
+                f"arq_enabled={settings.arq_enabled}",
+                f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
+                "worker stages include scrape_item, parse_scrape_results, rank_streams, debrid_item, and finalize_item",
+                "tenant worker enqueue quotas can deny downstream stage fan-out",
+                "GET /api/v1/workers/queue and /api/v1/workers/queue/history expose queue pressure",
+            ],
+            required_actions=[
+                "split_parse_map_validate_index_stages_into_isolated_workers_or_sandboxes",
+                "define_per_stage_cpu_memory_and_timeout_budgets",
+                "add_crash_containment_and_retry_policy_for_heavy_jobs",
+            ],
+            remaining_gaps=[
+                "heavy parse/map/validate/index work still runs in the normal worker process",
+                "no per-stage sandbox profile or resource ceilings exist yet",
+                "crash containment is queue-level rather than sandbox-boundary level",
+            ],
+        ),
+        release_metadata_performance=EnterpriseOperationsSliceResponse(
+            name="Release Engineering / Metadata Governance / Performance Discipline",
+            status="partial",
+            evidence=[
+                "release workflow requires PAT-authenticated release-please updates",
+                "package.json exposes security:audit, security:bandit, and perf:bench",
+                "docs/TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md tracks release, metadata, and chaos gaps explicitly",
+                "scripts/run_backup_restore_proof.ps1 and playback/VFS proof gates already produce promotion evidence inputs",
+            ],
+            required_actions=[
+                "add_sbom_signing_and_artifact_promotion_policy",
+                "promote_metadata_reindex_and_reconciliation_into_a_first_class_program",
+                "define_benchmark_baselines_and_chaos_regression_thresholds",
+            ],
+            remaining_gaps=[
+                "artifact provenance and SBOM policy are not yet first-class release gates",
+                "metadata and reindex governance are not yet exposed as a dedicated operator surface",
+                "benchmark and chaos discipline are not yet enforced by regression thresholds",
             ],
         ),
     )
@@ -633,9 +725,135 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         remaining_gaps=[
             "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
             "ABAC policy is limited to permission and tenant-scope checks",
-            "policy change workflow is not yet a full operator CRUD/audit surface",
+            "policy CRUD/version workflows now exist, but broader ABAC resources and audit search are still incomplete",
         ],
     )
+
+
+@router.get(
+    "/auth/policy/revisions",
+    operation_id="default.auth_policy_revisions",
+    response_model=AccessPolicyRevisionListResponse,
+    dependencies=[Depends(require_permissions("settings:write"))],
+)
+async def list_auth_policy_revisions(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> AccessPolicyRevisionListResponse:
+    """Return persisted access-policy revisions for operator review."""
+
+    resources = request.app.state.resources
+    service = resources.access_policy_service
+    if service is None:
+        snapshot = resources.access_policy_snapshot
+        if snapshot is None:
+            return AccessPolicyRevisionListResponse(active_version=None, revisions=[])
+        now = datetime.now(UTC).isoformat()
+        return AccessPolicyRevisionListResponse(
+            active_version=snapshot.version,
+            revisions=[
+                AccessPolicyRevisionResponse(
+                    version=snapshot.version,
+                    source=snapshot.source,
+                    is_active=True,
+                    activated_at=now,
+                    created_at=now,
+                    updated_at=now,
+                    role_grants={
+                        role: list(permissions)
+                        for role, permissions in sorted(snapshot.role_grants.items())
+                    },
+                    principal_roles={
+                        principal: list(roles)
+                        for principal, roles in sorted(snapshot.principal_roles.items())
+                    },
+                    principal_scopes={
+                        principal: list(scopes)
+                        for principal, scopes in sorted(snapshot.principal_scopes.items())
+                    },
+                    principal_tenant_grants={
+                        principal: list(tenants)
+                        for principal, tenants in sorted(snapshot.principal_tenant_grants.items())
+                    },
+                    audit_decisions=snapshot.audit_decisions,
+                )
+            ],
+        )
+
+    revisions = await service.list_revisions(limit=limit)
+    active_version = next((revision.version for revision in revisions if revision.is_active), None)
+    return AccessPolicyRevisionListResponse(
+        active_version=active_version,
+        revisions=[_access_policy_revision_response(revision) for revision in revisions],
+    )
+
+
+@router.post(
+    "/auth/policy/revisions",
+    operation_id="default.write_auth_policy_revision",
+    response_model=AccessPolicyRevisionResponse,
+    dependencies=[Depends(require_permissions("settings:write"))],
+)
+async def write_auth_policy_revision(
+    request: Request,
+    payload: AccessPolicyRevisionWriteRequest,
+) -> AccessPolicyRevisionResponse:
+    """Persist one operator-managed access-policy revision and optionally activate it."""
+
+    resources = request.app.state.resources
+    service = resources.access_policy_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="Access policy service unavailable")
+
+    record = await service.write_revision(
+        version=payload.version,
+        source=payload.source,
+        role_grants=payload.role_grants,
+        principal_roles=payload.principal_roles,
+        principal_scopes=payload.principal_scopes,
+        principal_tenant_grants=payload.principal_tenant_grants,
+        audit_decisions=payload.audit_decisions,
+        activate=payload.activate,
+    )
+    if record.is_active:
+        resources.access_policy_snapshot = record.to_snapshot()
+    audit_action(
+        request,
+        action="security.access_policy.write_revision",
+        target=f"access_policy.{payload.version}",
+        details={"activate": payload.activate, "source": payload.source},
+    )
+    return _access_policy_revision_response(record)
+
+
+@router.post(
+    "/auth/policy/revisions/{version}/activate",
+    operation_id="default.activate_auth_policy_revision",
+    response_model=AccessPolicyRevisionResponse,
+    dependencies=[Depends(require_permissions("settings:write"))],
+)
+async def activate_auth_policy_revision(
+    request: Request,
+    version: str,
+) -> AccessPolicyRevisionResponse:
+    """Activate one persisted access-policy revision."""
+
+    resources = request.app.state.resources
+    service = resources.access_policy_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="Access policy service unavailable")
+    try:
+        record = await service.activate_revision(version)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    resources.access_policy_snapshot = record.to_snapshot()
+    audit_action(
+        request,
+        action="security.access_policy.activate_revision",
+        target=f"access_policy.{record.version}",
+    )
+    return _access_policy_revision_response(record)
 
 
 @router.get("/logs", operation_id="default.logs", response_model=LogsResponse)

@@ -36,6 +36,13 @@ If a PR was opened from a reused branch, the recovery path is:
 
 The repository now enforces this with [`../.github/workflows/pr-branch-hygiene.yml`](../.github/workflows/pr-branch-hygiene.yml).
 
+The earlier local-preflight path is now:
+
+- create a fresh single-use branch with `npm run branch:codex:new -- <topic>`
+- audit the current branch before opening or updating a PR with `npm run branch:hygiene`
+
+`branch:codex:new` creates a timestamped `codex/<topic>-<utc>` branch from current `origin/main` and refuses to run when tracked changes are present, which prevents accidental reuse of a dirty or already-stacked branch. `branch:hygiene` checks ahead/behind state against `origin/main` and, when GitHub is reachable, also checks whether the same branch name was already used by a merged PR.
+
 ## Why This Policy Exists
 
 Release Please reads commit subjects on `main`.
@@ -149,11 +156,13 @@ Use those instead of screenshots or memory to validate that live branch protecti
 ### Feature delivery
 
 1. Create or push a feature branch.
+   Prefer `npm run branch:codex:new -- <topic>` for Codex-driven work so the branch starts from current `origin/main` and gets a unique single-use name.
 2. Open a draft PR against `main`.
 3. Set a Conventional Commit PR title immediately.
 4. Let CI, review, and follow-up commits happen on the PR.
-5. When green and approved, use **Squash and merge**.
-6. Delete the feature branch after merge, or enable GitHub auto-delete for merged branches.
+5. Run `npm run branch:hygiene` before requesting review or converting a draft PR so behind/reuse state is caught locally instead of by the PR gate.
+6. When green and approved, use **Squash and merge**.
+7. Delete the feature branch after merge, or enable GitHub auto-delete for merged branches.
 
 Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub shows `Merge pull request` instead of `Squash and merge`, the repository merge settings are still misconfigured.
 
