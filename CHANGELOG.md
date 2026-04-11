@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/filmu-dev/FilmuCore/compare/v0.5.0...v0.6.0) (2026-04-11)
+
+
+### Features
+
+* add enterprise policy revision governance ([#17](https://github.com/filmu-dev/FilmuCore/issues/17)) ([14fba28](https://github.com/filmu-dev/FilmuCore/commit/14fba28e0e230e1fe83eb186eb93abae14af35a1))
+
 ## [0.5.0](https://github.com/filmu-dev/FilmuCore/compare/v0.4.0...v0.5.0) (2026-04-11)
 
 
