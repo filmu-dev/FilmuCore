@@ -19,9 +19,10 @@ Filmu is expected to become **enterprise-grade and state-of-the-art across all m
 
 ## Current Filmu vs `riven-ts` state
 
-- The exact comparison target is the clean local `riven-ts` checkout at `E:/Dev/Triven_riven-fork/Triven_backend - ts`, aligned directly to upstream `main` at `e64604a`.
+- The exact comparison target is upstream `rivenmedia/riven-ts` `main` at `f98cc31`.
 - Filmu already exceeds that baseline in several areas: cross-process VFS architecture, Windows-native adapter support, playback/operator governance surfaces, persisted OIDC/authz posture visibility, tenant quota posture, and plugin trust/publisher policy depth.
 - The remaining work is therefore not "reach first parity." It is to turn those advantages into enterprise-grade enforced operations while closing the smaller number of areas where `riven-ts` still leads, especially sandboxed heavy-stage breadth, package/plugin ecosystem breadth, and externally provisioned operations tooling.
+- The operator APIs now expose more of that roadmap directly: [`GET /api/v1/operations/governance`](../../filmu_py/api/routes/default.py) now reports a 10-slice enterprise posture contract, and [`GET /api/v1/auth/policy/revisions`](../../filmu_py/api/routes/default.py) plus the matching write/activate routes expose persisted access-policy revision workflows instead of leaving policy state bootstrap-only.
 
 ---
 

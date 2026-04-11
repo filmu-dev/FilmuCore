@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from authlib.jose import jwt
@@ -268,6 +269,65 @@ class DummyAccessPolicyService:
 
     def __init__(self, settings: Settings) -> None:
         self.snapshot = snapshot_from_settings(settings.access_policy)
+        now = datetime(2026, 4, 11, 12, 0, tzinfo=UTC)
+        self.revisions: list[Any] = [self._build_revision_record(self.snapshot, now, True)]
+
+    def _build_revision_record(self, snapshot: Any, at: datetime, is_active: bool) -> Any:
+        record = type("AccessPolicyRevisionRecord", (), {})()
+        record.version = snapshot.version
+        record.source = snapshot.source
+        record.is_active = is_active
+        record.activated_at = at
+        record.created_at = at
+        record.updated_at = at
+        record.role_grants = snapshot.role_grants
+        record.principal_roles = snapshot.principal_roles
+        record.principal_scopes = snapshot.principal_scopes
+        record.principal_tenant_grants = snapshot.principal_tenant_grants
+        record.audit_decisions = snapshot.audit_decisions
+        record.to_snapshot = lambda snapshot=snapshot: snapshot
+        return record
+
+    async def list_revisions(self, *, limit: int = 20) -> list[Any]:
+        return self.revisions[:limit]
+
+    async def write_revision(
+        self,
+        *,
+        version: str,
+        source: str,
+        role_grants: dict[str, list[str]],
+        principal_roles: dict[str, list[str]],
+        principal_scopes: dict[str, list[str]],
+        principal_tenant_grants: dict[str, list[str]],
+        audit_decisions: bool,
+        activate: bool = True,
+    ) -> Any:
+        now = datetime(2026, 4, 11, 12, 30, tzinfo=UTC)
+        if activate:
+            for revision in self.revisions:
+                revision.is_active = False
+        snapshot = type(self.snapshot)(
+            version=version,
+            source=source,
+            role_grants=role_grants,
+            principal_roles=principal_roles,
+            principal_scopes=principal_scopes,
+            principal_tenant_grants=principal_tenant_grants,
+            audit_decisions=audit_decisions,
+        )
+        record = self._build_revision_record(snapshot, now, activate)
+        self.snapshot = snapshot if activate else self.snapshot
+        self.revisions.insert(0, record)
+        return record
+
+    async def activate_revision(self, version: str) -> Any:
+        for revision in self.revisions:
+            revision.is_active = revision.version == version
+            if revision.version == version:
+                self.snapshot = revision.to_snapshot()
+                return revision
+        raise LookupError(f"unknown access policy revision '{version}'")
 
 
 def _build_settings(
@@ -874,8 +934,47 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     assert body["remaining_gaps"] == [
         "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
         "ABAC policy is limited to permission and tenant-scope checks",
-        "policy change workflow is not yet a full operator CRUD/audit surface",
+        "policy CRUD/version workflows now exist, but broader ABAC resources and audit search are still incomplete",
     ]
+
+
+def test_auth_policy_revision_routes_return_inventory_and_accept_writes() -> None:
+    client = _build_client()
+
+    list_response = client.get("/api/v1/auth/policy/revisions", headers=_headers())
+
+    assert list_response.status_code == 200
+    assert list_response.json()["active_version"] == "default-v1"
+
+    write_response = client.post(
+        "/api/v1/auth/policy/revisions",
+        headers=_headers(),
+        json={
+            "version": "operator-v2",
+            "source": "operator_api",
+            "activate": True,
+            "role_grants": {"tenant:analyst": ["library:read"]},
+            "principal_roles": {"user-1": ["tenant:analyst"]},
+            "principal_scopes": {"user-1": ["library:read"]},
+            "principal_tenant_grants": {"user-1": ["tenant-analytics"]},
+            "audit_decisions": True,
+        },
+    )
+
+    assert write_response.status_code == 200
+    body = write_response.json()
+    assert body["version"] == "operator-v2"
+    assert body["is_active"] is True
+    assert body["role_grants"] == {"tenant:analyst": ["library:read"]}
+
+    activate_response = client.post(
+        "/api/v1/auth/policy/revisions/operator-v2/activate",
+        headers=_headers(),
+    )
+
+    assert activate_response.status_code == 200
+    assert activate_response.json()["version"] == "operator-v2"
+    assert activate_response.json()["is_active"] is True
 
 
 def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
@@ -901,6 +1000,9 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
         "distributed_control_plane",
         "sre_program",
         "operator_log_pipeline",
+        "plugin_runtime_isolation",
+        "heavy_stage_workload_isolation",
+        "release_metadata_performance",
     }
     assert body["playback_gate"]["status"] == "partial"
     assert "proof:playback:gate:enterprise package entrypoint exists" in body[
@@ -918,6 +1020,9 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert body["sre_program"]["status"] == "partial"
     assert body["operator_log_pipeline"]["status"] == "partial"
     assert "structured_logging_enabled=True" in body["operator_log_pipeline"]["evidence"]
+    assert body["plugin_runtime_isolation"]["status"] == "partial"
+    assert body["heavy_stage_workload_isolation"]["status"] == "partial"
+    assert body["release_metadata_performance"]["status"] == "partial"
 
 
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:

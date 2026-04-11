@@ -107,6 +107,42 @@ class AuthPolicyResponse(BaseModel):
     remaining_gaps: list[str] = []
 
 
+class AccessPolicyRevisionResponse(BaseModel):
+    """One persisted operator-visible access-policy revision row."""
+
+    version: str
+    source: str
+    is_active: bool
+    activated_at: str
+    created_at: str
+    updated_at: str
+    role_grants: dict[str, list[str]]
+    principal_roles: dict[str, list[str]]
+    principal_scopes: dict[str, list[str]]
+    principal_tenant_grants: dict[str, list[str]]
+    audit_decisions: bool
+
+
+class AccessPolicyRevisionListResponse(BaseModel):
+    """Bounded access-policy revision inventory for operators."""
+
+    active_version: str | None = None
+    revisions: list[AccessPolicyRevisionResponse]
+
+
+class AccessPolicyRevisionWriteRequest(BaseModel):
+    """Operator-managed payload for one persisted access-policy revision."""
+
+    version: str
+    source: str = "operator_api"
+    activate: bool = True
+    role_grants: dict[str, list[str]] = {}
+    principal_roles: dict[str, list[str]] = {}
+    principal_scopes: dict[str, list[str]] = {}
+    principal_tenant_grants: dict[str, list[str]] = {}
+    audit_decisions: bool = True
+
+
 class PluginEventStatusResponse(BaseModel):
     """One plugin event-governance and hook-subscription summary."""
 
@@ -164,6 +200,9 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
     distributed_control_plane: EnterpriseOperationsSliceResponse
     sre_program: EnterpriseOperationsSliceResponse
     operator_log_pipeline: EnterpriseOperationsSliceResponse
+    plugin_runtime_isolation: EnterpriseOperationsSliceResponse
+    heavy_stage_workload_isolation: EnterpriseOperationsSliceResponse
+    release_metadata_performance: EnterpriseOperationsSliceResponse
 
 
 class TenantQuotaPolicyResponse(BaseModel):

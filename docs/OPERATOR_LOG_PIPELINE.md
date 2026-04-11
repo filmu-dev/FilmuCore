@@ -13,7 +13,7 @@ Current evidence:
 - Rotating retention is controlled by `Settings.logging`.
 - API, worker, plugin, tenant, request, item, and trace context can be attached to log records when available.
 - `/api/v1/logs` and SSE streams remain compatibility surfaces.
-- `/api/v1/operations/governance` reports structured log posture, OTLP configuration state, log shipper settings, field mapping version, durable replay posture, and the adjacent plugin/runtime-isolation posture that operators need to interpret trust-related log events.
+- `/api/v1/operations/governance` reports structured log posture, OTLP configuration state, log shipper settings, field mapping version, and durable replay posture, while plugin/runtime-isolation posture is now a separate adjacent governance slice.
 - [`../ops/vector/filmu-ndjson-vector.toml`](../ops/vector/filmu-ndjson-vector.toml) is the first concrete Vector tailing configuration for `logs/ecs.json*`.
 - `pnpm proof:operations:log-pipeline` runs [`../scripts/check_log_pipeline_contract.ps1`](../scripts/check_log_pipeline_contract.ps1) and writes a search-contract artifact under `artifacts/operations/log-pipeline/`.
 
