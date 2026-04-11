@@ -4,7 +4,7 @@
 >
 > This document is a research snapshot, not the canonical current-status document.
 > Several limitations discussed below were valid at the time of writing but have since been addressed in the implementation.
-> For current FilmuVFS status and active next steps, use [`STATUS.md`](STATUS.md) and [`TODOS/NEXT_IMPLEMENTATION_PRIORITIES.md`](TODOS/NEXT_IMPLEMENTATION_PRIORITIES.md).
+> For current FilmuVFS status and active next steps, use [`STATUS.md`](STATUS.md), [`EXECUTION_PLAN.md`](EXECUTION_PLAN.md), and the active planning matrices under [`TODOS/`](TODOS).
 
 ## 1. Current Architecture Audit
 The current FilmuVFS (Rust) is a well-structured, async-first implementation tailored for streaming over HTTP.

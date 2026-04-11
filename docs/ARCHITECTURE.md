@@ -21,7 +21,8 @@ Parity with current `riven-ts` is the floor, not the target.
 The current audit and the newly elevated gaps are tracked in:
 
 - [`ENTERPRISE_GRADE_AUDIT_2026_04_09.md`](ENTERPRISE_GRADE_AUDIT_2026_04_09.md)
-- [`TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md`](TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md)
+- [`STATUS.md`](STATUS.md)
+- active implementation matrices under [`TODOS/`](TODOS)
 
 ## filmu-ts → Python mapping (updated)
 

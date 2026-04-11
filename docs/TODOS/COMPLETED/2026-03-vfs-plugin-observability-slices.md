@@ -69,7 +69,7 @@ The primary forward-looking docs were refreshed to reflect this delivered state:
 - [`../../PLUGIN_SDK.md`](../../PLUGIN_SDK.md)
 - [`../../ORCHESTRATION.md`](../../ORCHESTRATION.md)
 - [`../../EXECUTION_PLAN.md`](../../EXECUTION_PLAN.md)
-- [`../NEXT_IMPLEMENTATION_PRIORITIES.md`](../NEXT_IMPLEMENTATION_PRIORITIES.md)
+- [`../../STATUS.md`](../../STATUS.md)
 - [`../PLUGIN_CAPABILITY_MODEL_MATRIX.md`](../PLUGIN_CAPABILITY_MODEL_MATRIX.md)
 - [`../ORCHESTRATION_BREADTH_MATRIX.md`](../ORCHESTRATION_BREADTH_MATRIX.md)
 - [`../FILMUVFS_BYTE_SERVING_PLATFORM_MATRIX.md`](../FILMUVFS_BYTE_SERVING_PLATFORM_MATRIX.md)

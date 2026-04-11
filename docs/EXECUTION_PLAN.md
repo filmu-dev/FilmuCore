@@ -16,8 +16,8 @@ This plan is constrained to currently documented state in:
 
 For the current detailed work breakdowns, use:
 
-- [`NEXT_IMPLEMENTATION_PRIORITIES.md`](TODOS/NEXT_IMPLEMENTATION_PRIORITIES.md) - current top-level priority reference
-- [`ENTERPRISE_GRADE_GAP_MATRIX.md`](TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md) - top-level enterprise/state-of-the-art gaps that must not be treated as optional follow-up work
+- [`STATUS.md`](STATUS.md) - current top-level priority and posture reference
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) - platform quality bar and active architectural gaps
 - [`PHASE_C_ROUTE_SURFACE_MATRIX.md`](TODOS/PHASE_C_ROUTE_SURFACE_MATRIX.md) - route-surface breakdown
 - [`DOMAIN_MODEL_EXPANSION_MATRIX.md`](TODOS/DOMAIN_MODEL_EXPANSION_MATRIX.md) - domain-backing gaps for compatibility routes
 - [`ORCHESTRATION_BREADTH_MATRIX.md`](TODOS/ORCHESTRATION_BREADTH_MATRIX.md) - orchestration/decomposition gaps

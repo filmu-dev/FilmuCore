@@ -47,8 +47,7 @@ This recommendation is based on the active backend and planning documents, espec
 - [`STATUS.md`](./STATUS.md)
 - [`LOCAL_FRONTEND_TESTING_READINESS.md`](./LOCAL_FRONTEND_TESTING_READINESS.md)
 - [`EXECUTION_PLAN.md`](./EXECUTION_PLAN.md)
-- [`TODOS/NEXT_IMPLEMENTATION_PRIORITIES.md`](./TODOS/NEXT_IMPLEMENTATION_PRIORITIES.md)
-- [`TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md`](./TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md)
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 - [`PLUGIN_SDK.md`](./PLUGIN_SDK.md)
 
 ## What The Backend Direction Already Supports
@@ -124,7 +123,7 @@ The following platform gaps remain active and are not optional:
 - stronger VFS operational maturity and rollout policy
 - explicit performance budgets, benchmark discipline, and chaos testing
 
-These are tracked in [`TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md`](./TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md).
+These are tracked through [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`STATUS.md`](./STATUS.md), and the active matrix set under [`docs/TODOS`](./TODOS).
 
 ### Replacement contract gate
 

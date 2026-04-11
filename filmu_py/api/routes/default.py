@@ -651,7 +651,7 @@ async def _enterprise_operations_governance(
             evidence=[
                 "release workflow requires PAT-authenticated release-please updates",
                 "package.json exposes security:audit, security:bandit, and perf:bench",
-                "docs/TODOS/ENTERPRISE_GRADE_GAP_MATRIX.md tracks release, metadata, and chaos gaps explicitly",
+                "STATUS.md plus the active TODO matrix set track release, metadata, and chaos gaps explicitly",
                 "scripts/run_backup_restore_proof.ps1 and playback/VFS proof gates already produce promotion evidence inputs",
             ],
             required_actions=[
