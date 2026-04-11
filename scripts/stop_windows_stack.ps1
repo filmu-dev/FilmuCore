@@ -5,6 +5,90 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Get-DefaultMountPath {
+    $systemDrive = [System.Environment]::GetEnvironmentVariable('SystemDrive')
+    if ([string]::IsNullOrWhiteSpace($systemDrive)) {
+        $systemDrive = 'C:'
+    }
+    return (Join-Path $systemDrive 'FilmuCoreVFS')
+}
+
+function Get-CommandLineArgValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $CommandLine,
+        [Parameter(Mandatory = $true)]
+        [string] $ArgName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $null
+    }
+
+    $escaped = [regex]::Escape($ArgName.TrimStart('-'))
+    $pattern = '(?i)(?:^|\s)--' + $escaped + '\s+(?:"(?<value>[^"]+)"|(?<value>\S+))'
+    $match = [regex]::Match($CommandLine, $pattern)
+    if (-not $match.Success) {
+        return $null
+    }
+
+    $value = [string] $match.Groups['value'].Value
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+
+    return $value.Trim()
+}
+
+function Find-UnmanagedFilmuvfsProcesses {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MountPath,
+        [string] $GrpcServer = ''
+    )
+
+    $resolvedMount = [System.IO.Path]::GetFullPath($MountPath)
+    $resolvedGrpc = if ([string]::IsNullOrWhiteSpace($GrpcServer)) { $null } else { $GrpcServer.Trim() }
+    $matches = [System.Collections.Generic.List[object]]::new()
+
+    $candidates = @(Get-CimInstance Win32_Process -Filter "Name='filmuvfs.exe'" -ErrorAction SilentlyContinue)
+    foreach ($candidate in $candidates) {
+        $commandLine = [string] $candidate.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            continue
+        }
+
+        $mountValue = Get-CommandLineArgValue -CommandLine $commandLine -ArgName 'mountpoint'
+        if ([string]::IsNullOrWhiteSpace($mountValue)) {
+            continue
+        }
+
+        $resolvedCandidateMount = $null
+        try {
+            $resolvedCandidateMount = [System.IO.Path]::GetFullPath($mountValue)
+        }
+        catch {
+            continue
+        }
+
+        if ($resolvedCandidateMount -ne $resolvedMount) {
+            continue
+        }
+
+        if ($null -ne $resolvedGrpc) {
+            $grpcValue = Get-CommandLineArgValue -CommandLine $commandLine -ArgName 'grpc-server'
+            if ([string]::IsNullOrWhiteSpace($grpcValue) -or ($grpcValue.Trim() -ne $resolvedGrpc)) {
+                continue
+            }
+        }
+
+        $matches.Add($candidate) | Out-Null
+    }
+
+    return @($matches)
+}
+
 function Read-State {
     param(
         [Parameter(Mandatory = $true)]
@@ -131,7 +215,26 @@ Write-Host ''
 
 Write-Host '[1/2] Stopping Windows-native filmuvfs mount...' -ForegroundColor Yellow
 if ($null -eq $state) {
-    Write-Host '      ⚠ No managed Windows filmuvfs state file was found' -ForegroundColor Yellow
+    Write-Host '      ⚠ No managed Windows filmuvfs state file was found; scanning for unmanaged filmuvfs instances...' -ForegroundColor Yellow
+
+    $fallbackMountPath = Get-DefaultMountPath
+    $fallbackGrpcServer = 'http://127.0.0.1:50051'
+    $unmanaged = Find-UnmanagedFilmuvfsProcesses -MountPath $fallbackMountPath -GrpcServer $fallbackGrpcServer
+    if ($unmanaged.Count -eq 0) {
+        Write-Host ("      ✓ No unmanaged filmuvfs process found for mountpoint {0}" -f $fallbackMountPath) -ForegroundColor Green
+    }
+    else {
+        foreach ($processInfo in $unmanaged) {
+            $processId = [int] $processInfo.ProcessId
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 250
+            $stillRunning = $null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)
+            if ($stillRunning) {
+                Stop-Process -Id $processId -Force -ErrorAction Stop
+            }
+            Write-Host ("      ✓ Stopped unmanaged filmuvfs process {0} (mountpoint {1})" -f $processId, $fallbackMountPath) -ForegroundColor Green
+        }
+    }
 }
 else {
     $managedPid = [long]$state.pid
