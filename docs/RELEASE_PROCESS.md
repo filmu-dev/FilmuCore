@@ -39,9 +39,11 @@ The repository now enforces this with [`../.github/workflows/pr-branch-hygiene.y
 The earlier local-preflight path is now:
 
 - create a fresh single-use branch with `npm run branch:codex:new -- <topic>`
+- if your long-lived local branch is `dev`, publish to a fresh PR branch with `npm run branch:codex:publish -- <topic>` instead of pushing `dev`
 - audit the current branch before opening or updating a PR with `npm run branch:hygiene`
+- install the repo-managed pre-push hook once with `npm run hooks:install`
 
-`branch:codex:new` creates a timestamped `codex/<topic>-<utc>` branch from current `origin/main` and refuses to run when tracked changes are present, which prevents accidental reuse of a dirty or already-stacked branch. `branch:hygiene` checks ahead/behind state against `origin/main` and, when GitHub is reachable, also checks whether the same branch name was already used by a merged PR.
+`branch:codex:new` creates a timestamped `codex/<topic>-<utc>` branch from current `origin/main` and refuses to run when tracked changes are present, which prevents accidental reuse of a dirty or already-stacked branch. `branch:codex:publish` is the safer path when local work accumulates on a long-lived branch such as `dev`: it creates a fresh timestamped `codex/<topic>-<utc>` branch from current `origin/main`, applies only the net content diff from the source branch, and commits that clean delta as a single publish commit. `branch:hygiene` checks ahead/behind state against `origin/main` and, when GitHub is reachable, also checks whether the same branch name was already used by a merged PR. `hooks:install` configures the repo's `.githooks/pre-push` hook so branch hygiene runs automatically on every push.
 
 ## Why This Policy Exists
 
@@ -132,23 +134,20 @@ Add these as required when their runner paths are fully provisioned:
 
 - `PR Branch Hygiene / PR Branch Hygiene`
 - `PR Title / Semantic PR Title`
-- `Verify / Verify - Python Lint`
-- `Verify / Verify - Python Tests`
-- `Verify / Verify - Rust Format`
-- `Verify / Verify - Rust Check`
-- `Verify / Verify - Rust Tests`
+- `Verify - Python Lint / Python Lint`
+- `Verify - Python Tests / Python Tests`
+- `Verify - Rust Format / Rust Format`
+- `Verify - Rust Check / Rust Check`
+- `Verify - Rust Tests / Rust Tests`
 - `Playback Gate / Playback Gate`
 - `Validate Platform Stack / Validate Platform Stack`
 
 The playback gate may stay path-conditional in practice, but the workflow itself is now merged and green. Whether it is already marked required on live protected-branch policy must still be validated from an admin-authenticated host with [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1).
 
-The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
-
 The repository now also carries [`../scripts/check_github_main_policy.ps1`](../scripts/check_github_main_policy.ps1) plus package scripts `proof:playback:policy` and `proof:playback:policy:validate` so the exact expected `main` policy can be printed or, when `gh` is installed and authenticated, validated against the live repository settings instead of relying on screenshots or memory.
 For the stricter release-candidate posture, the repository also now carries `proof:playback:policy:enterprise` and `proof:playback:policy:enterprise:validate`, which add minimum-review/admin-enforcement expectations and the expected provider/Windows proof-profile contract behind the single playback gate.
 The playback-gate workflow now also captures `playback-proof-artifacts/github-main-policy-expected.json` from that same policy checker so branch-protection promotion can key off the canonical expected profile/check names from CI artifacts instead of screenshots or memory.
 The playback gate may stay path-conditional in practice, but once the GitHub-hosted runner configuration is provisioned and green it should be marked required for the protected `main` workflow policy described in the playback-gate docs.
-The PR-title gate has one bootstrap caveat: do not mark `PR Title / Semantic PR Title` required until after the PR that introduces [`.github/workflows/semantic-pr-title.yml`](../.github/workflows/semantic-pr-title.yml) is merged to `main`, because `pull_request_target` workflows are evaluated from the base branch and cannot report from a workflow that does not yet exist on `main`.
 
 The repository now also carries:
 
@@ -166,6 +165,7 @@ Use those instead of screenshots or memory to validate that live branch protecti
 
 1. Create or push a feature branch.
    Prefer `npm run branch:codex:new -- <topic>` for Codex-driven work so the branch starts from current `origin/main` and gets a unique single-use name.
+   If your local working branch is a long-lived `dev`, do not push `dev` itself. Use `npm run branch:codex:publish -- <topic>` to cut a fresh single-use PR branch from current `origin/main`.
 2. Open a draft PR against `main`.
 3. Set a Conventional Commit PR title immediately.
 4. Let CI, review, and follow-up commits happen on the PR.
@@ -174,6 +174,17 @@ Use those instead of screenshots or memory to validate that live branch protecti
 7. Delete the feature branch after merge, or enable GitHub auto-delete for merged branches.
 
 Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub shows `Merge pull request` instead of `Squash and merge`, the repository merge settings are still misconfigured.
+
+### Local dev branch model
+
+If you keep a local-only `dev` branch as your integration branch:
+
+1. keep `dev` local and rebase it onto `origin/main` as needed
+2. do not open PRs from `dev`
+3. when you want to publish, run `npm run branch:codex:publish -- <topic>`
+4. push and open the PR from the fresh `codex/<topic>-<utc>` branch that command creates
+
+This preserves `dev` as your workspace while keeping GitHub PR branches single-use and clean.
 
 ### Release creation
 

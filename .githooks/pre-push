@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+if [[ -z "${repo_root:-}" ]]; then
+  echo "pre-push: could not resolve repository root" >&2
+  exit 1
+fi
+
+ps_exe=""
+if command -v pwsh >/dev/null 2>&1; then
+  ps_exe="pwsh"
+elif command -v powershell.exe >/dev/null 2>&1; then
+  ps_exe="powershell.exe"
+else
+  echo "pre-push: pwsh or powershell.exe is required to run branch hygiene checks" >&2
+  exit 1
+fi
+
+remote_name="${1:-origin}"
+remote_url="${2:-}"
+seen=""
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "${local_ref}" != refs/heads/* ]]; then
+    continue
+  fi
+
+  branch="${local_ref#refs/heads/}"
+  if [[ " ${seen} " == *" ${branch} "* ]]; then
+    continue
+  fi
+  seen="${seen} ${branch}"
+
+  "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_branch_hygiene.ps1" -Branch "${branch}" -Remote "${remote_name}"
+done
+
+exit 0
