@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -284,6 +284,36 @@ def test_watch_catalog_governance_tracks_reconnect_delta_lifecycle() -> None:
     assert snapshot["vfs_catalog_deltas_served"] == 1
 
 
+def test_watch_catalog_reuses_current_generation_without_snapshot_fallback() -> None:
+    current_snapshot = _catalog_snapshot(generation_id="2", file_url="https://cdn.example.com/movie-b")
+    supplier = _StubSupplier(
+        current_snapshot=current_snapshot,
+        reconnect_delta=None,
+        snapshots_by_generation={2: current_snapshot},
+    )
+    servicer = FilmuVfsCatalogGrpcServicer(cast(Any, supplier), heartbeat_interval=timedelta(seconds=1))
+
+    event = asyncio.run(
+        _first_watch_event(
+            servicer,
+            catalog_pb2.WatchCatalogRequest(
+                subscribe=catalog_pb2.CatalogSubscribe(
+                    daemon_id="pytest-daemon",
+                    last_applied_generation_id="2",
+                    want_full_snapshot=True,
+                    correlation=catalog_pb2.CatalogCorrelationKeys(),
+                )
+            ),
+        )
+    )
+
+    assert event.WhichOneof("payload") == "heartbeat"
+    snapshot = servicer.build_governance_snapshot()
+    assert snapshot["vfs_catalog_reconnect_requested"] == 1
+    assert snapshot["vfs_catalog_reconnect_current_generation_reused"] == 1
+    assert snapshot["vfs_catalog_reconnect_snapshot_fallback"] == 0
+
+
 def test_refresh_catalog_entry_forces_provider_refresh_and_returns_new_url() -> None:
     snapshot = _catalog_snapshot(generation_id="1", file_url="https://cdn.example.com/stale")
     provider_client = _FakeProviderClient("https://cdn.example.com/fresh")
@@ -318,6 +348,41 @@ def test_refresh_catalog_entry_forces_provider_refresh_and_returns_new_url() -> 
     assert snapshot["vfs_catalog_inline_refresh_succeeded"] == 1
     assert snapshot["vfs_catalog_refresh_attempts"] == 1
     assert snapshot["vfs_catalog_refresh_succeeded"] == 1
+
+
+def test_refresh_catalog_entry_deduplicates_concurrent_inline_refreshes() -> None:
+    snapshot = _catalog_snapshot(generation_id="1", file_url="https://cdn.example.com/stale")
+    provider_client = _FakeProviderClient("https://cdn.example.com/fresh")
+    servicer = FilmuVfsCatalogGrpcServicer(
+        cast(Any, _StubSupplier(current_snapshot=snapshot)),
+        playback_clients={"realdebrid": provider_client},
+    )
+
+    async def invoke_refresh() -> catalog_pb2.RefreshCatalogEntryResponse:
+        with patch(
+            "filmu_py.services.vfs_server._probe_remote_direct_url",
+            new=AsyncMock(return_value=True),
+        ):
+            return await servicer.RefreshCatalogEntry(
+                catalog_pb2.RefreshCatalogEntryRequest(
+                    provider_file_id="provider-file-movie-1",
+                    handle_key="handle-1",
+                    entry_id="file:movie-file-1",
+                ),
+                cast(Any, _FakeContext()),
+            )
+
+    async def run_concurrent() -> tuple[catalog_pb2.RefreshCatalogEntryResponse, ...]:
+        return await asyncio.gather(invoke_refresh(), invoke_refresh())
+
+    first, second = asyncio.run(run_concurrent())
+
+    assert first.success is True
+    assert second.success is True
+    assert len(provider_client.calls) == 1
+    snapshot = servicer.build_governance_snapshot()
+    assert snapshot["vfs_catalog_inline_refresh_requests"] == 2
+    assert snapshot["vfs_catalog_inline_refresh_deduplicated"] == 1
 
 
 def test_refresh_catalog_entry_prefers_entry_id_over_shared_provider_file_id() -> None:

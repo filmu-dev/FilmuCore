@@ -479,6 +479,30 @@ impl MountRuntime {
         self.peak_active_reads.load(Ordering::SeqCst)
     }
 
+    pub fn active_handle_summaries(&self, limit: usize) -> Vec<String> {
+        let mut summaries = self
+            .handles
+            .iter()
+            .map(|entry| {
+                let state = entry.value();
+                let path = self
+                    .entry_for_inode(state.inode)
+                    .map(|catalog_entry| catalog_entry.path.clone())
+                    .unwrap_or_else(|| format!("invalidated:inode:{}", state.inode));
+                format!(
+                    "{}|{}|{}|invalidated={}",
+                    self.session_id.as_str(),
+                    state.handle_key,
+                    path,
+                    state.invalidated
+                )
+            })
+            .collect::<Vec<_>>();
+        summaries.sort();
+        summaries.truncate(limit);
+        summaries
+    }
+
     fn record_handle_startup_result(&self, handle_id: u64, result: &'static str) {
         let Some(mut handle_state) = self.handles.get_mut(&handle_id) else {
             return;

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
+import multiprocessing
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -95,6 +98,112 @@ WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
     ["stage"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
 )
+_HEAVY_STAGE_EXECUTOR: Executor | None = None
+
+
+def _heavy_stage_executor() -> Executor:
+    """Return the bounded executor used for CPU-heavy ranking isolation."""
+
+    global _HEAVY_STAGE_EXECUTOR
+    if _HEAVY_STAGE_EXECUTOR is None:
+        if multiprocessing.get_start_method(allow_none=True) == "fork":
+            _HEAVY_STAGE_EXECUTOR = ProcessPoolExecutor(max_workers=2)
+        else:
+            try:
+                _HEAVY_STAGE_EXECUTOR = ProcessPoolExecutor(
+                    max_workers=2,
+                    mp_context=multiprocessing.get_context("spawn"),
+                )
+            except (ValueError, RuntimeError):
+                _HEAVY_STAGE_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+    return _HEAVY_STAGE_EXECUTOR
+
+
+def _rank_stream_batch(
+    *,
+    item_title: str,
+    item_aliases: list[str],
+    profile: RankingProfile,
+    bucket_limit: int,
+    stream_inputs: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Run the expensive RTN ranking/sorting batch in an isolated worker."""
+
+    rtn = RTN(profile)
+    successful: list[tuple[str, RankedTorrent]] = []
+    failures: list[dict[str, object]] = []
+
+    for stream_input in stream_inputs:
+        stream_id = str(stream_input["stream_id"])
+        parsed = ParsedData(
+            raw_title=str(stream_input["raw_title"]),
+            parsed_title=str(stream_input["parsed_title"]),
+            resolution=str(stream_input["resolution"]),
+        )
+        try:
+            ranked = rtn.rank_torrent(
+                parsed,
+                correct_title=item_title,
+                aliases=item_aliases or None,
+            )
+            partial_scope_bonus = int(stream_input.get("partial_scope_bonus", 0) or 0)
+            if partial_scope_bonus > 0:
+                score_parts = dict(ranked.score_parts)
+                score_parts["partial_scope_bonus"] = partial_scope_bonus
+                ranked = RankedTorrent(
+                    data=ranked.data,
+                    rank=ranked.rank + partial_scope_bonus,
+                    lev_ratio=ranked.lev_ratio,
+                    fetch=ranked.fetch,
+                    failed_checks=ranked.failed_checks,
+                    score_parts=score_parts,
+                )
+        except Exception as exc:  # pragma: no cover - subprocess defensive path
+            failures.append(
+                {
+                    "stream_id": stream_id,
+                    "rank_score": 0,
+                    "lev_ratio": 0.0,
+                    "fetch": False,
+                    "passed": False,
+                    "rejection_reason": str(exc),
+                }
+            )
+            continue
+        successful.append((stream_id, ranked))
+
+    sorted_ranked = rtn.sort_torrents(
+        [ranked for _, ranked in successful],
+        bucket_limit=bucket_limit,
+    )
+    kept_ids = {id(ranked.data) for ranked in sorted_ranked}
+    results = list(failures)
+    for stream_id, ranked in successful:
+        if id(ranked.data) not in kept_ids:
+            results.append(
+                {
+                    "stream_id": stream_id,
+                    "rank_score": 0,
+                    "lev_ratio": ranked.lev_ratio,
+                    "fetch": False,
+                    "passed": False,
+                    "rejection_reason": "bucket_limit_exceeded",
+                }
+            )
+            continue
+        results.append(
+            {
+                "stream_id": stream_id,
+                "rank_score": ranked.rank,
+                "lev_ratio": ranked.lev_ratio,
+                "fetch": ranked.fetch,
+                "passed": ranked.fetch,
+                "rejection_reason": None
+                if ranked.fetch
+                else ",".join(ranked.failed_checks) or "fetch_failed",
+            }
+        )
+    return results
 
 
 def _redis_from_settings(settings: Settings) -> Redis:
@@ -1383,7 +1492,6 @@ async def rank_streams(
         logger.info("rank_streams starting", extra=log_context)
         streams = await media_service.get_stream_candidates(media_item_id=item_id)
         profile = _resolve_ranking_profile(settings)
-        rtn = RTN(profile)
         anime_only = _dubbed_anime_only(settings) and _is_anime_item(item.attributes)
         item_aliases = (
             _title_aliases(item.attributes)
@@ -1411,7 +1519,8 @@ async def rank_streams(
                 requested_seasons=partial_requested_seasons,
             )
         ranked_results: list[RankedStreamCandidateRecord] = []
-        successful: list[tuple[StreamORM, RankedTorrent]] = []
+        rankable_streams: list[StreamORM] = []
+        rank_batch_inputs: list[dict[str, object]] = []
 
         for stream in streams:
             if not stream.parsed_title:
@@ -1467,68 +1576,54 @@ async def rank_streams(
                 )
                 continue
 
-            parsed = ParsedData(
-                raw_title=stream.raw_title,
-                parsed_title=stream.parsed_title,
-                resolution=stream.resolution,
+            rankable_streams.append(stream)
+            rank_batch_inputs.append(
+                {
+                    "stream_id": str(stream.id),
+                    "raw_title": stream.raw_title,
+                    "parsed_title": stream.parsed_title,
+                    "resolution": stream.resolution,
+                    "partial_scope_bonus": _partial_scope_rank_bonus(
+                        stream,
+                        partial_requested_seasons,
+                    ),
+                }
             )
-            try:
-                ranked = rtn.rank_torrent(
-                    parsed,
-                    correct_title=item.title,
-                    aliases=item_aliases or None,
-                )
-                ranked = _apply_partial_scope_rank_bonus(
-                    stream,
-                    ranked,
-                    partial_requested_seasons,
-                )
-                successful.append((stream, ranked))
-            except Exception as exc:
-                ranked_results.append(
-                    RankedStreamCandidateRecord(
-                        item_id=item_id,
-                        stream_id=stream.id,
-                        rank_score=0,
-                        lev_ratio=0.0,
-                        fetch=False,
-                        passed=False,
-                        rejection_reason=str(exc),
-                        stream=stream,
-                    )
-                )
 
-        sorted_ranked = rtn.sort_torrents(
-            [ranked for _, ranked in successful],
-            bucket_limit=_bucket_limit(settings),
-        )
-        kept_ids = {id(ranked.data) for ranked in sorted_ranked}
-        for stream, ranked in successful:
-            if id(ranked.data) not in kept_ids:
-                ranked_results.append(
-                    RankedStreamCandidateRecord(
-                        item_id=item_id,
-                        stream_id=stream.id,
-                        rank_score=0,
-                        lev_ratio=ranked.lev_ratio,
-                        fetch=False,
-                        passed=False,
-                        rejection_reason="bucket_limit_exceeded",
-                        stream=stream,
-                    )
-                )
+        ranked_batch_records: list[dict[str, object]]
+        if rank_batch_inputs:
+            loop = asyncio.get_running_loop()
+            ranked_batch_records = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _heavy_stage_executor(),
+                    functools.partial(
+                        _rank_stream_batch,
+                        item_title=item.title,
+                        item_aliases=item_aliases,
+                        profile=profile,
+                        bucket_limit=_bucket_limit(settings),
+                        stream_inputs=rank_batch_inputs,
+                    ),
+                ),
+                timeout=60.0,
+            )
+        else:
+            ranked_batch_records = []
+
+        stream_map = {str(stream.id): stream for stream in rankable_streams}
+        for ranked_record in ranked_batch_records:
+            stream = stream_map.get(str(ranked_record["stream_id"]))
+            if stream is None:
                 continue
             ranked_results.append(
                 RankedStreamCandidateRecord(
                     item_id=item_id,
                     stream_id=stream.id,
-                    rank_score=ranked.rank,
-                    lev_ratio=ranked.lev_ratio,
-                    fetch=ranked.fetch,
-                    passed=ranked.fetch,
-                    rejection_reason=None
-                    if ranked.fetch
-                    else ",".join(ranked.failed_checks) or "fetch_failed",
+                    rank_score=int(ranked_record["rank_score"]),
+                    lev_ratio=float(ranked_record["lev_ratio"]),
+                    fetch=bool(ranked_record["fetch"]),
+                    passed=bool(ranked_record["passed"]),
+                    rejection_reason=cast(str | None, ranked_record["rejection_reason"]),
                     stream=stream,
                 )
             )

@@ -75,6 +75,7 @@ class PluginContext:
     """Scoped runtime context injected into one plugin implementation."""
 
     plugin_name: str
+    tenant_id: str
     settings: Mapping[str, Any]
     event_bus: PluginEventBus
     rate_limiter: PluginRateLimiter
@@ -105,6 +106,7 @@ class PluginContextProvider:
     event_bus: PluginEventBus
     rate_limiter: PluginRateLimiter
     cache: PluginCache
+    tenant_id: str = "control-plane"
     logger_factory: Callable[[str], PluginLogger] | None = None
     settings_registry: PluginSettingsRegistry | None = None
     datasource_factory: Callable[[str, str | None], PluginDatasource | None] | None = None
@@ -147,6 +149,7 @@ class PluginContextProvider:
         )
         return PluginContext(
             plugin_name=plugin_name,
+            tenant_id=self.tenant_id,
             settings=settings_view,
             event_bus=self.event_bus,
             rate_limiter=self.rate_limiter,

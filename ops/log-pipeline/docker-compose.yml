@@ -1,0 +1,43 @@
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: adminadmin
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+      - ../opensearch/filmu-index-template.json:/usr/share/opensearch/config/filmu-index-template.json:ro
+
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.1
+    depends_on:
+      - opensearch
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+
+  vector:
+    image: timberio/vector:0.43.1-debian
+    depends_on:
+      - opensearch
+    environment:
+      FILMU_OPENSEARCH_ENDPOINT: http://opensearch:9200
+      FILMU_OPENSEARCH_INDEX: filmu-logs-%Y.%m.%d
+      FILMU_OPENSEARCH_USER: admin
+      FILMU_OPENSEARCH_PASSWORD: adminadmin
+    volumes:
+      - ../../logs:/logs
+      - ../vector/filmu-ndjson-vector.toml:/etc/vector/vector.toml:ro
+    command:
+      - --config
+      - /etc/vector/vector.toml
+
+volumes:
+  opensearch-data:

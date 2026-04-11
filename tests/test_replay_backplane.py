@@ -106,6 +106,25 @@ class FailingReplayBackplane:
         raise TimeoutError("redis unavailable")
 
 
+class RecordingReplaySink:
+    def __init__(self) -> None:
+        self.deliveries: list[dict[str, object]] = []
+        self.acks: list[dict[str, object]] = []
+        self.errors: list[dict[str, object]] = []
+
+    async def observe_delivery(self, **payload: object) -> object:
+        self.deliveries.append(dict(payload))
+        return None
+
+    async def observe_ack(self, **payload: object) -> object:
+        self.acks.append(dict(payload))
+        return None
+
+    async def observe_error(self, **payload: object) -> object:
+        self.errors.append(dict(payload))
+        return None
+
+
 def _stream_id_gt(left: str, right: str) -> bool:
     left_ms, left_seq = (int(part) for part in left.split("-", 1))
     right_ms, right_seq = (int(part) for part in right.split("-", 1))
@@ -208,3 +227,53 @@ async def test_redis_replay_backplane_ignores_existing_consumer_group() -> None:
     await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
 
     assert "filmu-api" in redis.groups["filmu:events"]
+
+
+@pytest.mark.asyncio
+async def test_redis_replay_backplane_reports_delivery_and_ack_state() -> None:
+    redis = FakeRedisStream()
+    sink = RecordingReplaySink()
+    backplane = RedisReplayEventBackplane(
+        redis,
+        stream_name="filmu:events",
+        maxlen=10,
+        subscription_state_sink=sink,
+    )
+    await backplane.publish("tenant.updated", {"ok": True}, tenant_id="tenant-a")
+    await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
+
+    events = await backplane.read_group(
+        group_name="filmu-api",
+        consumer_name="consumer-1",
+        node_id="node-a",
+        tenant_id="tenant-a",
+    )
+    await backplane.ack(
+        group_name="filmu-api",
+        consumer_name="consumer-1",
+        node_id="node-a",
+        tenant_id="tenant-a",
+        event_ids=[event.event_id for event in events],
+    )
+
+    assert sink.deliveries == [
+        {
+            "stream_name": "filmu:events",
+            "group_name": "filmu-api",
+            "consumer_name": "consumer-1",
+            "node_id": "node-a",
+            "tenant_id": "tenant-a",
+            "offset": ">",
+            "event_id": "1-0",
+        }
+    ]
+    assert sink.acks == [
+        {
+            "stream_name": "filmu:events",
+            "group_name": "filmu-api",
+            "consumer_name": "consumer-1",
+            "node_id": "node-a",
+            "tenant_id": "tenant-a",
+            "event_id": "1-0",
+        }
+    ]

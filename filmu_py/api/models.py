@@ -112,6 +112,11 @@ class AccessPolicyRevisionResponse(BaseModel):
 
     version: str
     source: str
+    approval_status: str
+    proposed_by: str | None = None
+    approved_by: str | None = None
+    approved_at: str | None = None
+    approval_notes: str | None = None
     is_active: bool
     activated_at: str
     created_at: str
@@ -135,12 +140,27 @@ class AccessPolicyRevisionWriteRequest(BaseModel):
 
     version: str
     source: str = "operator_api"
-    activate: bool = True
+    activate: bool = False
+    approval_notes: str | None = None
     role_grants: dict[str, list[str]] = {}
     principal_roles: dict[str, list[str]] = {}
     principal_scopes: dict[str, list[str]] = {}
     principal_tenant_grants: dict[str, list[str]] = {}
     audit_decisions: bool = True
+
+
+class AccessPolicyRevisionApprovalRequest(BaseModel):
+    """Operator approval/rejection payload for one access-policy revision."""
+
+    approval_notes: str | None = None
+    activate: bool = False
+
+
+class AccessPolicyAuditResponse(BaseModel):
+    """Bounded audit-search response for access-policy governance actions."""
+
+    total_matches: int
+    entries: list[str]
 
 
 class PluginEventStatusResponse(BaseModel):
@@ -177,6 +197,45 @@ class PluginGovernanceResponse(BaseModel):
 
     summary: PluginGovernanceSummaryResponse
     plugins: list[PluginCapabilityStatusResponse]
+
+
+class PluginGovernanceOverrideResponse(BaseModel):
+    """Persisted operator override row for plugin quarantine/revocation state."""
+
+    plugin_name: str
+    state: Literal["approved", "quarantined", "revoked"]
+    reason: str | None = None
+    notes: str | None = None
+    updated_by: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class PluginGovernanceOverrideWriteRequest(BaseModel):
+    """Operator write payload for persisted plugin governance overrides."""
+
+    state: Literal["approved", "quarantined", "revoked"]
+    reason: str | None = None
+    notes: str | None = None
+
+
+class ControlPlaneSubscriberResponse(BaseModel):
+    """Operator-visible replay/control-plane subscriber ownership row."""
+
+    stream_name: str
+    group_name: str
+    consumer_name: str
+    node_id: str
+    tenant_id: str | None = None
+    status: str
+    last_read_offset: str | None = None
+    last_delivered_event_id: str | None = None
+    last_acked_event_id: str | None = None
+    last_error: str | None = None
+    claimed_at: str
+    last_heartbeat_at: str
+    created_at: str
+    updated_at: str
 
 
 class EnterpriseOperationsSliceResponse(BaseModel):
@@ -437,6 +496,7 @@ class ServingGovernanceResponse(BaseModel):
     vfs_catalog_watch_sessions_active: int
     vfs_catalog_reconnect_requested: int
     vfs_catalog_reconnect_delta_served: int
+    vfs_catalog_reconnect_current_generation_reused: int
     vfs_catalog_reconnect_snapshot_fallback: int
     vfs_catalog_reconnect_failures: int
     vfs_catalog_snapshots_served: int
@@ -456,6 +516,7 @@ class ServingGovernanceResponse(BaseModel):
     vfs_catalog_refresh_skipped_no_client: int
     vfs_catalog_refresh_skipped_fresh: int
     vfs_catalog_inline_refresh_requests: int
+    vfs_catalog_inline_refresh_deduplicated: int
     vfs_catalog_inline_refresh_succeeded: int
     vfs_catalog_inline_refresh_failed: int
     vfs_catalog_inline_refresh_not_found: int
@@ -552,6 +613,8 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_rollout_readiness: str
     vfs_runtime_rollout_reasons: list[str]
     vfs_runtime_rollout_next_action: str
+    serving_active_session_summaries: list[str] = []
+    vfs_runtime_active_handle_summaries: list[str] = []
 
 
 class ServingStatusResponse(BaseModel):

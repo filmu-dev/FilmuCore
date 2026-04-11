@@ -33,6 +33,7 @@ from .plugins.context import HostPluginDatasource, PluginContextProvider
 from .plugins.registry import PluginRegistry
 from .resources import AppResources
 from .services.access_policy import AccessPolicyService
+from .services.control_plane import ControlPlaneService
 from .services.identity import SecurityIdentityService
 from .services.media import MediaService
 from .services.playback import (
@@ -41,6 +42,7 @@ from .services.playback import (
     InProcessHlsRestrictedFallbackRefreshController,
     PlaybackSourceService,
 )
+from .services.plugin_governance import PluginGovernanceService
 from .services.settings_service import load_settings
 from .workers.tasks import enqueue_process_scraped_item
 
@@ -115,6 +117,18 @@ def build_access_policy_service(resources: AppResources) -> AccessPolicyService:
     return AccessPolicyService(resources.db)
 
 
+def build_control_plane_service(resources: AppResources) -> ControlPlaneService:
+    """Build the persisted control-plane subscriber state service."""
+
+    return ControlPlaneService(resources.db)
+
+
+def build_plugin_governance_service(resources: AppResources) -> PluginGovernanceService:
+    """Build the persisted plugin-governance override service."""
+
+    return PluginGovernanceService(resources.db)
+
+
 def build_plugin_registry(
     *,
     graphql_plugin_registry: GraphQLPluginRegistry | None = None,
@@ -129,6 +143,7 @@ def build_plugin_context_provider(resources: AppResources) -> PluginContextProvi
 
     return PluginContextProvider(
         settings=resources.plugin_settings_payload or resources.settings.to_compatibility_dict(),
+        tenant_id="control-plane",
         event_bus=resources.event_bus,
         rate_limiter=cast("Any", resources.rate_limiter),
         cache=resources.cache,
@@ -244,14 +259,6 @@ def _build_lifespan(
         )
 
         event_bus = EventBus()
-        if runtime_settings.control_plane.event_backplane == "redis_stream":
-            event_bus.attach_replay_backplane(
-                RedisReplayEventBackplane(
-                    cast("Any", redis),
-                    stream_name=runtime_settings.control_plane.event_stream_name,
-                    maxlen=runtime_settings.control_plane.event_replay_maxlen,
-                )
-            )
         arq_redis: ArqRedis | None = None
         queue_name = _arq_queue_name(runtime_settings)
         if runtime_settings.arq_enabled:
@@ -319,6 +326,17 @@ def _build_lifespan(
         resources.access_policy_snapshot = await resources.access_policy_service.bootstrap(
             runtime_settings
         )
+        resources.control_plane_service = build_control_plane_service(resources)
+        resources.plugin_governance_service = build_plugin_governance_service(resources)
+        if runtime_settings.control_plane.event_backplane == "redis_stream":
+            event_bus.attach_replay_backplane(
+                RedisReplayEventBackplane(
+                    cast("Any", redis),
+                    stream_name=runtime_settings.control_plane.event_stream_name,
+                    maxlen=runtime_settings.control_plane.event_replay_maxlen,
+                    subscription_state_sink=resources.control_plane_service,
+                )
+            )
         plugin_context_provider = build_plugin_context_provider(resources)
         app.state.plugin_capability_load_report = await asyncio.to_thread(
             load_plugins,

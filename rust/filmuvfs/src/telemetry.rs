@@ -180,6 +180,7 @@ pub struct FilmuvfsRuntimeGaugeSnapshot {
     pub active_reads: u64,
     pub peak_active_reads: u64,
     pub chunk_cache_weighted_bytes: u64,
+    pub active_handle_summaries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1251,6 +1252,7 @@ impl FilmuvfsMetrics {
                 active_reads: self.mount_runtime.active_read_count(),
                 peak_active_reads: self.mount_runtime.peak_active_read_count(),
                 chunk_cache_weighted_bytes: self.mount_runtime.chunk_cache_weighted_size_bytes(),
+                active_handle_summaries: self.mount_runtime.active_handle_summaries(10),
             },
             handle_startup: FilmuvfsHandleStartupStatusSnapshot {
                 total: handle_startup_total,

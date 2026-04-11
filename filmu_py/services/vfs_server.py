@@ -49,6 +49,7 @@ _VFS_CATALOG_GOVERNANCE_TEMPLATE = {
     "vfs_catalog_watch_sessions_active": 0,
     "vfs_catalog_reconnect_requested": 0,
     "vfs_catalog_reconnect_delta_served": 0,
+    "vfs_catalog_reconnect_current_generation_reused": 0,
     "vfs_catalog_reconnect_snapshot_fallback": 0,
     "vfs_catalog_reconnect_failures": 0,
     "vfs_catalog_snapshots_served": 0,
@@ -68,6 +69,7 @@ _VFS_CATALOG_GOVERNANCE_TEMPLATE = {
     "vfs_catalog_refresh_skipped_no_client": 0,
     "vfs_catalog_refresh_skipped_fresh": 0,
     "vfs_catalog_inline_refresh_requests": 0,
+    "vfs_catalog_inline_refresh_deduplicated": 0,
     "vfs_catalog_inline_refresh_succeeded": 0,
     "vfs_catalog_inline_refresh_failed": 0,
     "vfs_catalog_inline_refresh_not_found": 0,
@@ -433,6 +435,8 @@ class FilmuVfsCatalogGrpcServicer:
         self._poll_interval = poll_interval
         self._heartbeat_interval = heartbeat_interval
         self._governance = build_empty_vfs_catalog_governance_snapshot()
+        self._inline_refresh_flights: dict[str, asyncio.Task[str | None]] = {}
+        self._inline_refresh_flights_lock = asyncio.Lock()
 
     def _record_governance_event(self, event: str, *, value: int = 1) -> None:
         self._governance[event] += value
@@ -681,10 +685,10 @@ class FilmuVfsCatalogGrpcServicer:
             self._record_governance_event("vfs_catalog_inline_refresh_not_found")
             return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
 
-        refreshed_url = await self._resolve_fresh_url(
+        refreshed_url = await self._resolve_inline_refresh(
             matched_entry,
-            force=True,
-            allow_stale_fallback=False,
+            entry_id=entry_id,
+            provider_file_id=provider_file_id,
         )
         if refreshed_url is None:
             logger.warning(
@@ -710,6 +714,44 @@ class FilmuVfsCatalogGrpcServicer:
         )
         self._record_governance_event("vfs_catalog_inline_refresh_succeeded")
         return catalog_pb2.RefreshCatalogEntryResponse(success=True, new_url=refreshed_url)
+
+    async def _resolve_inline_refresh(
+        self,
+        matched_entry: VfsCatalogFileEntry,
+        *,
+        entry_id: str,
+        provider_file_id: str,
+    ) -> str | None:
+        refresh_key = (
+            matched_entry.provider_file_id
+            or provider_file_id
+            or entry_id
+            or matched_entry.media_entry_id
+        )
+        existing: asyncio.Task[str | None] | None = None
+        async with self._inline_refresh_flights_lock:
+            existing = self._inline_refresh_flights.get(refresh_key)
+            if existing is not None:
+                self._record_governance_event("vfs_catalog_inline_refresh_deduplicated")
+            else:
+                task = asyncio.create_task(
+                    self._resolve_fresh_url(
+                        matched_entry,
+                        force=True,
+                        allow_stale_fallback=False,
+                    )
+                )
+                self._inline_refresh_flights[refresh_key] = task
+
+        if existing is not None:
+            return await existing
+        task = self._inline_refresh_flights[refresh_key]
+
+        try:
+            return await task
+        finally:
+            async with self._inline_refresh_flights_lock:
+                self._inline_refresh_flights.pop(refresh_key, None)
 
     async def WatchCatalog(
         self,
@@ -759,7 +801,15 @@ class FilmuVfsCatalogGrpcServicer:
                             current_generation_id
                         )
                 else:
-                    self._record_governance_event("vfs_catalog_reconnect_snapshot_fallback")
+                    active_snapshot = await self._supplier.snapshot_for_generation(
+                        reconnect_generation_id
+                    )
+                    if active_snapshot is not None:
+                        self._record_governance_event(
+                            "vfs_catalog_reconnect_current_generation_reused"
+                        )
+                    else:
+                        self._record_governance_event("vfs_catalog_reconnect_snapshot_fallback")
 
             if active_snapshot is None:
                 try:
@@ -776,6 +826,10 @@ class FilmuVfsCatalogGrpcServicer:
                     self._record_governance_event("vfs_catalog_snapshots_served")
                     yield _snapshot_event(active_snapshot, resolved_urls=resolved_urls)
                     last_server_event_at = monotonic()
+            elif reconnect_generation_id is not None and not reconnect_delta_served:
+                self._record_governance_event("vfs_catalog_heartbeats_served")
+                yield _heartbeat_event()
+                last_server_event_at = monotonic()
 
             assert active_snapshot is not None
             snapshot = active_snapshot
