@@ -439,15 +439,16 @@ impl WinfspFilesystem {
             context_ptr = format_args!("{:#x}", file_context_ptr_ref(file_context)),
             "winfsp.read"
         );
-        let bytes = self
-            .runtime_handle
-            .block_on(self.runtime.read_bytes(
-                handle_id,
-                file_context.inode,
-                offset,
-                effective_len.min(u32::MAX as usize) as u32,
-            ))
-            .map_err(ntstatus_from_mount_error)?;
+        let bytes = match self.runtime_handle.block_on(self.runtime.read_bytes(
+            handle_id,
+            file_context.inode,
+            offset,
+            effective_len.min(u32::MAX as usize) as u32,
+        )) {
+            Ok(bytes) => bytes,
+            Err(MountRuntimeError::ReadAborted { .. }) => return Ok(0),
+            Err(error) => return Err(ntstatus_from_mount_error(error)),
+        };
         if bytes.is_empty() && !buffer.is_empty() && offset > 0 {
             return Err(STATUS_END_OF_FILE);
         }
@@ -2015,6 +2016,7 @@ fn ntstatus_from_mount_error(error: MountRuntimeError) -> NTSTATUS {
         MountRuntimeError::MissingDetails { .. }
         | MountRuntimeError::MissingUrl { .. }
         | MountRuntimeError::Io { .. } => STATUS_IO_DEVICE_ERROR,
+        MountRuntimeError::ReadAborted { .. } => STATUS_SUCCESS,
         MountRuntimeError::HandleNotFound { .. }
         | MountRuntimeError::HandleInodeMismatch { .. }
         | MountRuntimeError::InvalidName { .. } => STATUS_INVALID_PARAMETER,

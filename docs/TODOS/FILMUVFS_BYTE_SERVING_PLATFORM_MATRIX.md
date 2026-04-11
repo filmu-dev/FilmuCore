@@ -88,6 +88,8 @@ What exists today:
 - the Python control plane now reuses generation ids for unchanged snapshots, can serve reconnect deltas for known generations, and exposes `RefreshCatalogEntry` for forced provider-link refresh through [`../../filmu_py/services/vfs_catalog.py`](../../filmu_py/services/vfs_catalog.py) and [`../../filmu_py/services/vfs_server.py`](../../filmu_py/services/vfs_server.py)
 - the Rust sidecar now retries stale mounted reads inline through that refresh RPC, uses `moka::future::Cache` in [`../../rust/filmuvfs/src/chunk_engine.rs`](../../rust/filmuvfs/src/chunk_engine.rs), and preserves stable assigned inodes with collision fallback in [`../../rust/filmuvfs/src/catalog/state.rs`](../../rust/filmuvfs/src/catalog/state.rs)
 - the Rust sidecar now also parses mounted media-semantic path metadata, carries it on mounted `getattr` / `readdir` / `open` / `read` surfaces, uses it for alias-aware mounted traversal, exposes discoverable alias browse entries (`tvdb-*`, `tmdb-*`, `Season 01`, `Episode 01.mkv`), and deduplicates concurrent inline stale-refresh RPCs per entry
+- the enterprise operator surface now also consumes the same mounted-runtime snapshot as [`/api/v1/stream/status`](../../filmu_py/api/routes/stream.py): [`/api/v1/operations/governance`](../../filmu_py/api/routes/default.py) now exposes live `vfs_runtime_rollout_readiness`, rollout reasons, cache/fallback/prefetch ratios, provider/fairness pressure incidents, and runtime-snapshot availability inside the `vfs_data_plane` slice instead of limiting that enterprise view to static capability posture
+- mounted foreground reads now also inherit explicit cancellation and release semantics: released handles cancel in-flight foreground reads, cancelled reads no longer repopulate chunk-engine handle tracking after release, ProjFS command cancellation now aborts async callback work, and runtime status plus `/api/v1/stream/status` now expose cancelled mounted-read, handle-startup, and ProjFS callback outcomes
 
 What does **not** exist yet:
 
@@ -130,16 +132,16 @@ This is the implementation breadth Python still needs to plan toward if the goal
 | Capability area                        | Current Python state           | TS reference breadth                                          | Why it matters                                                                                            | Priority |
 | -------------------------------------- | ------------------------------ | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | -------- |
 | **FilmuVFS mount lifecycle**           | gRPC bridge + Rust sidecar + WSL-validated mount lifecycle/read smoke + passed Plex/Emby playback gate | Implemented in TS                                             | Core product path for Plex/Emby-style consumers                                                           | **P1** (runtime hardening) |
-| **Path model / directory semantics**   | Partial generic path substrate | TS has movie/show/season/episode path typing                  | Needed for human-usable mount behavior and stable browse semantics                                        | **P1**   |
+| **Path model / directory semantics**   | Implemented baseline with typed browse semantics, aliases, and season grouping | TS has movie/show/season/episode path typing                  | Needed for human-usable mount behavior and stable browse semantics                                        | Done baseline / deepen |
 | **Shared chunk/range engine**          | Implemented in Python + adopted in HTTP direct range route | TS has chunk-calculation and discrete fetch utilities | Critical for performance, cache efficiency, and avoiding duplicate logic across VFS/HTTP                  | **P1** (mount adoption) |
 | **Direct file byte-range serving**     | Implemented baseline           | TS has mature read/open path concepts                         | Needed for frontend playback parity and shared stream engine validation                                   | Done     |
 | **HLS serving**                        | Implemented baseline           | TS references richer stream platform expectations             | Needed for web playback compatibility and future frontend playback                                        | Done     |
 | **Link resolver abstraction**          | Implemented                      | TS integrates stream-link request flow with plugins           | Required to turn Real-Debrid/provider state into file-like mount reads cleanly                            | Done     |
 | **File handle / stream session state** | Implemented natively           | TS has explicit file-handle maps and read-position logic      | Needed for performant mount reads and safe seek/scan behavior                                             | Done     |
 | **Chunk caching strategy**             | Implemented in-memory shared cache + HTTP route reuse | TS has chunk caches and read-type detection          | Needed to outperform TS rather than just match it                                                         | **P1** (mount wiring + disk cache) |
-| **Cancellation / abort behavior**      | Partial                        | TS explicitly handles aborted read requests                   | HTTP abort visibility exists now; mount-level abort-safe `0`-byte FUSE semantics still remain future work | **P1**   |
+| **Cancellation / abort behavior**      | Stronger baseline              | TS explicitly handles aborted read requests                   | Foreground mount reads now cancel cleanly on handle release/ProjFS command cancellation, but broader soak coverage and more Windows parity evidence still remain | **P1**   |
 | **FilmuVFS control-plane events**      | Implemented baseline via reconnect deltas + `RefreshCatalogEntry` + inline stale-read recovery | TS integrates plugin queues for stream-link requests          | Needed for lease refresh, invalidation, provider pressure handling                                        | Done baseline |
-| **Stream/VFS metrics**                 | Strong HTTP baseline / thin mount baseline | TS has richer operational behavior even if metrics are uneven | Needed for performance tuning and proving superiority                                                     | **P1** (mount telemetry) |
+| **Stream/VFS metrics**                 | Strong HTTP + joined cross-process baseline / mount telemetry still maturing | TS has richer operational behavior even if metrics are uneven | Needed for performance tuning and proving superiority                                                     | **P1** (mount telemetry) |
 | **Canary/rollback controls**           | Missing                        | Needed regardless of TS                                       | Required before rollout to real users                                                                     | **P2**   |
 
 ---
@@ -256,6 +258,11 @@ Priority 5 should be considered meaningfully advanced when:
 - Plex/Emby can traverse the mounted tree and read Real-Debrid-backed content as if it were ordinary filesystem media
 - VFS and stream metrics exist to prove performance and reliability
 - the design is clearly better factored than the TS implementation, not just equivalent in behavior
+
+Current checkpoint:
+
+- Reached for first-class mounted playback proof, shared chunk/cache execution, and cross-process governance visibility.
+- Still open for canary/rollback controls, broader long-running soak evidence, and deeper mounted telemetry/rollout hardening.
 
 ## Current serving-core update (March 2026)
 

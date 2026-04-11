@@ -11,6 +11,7 @@ use hyper_util::{
 };
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::{record_upstream_failure, record_upstream_retryable_event};
 
@@ -18,6 +19,64 @@ const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const UPSTREAM_RETRY_ATTEMPTS: usize = 5;
 const UPSTREAM_RETRY_BACKOFF_MS: u64 = 500;
 const UPSTREAM_RETRY_BACKOFF_MAX_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Default)]
+pub struct ReadCancellation {
+    handle: Option<CancellationToken>,
+    external: Option<CancellationToken>,
+}
+
+impl ReadCancellation {
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn from_handle(handle: CancellationToken) -> Self {
+        Self {
+            handle: Some(handle),
+            external: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_external(handle: CancellationToken, external: Option<CancellationToken>) -> Self {
+        Self {
+            handle: Some(handle),
+            external,
+        }
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+            || self
+                .external
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+    }
+
+    pub async fn cancelled(&self) {
+        match (self.handle.as_ref(), self.external.as_ref()) {
+            (Some(handle), Some(external)) => {
+                tokio::select! {
+                    _ = handle.cancelled() => {}
+                    _ = external.cancelled() => {}
+                }
+            }
+            (Some(handle), None) => {
+                handle.cancelled().await;
+            }
+            (None, Some(external)) => {
+                external.cancelled().await;
+            }
+            (None, None) => std::future::pending::<()>().await,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeRequest {
@@ -84,12 +143,19 @@ pub enum UpstreamReadError {
     UnexpectedStatus { status: StatusCode },
     #[error("failed to collect upstream response body: {message}")]
     ReadBody { message: String },
+    #[error("upstream read was cancelled")]
+    Cancelled,
 }
 
 impl UpstreamReadError {
     #[must_use]
     pub fn is_stale(&self) -> bool {
         matches!(self, Self::StaleStatus { .. })
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
     }
 
     #[must_use]
@@ -132,17 +198,29 @@ impl UpstreamReader {
         Self { client }
     }
 
-    pub async fn fetch_range(&self, request: RangeRequest) -> Result<Bytes, UpstreamReadError> {
+    pub async fn fetch_range(
+        &self,
+        request: RangeRequest,
+        cancellation: &ReadCancellation,
+    ) -> Result<Bytes, UpstreamReadError> {
         for attempt in 1..=UPSTREAM_RETRY_ATTEMPTS {
+            if cancellation.is_cancelled() {
+                return Err(UpstreamReadError::Cancelled);
+            }
             let http_request = request.build_http_request()?;
-            let response_result =
-                timeout(UPSTREAM_REQUEST_TIMEOUT, self.client.request(http_request)).await;
+            let response_result = tokio::select! {
+                _ = cancellation.cancelled() => return Err(UpstreamReadError::Cancelled),
+                result = timeout(UPSTREAM_REQUEST_TIMEOUT, self.client.request(http_request)) => result,
+            };
             let response = match response_result {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
                         record_upstream_retryable_event("network");
-                        sleep(retry_backoff(attempt)).await;
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Err(UpstreamReadError::Cancelled),
+                            _ = sleep(retry_backoff(attempt)) => {}
+                        }
                         continue;
                     }
                     record_upstream_failure("network");
@@ -153,7 +231,10 @@ impl UpstreamReader {
                 Err(_) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
                         record_upstream_retryable_event("network");
-                        sleep(retry_backoff(attempt)).await;
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Err(UpstreamReadError::Cancelled),
+                            _ = sleep(retry_backoff(attempt)) => {}
+                        }
                         continue;
                     }
                     record_upstream_failure("network");
@@ -178,7 +259,10 @@ impl UpstreamReader {
             if !status.is_success() {
                 if should_retry_status(status) && attempt < UPSTREAM_RETRY_ATTEMPTS {
                     record_upstream_retryable_event(retryable_status_event(status));
-                    sleep(retry_delay_for_response(response.headers(), attempt)).await;
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err(UpstreamReadError::Cancelled),
+                        _ = sleep(retry_delay_for_response(response.headers(), attempt)) => {}
+                    }
                     continue;
                 }
                 record_upstream_failure("unexpected_status");
@@ -190,14 +274,19 @@ impl UpstreamReader {
                 return Err(UpstreamReadError::UnexpectedStatus { status });
             }
 
-            let collected_result =
-                timeout(UPSTREAM_REQUEST_TIMEOUT, response.into_body().collect()).await;
+            let collected_result = tokio::select! {
+                _ = cancellation.cancelled() => return Err(UpstreamReadError::Cancelled),
+                result = timeout(UPSTREAM_REQUEST_TIMEOUT, response.into_body().collect()) => result,
+            };
             match collected_result {
                 Ok(Ok(collected)) => return Ok(collected.to_bytes()),
                 Ok(Err(error)) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
                         record_upstream_retryable_event("read_body");
-                        sleep(retry_backoff(attempt)).await;
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Err(UpstreamReadError::Cancelled),
+                            _ = sleep(retry_backoff(attempt)) => {}
+                        }
                         continue;
                     }
                     record_upstream_failure("read_body");
@@ -208,7 +297,10 @@ impl UpstreamReader {
                 Err(_) => {
                     if attempt < UPSTREAM_RETRY_ATTEMPTS {
                         record_upstream_retryable_event("read_body");
-                        sleep(retry_backoff(attempt)).await;
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Err(UpstreamReadError::Cancelled),
+                            _ = sleep(retry_backoff(attempt)) => {}
+                        }
                         continue;
                     }
                     record_upstream_failure("read_body");

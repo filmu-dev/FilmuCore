@@ -542,12 +542,14 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_handle_startup_ok: int
     vfs_runtime_handle_startup_error: int
     vfs_runtime_handle_startup_estale: int
+    vfs_runtime_handle_startup_cancelled: int
     vfs_runtime_handle_startup_average_duration_ms: int
     vfs_runtime_handle_startup_max_duration_ms: int
     vfs_runtime_mounted_reads_total: int
     vfs_runtime_mounted_reads_ok: int
     vfs_runtime_mounted_reads_error: int
     vfs_runtime_mounted_reads_estale: int
+    vfs_runtime_mounted_reads_cancelled: int
     vfs_runtime_mounted_reads_average_duration_ms: int
     vfs_runtime_mounted_reads_max_duration_ms: int
     vfs_runtime_upstream_fetch_operations: int
@@ -603,6 +605,7 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_inline_refresh_no_url: int
     vfs_runtime_inline_refresh_error: int
     vfs_runtime_inline_refresh_timeout: int
+    vfs_runtime_windows_callbacks_cancelled: int
     vfs_runtime_windows_callbacks_error: int
     vfs_runtime_windows_callbacks_estale: int
     vfs_runtime_cache_hit_ratio: float

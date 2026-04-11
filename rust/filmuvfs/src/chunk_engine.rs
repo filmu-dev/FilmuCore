@@ -17,7 +17,7 @@ use crate::{
     chunk_planner::{ChunkPlanner, ChunkPlannerConfig, PlannedChunk, PlannedRead, ReadPattern},
     prefetch::{PrefetchScheduleError, PrefetchScheduler, PrefetchSchedulerSnapshot},
     telemetry::{record_chunk_cache_event, record_chunk_read_pattern, record_prefetch_event},
-    upstream::{RangeRequest, UpstreamReadError, UpstreamReader},
+    upstream::{RangeRequest, ReadCancellation, UpstreamReadError, UpstreamReader},
 };
 
 #[derive(Debug, Clone)]
@@ -46,6 +46,7 @@ pub struct ChunkReadRequest {
     pub offset: u64,
     pub length: u32,
     pub file_size: Option<u64>,
+    pub cancellation: ReadCancellation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,12 +100,20 @@ pub enum ChunkEngineError {
     },
     #[error("chunk list does not fully cover the requested byte range")]
     IncompleteCoverage,
+    #[error("read was cancelled before completion")]
+    Cancelled,
 }
 
 impl ChunkEngineError {
     #[must_use]
     pub fn is_stale(&self) -> bool {
         matches!(self, Self::Upstream(error) if error.is_stale())
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
+            || matches!(self, Self::Upstream(error) if error.is_cancelled())
     }
 }
 
@@ -183,6 +192,11 @@ impl ChunkEngine {
     }
 
     #[must_use]
+    pub fn tracked_handle_count(&self) -> usize {
+        self.handle_reads.len()
+    }
+
+    #[must_use]
     pub fn cache_snapshot(&self) -> ChunkCacheSnapshot {
         let cache_snapshot: CacheEngineSnapshot = self.cache.snapshot();
         ChunkCacheSnapshot {
@@ -244,7 +258,6 @@ impl ChunkEngine {
             });
         }
 
-        self.register_handle(&request.handle_key);
         let previous_end_exclusive = self
             .handle_reads
             .get(&request.handle_key)
@@ -259,6 +272,7 @@ impl ChunkEngine {
         if planned.chunks.is_empty() {
             return Ok(Bytes::new());
         }
+        self.ensure_not_cancelled(&request)?;
 
         if self
             .all_chunks_cached(&request.file_id, &planned.chunks)
@@ -337,6 +351,8 @@ impl ChunkEngine {
             return Err(ChunkEngineError::IncompleteCoverage);
         }
 
+        self.ensure_not_cancelled(&request)?;
+
         self.handle_reads.insert(
             request.handle_key.clone(),
             HandleReadState {
@@ -410,7 +426,6 @@ impl ChunkEngine {
             return Ok(());
         }
 
-        self.register_handle(&request.handle_key);
         let planned = self.preview_read(&request);
         if planned.chunks.is_empty() {
             return Ok(());
@@ -453,6 +468,7 @@ impl ChunkEngine {
         request: &ChunkReadRequest,
         chunk: PlannedChunk,
     ) -> Result<Bytes, ChunkEngineError> {
+        self.ensure_not_cancelled(request)?;
         let key = cache_key(&request.file_id, chunk);
         if let Some(bytes) = self.cache.get(&key).await {
             record_chunk_cache_event("hit");
@@ -497,7 +513,10 @@ impl ChunkEngine {
                     let wait_started = tokio::time::Instant::now();
                     let notified = notify.notified();
                     drop(entry);
-                    notified.await;
+                    tokio::select! {
+                        _ = request.cancellation.cancelled() => return Err(ChunkEngineError::Cancelled),
+                        _ = notified => {}
+                    }
                     let wait_duration = wait_started.elapsed();
                     if let Some(bytes) = self.cache.get(&key).await {
                         self.record_coalescing_wait("hit", wait_duration);
@@ -517,7 +536,9 @@ impl ChunkEngine {
                 }
             };
 
+            self.ensure_not_cancelled(request)?;
             let _permit = self.scheduler.acquire_foreground().await?;
+            self.ensure_not_cancelled(request)?;
             if let Some(bytes) = self.cache.get(&key).await {
                 record_chunk_cache_event("hit_after_wait");
                 self.in_flight_chunks.remove(&key);
@@ -570,9 +591,13 @@ impl ChunkEngine {
         let size = u32::try_from(chunk.length).map_err(|_| ChunkEngineError::InvalidRequest {
             message: format!("chunk length {} exceeds u32::MAX", chunk.length),
         })?;
+        self.ensure_not_cancelled(request)?;
         let bytes = self
             .upstream_reader
-            .fetch_range(RangeRequest::new(request.url.clone(), chunk.offset, size))
+            .fetch_range(
+                RangeRequest::new(request.url.clone(), chunk.offset, size),
+                &request.cancellation,
+            )
             .await?;
         if bytes.len() != chunk.length as usize {
             return Err(ChunkEngineError::InvalidChunkPayload {
@@ -681,6 +706,13 @@ impl ChunkEngine {
             }
             _ => {}
         }
+    }
+
+    fn ensure_not_cancelled(&self, request: &ChunkReadRequest) -> Result<(), ChunkEngineError> {
+        if request.cancellation.is_cancelled() {
+            return Err(ChunkEngineError::Cancelled);
+        }
+        Ok(())
     }
 }
 

@@ -96,6 +96,8 @@ pub enum MountRuntimeError {
     StaleLease { path: String, status_code: u16 },
     #[error("I/O failure while reading {path}: {message}")]
     Io { path: String, message: String },
+    #[error("mounted read for {path} was aborted before completion")]
+    ReadAborted { path: String },
     #[error("read requested while mount is shutting down")]
     ShuttingDown,
 }
@@ -108,6 +110,7 @@ impl MountRuntimeError {
                 path,
                 status_code: status.as_u16(),
             },
+            UpstreamReadError::Cancelled => Self::ReadAborted { path },
             other => Self::Io {
                 path,
                 message: other.to_string(),
@@ -119,6 +122,7 @@ impl MountRuntimeError {
         let path = path.into();
         match error {
             ChunkEngineError::Upstream(error) => Self::from_upstream(path, error),
+            ChunkEngineError::Cancelled => Self::ReadAborted { path },
             other => Self::Io {
                 path,
                 message: other.to_string(),
@@ -167,7 +171,7 @@ pub struct MountHandle {
     pub semantic_path: MediaSemanticPathInfo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MountReadRequest {
     pub handle_id: u64,
     pub handle_key: String,
@@ -183,15 +187,17 @@ pub struct MountReadRequest {
     pub length: u32,
     pub size_bytes: Option<u64>,
     pub remote_direct: bool,
+    pub cancel_token: CancellationToken,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct MountHandleState {
     inode: u64,
     handle_key: String,
     invalidated: bool,
     opened_at: Instant,
     startup_recorded: bool,
+    cancel_token: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -479,6 +485,10 @@ impl MountRuntime {
         self.peak_active_reads.load(Ordering::SeqCst)
     }
 
+    pub fn tracked_chunk_handle_count(&self) -> usize {
+        self.chunk_engine.tracked_handle_count()
+    }
+
     pub fn active_handle_summaries(&self, limit: usize) -> Vec<String> {
         let mut summaries = self
             .handles
@@ -719,6 +729,7 @@ impl MountRuntime {
             length: adjusted_length,
             size_bytes,
             remote_direct: file.transport == CatalogFileTransport::RemoteDirect as i32,
+            cancel_token: handle.cancel_token,
         })
     }
 
@@ -728,6 +739,18 @@ impl MountRuntime {
         inode: u64,
         offset: u64,
         length: u32,
+    ) -> Result<Bytes, MountRuntimeError> {
+        self.read_bytes_with_cancel(handle_id, inode, offset, length, None)
+            .await
+    }
+
+    pub async fn read_bytes_with_cancel(
+        &self,
+        handle_id: u64,
+        inode: u64,
+        offset: u64,
+        length: u32,
+        external_cancel: Option<CancellationToken>,
     ) -> Result<Bytes, MountRuntimeError> {
         let request = self.prepare_read_request(handle_id, inode, offset, length)?;
         info!(
@@ -746,13 +769,20 @@ impl MountRuntime {
             file_size = ?request.size_bytes,
             "mount.read_bytes.request"
         );
+        if is_read_cancelled(&request.cancel_token, external_cancel.as_ref()) {
+            record_read_request("cancelled");
+            self.record_handle_startup_result(request.handle_id, "cancelled");
+            return Err(MountRuntimeError::ReadAborted {
+                path: request.path.clone(),
+            });
+        }
         if request.length == 0 {
             record_read_request("ok");
             self.record_handle_startup_result(request.handle_id, "ok");
             return Ok(Bytes::new());
         }
 
-        let chunk_request = build_chunk_read_request(&request);
+        let chunk_request = build_chunk_read_request(&request, external_cancel);
         let preview = self.chunk_engine.preview_read(&chunk_request);
         let chunks_resolved = preview.chunks.len();
         if let Some(chunk) = preview
@@ -775,6 +805,13 @@ impl MountRuntime {
                     "planned chunk length {} at offset {} rejected",
                     chunk.length, chunk.offset
                 ),
+            });
+        }
+        if chunk_request.cancellation.is_cancelled() {
+            record_read_request("cancelled");
+            self.record_handle_startup_result(request.handle_id, "cancelled");
+            return Err(MountRuntimeError::ReadAborted {
+                path: request.path.clone(),
             });
         }
         let _active_read = ActiveReadGuard::new(self);
@@ -812,6 +849,14 @@ impl MountRuntime {
 
             match result {
                 Ok(bytes) => {
+                    if chunk_request.cancellation.is_cancelled() {
+                        record_read_request("cancelled");
+                        record_mounted_read_duration(elapsed, "cancelled");
+                        self.record_handle_startup_result(request.handle_id, "cancelled");
+                        return Err(MountRuntimeError::ReadAborted {
+                            path: request.path.clone(),
+                        });
+                    }
                     record_read_request("ok");
                     record_mounted_read_duration(elapsed, "ok");
                     self.record_handle_startup_result(request.handle_id, "ok");
@@ -894,17 +939,15 @@ impl MountRuntime {
                                         &chunk_request,
                                         "post_inline_refresh_failure",
                                     )
-                                    .await
-                                    .map_err(|proxy_error| {
-                                        record_read_request("error");
-                                        record_mounted_read_duration(retry_elapsed, "error");
-                                        self.record_handle_startup_result(
-                                            request.handle_id,
-                                            "error",
-                                        );
-                                        error!(
-                                            error = %proxy_error,
-                                            path = %request.path,
+                            .await
+                            .map_err(|proxy_error| {
+                                let outcome = read_outcome_from_chunk_error(&proxy_error);
+                                record_read_request(outcome);
+                                record_mounted_read_duration(retry_elapsed, outcome);
+                                self.record_handle_startup_result(request.handle_id, outcome);
+                                error!(
+                                    error = %proxy_error,
+                                    path = %request.path,
                                             refreshed_url = %new_url,
                                             refresh_reason,
                                             "backend HTTP fallback failed after inline refresh retry"
@@ -926,9 +969,10 @@ impl MountRuntime {
                                     );
                                     Ok(bytes)
                                 } else {
-                                    record_read_request("error");
-                                    record_mounted_read_duration(retry_elapsed, "error");
-                                    self.record_handle_startup_result(request.handle_id, "error");
+                                    let outcome = read_outcome_from_chunk_error(&retry_error);
+                                    record_read_request(outcome);
+                                    record_mounted_read_duration(retry_elapsed, outcome);
+                                    self.record_handle_startup_result(request.handle_id, outcome);
                                     error!(
                                         error = %retry_error,
                                         path = %request.path,
@@ -953,11 +997,7 @@ impl MountRuntime {
                             )
                             .await
                             .map_err(|proxy_error| {
-                                let outcome = if proxy_error.is_stale() {
-                                    "estale"
-                                } else {
-                                    "error"
-                                };
+                                let outcome = read_outcome_from_chunk_error(&proxy_error);
                                 record_read_request(outcome);
                                 record_mounted_read_duration(elapsed, outcome);
                                 self.record_handle_startup_result(request.handle_id, outcome);
@@ -978,7 +1018,7 @@ impl MountRuntime {
                             );
                             Ok(bytes)
                         } else {
-                            let outcome = if error.is_stale() { "estale" } else { "error" };
+                            let outcome = read_outcome_from_chunk_error(&error);
                             record_read_request(outcome);
                             record_mounted_read_duration(elapsed, outcome);
                             self.record_handle_startup_result(request.handle_id, outcome);
@@ -991,15 +1031,16 @@ impl MountRuntime {
                 }
                 Err(error) => {
                     if let Some(bytes) = self
-                        .try_backend_proxy_read(&request, &chunk_request, "direct_read_failure")
-                        .await
-                        .map_err(|proxy_error| {
-                            record_read_request("error");
-                            record_mounted_read_duration(elapsed, "error");
-                            self.record_handle_startup_result(request.handle_id, "error");
-                            error!(
-                                error = %proxy_error,
-                                path = %request.path,
+                    .try_backend_proxy_read(&request, &chunk_request, "direct_read_failure")
+                    .await
+                    .map_err(|proxy_error| {
+                        let outcome = read_outcome_from_chunk_error(&proxy_error);
+                        record_read_request(outcome);
+                        record_mounted_read_duration(elapsed, outcome);
+                        self.record_handle_startup_result(request.handle_id, outcome);
+                        error!(
+                            error = %proxy_error,
+                            path = %request.path,
                                 "backend HTTP fallback failed after direct upstream failure"
                             );
                             MountRuntimeError::from_chunk_engine(request.path.clone(), proxy_error)
@@ -1016,9 +1057,10 @@ impl MountRuntime {
                         );
                         Ok(bytes)
                     } else {
-                        record_read_request("error");
-                        record_mounted_read_duration(elapsed, "error");
-                        self.record_handle_startup_result(request.handle_id, "error");
+                        let outcome = read_outcome_from_chunk_error(&error);
+                        record_read_request(outcome);
+                        record_mounted_read_duration(elapsed, outcome);
+                        self.record_handle_startup_result(request.handle_id, outcome);
                         error!(
                             error = %error,
                             path = %request.path,
@@ -1142,6 +1184,7 @@ impl MountRuntime {
             .handles
             .remove(&handle_id)
             .ok_or(MountRuntimeError::HandleNotFound { handle_id })?;
+        handle.cancel_token.cancel();
         self.handle_velocity.remove(&handle_id);
         self.chunk_engine.release_handle(&handle.handle_key);
 
@@ -1189,6 +1232,7 @@ impl MountRuntime {
                 invalidated: false,
                 opened_at: Instant::now(),
                 startup_recorded: false,
+                cancel_token: CancellationToken::new(),
             },
         );
         update_max(&self.peak_open_handles, self.handles.len() as u64);
@@ -1281,6 +1325,7 @@ impl MountRuntime {
             offset: 0,
             length: request_length,
             file_size: handle.size_bytes,
+            cancellation: crate::upstream::ReadCancellation::none(),
         };
 
         runtime_handle.spawn(async move {
@@ -2109,11 +2154,11 @@ mod linux_fuse {
             offset: u64,
             size: u32,
         ) -> FuseResult<ReplyData> {
-            let bytes = self
-                .runtime
-                .read_bytes(fh, inode, offset, size)
-                .await
-                .map_err(errno_from_mount_error)?;
+            let bytes = match self.runtime.read_bytes(fh, inode, offset, size).await {
+                Ok(bytes) => bytes,
+                Err(MountRuntimeError::ReadAborted { .. }) => Bytes::new(),
+                Err(error) => return Err(errno_from_mount_error(error)),
+            };
             Ok(ReplyData { data: bytes })
         }
 
@@ -2263,6 +2308,7 @@ mod linux_fuse {
             | MountRuntimeError::MissingUrl { .. }
             | MountRuntimeError::Io { .. }
             | MountRuntimeError::ShuttingDown => Errno::from(libc::EIO),
+            MountRuntimeError::ReadAborted { .. } => Errno::from(libc::EINTR),
             MountRuntimeError::InvalidName { .. } => Errno::from(libc::EINVAL),
             MountRuntimeError::StaleLease { .. } => Errno::from(libc::ESTALE),
         }
@@ -2427,7 +2473,12 @@ fn current_unrestricted_url(file: &FileEntry) -> Option<String> {
 fn should_attempt_inline_refresh_for_error(error: &ChunkEngineError) -> bool {
     matches!(
         error,
-        ChunkEngineError::Upstream(_) | ChunkEngineError::InvalidChunkPayload { .. }
+        ChunkEngineError::Upstream(UpstreamReadError::StaleStatus { .. })
+            | ChunkEngineError::Upstream(UpstreamReadError::UnexpectedStatus { .. })
+            | ChunkEngineError::Upstream(UpstreamReadError::InvalidUrl { .. })
+            | ChunkEngineError::Upstream(UpstreamReadError::Network { .. })
+            | ChunkEngineError::Upstream(UpstreamReadError::ReadBody { .. })
+            | ChunkEngineError::InvalidChunkPayload { .. }
     )
 }
 
@@ -2441,14 +2492,19 @@ fn inline_refresh_reason(error: &ChunkEngineError) -> &'static str {
         ChunkEngineError::Upstream(UpstreamReadError::BuildRequest { .. }) => "build_request",
         ChunkEngineError::Upstream(UpstreamReadError::Network { .. }) => "network",
         ChunkEngineError::Upstream(UpstreamReadError::ReadBody { .. }) => "read_body",
+        ChunkEngineError::Upstream(UpstreamReadError::Cancelled) => "cancelled",
         ChunkEngineError::InvalidChunkPayload { .. } => "invalid_chunk_payload",
         ChunkEngineError::InvalidRequest { .. } => "invalid_request",
         ChunkEngineError::Scheduler(_) => "scheduler",
         ChunkEngineError::IncompleteCoverage => "incomplete_coverage",
+        ChunkEngineError::Cancelled => "cancelled",
     }
 }
 
-fn build_chunk_read_request(request: &MountReadRequest) -> ChunkReadRequest {
+fn build_chunk_read_request(
+    request: &MountReadRequest,
+    external_cancel: Option<CancellationToken>,
+) -> ChunkReadRequest {
     let provider_file_id = request
         .provider_file_id
         .as_ref()
@@ -2465,7 +2521,28 @@ fn build_chunk_read_request(request: &MountReadRequest) -> ChunkReadRequest {
         offset: request.offset,
         length: request.length,
         file_size: request.size_bytes,
+        cancellation: crate::upstream::ReadCancellation::with_external(
+            request.cancel_token.clone(),
+            external_cancel,
+        ),
     }
+}
+
+fn read_outcome_from_chunk_error(error: &ChunkEngineError) -> &'static str {
+    if error.is_cancelled() {
+        "cancelled"
+    } else if error.is_stale() {
+        "estale"
+    } else {
+        "error"
+    }
+}
+
+fn is_read_cancelled(
+    handle_cancel: &CancellationToken,
+    external_cancel: Option<&CancellationToken>,
+) -> bool {
+    handle_cancel.is_cancelled() || external_cancel.is_some_and(CancellationToken::is_cancelled)
 }
 
 fn join_child_path(parent: &str, child_name: &str) -> String {
@@ -2765,6 +2842,7 @@ mod tests {
         build_chunk_read_request, parse_media_semantic_path, InlineRefreshFlight, MountReadRequest,
     };
     use tokio::time::{timeout, Duration};
+    use tokio_util::sync::CancellationToken;
 
     fn sample_request(provider_file_id: Option<&str>) -> MountReadRequest {
         MountReadRequest {
@@ -2782,13 +2860,14 @@ mod tests {
             length: 4096,
             size_bytes: Some(8192),
             remote_direct: true,
+            cancel_token: CancellationToken::new(),
         }
     }
 
     #[test]
     fn chunk_request_uses_entry_id_when_provider_file_id_is_blank() {
         let request = sample_request(Some("   "));
-        let chunk_request = build_chunk_read_request(&request);
+        let chunk_request = build_chunk_read_request(&request, None);
         assert_eq!(chunk_request.file_id, "entry-123");
         assert!(chunk_request.provider_file_id.is_none());
     }
@@ -2796,7 +2875,7 @@ mod tests {
     #[test]
     fn chunk_request_preserves_provider_file_id_but_uses_entry_id_for_cache_identity() {
         let request = sample_request(Some("provider-abc"));
-        let chunk_request = build_chunk_read_request(&request);
+        let chunk_request = build_chunk_read_request(&request, None);
         assert_eq!(chunk_request.file_id, "entry-123");
         assert_eq!(
             chunk_request.provider_file_id.as_deref(),
