@@ -232,8 +232,12 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
     if (($MaxRunDurationSeconds -gt 0) -and -not $DryRun -and ($null -ne $durationSeconds)) {
         $runPassed = $runPassed -and ([double] $durationSeconds -le $MaxRunDurationSeconds)
     }
-    if (($MaxReconnectIncidentCount -gt 0) -and -not $DryRun -and ($null -ne $reconnectIncidentCount)) {
-        $runPassed = $runPassed -and ([int] $reconnectIncidentCount -le $MaxReconnectIncidentCount)
+    # Zero is an active enterprise threshold: the gate passes 0 to require no reconnect incidents.
+    if (($MaxReconnectIncidentCount -ge 0) -and -not $DryRun) {
+        $runPassed = $runPassed -and (
+            ($null -ne $reconnectIncidentCount) -and
+            ([int] $reconnectIncidentCount -le $MaxReconnectIncidentCount)
+        )
     }
 
     $results.Add(
@@ -258,7 +262,9 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
             } else {
                 $true
             }
-            reconnect_within_threshold = if ($MaxReconnectIncidentCount -gt 0) {
+            reconnect_within_threshold = if ($DryRun) {
+                $true
+            } elseif ($MaxReconnectIncidentCount -ge 0) {
                 (($null -ne $reconnectIncidentCount) -and ([int] $reconnectIncidentCount -le $MaxReconnectIncidentCount))
             } else {
                 $true
@@ -293,7 +299,7 @@ $summary = [ordered]@{
         require_preferred_client_playback = [bool] $RequirePreferredClientPlayback
         require_media_server_proof = [bool] $RequireMediaServerProof
         max_run_duration_seconds = if ($MaxRunDurationSeconds -gt 0) { $MaxRunDurationSeconds } else { $null }
-        max_reconnect_incident_count = if ($MaxReconnectIncidentCount -gt 0) { $MaxReconnectIncidentCount } else { $null }
+        max_reconnect_incident_count = if ($MaxReconnectIncidentCount -ge 0) { $MaxReconnectIncidentCount } else { $null }
     }
     max_run_duration_seconds = @($results | ForEach-Object {
         if ($null -ne $_.duration_seconds) { [double] $_.duration_seconds } else { [double] 0 }
