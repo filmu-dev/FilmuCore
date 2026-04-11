@@ -22,6 +22,7 @@ from .core.cache import CacheManager
 from .core.chunk_engine import ChunkCache
 from .core.event_bus import EventBus
 from .core.rate_limiter import DistributedRateLimiter
+from .core.replay import RedisReplayEventBackplane
 from .db import DatabaseRuntime, run_migrations
 from .graphql import GraphQLPluginRegistry, create_graphql_router
 from .logging import attach_log_stream, configure_logging, detach_log_stream
@@ -236,6 +237,14 @@ def _build_lifespan(
         )
 
         event_bus = EventBus()
+        if runtime_settings.control_plane.event_backplane == "redis_stream":
+            event_bus.attach_replay_backplane(
+                RedisReplayEventBackplane(
+                    redis,
+                    stream_name=runtime_settings.control_plane.event_stream_name,
+                    maxlen=runtime_settings.control_plane.event_replay_maxlen,
+                )
+            )
         arq_redis: ArqRedis | None = None
         queue_name = _arq_queue_name(runtime_settings)
         if runtime_settings.arq_enabled:

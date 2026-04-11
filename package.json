@@ -37,6 +37,8 @@
     "proof:windows:vfs:soak:stability:full": "pwsh -NoProfile -File ./scripts/run_windows_vfs_soak_stability.ps1 -Profiles continuous,seek,concurrent,full -RepeatCount 1 -RequireFilmuvfs -FailFast",
     "proof:windows:vfs:soak:enterprise": "pwsh -NoProfile -File ./scripts/run_windows_vfs_soak_stability.ps1 -Profiles continuous,seek,concurrent,full -RepeatCount 1 -RequireFilmuvfs -RequireRuntimeCapture -RequireBackendStatusCapture -MaxReconnectIncidents 0 -MaxProviderPressureIncidents 0 -MaxFatalErrorIncidents 0 -FailFast",
     "proof:windows:vfs:gate": "pwsh -NoProfile -File ./scripts/run_windows_vfs_soak.ps1 -RequireFilmuvfs -RequireRemux -SequentialMinutes 15 -SeekIterations 32 -ConcurrentReaders 3 -ConcurrentIterations 64",
+    "proof:operations:backup-restore": "pwsh -NoProfile -File ./scripts/run_backup_restore_proof.ps1 -DryRun",
+    "proof:operations:log-pipeline": "pwsh -NoProfile -File ./scripts/check_log_pipeline_contract.ps1",
     "stack:validate": "pwsh -NoProfile -File ./scripts/validate_platform_stack.ps1",
     "stack:windows:start": "pwsh -NoProfile -File ./scripts/start_windows_stack.ps1",
     "stack:windows:check": "pwsh -NoProfile -File ./scripts/status_windows_stack.ps1",

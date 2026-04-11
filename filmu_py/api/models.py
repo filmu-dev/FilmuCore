@@ -64,6 +64,9 @@ class AuthContextResponse(BaseModel):
     effective_permissions: list[str]
     oidc_issuer: str | None = None
     oidc_subject: str | None = None
+    oidc_token_validated: bool = False
+    access_policy_version: str
+    quota_policy_version: str | None = None
     principal_key: str | None = None
     principal_type: str | None = None
     service_account_api_key_id: str | None = None
@@ -92,7 +95,12 @@ class AuthPolicyResponse(BaseModel):
     authorization_tenant_scope: str
     authorized_tenant_ids: list[str]
     oidc_claims_present: bool
+    oidc_token_validated: bool
+    access_policy_version: str
+    quota_policy_version: str | None = None
     permissions_model: str
+    policy_source: str
+    role_grants: dict[str, list[str]]
     decisions: list[AuthPolicyDecisionResponse]
     warnings: list[str] = []
     remaining_gaps: list[str] = []
@@ -154,6 +162,20 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
     distributed_control_plane: EnterpriseOperationsSliceResponse
     sre_program: EnterpriseOperationsSliceResponse
     operator_log_pipeline: EnterpriseOperationsSliceResponse
+
+
+class TenantQuotaPolicyResponse(BaseModel):
+    """Current tenant quota policy and request-intake visibility."""
+
+    tenant_id: str
+    enabled: bool
+    policy_version: str
+    api_requests_per_minute: int | None = None
+    worker_enqueues_per_minute: int | None = None
+    playback_refreshes_per_minute: int | None = None
+    provider_refreshes_per_minute: int | None = None
+    enforcement_points: list[str]
+    remaining_gaps: list[str] = []
 
 
 class QueueStatusResponse(BaseModel):

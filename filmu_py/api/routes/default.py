@@ -43,6 +43,7 @@ from ..models import (
     QueueStatusResponse,
     StatsMediaYearRelease,
     StatsResponse,
+    TenantQuotaPolicyResponse,
 )
 
 router = APIRouter(tags=["default"])
@@ -306,14 +307,20 @@ def _enterprise_operations_governance(
     policy_decisions = _auth_policy_decisions(auth_context)
 
     identity_required_actions = [
-        "configure_real_oidc_issuer_and_audience",
-        "persist_first_class_access_policy_configuration",
+        "configure_real_oidc_issuer_and_audience"
+        if not settings.oidc.enabled
+        else "monitor_oidc_validation_failures",
+        "persist_first_class_access_policy_configuration"
+        if settings.access_policy.version == "default-v1"
+        else "review_access_policy_audit_trail",
     ]
     if any(not decision.allowed for decision in policy_decisions):
         identity_required_actions.append("grant_or_document_missing_control_plane_permissions")
 
     tenant_required_actions = [
-        "define_tenant_quota_policy",
+        "define_tenant_quota_policy"
+        if not settings.tenant_quotas.enabled
+        else "review_tenant_quota_pressure",
         "attribute_plugin_execution_vfs_governance_and_metrics_to_tenant_id",
     ]
     if auth_context.authorization_tenant_scope == "all":
@@ -322,8 +329,12 @@ def _enterprise_operations_governance(
     normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
     structured_log_path = f"{normalized_log_dir}/{settings.logging.structured_filename}"
     log_required_actions = [
-        "configure_log_shipper_for_structured_ndjson",
-        "define_search_index_mapping_and_retention_policy",
+        "configure_log_shipper_for_structured_ndjson"
+        if not settings.log_shipper.enabled
+        else "monitor_log_shipper_health",
+        "define_search_index_mapping_and_retention_policy"
+        if not settings.log_shipper.target
+        else "validate_search_index_contract",
     ]
     if settings.otel_enabled and settings.otel_exporter_otlp_endpoint:
         log_required_actions.append("verify_trace_export_in_collector")
@@ -356,6 +367,9 @@ def _enterprise_operations_governance(
             evidence=[
                 f"authentication_mode={auth_context.authentication_mode}",
                 f"authorization_tenant_scope={auth_context.authorization_tenant_scope}",
+                f"oidc_validation_enabled={settings.oidc.enabled}",
+                f"oidc_token_validated={auth_context.oidc_token_validated}",
+                f"access_policy_version={settings.access_policy.version}",
                 (
                     "oidc_claims_present="
                     f"{auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None}"
@@ -364,9 +378,9 @@ def _enterprise_operations_governance(
             ],
             required_actions=identity_required_actions,
             remaining_gaps=[
-                "OIDC tokens are not yet cryptographically validated by the backend",
+                "OIDC is setting-gated and must be enabled per environment",
                 "ABAC is currently permission plus tenant-scope based",
-                "access policies are not yet persisted as operator-managed records",
+                "access policies are settings-managed, not database-versioned records",
             ],
         ),
         tenant_boundary=EnterpriseOperationsSliceResponse(
@@ -375,21 +389,29 @@ def _enterprise_operations_governance(
             evidence=[
                 f"request_tenant_id={auth_context.tenant_id}",
                 f"authorized_tenant_ids={','.join(auth_context.authorized_tenant_ids)}",
+                f"tenant_quota_enabled={settings.tenant_quotas.enabled}",
+                f"tenant_quota_policy_version={settings.tenant_quotas.version}",
                 "tenant-scoped stats and calendar authorization are enforced",
                 "worker context and plugin governance expose tenant posture",
             ],
             required_actions=tenant_required_actions,
             remaining_gaps=[
-                "tenant quota policy is not yet enforced",
+                "worker enqueue and provider/playback pressure quotas still need deep route coverage",
                 "plugin execution metrics are not fully tenant-attributed",
                 "VFS runtime metrics are not fully tenant-attributed",
             ],
         ),
         distributed_control_plane=EnterpriseOperationsSliceResponse(
             name="Distributed Control Plane",
-            status="not_ready",
+            status=(
+                "partial"
+                if settings.control_plane.event_backplane == "redis_stream"
+                else "not_ready"
+            ),
             evidence=[
-                "EventBus backend=process_local",
+                f"EventBus backend={settings.control_plane.event_backplane}",
+                f"event_stream_name={settings.control_plane.event_stream_name}",
+                f"event_replay_maxlen={settings.control_plane.event_replay_maxlen}",
                 "LogStreamBroker backend=process_local",
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
@@ -400,9 +422,9 @@ def _enterprise_operations_governance(
                 "document_node_coordination_and_failover_semantics",
             ],
             remaining_gaps=[
-                "process-local event fanout is not HA",
+                "event replay is available as Redis Streams baseline but not yet the only bus",
                 "log streaming history is bounded per process",
-                "cross-node subscription durability is not implemented",
+                "node coordination and failover promotion are not fully implemented",
             ],
         ),
         sre_program=EnterpriseOperationsSliceResponse(
@@ -410,6 +432,7 @@ def _enterprise_operations_governance(
             status="partial",
             evidence=[
                 "docs/OPERATIONS_PROGRAM.md defines SLOs, DR, rollback, incident, rollout, and capacity policy",
+                "scripts/run_backup_restore_proof.ps1 produces restore-proof artifacts",
                 "playback and VFS proof scripts provide operational evidence inputs",
                 "queue and VFS status APIs expose operator readiness signals",
             ],
@@ -420,7 +443,7 @@ def _enterprise_operations_governance(
             ],
             remaining_gaps=[
                 "SLO/error-budget enforcement is not automated",
-                "DR restore proof is not yet artifacted in CI",
+                "DR restore proof is scriptable but not yet required in CI",
                 "capacity review is policy-defined but not scheduled by automation",
             ],
         ),
@@ -433,13 +456,17 @@ def _enterprise_operations_governance(
                 f"retention_files={settings.logging.retention_files}",
                 f"otel_enabled={settings.otel_enabled}",
                 f"otel_endpoint_configured={bool(settings.otel_exporter_otlp_endpoint)}",
+                f"log_shipper_enabled={settings.log_shipper.enabled}",
+                f"log_shipper_type={settings.log_shipper.type}",
+                f"log_shipper_target_configured={bool(settings.log_shipper.target)}",
+                f"log_field_mapping_version={settings.log_shipper.field_mapping_version}",
                 "docs/OPERATOR_LOG_PIPELINE.md defines shipping/search/replay taxonomy",
             ],
             required_actions=log_required_actions,
             remaining_gaps=[
-                "shipper/search backend is not provisioned by this service",
+                "shipper/search backend is configured externally and verified by contract checks",
                 "trace/span coverage is still partial",
-                "replay taxonomy is documented but not yet backed by a durable event stream",
+                "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
             ],
         ),
     )
@@ -499,6 +526,9 @@ async def get_auth_identity_context(request: Request) -> AuthContextResponse:
         effective_permissions=list(auth_context.effective_permissions),
         oidc_issuer=auth_context.oidc_issuer,
         oidc_subject=auth_context.oidc_subject,
+        oidc_token_validated=auth_context.oidc_token_validated,
+        access_policy_version=auth_context.access_policy_version,
+        quota_policy_version=auth_context.quota_policy_version,
         principal_key=getattr(identity, "principal_key", None),
         principal_type=getattr(identity, "principal_type", None),
         service_account_api_key_id=getattr(identity, "service_account_api_key_id", None),
@@ -519,9 +549,12 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         warnings.append("authentication is still API-key anchored")
     if auth_context.oidc_issuer is None or auth_context.oidc_subject is None:
         warnings.append("oidc claims are not present on this request")
+    if auth_context.oidc_issuer is not None and not auth_context.oidc_token_validated:
+        warnings.append("oidc claims were supplied by headers and were not token-validated")
     if auth_context.authorization_tenant_scope == "all":
         warnings.append("actor has global tenant scope")
 
+    resources = request.app.state.resources
     return AuthPolicyResponse(
         authentication_mode=auth_context.authentication_mode,
         actor_id=auth_context.actor_id,
@@ -532,13 +565,21 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         oidc_claims_present=(
             auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None
         ),
+        oidc_token_validated=auth_context.oidc_token_validated,
+        access_policy_version=auth_context.access_policy_version,
+        quota_policy_version=auth_context.quota_policy_version,
         permissions_model="role_scope_effective_permissions_with_tenant_scope",
+        policy_source="settings",
+        role_grants={
+            role: list(permissions)
+            for role, permissions in sorted(resources.settings.access_policy.role_grants.items())
+        },
         decisions=_auth_policy_decisions(auth_context),
         warnings=warnings,
         remaining_gaps=[
-            "OIDC/SSO validation is not yet active",
+            "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
             "ABAC policy is limited to permission and tenant-scope checks",
-            "policy inventory is not yet persisted as first-class operator configuration",
+            "policy inventory is settings-managed and not yet stored as audited database records",
         ],
     )
 
@@ -549,6 +590,49 @@ async def get_logs(request: Request) -> LogsResponse:
 
     resources = request.app.state.resources
     return LogsResponse(logs=resources.log_stream.history())
+
+
+@router.get(
+    "/tenants/quota",
+    operation_id="default.tenant_quota_policy",
+    response_model=TenantQuotaPolicyResponse,
+)
+async def get_tenant_quota_policy(
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+) -> TenantQuotaPolicyResponse:
+    """Return current quota boundaries for one authorized tenant."""
+
+    auth_context = get_auth_context(request)
+    resolved_tenant_id = _resolve_target_tenant_id(
+        auth_context=auth_context,
+        requested_tenant_id=tenant_id,
+        required_permissions=("tenant:quota.read",),
+    )
+    settings = request.app.state.resources.settings
+    limits = settings.tenant_quotas.tenants.get(
+        resolved_tenant_id,
+        settings.tenant_quotas.default,
+    )
+    return TenantQuotaPolicyResponse(
+        tenant_id=resolved_tenant_id,
+        enabled=settings.tenant_quotas.enabled,
+        policy_version=settings.tenant_quotas.version,
+        api_requests_per_minute=limits.api_requests_per_minute,
+        worker_enqueues_per_minute=limits.worker_enqueues_per_minute,
+        playback_refreshes_per_minute=limits.playback_refreshes_per_minute,
+        provider_refreshes_per_minute=limits.provider_refreshes_per_minute,
+        enforcement_points=[
+            "api_request_intake" if settings.tenant_quotas.enabled else "api_request_visibility",
+            "worker_enqueue_policy",
+            "provider_refresh_policy",
+            "playback_refresh_policy",
+        ],
+        remaining_gaps=[
+            "worker/provider/playback quota ceilings are visible but not yet enforced everywhere",
+            "quota counters are Redis minute buckets, not long-horizon billing records",
+        ],
+    )
 
 
 @router.get(

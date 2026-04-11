@@ -535,6 +535,82 @@ class LoggingSettings(CompatibilityModel):
     structured_filename: str = "ecs.json"
 
 
+class OidcSettings(CompatibilityModel):
+    """OIDC/SSO token-validation settings for enterprise deployments."""
+
+    enabled: bool = False
+    issuer: str | None = None
+    audience: str | None = None
+    jwks_url: str | None = None
+    jwks_json: dict[str, Any] | None = None
+    allowed_algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"])
+    allow_api_key_fallback: bool = True
+    cache_ttl_seconds: int = 3600
+    clock_skew_seconds: int = 60
+    actor_id_claim: str = "sub"
+    actor_type_claim: str = "actor_type"
+    tenant_id_claim: str = "tenant_id"
+    authorized_tenants_claim: str = "authorized_tenants"
+    roles_claim: str = "roles"
+    scopes_claim: str = "scope"
+
+
+class AccessPolicySettings(CompatibilityModel):
+    """Operator-managed RBAC/ABAC policy overlay."""
+
+    version: str = "default-v1"
+    role_grants: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "platform:admin": ["*"],
+            "settings:write": ["settings:write"],
+            "playback:operator": ["playback:read", "playback:operate"],
+        }
+    )
+    principal_roles: dict[str, list[str]] = Field(default_factory=dict)
+    principal_scopes: dict[str, list[str]] = Field(default_factory=dict)
+    principal_tenant_grants: dict[str, list[str]] = Field(default_factory=dict)
+    audit_decisions: bool = True
+
+
+class TenantQuotaLimitSettings(CompatibilityModel):
+    """Per-tenant quota ceilings for request and worker pressure."""
+
+    api_requests_per_minute: int | None = None
+    worker_enqueues_per_minute: int | None = None
+    playback_refreshes_per_minute: int | None = None
+    provider_refreshes_per_minute: int | None = None
+
+
+class TenantQuotaSettings(CompatibilityModel):
+    """Tenant quota-policy settings enforced at request intake."""
+
+    enabled: bool = False
+    version: str = "default-v1"
+    default: TenantQuotaLimitSettings = Field(
+        default_factory=lambda: TenantQuotaLimitSettings(api_requests_per_minute=600)
+    )
+    tenants: dict[str, TenantQuotaLimitSettings] = Field(default_factory=dict)
+
+
+class ControlPlaneSettings(CompatibilityModel):
+    """Distributed control-plane eventing settings."""
+
+    event_backplane: Literal["process_local", "redis_stream"] = "process_local"
+    event_stream_name: str = "filmu:events"
+    event_replay_maxlen: int = 10_000
+    consumer_group: str = "filmu-api"
+
+
+class LogShipperSettings(CompatibilityModel):
+    """External structured-log shipper/search readiness settings."""
+
+    enabled: bool = False
+    type: Literal["external_ndjson_tail", "vector", "filebeat"] = "external_ndjson_tail"
+    target: str | None = None
+    field_mapping_version: str = "filmu-ecs-v1"
+    healthcheck_url: str | None = None
+
+
 class StreamSettings(CompatibilityModel):
     """Streaming compatibility block."""
 
@@ -619,6 +695,26 @@ class Settings(BaseSettings):
     stream: StreamSettings = Field(
         default_factory=StreamSettings,
         alias="FILMU_PY_STREAM",
+    )
+    oidc: OidcSettings = Field(
+        default_factory=OidcSettings,
+        alias="FILMU_PY_OIDC",
+    )
+    access_policy: AccessPolicySettings = Field(
+        default_factory=AccessPolicySettings,
+        alias="FILMU_PY_ACCESS_POLICY",
+    )
+    tenant_quotas: TenantQuotaSettings = Field(
+        default_factory=TenantQuotaSettings,
+        alias="FILMU_PY_TENANT_QUOTAS",
+    )
+    control_plane: ControlPlaneSettings = Field(
+        default_factory=ControlPlaneSettings,
+        alias="FILMU_PY_CONTROL_PLANE",
+    )
+    log_shipper: LogShipperSettings = Field(
+        default_factory=LogShipperSettings,
+        alias="FILMU_PY_LOG_SHIPPER",
     )
     grpc_bind_address: str = Field(
         default="127.0.0.1:50051",

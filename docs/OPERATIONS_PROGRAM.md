@@ -53,6 +53,12 @@ Restore proof cadence:
 - Staging: at least monthly.
 - Production: before major schema migrations and after backup tooling changes.
 
+Runnable proof:
+
+- `pnpm proof:operations:backup-restore` runs [`../scripts/run_backup_restore_proof.ps1`](../scripts/run_backup_restore_proof.ps1) in dry-run mode and writes `artifacts/operations/backup-restore/restore-summary.json`.
+- Real database proof should pass `-PostgresDsn` and an isolated `-RestorePostgresDsn`; the script intentionally does not restore into the live source database.
+- The proof captures settings backup state, optional `pg_dump` output, optional isolated `psql` restore, and smoke-check status in one JSON artifact.
+
 Restore success criteria:
 
 - App starts with migrations applied.
@@ -109,3 +115,5 @@ Review at least monthly or before major usage expansion:
 - Structured log volume and retention.
 
 The current machine-readable summary is exposed at `/api/v1/operations/governance`.
+
+That summary now includes whether backup/restore proof automation exists, OIDC validation is enabled, tenant quota policy is active, Redis Streams replay is configured, and log shipper/search readiness is configured.

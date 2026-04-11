@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 from fastapi import HTTPException, Request, status
@@ -20,6 +22,11 @@ from filmu_py.core.log_stream import LogStreamBroker
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.resources import AppResources
+from filmu_py.security.oidc import (
+    OidcValidationError,
+    OidcValidationResult,
+    validate_oidc_bearer_token,
+)
 from filmu_py.services.media import MediaService
 from filmu_py.services.playback import InProcessDirectPlaybackRefreshController
 
@@ -55,6 +62,9 @@ class AuthContext:
     effective_permissions: tuple[str, ...]
     oidc_issuer: str | None
     oidc_subject: str | None
+    oidc_token_validated: bool
+    access_policy_version: str
+    quota_policy_version: str | None
 
 
 def _normalize_key_id(value: str | None) -> str | None:
@@ -82,27 +92,97 @@ def _split_header_values(raw: str | None, *, fallback: tuple[str, ...]) -> tuple
     return values or fallback
 
 
-def _build_auth_context(request: Request, *, api_key_id: str) -> AuthContext:
+def _claim_values(claims: dict[str, Any], claim_name: str) -> tuple[str, ...]:
+    value = claims.get(claim_name)
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.replace(",", " ").split() if part.strip())
+    if isinstance(value, list):
+        return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return ()
+
+
+def _merge_values(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in group:
+            normalized = value.strip()
+            if not normalized or normalized in seen:
+                continue
+            merged.append(normalized)
+            seen.add(normalized)
+    return tuple(merged)
+
+
+def _principal_policy_values(
+    values: dict[str, list[str]],
+    *,
+    actor_id: str,
+) -> tuple[str, ...]:
+    return tuple(item for item in values.get(actor_id, ()) if isinstance(item, str) and item)
+
+
+def _build_auth_context(
+    request: Request,
+    *,
+    api_key_id: str,
+    authentication_mode: str = "api_key",
+    oidc_result: OidcValidationResult | None = None,
+) -> AuthContext:
     """Resolve actor and tenant metadata from headers atop API-key authentication."""
 
-    actor_id = request.headers.get(_ACTOR_ID_HEADER) or f"api-key:{api_key_id}"
-    actor_type = request.headers.get(_ACTOR_TYPE_HEADER) or _DEFAULT_ACTOR_TYPE
-    tenant_id = request.headers.get(_TENANT_ID_HEADER) or _DEFAULT_TENANT_ID
+    settings = get_settings(request)
+    oidc_claims = oidc_result.claims if oidc_result is not None else {}
+    actor_id_claim = oidc_claims.get(settings.oidc.actor_id_claim)
+    actor_type_claim = oidc_claims.get(settings.oidc.actor_type_claim)
+    tenant_id_claim = oidc_claims.get(settings.oidc.tenant_id_claim)
+    actor_id = (
+        request.headers.get(_ACTOR_ID_HEADER)
+        or (actor_id_claim if isinstance(actor_id_claim, str) and actor_id_claim else None)
+        or f"api-key:{api_key_id}"
+    )
+    actor_type = (
+        request.headers.get(_ACTOR_TYPE_HEADER)
+        or (actor_type_claim if isinstance(actor_type_claim, str) and actor_type_claim else None)
+        or _DEFAULT_ACTOR_TYPE
+    )
+    tenant_id = (
+        request.headers.get(_TENANT_ID_HEADER)
+        or (tenant_id_claim if isinstance(tenant_id_claim, str) and tenant_id_claim else None)
+        or _DEFAULT_TENANT_ID
+    )
     authorized_tenant_ids = _split_header_values(
         request.headers.get(_AUTHORIZED_TENANTS_HEADER),
-        fallback=(tenant_id,),
+        fallback=_claim_values(oidc_claims, settings.oidc.authorized_tenants_claim) or (tenant_id,),
     )
-    roles = _split_header_values(
-        request.headers.get(_ACTOR_ROLES_HEADER),
-        fallback=_DEFAULT_ROLES,
+    roles = _merge_values(
+        _split_header_values(
+            request.headers.get(_ACTOR_ROLES_HEADER),
+            fallback=_claim_values(oidc_claims, settings.oidc.roles_claim) or _DEFAULT_ROLES,
+        ),
+        _principal_policy_values(settings.access_policy.principal_roles, actor_id=actor_id),
     )
-    scopes = _split_header_values(
-        request.headers.get(_ACTOR_SCOPES_HEADER),
-        fallback=_DEFAULT_SCOPES,
+    scopes = _merge_values(
+        _split_header_values(
+            request.headers.get(_ACTOR_SCOPES_HEADER),
+            fallback=_claim_values(oidc_claims, settings.oidc.scopes_claim) or _DEFAULT_SCOPES,
+        ),
+        _principal_policy_values(settings.access_policy.principal_scopes, actor_id=actor_id),
     )
-    effective = effective_permissions(roles=roles, scopes=scopes)
+    authorized_tenant_ids = _merge_values(
+        authorized_tenant_ids,
+        _principal_policy_values(
+            settings.access_policy.principal_tenant_grants,
+            actor_id=actor_id,
+        ),
+    )
+    effective = effective_permissions(
+        roles=roles,
+        scopes=scopes,
+        role_permission_grants=settings.access_policy.role_grants,
+    )
     return AuthContext(
-        authentication_mode="api_key",
+        authentication_mode=authentication_mode,
         api_key_id=api_key_id,
         actor_id=actor_id,
         actor_type=actor_type,
@@ -116,8 +196,19 @@ def _build_auth_context(request: Request, *, api_key_id: str) -> AuthContext:
         roles=roles,
         scopes=scopes,
         effective_permissions=effective,
-        oidc_issuer=_normalize_optional_header(request.headers.get(_OIDC_ISSUER_HEADER)),
-        oidc_subject=_normalize_optional_header(request.headers.get(_OIDC_SUBJECT_HEADER)),
+        oidc_issuer=(
+            oidc_result.issuer
+            if oidc_result is not None
+            else _normalize_optional_header(request.headers.get(_OIDC_ISSUER_HEADER))
+        ),
+        oidc_subject=(
+            oidc_result.subject
+            if oidc_result is not None
+            else _normalize_optional_header(request.headers.get(_OIDC_SUBJECT_HEADER))
+        ),
+        oidc_token_validated=oidc_result is not None,
+        access_policy_version=settings.access_policy.version,
+        quota_policy_version=settings.tenant_quotas.version if settings.tenant_quotas.enabled else None,
     )
 
 
@@ -268,12 +359,53 @@ async def verify_api_key(request: Request) -> None:
     settings = get_settings(request)
     expected = settings.api_key.get_secret_value()
     key_id = _normalize_key_id(settings.api_key_id) or "primary"
+    authorization = request.headers.get("authorization", "")
+    bearer_token = authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else None
+
+    if settings.oidc.enabled and bearer_token and bearer_token != expected:
+        try:
+            oidc_result = await validate_oidc_bearer_token(
+                bearer_token,
+                settings=settings.oidc,
+                cache=get_cache(request),
+            )
+        except OidcValidationError as exc:
+            logger.warning(
+                "auth.oidc.rejected",
+                issuer=settings.oidc.issuer,
+                path=request.url.path,
+                method=request.method,
+                reason=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid OIDC bearer token",
+            ) from exc
+
+        auth_context = _build_auth_context(
+            request,
+            api_key_id=f"oidc:{oidc_result.issuer}",
+            authentication_mode="oidc",
+            oidc_result=oidc_result,
+        )
+        await _enforce_tenant_api_quota(request, auth_context)
+        request.state.auth_context = auth_context
+        identity_service = get_resources(request).security_identity_service
+        if identity_service is not None:
+            request.state.auth_identity = await identity_service.record_auth_context(auth_context)
+        _bind_auth_context(auth_context)
+        return
 
     provided = (
         request.headers.get("x-api-key")
-        or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        or bearer_token
         or request.query_params.get("api_key")
     )
+    if settings.oidc.enabled and not settings.oidc.allow_api_key_fallback:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="OIDC bearer token required",
+        )
 
     if not provided or provided != expected:
         logger.warning(
@@ -293,10 +425,46 @@ async def verify_api_key(request: Request) -> None:
         request,
         api_key_id=key_id,
     )
+    await _enforce_tenant_api_quota(request, auth_context)
     request.state.auth_context = auth_context
     identity_service = get_resources(request).security_identity_service
     if identity_service is not None:
         request.state.auth_identity = await identity_service.record_auth_context(auth_context)
+    _bind_auth_context(auth_context)
+
+
+async def _enforce_tenant_api_quota(request: Request, auth_context: AuthContext) -> None:
+    """Enforce request-intake quotas before route handlers run."""
+
+    settings = get_settings(request)
+    if not settings.tenant_quotas.enabled:
+        return
+    limit = settings.tenant_quotas.tenants.get(
+        auth_context.tenant_id,
+        settings.tenant_quotas.default,
+    ).api_requests_per_minute
+    if limit is None or limit <= 0:
+        return
+
+    minute = int(time.time() // 60)
+    key = f"quota:tenant:{auth_context.tenant_id}:api:{minute}"
+    redis = get_resources(request).redis
+    current = await redis.incr(key)
+    if current == 1:
+        await redis.expire(key, 120)
+    if current > limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Tenant request quota exceeded "
+                f"(policy={settings.tenant_quotas.version}, limit={limit}/minute)"
+            ),
+        )
+
+
+def _bind_auth_context(auth_context: AuthContext) -> None:
+    """Bind sanitized identity attributes to structured logs and metrics."""
+
     structlog.contextvars.bind_contextvars(
         api_key_id=auth_context.api_key_id,
         actor_id=auth_context.actor_id,
@@ -310,4 +478,7 @@ async def verify_api_key(request: Request) -> None:
         authentication_mode=auth_context.authentication_mode,
         oidc_issuer=auth_context.oidc_issuer or "",
         oidc_subject=auth_context.oidc_subject or "",
+        oidc_token_validated=auth_context.oidc_token_validated,
+        access_policy_version=auth_context.access_policy_version,
+        quota_policy_version=auth_context.quota_policy_version or "",
     )

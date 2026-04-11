@@ -43,9 +43,15 @@ class EventBus:
         self._subscribers: dict[str, list[asyncio.Queue[EventEnvelope]]] = defaultdict(list)
         self._max_queue_size = max_queue_size
         self._known_topics: set[str] = set()
+        self._replay_backplane: Any | None = None
         self._plugin_registry: PluginRegistry | None = None
         self._hook_executor: PluginHookWorkerExecutor | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
+
+    def attach_replay_backplane(self, replay_backplane: Any) -> None:
+        """Attach a durable replay journal without changing subscriber contracts."""
+
+        self._replay_backplane = replay_backplane
 
     def attach_plugin_runtime(
         self,
@@ -122,6 +128,12 @@ class EventBus:
         if not self._is_publish_allowed(topic):
             return
         self._known_topics.add(topic)
+        if self._replay_backplane is not None:
+            await self._replay_backplane.publish(
+                topic,
+                payload,
+                tenant_id=payload.get("tenant_id") if isinstance(payload.get("tenant_id"), str) else None,
+            )
         self._publish_envelope(EventEnvelope(topic=topic, payload=payload))
         self._schedule_hook_dispatch(topic, payload)
 
@@ -131,6 +143,23 @@ class EventBus:
         if not self._is_publish_allowed(topic):
             return
         self._known_topics.add(topic)
+        if self._replay_backplane is not None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                task = loop.create_task(
+                    self._replay_backplane.publish(
+                        topic,
+                        payload,
+                        tenant_id=payload.get("tenant_id")
+                        if isinstance(payload.get("tenant_id"), str)
+                        else None,
+                    )
+                )
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
         self._publish_envelope(EventEnvelope(topic=topic, payload=payload))
         self._schedule_hook_dispatch(topic, payload)
 

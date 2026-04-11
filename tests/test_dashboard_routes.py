@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, cast
 
+from authlib.jose import jwt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
@@ -28,8 +29,10 @@ class DummyRedis:
 
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
+        self.integers: dict[str, int] = {}
         self.sorted_sets: dict[str, dict[str, float]] = {}
         self.lists: dict[str, list[bytes]] = {}
+        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
 
     def ping(self, **kwargs: Any) -> bool:
         _ = kwargs
@@ -44,6 +47,49 @@ class DummyRedis:
 
     async def delete(self, key: str) -> None:
         self.values.pop(key, None)
+
+    async def incr(self, key: str) -> int:
+        self.integers[key] = self.integers.get(key, 0) + 1
+        return self.integers[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        _ = (key, seconds)
+        return True
+
+    async def xadd(
+        self,
+        name: str,
+        fields: dict[str, str],
+        *,
+        id: str = "*",
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        _ = (id, approximate)
+        bucket = self.streams.setdefault(name, [])
+        event_id = f"{len(bucket) + 1}-0"
+        bucket.append((event_id, fields))
+        if maxlen is not None and len(bucket) > maxlen:
+            del bucket[: len(bucket) - maxlen]
+        return event_id
+
+    async def xread(
+        self,
+        streams: dict[str, str],
+        *,
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        _ = block
+        rows: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        for stream_name, offset in streams.items():
+            selected = [
+                item for item in self.streams.get(stream_name, []) if _stream_id_gt(item[0], offset)
+            ]
+            if count is not None:
+                selected = selected[:count]
+            rows.append((stream_name, selected))
+        return rows
 
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
@@ -130,6 +176,12 @@ def _score_matches(score: float, bound: str | int, *, lower: bool) -> bool:
     return score >= target if lower else score <= target
 
 
+def _stream_id_gt(left: str, right: str) -> bool:
+    left_ms, left_seq = (int(part) for part in left.split("-", 1))
+    right_ms, right_seq = (int(part) for part in right.split("-", 1))
+    return (left_ms, left_seq) > (right_ms, right_seq)
+
+
 class DummyDatabaseRuntime:
     """No-op DB runtime placeholder for application resources in tests."""
 
@@ -158,18 +210,25 @@ class DummyMediaService:
         return {}
 
 
-def _build_settings(*, arq_enabled: bool = False, temporal_enabled: bool = False) -> Settings:
+def _build_settings(
+    *,
+    arq_enabled: bool = False,
+    temporal_enabled: bool = False,
+    **overrides: Any,
+) -> Settings:
     """Create deterministic settings payload for dashboard compatibility tests."""
 
-    return Settings(
-        FILMU_PY_API_KEY=SecretStr("a" * 32),
-        FILMU_PY_POSTGRES_DSN="postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
-        FILMU_PY_REDIS_URL=AnyUrl("redis://localhost:6379/0"),
-        FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
-        FILMU_PY_LOG_LEVEL="INFO",
-        FILMU_PY_ARQ_ENABLED=arq_enabled,
-        FILMU_PY_TEMPORAL_ENABLED=temporal_enabled,
-    )
+    payload: dict[str, Any] = {
+        "FILMU_PY_API_KEY": SecretStr("a" * 32),
+        "FILMU_PY_POSTGRES_DSN": "postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
+        "FILMU_PY_REDIS_URL": AnyUrl("redis://localhost:6379/0"),
+        "FILMU_PY_RUN_MIGRATIONS_ON_STARTUP": False,
+        "FILMU_PY_LOG_LEVEL": "INFO",
+        "FILMU_PY_ARQ_ENABLED": arq_enabled,
+        "FILMU_PY_TEMPORAL_ENABLED": temporal_enabled,
+    }
+    payload.update(overrides)
+    return Settings(**payload)
 
 
 def _build_snapshot() -> StatsProjection:
@@ -202,13 +261,18 @@ def _build_client(
     *,
     arq_enabled: bool = False,
     temporal_enabled: bool = False,
+    settings_overrides: dict[str, Any] | None = None,
     plugin_registry: PluginRegistry | None = None,
     plugin_load_report: Any | None = None,
     security_identity_service: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
-    settings = _build_settings(arq_enabled=arq_enabled, temporal_enabled=temporal_enabled)
+    settings = _build_settings(
+        arq_enabled=arq_enabled,
+        temporal_enabled=temporal_enabled,
+        **(settings_overrides or {}),
+    )
     redis = DummyRedis()
     registry = GraphQLPluginRegistry()
 
@@ -636,10 +700,77 @@ def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> 
         "effective_permissions": ["*", "playback:operate", "playback:read"],
         "oidc_issuer": None,
         "oidc_subject": None,
+        "oidc_token_validated": False,
+        "access_policy_version": "default-v1",
+        "quota_policy_version": None,
         "principal_key": "operator-1",
         "principal_type": "service",
         "service_account_api_key_id": "primary",
     }
+
+
+def test_auth_context_route_accepts_valid_oidc_bearer_token() -> None:
+    token = jwt.encode(
+        {"alg": "HS256", "kid": "test"},
+        {
+            "iss": "https://issuer.example.test",
+            "sub": "user-123",
+            "aud": "filmu-api",
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+            "tenant_id": "tenant-oidc",
+            "roles": ["playback:operator"],
+            "scope": "library:read playback:operate",
+        },
+        {"kty": "oct", "k": "c2VjcmV0", "kid": "test"},
+    )
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "issuer": "https://issuer.example.test",
+                "audience": "filmu-api",
+                "jwks_json": {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "test"}]},
+                "allowed_algorithms": ["HS256"],
+            }
+        }
+    )
+
+    token_value = token.decode("utf-8") if isinstance(token, bytes) else token
+    response = client.get(
+        "/api/v1/auth/context",
+        headers={"authorization": f"Bearer {token_value}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["authentication_mode"] == "oidc"
+    assert body["actor_id"] == "user-123"
+    assert body["tenant_id"] == "tenant-oidc"
+    assert body["oidc_issuer"] == "https://issuer.example.test"
+    assert body["oidc_subject"] == "user-123"
+    assert body["oidc_token_validated"] is True
+    assert body["effective_permissions"] == ["library:read", "playback:operate", "playback:read"]
+
+
+def test_oidc_can_disable_api_key_fallback() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "issuer": "https://issuer.example.test",
+                "audience": "filmu-api",
+                "jwks_json": {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "test"}]},
+                "allowed_algorithms": ["HS256"],
+                "allow_api_key_fallback": False,
+            }
+        }
+    )
+
+    response = client.get("/api/v1/auth/context", headers=_headers())
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "OIDC bearer token required"
 
 
 def test_auth_policy_route_returns_authorization_posture() -> None:
@@ -659,9 +790,17 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["permissions_model"] == "role_scope_effective_permissions_with_tenant_scope"
+    assert body["policy_source"] == "settings"
+    assert body["access_policy_version"] == "default-v1"
+    assert body["quota_policy_version"] is None
     assert body["authorization_tenant_scope"] == "self"
     assert body["oidc_claims_present"] is True
-    assert body["warnings"] == ["authentication is still API-key anchored"]
+    assert body["oidc_token_validated"] is False
+    assert body["warnings"] == [
+        "authentication is still API-key anchored",
+        "oidc claims were supplied by headers and were not token-validated",
+    ]
+    assert body["role_grants"]["platform:admin"] == ["*"]
     decisions = {decision["name"]: decision for decision in body["decisions"]}
     assert decisions["library_read"]["allowed"] is True
     assert decisions["playback_operate"]["allowed"] is True
@@ -669,9 +808,9 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     assert decisions["settings_write"]["missing_permissions"] == ["settings:write"]
     assert decisions["api_key_rotate"]["allowed"] is False
     assert body["remaining_gaps"] == [
-        "OIDC/SSO validation is not yet active",
+        "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
         "ABAC policy is limited to permission and tenant-scope checks",
-        "policy inventory is not yet persisted as first-class operator configuration",
+        "policy inventory is settings-managed and not yet stored as audited database records",
     ]
 
 
@@ -712,6 +851,28 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert body["sre_program"]["status"] == "partial"
     assert body["operator_log_pipeline"]["status"] == "partial"
     assert "structured_logging_enabled=True" in body["operator_log_pipeline"]["evidence"]
+
+
+def test_tenant_quota_route_returns_current_policy_visibility() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_TENANT_QUOTAS": {
+                "enabled": True,
+                "version": "quota-v2",
+                "tenants": {"tenant-main": {"api_requests_per_minute": 25}},
+            }
+        }
+    )
+
+    response = client.get("/api/v1/tenants/quota", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tenant_id"] == "tenant-main"
+    assert body["enabled"] is True
+    assert body["policy_version"] == "quota-v2"
+    assert body["api_requests_per_minute"] == 25
+    assert body["enforcement_points"][0] == "api_request_intake"
 
 
 def test_worker_queue_route_returns_control_plane_snapshot() -> None:

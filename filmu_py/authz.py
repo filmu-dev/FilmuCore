@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 _ROLE_PERMISSION_GRANTS: dict[str, frozenset[str]] = {
@@ -57,12 +57,22 @@ def _implied_permissions(permission: str) -> set[str]:
     return implied
 
 
-def effective_permissions(*, roles: Iterable[str], scopes: Iterable[str]) -> tuple[str, ...]:
+def effective_permissions(
+    *,
+    roles: Iterable[str],
+    scopes: Iterable[str],
+    role_permission_grants: Mapping[str, Iterable[str]] | None = None,
+) -> tuple[str, ...]:
     """Return the normalized, deduplicated effective permission set."""
 
+    grants = role_permission_grants or _ROLE_PERMISSION_GRANTS
     resolved: set[str] = set()
     for role in roles:
-        resolved.update(_ROLE_PERMISSION_GRANTS.get(_normalize_permission(role), ()))
+        resolved.update(
+            _normalize_permission(permission)
+            for permission in grants.get(_normalize_permission(role), ())
+            if permission
+        )
     for scope in scopes:
         resolved.update(_implied_permissions(_normalize_permission(scope)))
     return tuple(sorted(permission for permission in resolved if permission))

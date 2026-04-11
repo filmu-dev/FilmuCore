@@ -221,29 +221,29 @@ Detailed observability breakdown: [`OBSERVABILITY_MATURITY_MATRIX.md`](OBSERVABI
 
 After the shipped layer-1 baseline, deepen:
 
-- shipper/search workflow above the now-landed durable structured logs
-- queue/backlog/control-plane lag history and alerting are now baseline through `/api/v1/workers/queue`, `/api/v1/workers/queue/history`, and bounded alert classification; the remaining work is broader lag/backlog history depth, replay taxonomy, and stronger operator automation rather than first instrumentation
+- shipper/search workflow above the now-landed durable structured logs; the first Vector tailing config and log-pipeline contract proof exist, so the remaining work is external collector/search provisioning and alert integration
+- queue/backlog/control-plane lag history and alerting are now baseline through `/api/v1/workers/queue`, `/api/v1/workers/queue/history`, bounded alert classification, and a Redis Streams replay journal; the remaining work is broader lag/backlog history depth, consumer-group operations, and stronger operator automation rather than first instrumentation
 - mounted stream/VFS data-plane metrics
 - correlation across API, workers, plugins, and stream control-plane events
-- [`OPERATOR_LOG_PIPELINE.md`](../OPERATOR_LOG_PIPELINE.md) now defines the expected shipper/search/replay taxonomy and alerting baseline; the next implementation gap is provisioning a real shipper/search backend or collector path rather than deciding the vocabulary.
+- [`OPERATOR_LOG_PIPELINE.md`](../OPERATOR_LOG_PIPELINE.md) now defines the expected shipper/search/replay taxonomy and alerting baseline; the next implementation gap is promoting the Vector/search contract into an environment-owned collector path rather than deciding the vocabulary.
 
 ---
 
 ## Priority 7 — Turn interim auth context into a real enterprise identity plane
 
-Current implementation now carries additive actor/tenant/role/scope context through authenticated API requests, computes `effective_permissions`, emits structured audit logs for privileged settings/API-key mutations, rotates `api_key_id` alongside the secret itself, and persists actor-aware service-account key identity.
-Current implementation also exposes [`GET /api/v1/auth/policy`](../../filmu_py/api/routes/default.py) and [`GET /api/v1/operations/governance`](../../filmu_py/api/routes/default.py), so access-policy posture and remaining OIDC/ABAC gaps are visible to operators.
+Current implementation now carries additive actor/tenant/role/scope context through authenticated API requests, computes `effective_permissions` from settings-backed role grants, validates OIDC bearer JWTs against configured issuer/audience/JWKS when enabled, emits structured audit logs for privileged settings/API-key mutations, rotates `api_key_id` alongside the secret itself, and persists actor-aware service-account key identity.
+Current implementation also exposes [`GET /api/v1/auth/policy`](../../filmu_py/api/routes/default.py), [`GET /api/v1/tenants/quota`](../../filmu_py/api/routes/default.py), and [`GET /api/v1/operations/governance`](../../filmu_py/api/routes/default.py), so access-policy posture, quota posture, OIDC validation state, and remaining ABAC gaps are visible to operators.
 
 That is not yet a finished enterprise identity system.
 
 Next identity/authz work should include:
 
-- OIDC/SSO readiness instead of header-carried operator metadata
+- SSO rollout hardening above the current OIDC validation baseline: IdP docs, subject mapping policy, JWKS rotation operations, and deny/failure dashboards
 - deeper RBAC/ABAC policy evaluation across API, workers, plugins, and VFS control-plane actions
-- tenant-scoped authorization, quotas, audit retention, and operator-visible access policy state
+- database-versioned access policy, richer tenant quota enforcement, audit retention, and operator-managed approval workflows
 - broader tenancy propagation across plugin execution, VFS governance, metrics ownership, and control-plane attribution
 
-[`OPERATIONS_PROGRAM.md`](../OPERATIONS_PROGRAM.md) now provides the initial SRE/rollback/backup/incident/canary/capacity policy baseline for these enterprise slices. The next step is exercising those runbooks and artifacting proof, not drafting the first policy from scratch.
+[`OPERATIONS_PROGRAM.md`](../OPERATIONS_PROGRAM.md) now provides the initial SRE/rollback/backup/incident/canary/capacity policy baseline plus a runnable backup/restore proof script. The next step is exercising those runbooks against real isolated environments and promoting proof artifacts into CI/release evidence, not drafting the first policy from scratch.
 
 Why continuously:
 
