@@ -442,6 +442,11 @@ def _build_worker_settings() -> Settings:
     )
 
 
+@pytest.fixture(autouse=True)
+def _worker_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+
+
 class _FakeDebridClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
