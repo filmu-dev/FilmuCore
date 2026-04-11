@@ -107,9 +107,18 @@ The release automation itself is now split by privilege:
 
 - [`../.github/workflows/release.yml`](../.github/workflows/release.yml) defaults `GITHUB_TOKEN` to read-only workflow-wide
 - the `release` job is the only place that gets write access for PR/tag/release operations
-- the release-PR verify redispatch job gets `actions: write` only at the job level so it can trigger [`../.github/workflows/verify.yml`](../.github/workflows/verify.yml) for release-please branches without granting workflow-wide action mutation rights
+- `release-please` must use `RELEASE_PLEASE_TOKEN`, not `github.token`, because strict required checks are evaluated on the release PR merge commit and must come from a real `pull_request` check suite, not a manual redispatch on the release branch head
 
-This matters because release-please commonly updates the release PR with `GITHUB_TOKEN`, and those updates do not reliably trigger the normal `pull_request` verify workflow. The dispatch job closes that gap by explicitly re-running verify on open `autorelease: pending` PR branches.
+This matters because release-please updates made with `GITHUB_TOKEN` can leave the release PR in the broken state GitHub labels as `Expected — Waiting for status to be reported`: the `Verify - ...` jobs exist on the release branch head, but the required merge-commit contexts are missing. Manual `workflow_dispatch` redispatch does not fix that. The repository now fails the release workflow fast unless PAT-backed release automation is enabled, because a loud release-workflow failure is safer than silently opening an unmergeable release PR.
+
+### Release automation credentials
+
+Set both of these in the GitHub repository configuration:
+
+- repository variable `RELEASE_PLEASE_USE_PAT=true`
+- repository secret `RELEASE_PLEASE_TOKEN=<fine-grained PAT or GitHub App token with repo contents, pull requests, and workflow-trigger coverage for this repository>`
+
+If either is missing, [`../.github/workflows/release.yml`](../.github/workflows/release.yml) now fails before it can open or update a broken release PR.
 
 Required checks should include at least:
 
@@ -170,7 +179,7 @@ Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub s
 
 1. The squash merge pushes one Conventional Commit onto `main`.
 2. [`../.github/workflows/release.yml`](../.github/workflows/release.yml) runs on that push.
-3. Release Please updates or opens the release PR branch.
+3. Release Please updates or opens the release PR branch using `RELEASE_PLEASE_TOKEN`.
 4. Merge the release PR.
 5. Release Please tags the repo and publishes the GitHub release.
 
@@ -179,6 +188,7 @@ Do not use the plain merge-commit strategy for release-carrying PRs. If GitHub s
 - merging with the GitHub `Merge pull request` strategy
 - relying on arbitrary branch commit subjects instead of the PR title
 - expecting pushes to feature branches to create releases directly
+- letting release-please fall back to `GITHUB_TOKEN` while `main` uses strict required status checks
 
 Feature-branch pushes should validate code, not create releases.
 
