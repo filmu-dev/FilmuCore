@@ -25,13 +25,13 @@ if TYPE_CHECKING:
     from .services.access_policy import AccessPolicyService, AccessPolicySnapshot
     from .services.control_plane import ControlPlaneService
     from .services.identity import SecurityIdentityService
-    from .services.plugin_governance import PluginGovernanceService
     from .services.playback import (
         InProcessDirectPlaybackRefreshController,
         InProcessHlsFailedLeaseRefreshController,
         InProcessHlsRestrictedFallbackRefreshController,
         PlaybackSourceService,
     )
+    from .services.plugin_governance import PluginGovernanceService
     from .services.vfs_catalog import FilmuVfsCatalogSupplier
     from .services.vfs_server import FilmuVfsCatalogGrpcServer
 

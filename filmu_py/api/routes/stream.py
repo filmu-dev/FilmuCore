@@ -12,6 +12,7 @@ import tempfile
 from asyncio.subprocess import PIPE
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -374,7 +375,7 @@ async def _allow_tenant_refresh_trigger(
         return True
     minute = int(datetime.now(UTC).timestamp() // 60)
     key = f"quota:tenant:{auth_context.tenant_id}:{quota_name}:{minute}"
-    current = await cast(Any, resources.redis).incr(key)
+    current = int(await cast(Any, resources.redis).incr(key))
     if current == 1 and hasattr(resources.redis, "expire"):
         await cast(Any, resources.redis).expire(key, 120)
     return current <= limit

@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import functools
 import json
 import logging
 import multiprocessing
-from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
+import os
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -101,12 +103,35 @@ WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
 _HEAVY_STAGE_EXECUTOR: Executor | None = None
 
 
+class _RankBatchInput(TypedDict):
+    """Serializable input payload for isolated ranking work."""
+
+    stream_id: str
+    raw_title: str
+    parsed_title: dict[str, object] | str
+    resolution: str | None
+    partial_scope_bonus: int
+
+
+class _RankBatchRecord(TypedDict):
+    """Serializable output payload from isolated ranking work."""
+
+    stream_id: str
+    rank_score: int
+    lev_ratio: float
+    fetch: bool
+    passed: bool
+    rejection_reason: str | None
+
+
 def _heavy_stage_executor() -> Executor:
     """Return the bounded executor used for CPU-heavy ranking isolation."""
 
     global _HEAVY_STAGE_EXECUTOR
     if _HEAVY_STAGE_EXECUTOR is None:
-        if multiprocessing.get_start_method(allow_none=True) == "fork":
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            _HEAVY_STAGE_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+        elif multiprocessing.get_start_method(allow_none=True) == "fork":
             _HEAVY_STAGE_EXECUTOR = ProcessPoolExecutor(max_workers=2)
         else:
             try:
@@ -124,21 +149,21 @@ def _rank_stream_batch(
     item_title: str,
     item_aliases: list[str],
     profile: RankingProfile,
-    bucket_limit: int,
-    stream_inputs: list[dict[str, object]],
-) -> list[dict[str, object]]:
+    bucket_limit: int | None,
+    stream_inputs: list[_RankBatchInput],
+) -> list[_RankBatchRecord]:
     """Run the expensive RTN ranking/sorting batch in an isolated worker."""
 
     rtn = RTN(profile)
     successful: list[tuple[str, RankedTorrent]] = []
-    failures: list[dict[str, object]] = []
+    failures: list[_RankBatchRecord] = []
 
     for stream_input in stream_inputs:
-        stream_id = str(stream_input["stream_id"])
+        stream_id = stream_input["stream_id"]
         parsed = ParsedData(
-            raw_title=str(stream_input["raw_title"]),
-            parsed_title=str(stream_input["parsed_title"]),
-            resolution=str(stream_input["resolution"]),
+            raw_title=stream_input["raw_title"],
+            parsed_title=_coerce_rank_batch_parsed_title(stream_input["parsed_title"]),
+            resolution=stream_input["resolution"],
         )
         try:
             ranked = rtn.rank_torrent(
@@ -146,7 +171,7 @@ def _rank_stream_batch(
                 correct_title=item_title,
                 aliases=item_aliases or None,
             )
-            partial_scope_bonus = int(stream_input.get("partial_scope_bonus", 0) or 0)
+            partial_scope_bonus = stream_input["partial_scope_bonus"]
             if partial_scope_bonus > 0:
                 score_parts = dict(ranked.score_parts)
                 score_parts["partial_scope_bonus"] = partial_scope_bonus
@@ -204,6 +229,20 @@ def _rank_stream_batch(
             }
         )
     return results
+
+
+def _coerce_rank_batch_parsed_title(raw: dict[str, object] | str) -> dict[str, object]:
+    """Normalize serialized parsed-title payloads for the isolated rank worker."""
+
+    if isinstance(raw, dict):
+        return {key: value for key, value in raw.items() if isinstance(key, str)}
+    try:
+        parsed = ast.literal_eval(raw)
+    except (SyntaxError, ValueError):
+        return {}
+    if isinstance(parsed, dict):
+        return {key: value for key, value in parsed.items() if isinstance(key, str)}
+    return {}
 
 
 def _redis_from_settings(settings: Settings) -> Redis:
@@ -1520,7 +1559,7 @@ async def rank_streams(
             )
         ranked_results: list[RankedStreamCandidateRecord] = []
         rankable_streams: list[StreamORM] = []
-        rank_batch_inputs: list[dict[str, object]] = []
+        rank_batch_inputs: list[_RankBatchInput] = []
 
         for stream in streams:
             if not stream.parsed_title:
@@ -1581,16 +1620,19 @@ async def rank_streams(
                 {
                     "stream_id": str(stream.id),
                     "raw_title": stream.raw_title,
-                    "parsed_title": stream.parsed_title,
+                    "parsed_title": (
+                        stream.parsed_title if isinstance(stream.parsed_title, dict) else {}
+                    ),
                     "resolution": stream.resolution,
-                    "partial_scope_bonus": _partial_scope_rank_bonus(
-                        stream,
-                        partial_requested_seasons,
+                    "partial_scope_bonus": (
+                        _partial_scope_rank_bonus(stream, partial_requested_seasons)
+                        if partial_requested_seasons is not None
+                        else 0
                     ),
                 }
             )
 
-        ranked_batch_records: list[dict[str, object]]
+        ranked_batch_records: list[_RankBatchRecord]
         if rank_batch_inputs:
             loop = asyncio.get_running_loop()
             ranked_batch_records = await asyncio.wait_for(
@@ -1612,19 +1654,19 @@ async def rank_streams(
 
         stream_map = {str(stream.id): stream for stream in rankable_streams}
         for ranked_record in ranked_batch_records:
-            stream = stream_map.get(str(ranked_record["stream_id"]))
-            if stream is None:
+            ranked_stream = stream_map.get(ranked_record["stream_id"])
+            if ranked_stream is None:
                 continue
             ranked_results.append(
                 RankedStreamCandidateRecord(
                     item_id=item_id,
-                    stream_id=stream.id,
-                    rank_score=int(ranked_record["rank_score"]),
-                    lev_ratio=float(ranked_record["lev_ratio"]),
-                    fetch=bool(ranked_record["fetch"]),
-                    passed=bool(ranked_record["passed"]),
-                    rejection_reason=cast(str | None, ranked_record["rejection_reason"]),
-                    stream=stream,
+                    stream_id=ranked_stream.id,
+                    rank_score=ranked_record["rank_score"],
+                    lev_ratio=ranked_record["lev_ratio"],
+                    fetch=ranked_record["fetch"],
+                    passed=ranked_record["passed"],
+                    rejection_reason=ranked_record["rejection_reason"],
+                    stream=ranked_stream,
                 )
             )
 

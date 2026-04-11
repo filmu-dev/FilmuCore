@@ -32,6 +32,7 @@ from ..models import (
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
+    ControlPlaneSubscriberResponse,
     EnterpriseOperationsGovernanceResponse,
     EnterpriseOperationsSliceResponse,
     HealthResponse,
@@ -39,9 +40,9 @@ from ..models import (
     MessageResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
-    PluginGovernanceResponse,
     PluginGovernanceOverrideResponse,
     PluginGovernanceOverrideWriteRequest,
+    PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
     QueueAlertResponse,
     QueueStatusHistoryPointResponse,
@@ -50,7 +51,6 @@ from ..models import (
     QueueStatusResponse,
     StatsMediaYearRelease,
     StatsResponse,
-    ControlPlaneSubscriberResponse,
     TenantQuotaPolicyResponse,
 )
 
@@ -1295,7 +1295,7 @@ async def get_plugins(request: Request) -> list[PluginCapabilityStatusResponse]:
                 ),
                 quarantine_reason=(
                     override.reason
-                    if is_quarantined
+                    if is_quarantined and override is not None
                     else (manifest.quarantine_reason if manifest is not None else None)
                 ),
                 publisher_policy_decision=getattr(success, "publisher_policy_decision", None),
