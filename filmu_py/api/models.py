@@ -134,6 +134,28 @@ class PluginGovernanceResponse(BaseModel):
     plugins: list[PluginCapabilityStatusResponse]
 
 
+class EnterpriseOperationsSliceResponse(BaseModel):
+    """One enterprise-operations workstream posture summary."""
+
+    name: str
+    status: Literal["ready", "partial", "blocked", "not_ready"]
+    evidence: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class EnterpriseOperationsGovernanceResponse(BaseModel):
+    """Machine-readable posture for the current enterprise operations slices."""
+
+    generated_at: str
+    playback_gate: EnterpriseOperationsSliceResponse
+    identity_authz: EnterpriseOperationsSliceResponse
+    tenant_boundary: EnterpriseOperationsSliceResponse
+    distributed_control_plane: EnterpriseOperationsSliceResponse
+    sre_program: EnterpriseOperationsSliceResponse
+    operator_log_pipeline: EnterpriseOperationsSliceResponse
+
+
 class QueueStatusResponse(BaseModel):
     """Current ARQ queue control-plane snapshot."""
 

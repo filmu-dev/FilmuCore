@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from datetime import UTC, datetime
 from secrets import token_hex
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
@@ -26,6 +27,8 @@ from ..models import (
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
+    EnterpriseOperationsGovernanceResponse,
+    EnterpriseOperationsSliceResponse,
     HealthResponse,
     LogsResponse,
     MessageResponse,
@@ -288,6 +291,158 @@ def _auth_policy_decisions(auth_context: Any) -> list[AuthPolicyDecisionResponse
             )
         )
     return responses
+
+
+def _enterprise_operations_governance(
+    *,
+    request: Request,
+    plugins: list[PluginCapabilityStatusResponse],
+) -> EnterpriseOperationsGovernanceResponse:
+    """Return machine-readable posture for the current enterprise roadmap slices."""
+
+    resources = request.app.state.resources
+    settings = resources.settings
+    auth_context = get_auth_context(request)
+    policy_decisions = _auth_policy_decisions(auth_context)
+
+    identity_required_actions = [
+        "configure_real_oidc_issuer_and_audience",
+        "persist_first_class_access_policy_configuration",
+    ]
+    if any(not decision.allowed for decision in policy_decisions):
+        identity_required_actions.append("grant_or_document_missing_control_plane_permissions")
+
+    tenant_required_actions = [
+        "define_tenant_quota_policy",
+        "attribute_plugin_execution_vfs_governance_and_metrics_to_tenant_id",
+    ]
+    if auth_context.authorization_tenant_scope == "all":
+        tenant_required_actions.append("review_global_tenant_scope_for_actor")
+
+    normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
+    structured_log_path = f"{normalized_log_dir}/{settings.logging.structured_filename}"
+    log_required_actions = [
+        "configure_log_shipper_for_structured_ndjson",
+        "define_search_index_mapping_and_retention_policy",
+    ]
+    if settings.otel_enabled and settings.otel_exporter_otlp_endpoint:
+        log_required_actions.append("verify_trace_export_in_collector")
+    else:
+        log_required_actions.append("configure_otlp_trace_export")
+
+    return EnterpriseOperationsGovernanceResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        playback_gate=EnterpriseOperationsSliceResponse(
+            name="Playback Gate Promotion / Merge Policy Proof",
+            status="partial",
+            evidence=[
+                "proof:playback:gate:enterprise package entrypoint exists",
+                "playback gate workflow writes github-main-policy-expected.json",
+                "check_github_main_policy.ps1 can validate live policy with gh admin auth",
+            ],
+            required_actions=[
+                "run proof:playback:policy:enterprise:validate from an admin-authenticated host",
+                "ensure Playback Gate / Playback Gate is a required protected-branch check",
+                "retain playback/provider/windows proof artifacts as merge evidence",
+            ],
+            remaining_gaps=[
+                "this API host cannot prove GitHub branch-protection state without gh admin auth",
+                "provider and Windows proof promotion still depends on repeated green evidence",
+            ],
+        ),
+        identity_authz=EnterpriseOperationsSliceResponse(
+            name="Enterprise Identity / OIDC / ABAC",
+            status="partial",
+            evidence=[
+                f"authentication_mode={auth_context.authentication_mode}",
+                f"authorization_tenant_scope={auth_context.authorization_tenant_scope}",
+                (
+                    "oidc_claims_present="
+                    f"{auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None}"
+                ),
+                "GET /api/v1/auth/policy exposes standard authorization probes",
+            ],
+            required_actions=identity_required_actions,
+            remaining_gaps=[
+                "OIDC tokens are not yet cryptographically validated by the backend",
+                "ABAC is currently permission plus tenant-scope based",
+                "access policies are not yet persisted as operator-managed records",
+            ],
+        ),
+        tenant_boundary=EnterpriseOperationsSliceResponse(
+            name="Tenant Boundary / Quotas / Attribution",
+            status="partial",
+            evidence=[
+                f"request_tenant_id={auth_context.tenant_id}",
+                f"authorized_tenant_ids={','.join(auth_context.authorized_tenant_ids)}",
+                "tenant-scoped stats and calendar authorization are enforced",
+                "worker context and plugin governance expose tenant posture",
+            ],
+            required_actions=tenant_required_actions,
+            remaining_gaps=[
+                "tenant quota policy is not yet enforced",
+                "plugin execution metrics are not fully tenant-attributed",
+                "VFS runtime metrics are not fully tenant-attributed",
+            ],
+        ),
+        distributed_control_plane=EnterpriseOperationsSliceResponse(
+            name="Distributed Control Plane",
+            status="not_ready",
+            evidence=[
+                "EventBus backend=process_local",
+                "LogStreamBroker backend=process_local",
+                f"arq_enabled={settings.arq_enabled}",
+                f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
+            ],
+            required_actions=[
+                "introduce_replayable_event_stream_backend",
+                "add_subscription_resume_offsets",
+                "document_node_coordination_and_failover_semantics",
+            ],
+            remaining_gaps=[
+                "process-local event fanout is not HA",
+                "log streaming history is bounded per process",
+                "cross-node subscription durability is not implemented",
+            ],
+        ),
+        sre_program=EnterpriseOperationsSliceResponse(
+            name="SRE / Production Operations Program",
+            status="partial",
+            evidence=[
+                "docs/OPERATIONS_PROGRAM.md defines SLOs, DR, rollback, incident, rollout, and capacity policy",
+                "playback and VFS proof scripts provide operational evidence inputs",
+                "queue and VFS status APIs expose operator readiness signals",
+            ],
+            required_actions=[
+                "exercise_backup_restore_runbook_on_real_environment",
+                "record_error_budget_review_cadence",
+                "wire_canary_rollout_checks_into_release_promotion",
+            ],
+            remaining_gaps=[
+                "SLO/error-budget enforcement is not automated",
+                "DR restore proof is not yet artifacted in CI",
+                "capacity review is policy-defined but not scheduled by automation",
+            ],
+        ),
+        operator_log_pipeline=EnterpriseOperationsSliceResponse(
+            name="Durable Operator Log Pipeline",
+            status="partial" if settings.logging.enabled else "blocked",
+            evidence=[
+                f"structured_logging_enabled={settings.logging.enabled}",
+                f"structured_log_path={structured_log_path}",
+                f"retention_files={settings.logging.retention_files}",
+                f"otel_enabled={settings.otel_enabled}",
+                f"otel_endpoint_configured={bool(settings.otel_exporter_otlp_endpoint)}",
+                "docs/OPERATOR_LOG_PIPELINE.md defines shipping/search/replay taxonomy",
+            ],
+            required_actions=log_required_actions,
+            remaining_gaps=[
+                "shipper/search backend is not provisioned by this service",
+                "trace/span coverage is still partial",
+                "replay taxonomy is documented but not yet backed by a durable event stream",
+            ],
+        ),
+    )
 
 
 @router.get("/", operation_id="default.root", response_model=MessageResponse)
@@ -622,6 +777,20 @@ async def get_plugin_governance(request: Request) -> PluginGovernanceResponse:
         summary=_plugin_governance_summary(plugins),
         plugins=plugins,
     )
+
+
+@router.get(
+    "/operations/governance",
+    operation_id="default.enterprise_operations_governance",
+    response_model=EnterpriseOperationsGovernanceResponse,
+)
+async def get_enterprise_operations_governance(
+    request: Request,
+) -> EnterpriseOperationsGovernanceResponse:
+    """Return enterprise operations posture across the active roadmap slices."""
+
+    plugins = await get_plugins(request)
+    return _enterprise_operations_governance(request=request, plugins=plugins)
 
 
 @router.get(

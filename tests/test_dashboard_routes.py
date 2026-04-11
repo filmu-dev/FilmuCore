@@ -675,6 +675,45 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     ]
 
 
+def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
+    client = _build_client(arq_enabled=True)
+
+    response = client.get(
+        "/api/v1/operations/governance",
+        headers={
+            **_headers(),
+            "x-auth-issuer": "https://issuer.example.test",
+            "x-auth-subject": "operator-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {
+        "generated_at",
+        "playback_gate",
+        "identity_authz",
+        "tenant_boundary",
+        "distributed_control_plane",
+        "sre_program",
+        "operator_log_pipeline",
+    }
+    assert body["playback_gate"]["status"] == "partial"
+    assert "proof:playback:gate:enterprise package entrypoint exists" in body[
+        "playback_gate"
+    ]["evidence"]
+    assert body["identity_authz"]["status"] == "partial"
+    assert "authentication_mode=api_key" in body["identity_authz"]["evidence"]
+    assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
+    assert body["tenant_boundary"]["status"] == "partial"
+    assert "request_tenant_id=tenant-main" in body["tenant_boundary"]["evidence"]
+    assert body["distributed_control_plane"]["status"] == "not_ready"
+    assert "EventBus backend=process_local" in body["distributed_control_plane"]["evidence"]
+    assert body["sre_program"]["status"] == "partial"
+    assert body["operator_log_pipeline"]["status"] == "partial"
+    assert "structured_logging_enabled=True" in body["operator_log_pipeline"]["evidence"]
+
+
 def test_worker_queue_route_returns_control_plane_snapshot() -> None:
     client = _build_client(arq_enabled=True)
     redis = cast(DummyRedis, client.app.state.resources.redis)
