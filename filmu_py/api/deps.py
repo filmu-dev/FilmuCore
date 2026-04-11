@@ -27,6 +27,7 @@ from filmu_py.security.oidc import (
     OidcValidationResult,
     validate_oidc_bearer_token,
 )
+from filmu_py.services.access_policy import AccessPolicySnapshot, snapshot_from_settings
 from filmu_py.services.media import MediaService
 from filmu_py.services.playback import InProcessDirectPlaybackRefreshController
 
@@ -64,6 +65,7 @@ class AuthContext:
     oidc_subject: str | None
     oidc_token_validated: bool
     access_policy_version: str
+    access_policy_source: str
     quota_policy_version: str | None
 
 
@@ -122,6 +124,46 @@ def _principal_policy_values(
     return tuple(item for item in values.get(actor_id, ()) if isinstance(item, str) and item)
 
 
+def _resolve_access_policy_snapshot(request: Request) -> AccessPolicySnapshot:
+    resources = get_resources(request)
+    snapshot = resources.access_policy_snapshot
+    if snapshot is not None:
+        return snapshot
+    return snapshot_from_settings(resources.settings.access_policy)
+
+
+def _audit_authorization_decision(
+    request: Request,
+    *,
+    auth_context: AuthContext,
+    required_permissions: tuple[str, ...],
+    target_tenant_id: str,
+    decision: Any,
+) -> None:
+    policy = _resolve_access_policy_snapshot(request)
+    if not policy.audit_decisions:
+        return
+    log_method = logger.info if decision.allowed else logger.warning
+    log_method(
+        "auth.permission_decision",
+        path=request.url.path,
+        method=request.method,
+        actor_id=auth_context.actor_id,
+        actor_type=auth_context.actor_type,
+        tenant_id=auth_context.tenant_id,
+        target_tenant_id=target_tenant_id,
+        required_permissions=list(required_permissions),
+        matched_permissions=list(decision.matched_permissions),
+        missing_permissions=list(decision.missing_permissions),
+        allowed=decision.allowed,
+        reason=decision.reason,
+        tenant_scope=decision.tenant_scope,
+        authentication_mode=auth_context.authentication_mode,
+        access_policy_version=policy.version,
+        access_policy_source=policy.source,
+    )
+
+
 def _build_auth_context(
     request: Request,
     *,
@@ -132,6 +174,7 @@ def _build_auth_context(
     """Resolve actor and tenant metadata from headers atop API-key authentication."""
 
     settings = get_settings(request)
+    policy = _resolve_access_policy_snapshot(request)
     oidc_claims = oidc_result.claims if oidc_result is not None else {}
     actor_id_claim = oidc_claims.get(settings.oidc.actor_id_claim)
     actor_type_claim = oidc_claims.get(settings.oidc.actor_type_claim)
@@ -160,26 +203,26 @@ def _build_auth_context(
             request.headers.get(_ACTOR_ROLES_HEADER),
             fallback=_claim_values(oidc_claims, settings.oidc.roles_claim) or _DEFAULT_ROLES,
         ),
-        _principal_policy_values(settings.access_policy.principal_roles, actor_id=actor_id),
+        _principal_policy_values(policy.principal_roles, actor_id=actor_id),
     )
     scopes = _merge_values(
         _split_header_values(
             request.headers.get(_ACTOR_SCOPES_HEADER),
             fallback=_claim_values(oidc_claims, settings.oidc.scopes_claim) or _DEFAULT_SCOPES,
         ),
-        _principal_policy_values(settings.access_policy.principal_scopes, actor_id=actor_id),
+        _principal_policy_values(policy.principal_scopes, actor_id=actor_id),
     )
     authorized_tenant_ids = _merge_values(
         authorized_tenant_ids,
         _principal_policy_values(
-            settings.access_policy.principal_tenant_grants,
+            policy.principal_tenant_grants,
             actor_id=actor_id,
         ),
     )
     effective = effective_permissions(
         roles=roles,
         scopes=scopes,
-        role_permission_grants=settings.access_policy.role_grants,
+        role_permission_grants=policy.role_grants,
     )
     return AuthContext(
         authentication_mode=authentication_mode,
@@ -207,7 +250,8 @@ def _build_auth_context(
             else _normalize_optional_header(request.headers.get(_OIDC_SUBJECT_HEADER))
         ),
         oidc_token_validated=oidc_result is not None,
-        access_policy_version=settings.access_policy.version,
+        access_policy_version=policy.version,
+        access_policy_source=policy.source,
         quota_policy_version=settings.tenant_quotas.version if settings.tenant_quotas.enabled else None,
     )
 
@@ -280,6 +324,13 @@ def require_permissions(
             actor_tenant_id=auth_context.tenant_id,
             target_tenant_id=auth_context.tenant_id,
             authorized_tenant_ids=auth_context.authorized_tenant_ids,
+        )
+        _audit_authorization_decision(
+            request,
+            auth_context=auth_context,
+            required_permissions=normalized_permissions,
+            target_tenant_id=auth_context.tenant_id,
+            decision=decision,
         )
         if not decision.allowed:
             raise HTTPException(
@@ -480,5 +531,6 @@ def _bind_auth_context(auth_context: AuthContext) -> None:
         oidc_subject=auth_context.oidc_subject or "",
         oidc_token_validated=auth_context.oidc_token_validated,
         access_policy_version=auth_context.access_policy_version,
+        access_policy_source=auth_context.access_policy_source,
         quota_policy_version=auth_context.quota_policy_version or "",
     )

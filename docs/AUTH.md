@@ -82,6 +82,8 @@ The control plane is also stricter than the earlier baseline:
 - the backend now computes `effective_permissions` from roles, scopes, and settings-backed role grants and exposes them on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
 - the backend now also evaluates tenant-aware authorization decisions through [`evaluate_permissions()`](../filmu_py/authz.py) instead of only checking whether a permission string exists
 - [`GET /api/v1/auth/policy`](../filmu_py/api/routes/default.py) exposes standard authorization probes, matched and missing permissions, tenant-scope classification, OIDC validation state, access-policy version/source, role grants, warnings, and remaining policy gaps for the current actor
+- startup now bootstraps a persisted access-policy revision through [`AccessPolicyService`](../filmu_py/services/access_policy.py), and settings saves refresh the active revision instead of leaving policy inventory purely process-local
+- privileged authorization checks now emit allow/deny audit events when policy decision auditing is enabled, so policy evaluation is observable rather than only implicit in HTTP results
 - tenant-aware intake paths now persist the resolved `tenant_id` on created `media_items` and `item_requests`
 - tenant-scoped reads now also reach item detail/listing, calendar, and stats surfaces instead of stopping at write-time persistence
 
@@ -92,7 +94,7 @@ The request identity surface now also carries delegated tenant scope and OIDC id
 - validated OIDC tokens can derive actor id, tenant id, authorized tenants, roles, and scopes from configured claims
 - [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py) now returns `authorized_tenant_ids`, `authorization_tenant_scope`, `oidc_issuer`, `oidc_subject`, `oidc_token_validated`, `access_policy_version`, and `quota_policy_version` alongside `effective_permissions`
 
-Remaining identity gaps: OIDC/SSO is now real but setting-gated; policy is settings-managed rather than database-versioned with operator workflows; ABAC is still permission plus tenant-scope based; frontend session-to-backend subject mapping still needs product-specific rollout.
+Remaining identity gaps: OIDC/SSO is now real but still rollout-gated; persisted policy revisions exist but operator-managed CRUD/version approval workflows do not; ABAC is still mostly permission plus tenant-scope based; frontend session-to-backend subject mapping still needs product-specific rollout.
 
 ---
 
@@ -152,7 +154,7 @@ The current API-key model is acceptable for the present BFF architecture, but th
 - stronger service-to-service auth
 - scoped machine credentials above the new persisted `ServiceAccountORM` baseline
 - internal admin/service roles
-- broader RBAC/ABAC policy evaluation above the current `effective_permissions` and tenant-aware authorization baseline
+- broader RBAC/ABAC policy evaluation above the current `effective_permissions`, persisted policy revision, and tenant-aware authorization baseline
 - plugin/service capability boundaries
 - eventual user-aware audit trails, real OIDC/SSO integration, and tenant-scoped authorization beyond the current delegated-tenant compatibility headers
 

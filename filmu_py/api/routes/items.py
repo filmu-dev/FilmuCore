@@ -325,7 +325,12 @@ async def add_items(
         queue_name = resources.arq_queue_name
         for item_id in result.ids:
             try:
-                await enqueue_scrape_item(arq_redis, item_id=item_id, queue_name=queue_name)
+                await enqueue_scrape_item(
+                    arq_redis,
+                    item_id=item_id,
+                    queue_name=queue_name,
+                    tenant_id=auth_context.tenant_id,
+                )
             except Exception:
                 import logging
 

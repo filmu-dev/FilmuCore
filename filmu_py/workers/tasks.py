@@ -23,7 +23,7 @@ from prometheus_client import Counter, Histogram
 from redis.asyncio import Redis
 from sqlalchemy import select
 
-from filmu_py.config import Settings, get_settings, set_runtime_settings
+from filmu_py.config import Settings, TenantQuotaLimitSettings, get_settings, set_runtime_settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
@@ -113,6 +113,56 @@ async def _enqueue_arq_job(
 
     enqueued_job = await cast(Any, redis).enqueue_job(function, *args, **kwargs)
     return cast(object | None, enqueued_job)
+
+
+async def _enforce_tenant_worker_enqueue_quota(
+    redis: object,
+    *,
+    settings: Settings,
+    tenant_id: str | None,
+    stage_name: str,
+) -> bool:
+    """Enforce tenant-scoped worker enqueue pressure when quota policy enables it."""
+
+    if tenant_id is None or not settings.tenant_quotas.enabled or not hasattr(redis, "incr"):
+        return True
+
+    limits: object = settings.tenant_quotas.tenants.get(
+        tenant_id,
+        settings.tenant_quotas.default,
+    )
+    if isinstance(limits, dict):
+        raw_limit = limits.get("worker_enqueues_per_minute")
+        if isinstance(raw_limit, (int, float)) or (
+            isinstance(raw_limit, str) and raw_limit.strip()
+        ):
+            limit = int(raw_limit)
+        else:
+            limit = None
+    else:
+        limit = cast(TenantQuotaLimitSettings, limits).worker_enqueues_per_minute
+    if limit is None or limit <= 0:
+        return True
+
+    minute = int(datetime.now(UTC).timestamp() // 60)
+    key = f"quota:tenant:{tenant_id}:worker_enqueue:{minute}"
+    current = await cast(Any, redis).incr(key)
+    if current == 1 and hasattr(redis, "expire"):
+        await cast(Any, redis).expire(key, 120)
+    if current > limit:
+        _record_enqueue_decision(stage_name, "tenant_quota_denied")
+        logger.warning(
+            "tenant worker enqueue quota exceeded",
+            extra={
+                "tenant_id": tenant_id,
+                "stage": stage_name,
+                "policy_version": settings.tenant_quotas.version,
+                "limit_per_minute": limit,
+                "observed_count": current,
+            },
+        )
+        return False
+    return True
 
 
 async def _acquire_worker_rate_limit(
@@ -398,9 +448,18 @@ async def enqueue_parse_scrape_results(
     item_id: str,
     queue_name: str,
     partial_seasons: list[int] | None = None,
+    tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the parse-scrape-results stage with a unique job id for idempotency."""
 
+    settings = get_settings()
+    if not await _enforce_tenant_worker_enqueue_quota(
+        redis,
+        settings=settings,
+        tenant_id=tenant_id,
+        stage_name="parse_scrape_results",
+    ):
+        return False
     await _clear_stale_downstream_job(
         redis,
         item_id=item_id,
@@ -430,10 +489,16 @@ async def enqueue_process_scraped_item(
     *,
     item_id: str,
     queue_name: str,
+    tenant_id: str | None = None,
 ) -> bool:
     """Backward-compatible alias that now enqueues parse-scrape-results."""
 
-    return await enqueue_parse_scrape_results(redis, item_id=item_id, queue_name=queue_name)
+    return await enqueue_parse_scrape_results(
+        redis,
+        item_id=item_id,
+        queue_name=queue_name,
+        tenant_id=tenant_id,
+    )
 
 
 async def enqueue_scrape_item(
@@ -444,9 +509,18 @@ async def enqueue_scrape_item(
     defer_by_seconds: int | None = None,
     job_id: str | None = None,
     missing_seasons: list[int] | None = None,
+    tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the scrape stage with a unique job id for idempotency."""
 
+    settings = get_settings()
+    if not await _enforce_tenant_worker_enqueue_quota(
+        redis,
+        settings=settings,
+        tenant_id=tenant_id,
+        stage_name="scrape_item",
+    ):
+        return False
     resolved_job_id = job_id or scrape_item_job_id(item_id)
     await _clear_stale_downstream_job(
         redis,
@@ -502,9 +576,18 @@ async def enqueue_rank_streams(
     item_id: str,
     queue_name: str,
     partial_seasons: list[int] | None = None,
+    tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the rank-streams stage with a unique job id for idempotency."""
 
+    settings = get_settings()
+    if not await _enforce_tenant_worker_enqueue_quota(
+        redis,
+        settings=settings,
+        tenant_id=tenant_id,
+        stage_name="rank_streams",
+    ):
+        return False
     await _clear_stale_downstream_job(
         redis,
         item_id=item_id,
@@ -568,9 +651,23 @@ def _ongoing_show_poll_hours(settings: Settings) -> set[int]:
     return set(range(0, 24, interval_hours))
 
 
-async def enqueue_debrid_item(redis: ArqRedis, *, item_id: str, queue_name: str) -> bool:
+async def enqueue_debrid_item(
+    redis: ArqRedis,
+    *,
+    item_id: str,
+    queue_name: str,
+    tenant_id: str | None = None,
+) -> bool:
     """Enqueue the debrid stage with a unique job id for idempotency."""
 
+    settings = get_settings()
+    if not await _enforce_tenant_worker_enqueue_quota(
+        redis,
+        settings=settings,
+        tenant_id=tenant_id,
+        stage_name="debrid_item",
+    ):
+        return False
     await _clear_stale_downstream_job(
         redis,
         item_id=item_id,
@@ -586,9 +683,23 @@ async def enqueue_debrid_item(redis: ArqRedis, *, item_id: str, queue_name: str)
     return job is not None
 
 
-async def enqueue_finalize_item(redis: ArqRedis, *, item_id: str, queue_name: str) -> bool:
+async def enqueue_finalize_item(
+    redis: ArqRedis,
+    *,
+    item_id: str,
+    queue_name: str,
+    tenant_id: str | None = None,
+) -> bool:
     """Enqueue the finalize stage with a unique job id for idempotency."""
 
+    settings = get_settings()
+    if not await _enforce_tenant_worker_enqueue_quota(
+        redis,
+        settings=settings,
+        tenant_id=tenant_id,
+        stage_name="finalize_item",
+    ):
+        return False
     await _clear_stale_downstream_job(
         redis,
         item_id=item_id,
@@ -836,7 +947,7 @@ def _resolve_enabled_downloader(
 async def _maybe_enqueue_next_stage(
     ctx: dict[str, Any],
     *,
-    enqueuer: Callable[[ArqRedis, str, str], Awaitable[bool]],
+    enqueuer: Callable[[ArqRedis, str, str, str | None], Awaitable[bool]],
     item_id: str,
     stage_name: str,
     job_id: str,
@@ -865,7 +976,8 @@ async def _maybe_enqueue_next_stage(
         )
     queue_name_value = ctx.get("queue_name")
     queue_name = _queue_name(get_settings()) if queue_name_value is None else str(queue_name_value)
-    enqueued = await enqueuer(redis_client, item_id, queue_name)
+    tenant_id = await _resolve_item_tenant_id(ctx, item_id=item_id)
+    enqueued = await enqueuer(redis_client, item_id, queue_name, tenant_id)
     _log_downstream_enqueue_result(
         item_id=item_id,
         stage_name=stage_name,
@@ -908,11 +1020,13 @@ async def _maybe_enqueue_parse_stage(
         )
     queue_name_value = ctx.get("queue_name")
     queue_name = _queue_name(get_settings()) if queue_name_value is None else str(queue_name_value)
+    tenant_id = await _resolve_item_tenant_id(ctx, item_id=item_id)
     enqueued = await enqueue_parse_scrape_results(
         redis_client,
         item_id=item_id,
         queue_name=queue_name,
         partial_seasons=partial_seasons,
+        tenant_id=tenant_id,
     )
     _log_downstream_enqueue_result(
         item_id=item_id,
@@ -1193,11 +1307,12 @@ async def parse_scrape_results(
         )
         await _maybe_enqueue_next_stage(
             mutable_ctx,
-            enqueuer=lambda redis, item_id, queue_name: enqueue_rank_streams(
+            enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_rank_streams(
                 redis,
                 item_id=item_id,
                 queue_name=queue_name,
                 partial_seasons=partial_seasons,
+                tenant_id=tenant_id,
             ),
             item_id=item_id,
             stage_name="rank_streams",
@@ -1242,10 +1357,11 @@ async def rank_streams(
         if item.state is ItemState.DOWNLOADED:
             await _maybe_enqueue_next_stage(
                 mutable_ctx,
-                enqueuer=lambda redis, item_id, queue_name: enqueue_debrid_item(
+                enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_debrid_item(
                     redis,
                     item_id=item_id,
                     queue_name=queue_name,
+                    tenant_id=tenant_id,
                 ),
                 item_id=item_id,
                 stage_name="debrid_item",
@@ -1485,12 +1601,13 @@ async def rank_streams(
             requeue_job_id = f"{scrape_item_job_id(item_id)}:retry:{attempt_count}"
             enqueued = await _maybe_enqueue_next_stage(
                 mutable_ctx,
-                enqueuer=lambda redis, item_id, queue_name: enqueue_scrape_item(
+                enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_scrape_item(
                     redis,
                     item_id=item_id,
                     queue_name=queue_name,
                     defer_by_seconds=cooldown_seconds if cooldown_seconds > 0 else None,
                     job_id=requeue_job_id,
+                    tenant_id=tenant_id,
                 ),
                 item_id=item_id,
                 stage_name="scrape_item",
@@ -1529,10 +1646,11 @@ async def rank_streams(
         )
         await _maybe_enqueue_next_stage(
             mutable_ctx,
-            enqueuer=lambda redis, item_id, queue_name: enqueue_debrid_item(
+            enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_debrid_item(
                 redis,
                 item_id=item_id,
                 queue_name=queue_name,
+                tenant_id=tenant_id,
             ),
             item_id=item_id,
             stage_name="debrid_item",
@@ -1633,7 +1751,12 @@ async def retry_library(ctx: dict[str, object]) -> int:
                         extra={**log_context, "stage": "scrape_item"},
                     )
                     continue
-                if await enqueue_scrape_item(arq_redis, item_id=item.id, queue_name=queue_name):
+                if await enqueue_scrape_item(
+                    arq_redis,
+                    item_id=item.id,
+                    queue_name=queue_name,
+                    tenant_id=item.tenant_id,
+                ):
                     logger.info(
                         "retry_library re-enqueued item",
                         extra={**log_context, "stage": "scrape_item"},
@@ -1647,7 +1770,10 @@ async def retry_library(ctx: dict[str, object]) -> int:
                     )
                     continue
                 if await enqueue_parse_scrape_results(
-                    arq_redis, item_id=item.id, queue_name=queue_name
+                    arq_redis,
+                    item_id=item.id,
+                    queue_name=queue_name,
+                    tenant_id=item.tenant_id,
                 ):
                     logger.info(
                         "retry_library re-enqueued item",
@@ -1667,7 +1793,12 @@ async def retry_library(ctx: dict[str, object]) -> int:
                         extra={**log_context, "stage": "finalize_item"},
                     )
                     continue
-                if await enqueue_finalize_item(arq_redis, item_id=item.id, queue_name=queue_name):
+                if await enqueue_finalize_item(
+                    arq_redis,
+                    item_id=item.id,
+                    queue_name=queue_name,
+                    tenant_id=item.tenant_id,
+                ):
                     logger.info(
                         "retry_library re-enqueued item",
                         extra={**log_context, "stage": "finalize_item"},
@@ -2079,10 +2210,11 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         )
         await _maybe_enqueue_next_stage(
             mutable_ctx,
-            enqueuer=lambda redis, item_id, queue_name: enqueue_finalize_item(
+            enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_finalize_item(
                 redis,
                 item_id=item_id,
                 queue_name=queue_name,
+                tenant_id=tenant_id,
             ),
             item_id=item_id,
             stage_name="finalize_item",
@@ -2256,6 +2388,7 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                     item_id=item.id,
                     queue_name=_queue_name(settings),
                     defer_by_seconds=no_inventory_defer,
+                    tenant_id=item.tenant_id,
                 )
                 logger.info(
                     "finalize stage re-queued show without satisfied released episodes",
@@ -2330,6 +2463,7 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                 defer_by_seconds=_show_completion_retry_delay_seconds(settings, event=event),
                 job_id=followup_scrape_job_id,
                 missing_seasons=missing_season_numbers or None,
+                tenant_id=item.tenant_id,
             )
 
         logger.info(
@@ -2362,6 +2496,34 @@ def _queue_name(settings: Settings) -> str:
     """Normalize worker queue name from environment configuration."""
 
     return settings.arq_queue_name.strip() or "filmu-py"
+
+
+async def _resolve_item_tenant_id(ctx: dict[str, Any], *, item_id: str) -> str | None:
+    """Resolve and cache tenant ownership for one media item during worker orchestration."""
+
+    cache = cast(dict[str, str | None], ctx.setdefault("_tenant_ids_by_item_id", {}))
+    if item_id in cache:
+        return cache[item_id]
+
+    try:
+        UUID(str(item_id))
+    except (TypeError, ValueError):
+        item = await _resolve_media_service(ctx).get_item(item_id)
+        tenant_id = getattr(item, "tenant_id", None) if item is not None else None
+        cache[item_id] = tenant_id
+        return tenant_id
+
+    db = ctx.get("db")
+    if not isinstance(db, DatabaseRuntime):
+        settings = await _resolve_runtime_settings(ctx)
+        db = DatabaseRuntime(settings.postgres_dsn, echo=False)
+        ctx["db"] = db
+
+    async with db.session() as session:
+        result = await session.execute(select(MediaItemORM.tenant_id).where(MediaItemORM.id == item_id))
+        tenant_id = result.scalar_one_or_none()
+    cache[item_id] = tenant_id
+    return tenant_id
 
 
 def _resolve_media_service(ctx: dict[str, Any]) -> MediaService:
@@ -2892,6 +3054,7 @@ async def poll_ongoing_shows(ctx: dict[str, object]) -> dict[str, int]:
             arq_redis,
             item_id=item.id,
             queue_name=queue_name,
+            tenant_id=item.tenant_id,
         )
         queued_count += 1
 
@@ -2930,7 +3093,12 @@ async def poll_unreleased_items(ctx: dict[str, object]) -> dict[str, int]:
                 event=ItemEvent.INDEX,
                 message="unreleased item now available",
             )
-            await enqueue_scrape_item(arq_redis, item_id=str(item.id), queue_name=queue_name)
+            await enqueue_scrape_item(
+                arq_redis,
+                item_id=str(item.id),
+                queue_name=queue_name,
+                tenant_id=item.tenant_id,
+            )
             transitioned_count += 1
 
     return {"processed": processed_count, "transitioned": transitioned_count}

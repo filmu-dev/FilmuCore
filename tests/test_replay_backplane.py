@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from redis.exceptions import ResponseError
 
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.replay import RedisReplayEventBackplane
@@ -13,6 +14,8 @@ from filmu_py.core.replay import RedisReplayEventBackplane
 class FakeRedisStream:
     def __init__(self) -> None:
         self.rows: list[tuple[str, dict[str, str]]] = []
+        self.groups: dict[str, dict[str, set[str]]] = {}
+        self.acked: list[tuple[str, str, tuple[str, ...]]] = []
 
     async def xadd(
         self,
@@ -43,6 +46,52 @@ class FakeRedisStream:
         if count is not None:
             selected = selected[:count]
         return [("filmu:events", selected)]
+
+    async def xgroup_create(
+        self,
+        name: str,
+        groupname: str,
+        id: str = "$",
+        *,
+        mkstream: bool = False,
+    ) -> bool:
+        _ = (id, mkstream)
+        groups = self.groups.setdefault(name, {})
+        if groupname in groups:
+            raise ResponseError("BUSYGROUP Consumer Group name already exists")
+        groups[groupname] = set()
+        return True
+
+    async def xreadgroup(
+        self,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        *,
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        _ = (block, consumername)
+        stream_name, offset = next(iter(streams.items()))
+        selected = [row for row in self.rows if _stream_id_gt(row[0], "0-0")]
+        if offset != ">":
+            selected = [row for row in selected if _stream_id_gt(row[0], offset)]
+        if count is not None:
+            selected = selected[:count]
+        self.groups.setdefault(stream_name, {}).setdefault(groupname, set()).update(
+            row[0] for row in selected
+        )
+        return [(stream_name, selected)]
+
+    async def xack(self, name: str, groupname: str, *ids: str) -> int:
+        self.acked.append((name, groupname, ids))
+        group = self.groups.setdefault(name, {}).setdefault(groupname, set())
+        acked = 0
+        for event_id in ids:
+            if event_id in group:
+                group.remove(event_id)
+                acked += 1
+        return acked
 
 
 def _stream_id_gt(left: str, right: str) -> bool:
@@ -95,3 +144,39 @@ async def test_event_bus_publishes_to_replay_backplane_and_local_subscribers() -
 def test_fake_redis_stream_signature_is_compatible() -> None:
     assert hasattr(FakeRedisStream(), "xadd")
     assert hasattr(FakeRedisStream(), "xread")
+    assert hasattr(FakeRedisStream(), "xgroup_create")
+    assert hasattr(FakeRedisStream(), "xreadgroup")
+    assert hasattr(FakeRedisStream(), "xack")
+
+
+@pytest.mark.asyncio
+async def test_redis_replay_backplane_supports_consumer_group_reads_and_ack() -> None:
+    redis = FakeRedisStream()
+    backplane = RedisReplayEventBackplane(redis, stream_name="filmu:events", maxlen=10)
+    await backplane.publish("tenant.updated", {"ok": True}, tenant_id="tenant-a")
+    await backplane.publish("tenant.updated", {"ok": False}, tenant_id="tenant-b")
+
+    await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
+    events = await backplane.read_group(
+        group_name="filmu-api",
+        consumer_name="consumer-1",
+        count=2,
+    )
+    acked = await backplane.ack(
+        group_name="filmu-api",
+        event_ids=[event.event_id for event in events],
+    )
+
+    assert [event.event_id for event in events] == ["1-0", "2-0"]
+    assert acked == 2
+
+
+@pytest.mark.asyncio
+async def test_redis_replay_backplane_ignores_existing_consumer_group() -> None:
+    redis = FakeRedisStream()
+    backplane = RedisReplayEventBackplane(redis, stream_name="filmu:events", maxlen=10)
+
+    await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
+    await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
+
+    assert "filmu-api" in redis.groups["filmu:events"]

@@ -69,6 +69,11 @@ async def _persist_runtime_settings(
     await persist_settings_blob(db, payload)
     request.app.state.resources.settings = validated
     request.app.state.resources.plugin_settings_payload = json.loads(json.dumps(payload))
+    access_policy_service = request.app.state.resources.access_policy_service
+    if access_policy_service is not None:
+        request.app.state.resources.access_policy_snapshot = await access_policy_service.bootstrap(
+            validated
+        )
     set_runtime_settings(validated)
     return validated
 

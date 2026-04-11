@@ -10,16 +10,19 @@ from authlib.jose import jwt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
+from redis.exceptions import ResponseError
 
 from filmu_py.api.router import create_api_router
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
+from filmu_py.core.chunk_engine import ChunkCache
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
+from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.media import StatsProjection, StatsYearReleaseRecord
 
@@ -33,6 +36,7 @@ class DummyRedis:
         self.sorted_sets: dict[str, dict[str, float]] = {}
         self.lists: dict[str, list[bytes]] = {}
         self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self.stream_groups: dict[str, dict[str, set[str]]] = {}
 
     def ping(self, **kwargs: Any) -> bool:
         _ = kwargs
@@ -90,6 +94,55 @@ class DummyRedis:
                 selected = selected[:count]
             rows.append((stream_name, selected))
         return rows
+
+    async def xgroup_create(
+        self,
+        name: str,
+        groupname: str,
+        id: str = "$",
+        *,
+        mkstream: bool = False,
+    ) -> bool:
+        _ = (id, mkstream)
+        groups = self.stream_groups.setdefault(name, {})
+        if groupname in groups:
+            raise ResponseError("BUSYGROUP Consumer Group name already exists")
+        groups[groupname] = set()
+        return True
+
+    async def xreadgroup(
+        self,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        *,
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        _ = (consumername, block)
+        rows: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        for stream_name, offset in streams.items():
+            selected = [
+                item for item in self.streams.get(stream_name, []) if _stream_id_gt(item[0], "0-0")
+            ]
+            if offset != ">":
+                selected = [item for item in selected if _stream_id_gt(item[0], offset)]
+            if count is not None:
+                selected = selected[:count]
+            self.stream_groups.setdefault(stream_name, {}).setdefault(groupname, set()).update(
+                item[0] for item in selected
+            )
+            rows.append((stream_name, selected))
+        return rows
+
+    async def xack(self, name: str, groupname: str, *ids: str) -> int:
+        group = self.stream_groups.setdefault(name, {}).setdefault(groupname, set())
+        acked = 0
+        for event_id in ids:
+            if event_id in group:
+                group.remove(event_id)
+                acked += 1
+        return acked
 
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
@@ -210,6 +263,13 @@ class DummyMediaService:
         return {}
 
 
+class DummyAccessPolicyService:
+    """Minimal access-policy inventory stub for route tests."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.snapshot = snapshot_from_settings(settings.access_policy)
+
+
 def _build_settings(
     *,
     arq_enabled: bool = False,
@@ -281,6 +341,7 @@ def _build_client(
         settings=settings,
         redis=redis,  # type: ignore[arg-type]
         cache=CacheManager(redis=redis, namespace="test"),  # type: ignore[arg-type]
+        chunk_cache=ChunkCache(max_bytes=8 * 1024 * 1024),
         rate_limiter=DistributedRateLimiter(redis=redis),  # type: ignore[arg-type]
         event_bus=EventBus(),
         db=DummyDatabaseRuntime(),  # type: ignore[arg-type]
@@ -288,6 +349,8 @@ def _build_client(
         graphql_plugin_registry=registry,
         plugin_registry=plugin_registry,
         security_identity_service=security_identity_service,
+        access_policy_service=DummyAccessPolicyService(settings),
+        access_policy_snapshot=snapshot_from_settings(settings.access_policy),
     )
     app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
@@ -702,6 +765,7 @@ def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> 
         "oidc_subject": None,
         "oidc_token_validated": False,
         "access_policy_version": "default-v1",
+        "access_policy_source": "settings",
         "quota_policy_version": None,
         "principal_key": "operator-1",
         "principal_type": "service",
@@ -810,7 +874,7 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     assert body["remaining_gaps"] == [
         "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
         "ABAC policy is limited to permission and tenant-scope checks",
-        "policy inventory is settings-managed and not yet stored as audited database records",
+        "policy change workflow is not yet a full operator CRUD/audit surface",
     ]
 
 
@@ -833,6 +897,7 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
         "playback_gate",
         "identity_authz",
         "tenant_boundary",
+        "vfs_data_plane",
         "distributed_control_plane",
         "sre_program",
         "operator_log_pipeline",
@@ -846,6 +911,8 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
     assert body["tenant_boundary"]["status"] == "partial"
     assert "request_tenant_id=tenant-main" in body["tenant_boundary"]["evidence"]
+    assert body["vfs_data_plane"]["status"] == "partial"
+    assert "chunk_cache_enabled=True" in body["vfs_data_plane"]["evidence"]
     assert body["distributed_control_plane"]["status"] == "not_ready"
     assert "EventBus backend=process_local" in body["distributed_control_plane"]["evidence"]
     assert body["sre_program"]["status"] == "partial"

@@ -116,4 +116,4 @@ Review at least monthly or before major usage expansion:
 
 The current machine-readable summary is exposed at `/api/v1/operations/governance`.
 
-That summary now includes whether backup/restore proof automation exists, OIDC validation is enabled, tenant quota policy is active, Redis Streams replay is configured, and log shipper/search readiness is configured.
+That summary now includes whether backup/restore proof automation exists, which access-policy version/source is active, whether OIDC validation is enabled, whether tenant request and worker-enqueue quota policy is active, whether Redis Streams replay plus consumer-group primitives are configured, whether the VFS data-plane slice has chunk-cache/catalog-watch evidence, and whether log shipper/search readiness is configured.

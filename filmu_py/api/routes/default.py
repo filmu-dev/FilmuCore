@@ -294,6 +294,29 @@ def _auth_policy_decisions(auth_context: Any) -> list[AuthPolicyDecisionResponse
     return responses
 
 
+def _vfs_data_plane_evidence(request: Request) -> list[str]:
+    """Return bounded VFS runtime evidence for enterprise-governance posture."""
+
+    resources = request.app.state.resources
+    evidence = [
+        f"vfs_catalog_server_enabled={resources.vfs_catalog_server is not None}",
+        f"chunk_cache_enabled={resources.chunk_cache is not None}",
+    ]
+    if resources.chunk_cache is not None:
+        evidence.append(f"chunk_cache_max_bytes={resources.chunk_cache.max_bytes()}")
+    if resources.vfs_catalog_server is not None:
+        snapshot = resources.vfs_catalog_server.build_governance_snapshot()
+        evidence.extend(
+            [
+                f"catalog_watch_sessions_started={snapshot['vfs_catalog_watch_sessions_started']}",
+                f"catalog_reconnect_delta_served={snapshot['vfs_catalog_reconnect_delta_served']}",
+                f"catalog_refresh_attempts={snapshot['vfs_catalog_refresh_attempts']}",
+                f"catalog_inline_refresh_succeeded={snapshot['vfs_catalog_inline_refresh_succeeded']}",
+            ]
+        )
+    return evidence
+
+
 def _enterprise_operations_governance(
     *,
     request: Request,
@@ -310,8 +333,8 @@ def _enterprise_operations_governance(
         "configure_real_oidc_issuer_and_audience"
         if not settings.oidc.enabled
         else "monitor_oidc_validation_failures",
-        "persist_first_class_access_policy_configuration"
-        if settings.access_policy.version == "default-v1"
+        "promote_operator_managed_access_policy_revisions"
+        if auth_context.access_policy_source == "settings"
         else "review_access_policy_audit_trail",
     ]
     if any(not decision.allowed for decision in policy_decisions):
@@ -369,7 +392,8 @@ def _enterprise_operations_governance(
                 f"authorization_tenant_scope={auth_context.authorization_tenant_scope}",
                 f"oidc_validation_enabled={settings.oidc.enabled}",
                 f"oidc_token_validated={auth_context.oidc_token_validated}",
-                f"access_policy_version={settings.access_policy.version}",
+                f"access_policy_version={auth_context.access_policy_version}",
+                f"access_policy_source={auth_context.access_policy_source}",
                 (
                     "oidc_claims_present="
                     f"{auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None}"
@@ -380,7 +404,7 @@ def _enterprise_operations_governance(
             remaining_gaps=[
                 "OIDC is setting-gated and must be enabled per environment",
                 "ABAC is currently permission plus tenant-scope based",
-                "access policies are settings-managed, not database-versioned records",
+                "policy change workflow is still bootstrap-first instead of full CRUD operator management",
             ],
         ),
         tenant_boundary=EnterpriseOperationsSliceResponse(
@@ -401,6 +425,21 @@ def _enterprise_operations_governance(
                 "VFS runtime metrics are not fully tenant-attributed",
             ],
         ),
+        vfs_data_plane=EnterpriseOperationsSliceResponse(
+            name="FilmuVFS Enterprise Data Plane",
+            status="partial",
+            evidence=_vfs_data_plane_evidence(request),
+            required_actions=[
+                "repeat_multi_environment_soak_and_backpressure_runs",
+                "promote_rollout_readiness_thresholds_into_merge_policy",
+                "expand_tenant_attribution_for_mounted_runtime_metrics",
+            ],
+            remaining_gaps=[
+                "mounted rollout confidence still depends on repeated proof execution",
+                "cache correctness and fairness are observable but not yet policy-enforced in CI",
+                "tenant attribution is not yet complete across all mounted runtime counters",
+            ],
+        ),
         distributed_control_plane=EnterpriseOperationsSliceResponse(
             name="Distributed Control Plane",
             status=(
@@ -412,17 +451,18 @@ def _enterprise_operations_governance(
                 f"EventBus backend={settings.control_plane.event_backplane}",
                 f"event_stream_name={settings.control_plane.event_stream_name}",
                 f"event_replay_maxlen={settings.control_plane.event_replay_maxlen}",
+                f"consumer_group={settings.control_plane.consumer_group}",
                 "LogStreamBroker backend=process_local",
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
             ],
             required_actions=[
-                "introduce_replayable_event_stream_backend",
+                "promote_redis_stream_consumer_groups_into_active_subscribers",
                 "add_subscription_resume_offsets",
                 "document_node_coordination_and_failover_semantics",
             ],
             remaining_gaps=[
-                "event replay is available as Redis Streams baseline but not yet the only bus",
+                "event replay now supports consumer-group reads but is not yet the only bus",
                 "log streaming history is bounded per process",
                 "node coordination and failover promotion are not fully implemented",
             ],
@@ -448,7 +488,7 @@ def _enterprise_operations_governance(
             ],
         ),
         operator_log_pipeline=EnterpriseOperationsSliceResponse(
-            name="Durable Operator Log Pipeline",
+            name="Durable Operator Log Pipeline / Plugin Runtime Isolation",
             status="partial" if settings.logging.enabled else "blocked",
             evidence=[
                 f"structured_logging_enabled={settings.logging.enabled}",
@@ -460,12 +500,19 @@ def _enterprise_operations_governance(
                 f"log_shipper_type={settings.log_shipper.type}",
                 f"log_shipper_target_configured={bool(settings.log_shipper.target)}",
                 f"log_field_mapping_version={settings.log_shipper.field_mapping_version}",
+                f"plugin_total={len(plugins)}",
+                (
+                    "plugin_sandbox_profiles="
+                    + ",".join(sorted({plugin.sandbox_profile or "unspecified" for plugin in plugins}))
+                ),
+                f"plugin_quarantined={sum(1 for plugin in plugins if plugin.quarantined)}",
                 "docs/OPERATOR_LOG_PIPELINE.md defines shipping/search/replay taxonomy",
             ],
             required_actions=log_required_actions,
             remaining_gaps=[
                 "shipper/search backend is configured externally and verified by contract checks",
                 "trace/span coverage is still partial",
+                "plugin runtime isolation remains process-local rather than sandboxed execution",
                 "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
             ],
         ),
@@ -528,6 +575,7 @@ async def get_auth_identity_context(request: Request) -> AuthContextResponse:
         oidc_subject=auth_context.oidc_subject,
         oidc_token_validated=auth_context.oidc_token_validated,
         access_policy_version=auth_context.access_policy_version,
+        access_policy_source=auth_context.access_policy_source,
         quota_policy_version=auth_context.quota_policy_version,
         principal_key=getattr(identity, "principal_key", None),
         principal_type=getattr(identity, "principal_type", None),
@@ -569,17 +617,23 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         access_policy_version=auth_context.access_policy_version,
         quota_policy_version=auth_context.quota_policy_version,
         permissions_model="role_scope_effective_permissions_with_tenant_scope",
-        policy_source="settings",
+        policy_source=auth_context.access_policy_source,
         role_grants={
             role: list(permissions)
-            for role, permissions in sorted(resources.settings.access_policy.role_grants.items())
+            for role, permissions in sorted(
+                (
+                    resources.access_policy_snapshot.role_grants
+                    if resources.access_policy_snapshot is not None
+                    else resources.settings.access_policy.role_grants
+                ).items()
+            )
         },
         decisions=_auth_policy_decisions(auth_context),
         warnings=warnings,
         remaining_gaps=[
             "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
             "ABAC policy is limited to permission and tenant-scope checks",
-            "policy inventory is settings-managed and not yet stored as audited database records",
+            "policy change workflow is not yet a full operator CRUD/audit surface",
         ],
     )
 

@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
+from redis.exceptions import ResponseError
+
 
 class RedisStreamClient(Protocol):
     """Subset of Redis stream commands used by the replay backplane."""
@@ -27,6 +29,27 @@ class RedisStreamClient(Protocol):
         count: int | None = None,
         block: int | None = None,
     ) -> list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]]: ...
+
+    async def xgroup_create(
+        self,
+        name: str,
+        groupname: str,
+        id: str = "$",
+        *,
+        mkstream: bool = False,
+    ) -> object: ...
+
+    async def xreadgroup(
+        self,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        *,
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]]: ...
+
+    async def xack(self, name: str, groupname: str, *ids: str) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +98,25 @@ class RedisReplayEventBackplane:
         )
         return event_id.decode("utf-8") if isinstance(event_id, bytes) else event_id
 
+    async def ensure_consumer_group(
+        self,
+        group_name: str,
+        *,
+        start_id: str = "0-0",
+    ) -> None:
+        """Ensure one durable consumer group exists for the replay stream."""
+
+        try:
+            await self._redis.xgroup_create(
+                self.stream_name,
+                group_name,
+                id=start_id,
+                mkstream=True,
+            )
+        except ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+
     async def read_after(self, offset: str = "0-0", *, count: int = 100) -> list[ReplayEvent]:
         """Read replay events after one Redis Streams offset."""
 
@@ -107,3 +149,64 @@ class RedisReplayEventBackplane:
                     )
                 )
         return events
+
+    async def read_group(
+        self,
+        *,
+        group_name: str,
+        consumer_name: str,
+        count: int = 100,
+        block_ms: int | None = None,
+        offset: str = ">",
+    ) -> list[ReplayEvent]:
+        """Read events through one consumer group for durable subscription resume."""
+
+        streams = await self._redis.xreadgroup(
+            group_name,
+            consumer_name,
+            {self.stream_name: offset},
+            count=max(1, count),
+            block=block_ms,
+        )
+        return _decode_replay_events(streams)
+
+    async def ack(
+        self,
+        *,
+        group_name: str,
+        event_ids: list[str] | tuple[str, ...],
+    ) -> int:
+        """Acknowledge processed events for one durable consumer group."""
+
+        if not event_ids:
+            return 0
+        return await self._redis.xack(self.stream_name, group_name, *event_ids)
+
+
+def _decode_replay_events(
+    streams: list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]],
+) -> list[ReplayEvent]:
+    events: list[ReplayEvent] = []
+    for _stream_name, rows in streams:
+        for raw_event_id, raw_fields in rows:
+            event_id = raw_event_id.decode("utf-8") if isinstance(raw_event_id, bytes) else raw_event_id
+            fields = {
+                (key.decode("utf-8") if isinstance(key, bytes) else key): (
+                    value.decode("utf-8") if isinstance(value, bytes) else value
+                )
+                for key, value in raw_fields.items()
+            }
+            payload_raw = fields.get("payload", "{}")
+            try:
+                payload = json.loads(payload_raw)
+            except ValueError:
+                payload = {}
+            events.append(
+                ReplayEvent(
+                    event_id=event_id,
+                    topic=fields.get("topic", ""),
+                    tenant_id=fields.get("tenant_id") or None,
+                    payload=cast(dict[str, Any], payload if isinstance(payload, dict) else {}),
+                )
+            )
+    return events

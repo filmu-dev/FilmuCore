@@ -452,6 +452,7 @@ async def _queue_real_scrape(
         queue_client,
         item_id=item.id,
         queue_name=resources.arq_queue_name,
+        tenant_id=auth_context.tenant_id,
     )
     if not queued:
         logger.info(

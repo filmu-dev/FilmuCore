@@ -66,6 +66,7 @@ class AuthContextResponse(BaseModel):
     oidc_subject: str | None = None
     oidc_token_validated: bool = False
     access_policy_version: str
+    access_policy_source: str
     quota_policy_version: str | None = None
     principal_key: str | None = None
     principal_type: str | None = None
@@ -159,6 +160,7 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
     playback_gate: EnterpriseOperationsSliceResponse
     identity_authz: EnterpriseOperationsSliceResponse
     tenant_boundary: EnterpriseOperationsSliceResponse
+    vfs_data_plane: EnterpriseOperationsSliceResponse
     distributed_control_plane: EnterpriseOperationsSliceResponse
     sre_program: EnterpriseOperationsSliceResponse
     operator_log_pipeline: EnterpriseOperationsSliceResponse

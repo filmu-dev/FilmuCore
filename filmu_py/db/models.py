@@ -180,6 +180,52 @@ class ServiceAccountORM(Base):
     principal: Mapped[PrincipalORM] = relationship(back_populates="service_account")
 
 
+class AccessPolicyRevisionORM(Base):
+    """Persisted access-policy inventory for operator-visible authz governance."""
+
+    __tablename__ = "access_policy_revisions"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    version: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    source: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="settings_bootstrap",
+        server_default=text("'settings_bootstrap'"),
+    )
+    policy_data: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+        index=True,
+    )
+    activated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class MediaItemORM(Base):
     """Persistent media item tracked through pipeline lifecycle states."""
 
