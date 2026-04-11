@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/filmu-dev/FilmuCore/compare/v0.7.0...v0.8.0) (2026-04-11)
+
+
+### Features
+
+* add platform-aware stack lifecycle wrappers ([#24](https://github.com/filmu-dev/FilmuCore/issues/24)) ([726ad70](https://github.com/filmu-dev/FilmuCore/commit/726ad70e3a60ca1ee5330bc142b6875eec096aec))
+
 ## [0.7.0](https://github.com/filmu-dev/FilmuCore/compare/v0.6.0...v0.7.0) (2026-04-11)
 
 
