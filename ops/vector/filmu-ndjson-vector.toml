@@ -10,8 +10,8 @@ source = '''
 parsed, err = parse_json(.message)
 if err == null {
   . = merge(., parsed)
+  .filmu.mapping_version = "filmu-ecs-v1"
 }
-.filmu.mapping_version = "filmu-ecs-v1"
 '''
 
 [sinks.filmu_search_contract]

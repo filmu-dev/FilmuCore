@@ -75,7 +75,7 @@ Replay-related evidence should use stable event classes:
 - `plugin.policy_rejected`
 - `plugin.quarantine_recommended`
 
-These event classes are a contract for future durable replay streams. Until a replayable event backend exists, structured logs are forensic evidence, not the system of record.
+These event classes are a contract for future durable replay streams. Structured logs remain the primary forensic record until the Redis Streams replay baseline reaches full HA maturity and can serve as the operational system of record.
 
 Current replay baseline:
 

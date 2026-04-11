@@ -130,30 +130,7 @@ class RedisReplayEventBackplane:
             count=max(1, count),
             block=None,
         )
-        events: list[ReplayEvent] = []
-        for _stream_name, rows in streams:
-            for raw_event_id, raw_fields in rows:
-                event_id = raw_event_id.decode("utf-8") if isinstance(raw_event_id, bytes) else raw_event_id
-                fields = {
-                    (key.decode("utf-8") if isinstance(key, bytes) else key): (
-                        value.decode("utf-8") if isinstance(value, bytes) else value
-                    )
-                    for key, value in raw_fields.items()
-                }
-                payload_raw = fields.get("payload", "{}")
-                try:
-                    payload = json.loads(payload_raw)
-                except ValueError:
-                    payload = {}
-                events.append(
-                    ReplayEvent(
-                        event_id=event_id,
-                        topic=fields.get("topic", ""),
-                        tenant_id=fields.get("tenant_id") or None,
-                        payload=cast(dict[str, Any], payload if isinstance(payload, dict) else {}),
-                    )
-                )
-        return events
+        return _decode_replay_events(streams)
 
     async def read_group(
         self,

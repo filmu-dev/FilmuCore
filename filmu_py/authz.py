@@ -65,7 +65,7 @@ def effective_permissions(
 ) -> tuple[str, ...]:
     """Return the normalized, deduplicated effective permission set."""
 
-    grants = role_permission_grants or _ROLE_PERMISSION_GRANTS
+    grants = _ROLE_PERMISSION_GRANTS if role_permission_grants is None else role_permission_grants
     resolved: set[str] = set()
     for role in roles:
         resolved.update(

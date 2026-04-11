@@ -94,6 +94,18 @@ class FakeRedisStream:
         return acked
 
 
+class FailingReplayBackplane:
+    async def publish(
+        self,
+        topic: str,
+        payload: dict[str, object],
+        *,
+        tenant_id: str | None = None,
+    ) -> str:
+        _ = (topic, payload, tenant_id)
+        raise TimeoutError("redis unavailable")
+
+
 def _stream_id_gt(left: str, right: str) -> bool:
     left_ms, left_seq = (int(part) for part in left.split("-", 1))
     right_ms, right_seq = (int(part) for part in right.split("-", 1))
@@ -139,6 +151,22 @@ async def test_event_bus_publishes_to_replay_backplane_and_local_subscribers() -
     replay_payload = redis.rows[0][1]
     assert replay_payload["tenant_id"] == "tenant-b"
     assert "plugins.scan.finished" in replay_payload["topic"]
+
+
+@pytest.mark.asyncio
+async def test_event_bus_replay_failure_still_delivers_local_subscriber() -> None:
+    bus = EventBus()
+    bus.attach_replay_backplane(FailingReplayBackplane())
+    subscriber = bus.subscribe("plugins.scan.finished")
+    next_event = asyncio.create_task(subscriber.__anext__())
+    await asyncio.sleep(0)
+
+    await bus.publish("plugins.scan.finished", {"tenant_id": "tenant-b", "ok": True})
+    envelope = await next_event
+    await subscriber.aclose()
+
+    assert envelope.topic == "plugins.scan.finished"
+    assert envelope.payload == {"tenant_id": "tenant-b", "ok": True}
 
 
 def test_fake_redis_stream_signature_is_compatible() -> None:

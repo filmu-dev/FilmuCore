@@ -133,11 +133,14 @@ async def _enforce_tenant_worker_enqueue_quota(
     )
     if isinstance(limits, dict):
         raw_limit = limits.get("worker_enqueues_per_minute")
-        if isinstance(raw_limit, (int, float)) or (
-            isinstance(raw_limit, str) and raw_limit.strip()
-        ):
-            limit = int(raw_limit)
-        else:
+        try:
+            if isinstance(raw_limit, (int, float)):
+                limit = int(raw_limit)
+            elif isinstance(raw_limit, str) and raw_limit.strip():
+                limit = int(float(raw_limit))
+            else:
+                limit = None
+        except (TypeError, ValueError, OverflowError):
             limit = None
     else:
         limit = cast(TenantQuotaLimitSettings, limits).worker_enqueues_per_minute
