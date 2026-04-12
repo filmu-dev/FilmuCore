@@ -55,7 +55,7 @@ Current incremental note:
 - `Slice R` is implemented: stream-link refresh can now run through an optional queued dispatch path (`stream.refresh_dispatch_mode=queued`), and the route/resource layer can hand off direct-play plus HLS refresh pressure to ARQ instead of forcing in-process refresh scheduling.
 - `Wave 1` is now code-complete in local `main`: the remaining requirement is to keep the external proof artifacts and protected-branch policy green in real environments, not to land more application code for slices `G` through `J`.
 - `Wave 2` is now implementation-complete in local `main`: the repo now encodes route/resource-scope ABAC coverage, OIDC rollout-proof gates, and policy-alert thresholds. Remaining work is environment activation and operator evidence, not missing backend capability.
-- `Wave 3` is now repo-closed in local `main`: the repo now encodes the lifecycle graph, dedicated index stage, DLQ/idempotency taxonomy, policy-driven heavy-stage isolation budgets, and operator-visible queued stream-link refresh readiness/proof state. Remaining work is environment soak/proof execution and stricter sandbox ceilings, not missing orchestration primitives.
+- `Wave 3` is now fully closed in local `main`: the repo now encodes the lifecycle graph, dedicated index stage, DLQ/idempotency taxonomy, process-required heavy-stage isolation exit gates, and operator-visible queued stream-link refresh readiness/proof state. Ongoing soak evidence is steady-state operations work, not an open Wave 3 implementation gap.
 
 ---
 

@@ -639,6 +639,9 @@ def test_stream_status_route_exposes_serving_governance_snapshot() -> None:
     assert payload["governance"]["stream_refresh_proof_ref_count"] == 0
     assert payload["governance"]["heavy_stage_executor_mode"] == "process_pool_preferred"
     assert payload["governance"]["heavy_stage_max_workers"] == 2
+    assert payload["governance"]["heavy_stage_max_tasks_per_child"] == 0
+    assert payload["governance"]["heavy_stage_process_isolation_required"] == 0
+    assert payload["governance"]["heavy_stage_exit_ready"] == 0
     assert payload["governance"]["heavy_stage_index_timeout_seconds"] == 45.0
     assert payload["governance"]["heavy_stage_parse_timeout_seconds"] == 30.0
     assert payload["governance"]["heavy_stage_rank_timeout_seconds"] == 60.0

@@ -726,6 +726,15 @@ async def _enterprise_operations_governance(
         )
     )
     heavy_stage_policy = settings.orchestration.heavy_stage_isolation
+    heavy_stage_exit_ready = (
+        settings.arq_enabled
+        and settings.stream.refresh_dispatch_mode == "queued"
+        and queued_refresh_ready
+        and heavy_stage_policy.executor_mode == "process_pool_required"
+        and heavy_stage_policy.max_tasks_per_child > 0
+        and bool(heavy_stage_policy.proof_refs)
+        and bool(settings.orchestration.queued_refresh_proof_refs)
+    )
     oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(settings)
     )
@@ -1131,9 +1140,17 @@ async def _enterprise_operations_governance(
         heavy_stage_workload_isolation=EnterpriseOperationsSliceResponse(
             name="Heavy-Stage Workload Isolation",
             status=(
-                "partial"
-                if settings.arq_enabled and queued_refresh_ready
-                else ("blocked" if settings.stream.refresh_dispatch_mode == "queued" else "not_ready")
+                "ready"
+                if heavy_stage_exit_ready
+                else (
+                    "partial"
+                    if settings.arq_enabled and queued_refresh_ready
+                    else (
+                        "blocked"
+                        if settings.stream.refresh_dispatch_mode == "queued"
+                        else "not_ready"
+                    )
+                )
             ),
             evidence=[
                 f"arq_enabled={settings.arq_enabled}",
@@ -1148,6 +1165,8 @@ async def _enterprise_operations_governance(
                 f"stream_refresh_queue_ready={int(queued_refresh_ready)}",
                 f"heavy_stage_executor_mode={heavy_stage_policy.executor_mode}",
                 f"heavy_stage_max_workers={heavy_stage_policy.max_workers}",
+                f"heavy_stage_max_tasks_per_child={heavy_stage_policy.max_tasks_per_child}",
+                f"heavy_stage_process_isolation_required={int(heavy_stage_policy.executor_mode == 'process_pool_required')}",
                 (
                     "heavy_stage_timeouts="
                     "index_item:"
@@ -1159,32 +1178,50 @@ async def _enterprise_operations_governance(
                 ),
                 f"heavy_stage_proof_ref_count={len(heavy_stage_policy.proof_refs)}",
                 f"queued_refresh_proof_ref_count={len(settings.orchestration.queued_refresh_proof_refs)}",
+                f"heavy_stage_exit_ready={int(heavy_stage_exit_ready)}",
                 "GET /api/v1/workers/queue and /api/v1/workers/queue/history expose queue pressure",
             ],
-            required_actions=[
-                "promote_per_stage_cpu_memory_and_timeout_budgets_into_environment policy",
-                "record_queued_refresh_soak_evidence"
-                if not settings.orchestration.queued_refresh_proof_refs
-                else "exercise_queued_stream_link_refresh_path_under_real mounted pressure",
-                "record_heavy_stage_failure_injection_or_soak_evidence"
-                if not heavy_stage_policy.proof_refs
-                else "review_heavy_stage_isolation_evidence",
-                "add_crash_containment_and_retry_policy_for_heavy_jobs",
-            ],
-            remaining_gaps=[
-                "memory ceilings remain process-bounded rather than OS-enforced sandbox ceilings",
-                (
-                    "queued stream-link refresh is implemented but still needs environment soak evidence"
-                    if not settings.orchestration.queued_refresh_proof_refs
-                    else "queued stream-link refresh proof is configured but still depends on external environment execution"
-                ),
-                "crash containment is executor-bounded rather than true sandbox isolation",
-                (
-                    "heavy-stage isolation proof refs have not been recorded"
-                    if not heavy_stage_policy.proof_refs
-                    else "heavy-stage isolation proof is configured but remains executor-bounded rather than sandbox-enforced"
-                ),
-            ],
+            required_actions=(
+                []
+                if heavy_stage_exit_ready
+                else [
+                    "enable_queued_stream_link_refresh_dispatch"
+                    if settings.stream.refresh_dispatch_mode != "queued"
+                    else "promote_per_stage_cpu_memory_and_timeout_budgets_into_environment policy",
+                    "attach_queued_refresh_runtime_controllers"
+                    if settings.stream.refresh_dispatch_mode == "queued" and not queued_refresh_ready
+                    else (
+                        "record_queued_refresh_soak_evidence"
+                        if not settings.orchestration.queued_refresh_proof_refs
+                        else "review_queued_refresh_soak_evidence"
+                    ),
+                    "require_process_backed_heavy_stage_isolation"
+                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    else (
+                        "set_heavy_stage_process_recycle_budget"
+                        if heavy_stage_policy.max_tasks_per_child <= 0
+                        else (
+                            "record_heavy_stage_failure_injection_or_soak_evidence"
+                            if not heavy_stage_policy.proof_refs
+                            else "review_heavy_stage_isolation_evidence"
+                        )
+                    ),
+                ]
+            ),
+            remaining_gaps=(
+                []
+                if heavy_stage_exit_ready
+                else [
+                    "queued stream-link refresh dispatch is not fully configured"
+                    if settings.stream.refresh_dispatch_mode != "queued" or not queued_refresh_ready
+                    else "queued stream-link refresh soak evidence has not been recorded",
+                    "heavy stages are not yet forced into process-backed isolation"
+                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    else "heavy-stage worker recycle limits are not configured"
+                    if heavy_stage_policy.max_tasks_per_child <= 0
+                    else "heavy-stage isolation evidence has not been recorded",
+                ]
+            ),
         ),
         release_metadata_performance=EnterpriseOperationsSliceResponse(
             name="Release Engineering / Metadata Governance / Performance Discipline",

@@ -109,7 +109,7 @@ WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
     ["stage"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
 )
-_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int], Executor] = {}
+_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int], Executor] = {}
 
 
 class _RankBatchInput(TypedDict):
@@ -138,21 +138,41 @@ def _heavy_stage_executor(stage_name: str) -> Executor:
 
     settings = get_settings()
     policy = settings.orchestration.heavy_stage_isolation
-    executor_key = (stage_name, policy.executor_mode, policy.max_workers)
+    executor_key = (
+        stage_name,
+        policy.executor_mode,
+        policy.max_workers,
+        policy.max_tasks_per_child,
+    )
     executor = _HEAVY_STAGE_EXECUTORS.get(executor_key)
     if executor is not None:
         return executor
-    if policy.executor_mode == "thread_pool_only" or "PYTEST_CURRENT_TEST" in os.environ:
+    if policy.executor_mode == "thread_pool_only" or (
+        policy.executor_mode != "process_pool_required"
+        and "PYTEST_CURRENT_TEST" in os.environ
+    ):
         executor = ThreadPoolExecutor(max_workers=policy.max_workers)
-    elif multiprocessing.get_start_method(allow_none=True) == "fork":
-        executor = ProcessPoolExecutor(max_workers=policy.max_workers)
     else:
+        max_tasks_per_child = (
+            policy.max_tasks_per_child if policy.max_tasks_per_child > 0 else None
+        )
         try:
-            executor = ProcessPoolExecutor(
-                max_workers=policy.max_workers,
-                mp_context=multiprocessing.get_context("spawn"),
-            )
+            if multiprocessing.get_start_method(allow_none=True) == "fork":
+                executor = ProcessPoolExecutor(
+                    max_workers=policy.max_workers,
+                    max_tasks_per_child=max_tasks_per_child,
+                )
+            else:
+                executor = ProcessPoolExecutor(
+                    max_workers=policy.max_workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    max_tasks_per_child=max_tasks_per_child,
+                )
         except (ValueError, RuntimeError):
+            if policy.executor_mode == "process_pool_required":
+                raise RuntimeError(
+                    f"process-backed heavy-stage isolation is required for {stage_name}"
+                ) from None
             executor = ThreadPoolExecutor(max_workers=policy.max_workers)
     _HEAVY_STAGE_EXECUTORS[executor_key] = executor
     return executor
