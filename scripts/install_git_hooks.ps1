@@ -30,4 +30,5 @@ if (-not (Test-Path -LiteralPath $resolvedHooksPath)) {
 Invoke-GitCapture -Arguments @('config', 'core.hooksPath', $HooksPath) | Out-Null
 
 Write-Output "Configured git hooks path: $HooksPath"
-Write-Output 'Pre-push will now run branch hygiene automatically.'
+Write-Output 'Commit messages will now be normalized to conventional prefixes automatically.'
+Write-Output 'Pre-push will now block forbidden generated artifacts and run branch hygiene automatically.'

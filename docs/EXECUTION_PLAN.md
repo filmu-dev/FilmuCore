@@ -18,7 +18,6 @@ For the current detailed work breakdowns, use:
 
 - [`STATUS.md`](STATUS.md) - current top-level priority and posture reference
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) - platform quality bar and active architectural gaps
-- [`PHASE_C_ROUTE_SURFACE_MATRIX.md`](TODOS/PHASE_C_ROUTE_SURFACE_MATRIX.md) - route-surface breakdown
 - [`DOMAIN_MODEL_EXPANSION_MATRIX.md`](TODOS/DOMAIN_MODEL_EXPANSION_MATRIX.md) - domain-backing gaps for compatibility routes
 - [`ORCHESTRATION_BREADTH_MATRIX.md`](TODOS/ORCHESTRATION_BREADTH_MATRIX.md) - orchestration/decomposition gaps
 - [`PLUGIN_CAPABILITY_MODEL_MATRIX.md`](TODOS/PLUGIN_CAPABILITY_MODEL_MATRIX.md) - plugin/runtime capability gaps
@@ -26,6 +25,21 @@ For the current detailed work breakdowns, use:
 - [`OBSERVABILITY_MATURITY_MATRIX.md`](TODOS/OBSERVABILITY_MATURITY_MATRIX.md) - observability growth plan
 
 ## These planning artifacts are subordinate to this execution plan and should stay aligned with [`STATUS.md`](STATUS.md) and [`LOCAL_FRONTEND_TESTING_READINESS.md`](LOCAL_FRONTEND_TESTING_READINESS.md).
+
+## Canonical status map
+
+Use the docs below as the current source of truth for done/partial/missing state:
+
+- [`STATUS.md`](STATUS.md) - top-level current posture and cross-cutting "done vs still missing" summary
+- compatibility-route breadth is complete enough that it is no longer an active planning track; current playback maturity now lives in the playback and VFS docs
+- [`TODOS/DOMAIN_MODEL_EXPANSION_MATRIX.md`](TODOS/DOMAIN_MODEL_EXPANSION_MATRIX.md) - entity and projection depth; entity layer is effectively done, read-model deepening remains
+- [`TODOS/ORCHESTRATION_BREADTH_MATRIX.md`](TODOS/ORCHESTRATION_BREADTH_MATRIX.md) - worker graph and recovery breadth; Wave 3 is repo-closed and remaining work is operational soak/proof plus future platform deepening
+- [`TODOS/PLUGIN_CAPABILITY_MODEL_MATRIX.md`](TODOS/PLUGIN_CAPABILITY_MODEL_MATRIX.md) - plugin/runtime capability depth; Wave 4 is repo-closed and remaining work is recurring rollout evidence plus broader future plugin breadth
+- [`TODOS/FILMUVFS_BYTE_SERVING_PLATFORM_MATRIX.md`](TODOS/FILMUVFS_BYTE_SERVING_PLATFORM_MATRIX.md) - VFS/runtime maturity; mounted path is real, rollout/telemetry/canary hardening remains
+- [`TODOS/OBSERVABILITY_MATURITY_MATRIX.md`](TODOS/OBSERVABILITY_MATURITY_MATRIX.md) - observability maturity; local reference stack is done, environment rollout and deeper correlation remain
+- [`TODOS/PLAYBACK_PROOF_IMPLEMENTATION_PLAN.md`](TODOS/PLAYBACK_PROOF_IMPLEMENTATION_PLAN.md) - playback proof and gate posture; proof baseline is done, live GitHub policy validation and repeated soak hardening remain
+
+Historical audits and dated comparison notes remain useful context, but they are not the canonical current-state checklist unless a current-state doc explicitly points to them.
 
 No undocumented requirements are assumed.
 

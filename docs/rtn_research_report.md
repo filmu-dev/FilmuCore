@@ -3,7 +3,7 @@
 > Source: `Triven_backend - ts/packages/util-rank-torrent-name`
 > Integration: `Triven_backend - ts/apps/riven/lib/message-queue/flows/`
 
-This package is still a live concern after the April 6, 2026 re-audit: the local `Triven_backend - ts` comparison checkout is now aligned directly to upstream `main` at `e64604a`, and it includes `@repo/util-rank-torrent-name` as part of the active app dependency graph.
+This package is still a live concern after the April 11, 2026 re-audit: the local `Triven_backend - ts` comparison checkout is now aligned directly to upstream `main` at `f98cc31`, and it includes `@repo/util-rank-torrent-name` as part of the active app dependency graph.
 
 ---
 

@@ -65,7 +65,8 @@ class ProwlarrScraper:
         if not self.enabled or not self.base_url or not self.api_key:
             return []
 
-        query = (metadata.query or metadata.title or metadata.external_ids.imdb_id or "").strip()
+        title_query = (metadata.title or "").strip()
+        query = (title_query or metadata.query or metadata.external_ids.imdb_id or "").strip()
         if not query:
             self.ctx.logger.warning(
                 "plugin.scraper.prowlarr.skipped",
@@ -86,12 +87,17 @@ class ProwlarrScraper:
         use_tvsearch = item_type in {"episode", "show", "series"} and (
             metadata.season_number is not None or metadata.episode_number is not None
         )
-        params: dict[str, str | int] = {
-            "query": query,
-            "type": "tvsearch" if use_tvsearch else "search",
-            "limit": 50,
-            "categories": category,
-        }
+        params: dict[str, str | int] = {"query": query, "limit": 50, "categories": category}
+        if use_tvsearch:
+            params["type"] = "tvsearch"
+        elif metadata.external_ids.imdb_id or metadata.year is not None:
+            params["type"] = "movie"
+        else:
+            params["type"] = "search"
+        if metadata.year is not None:
+            params["year"] = metadata.year
+        if metadata.external_ids.imdb_id:
+            params["imdbId"] = metadata.external_ids.imdb_id
         if use_tvsearch:
             if metadata.season_number is not None:
                 params["season"] = metadata.season_number

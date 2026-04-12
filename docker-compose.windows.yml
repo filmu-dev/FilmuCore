@@ -1,3 +1,7 @@
+# Windows note:
+# - this compose file is backend-only by design
+# - it does not start the native Windows `filmuvfs.exe` mount process
+# - use `pnpm run stack:start` or `scripts/start_windows_stack.ps1` for the full Windows stack
 services:
   postgres:
     image: postgres:18

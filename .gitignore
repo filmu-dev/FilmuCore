@@ -25,6 +25,8 @@ node_modules/
 *.db
 
 playback-proof-artifacts/
+ci-artifacts/
+logs/
 
 # Local comparison and research docs that should stay out of the shared repo.
 docs/RIVEN_TS_*.md

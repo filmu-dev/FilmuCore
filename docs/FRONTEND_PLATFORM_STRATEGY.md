@@ -35,7 +35,7 @@ However, the repository is **not** yet in a state where a clean rip-and-replace 
 - the current frontend source and complete route/journey baseline remain external to this workspace
 - the auth/BFF contract is documented, but not yet frozen as a frontend replacement contract
 - the GraphQL surface exists, but replacement-grade schema/codegen boundaries still need to be formalized
-- enterprise-grade platform gaps are still open in identity/authz, tenancy, distributed control plane, SRE/DR, plugin isolation depth, VFS maturity, and performance/chaos discipline
+- enterprise-grade platform work is still open in environment-owned identity rollout, tenancy/product ownership depth, distributed control plane, SRE/DR, VFS operational maturity, externally hosted search/logging rollout, and performance/chaos discipline
 - documentation is strong but still has source-of-truth hygiene debt; for example, active planning material contains duplicated priority blocks
 
 ## Audit Basis

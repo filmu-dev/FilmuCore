@@ -55,7 +55,7 @@ What this baseline is good at:
 
 What it does **not** yet provide sufficiently:
 
-- operator-ready local log shipping and search comparable to the current `riven-ts` Elastic/Filebeat path
+- environment-executed log shipping and search parity comparable to the current `riven-ts` Elastic/Filebeat path
 - richer trace/span adoption across every log-producing path
 - mounted Rust data-plane telemetry and cross-process traceability
 - deeper queue replay-taxonomy visibility and longer-lived backlog history beyond the now-landed alert/history baseline

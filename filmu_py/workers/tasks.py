@@ -439,13 +439,7 @@ async def _resolve_runtime_settings(ctx: dict[str, Any]) -> Settings:
     """Resolve the latest runtime settings, preferring persisted settings for worker jobs."""
 
     explicit = ctx.get("settings")
-    if isinstance(explicit, Settings):
-        payload = ctx.get("plugin_settings_payload")
-        if not isinstance(payload, dict):
-            ctx["plugin_settings_payload"] = explicit.to_compatibility_dict()
-        return explicit
-
-    current = get_settings()
+    current = explicit if isinstance(explicit, Settings) else get_settings()
     db = ctx.get("db")
     if not isinstance(db, DatabaseRuntime):
         db = DatabaseRuntime(current.postgres_dsn, echo=False)
@@ -453,11 +447,13 @@ async def _resolve_runtime_settings(ctx: dict[str, Any]) -> Settings:
 
     persisted = await load_settings(db)
     if persisted is None:
+        ctx["settings"] = current
         ctx["plugin_settings_payload"] = current.to_compatibility_dict()
         return current
 
     ctx["plugin_settings_payload"] = persisted
     resolved = Settings.from_compatibility_dict(persisted)
+    ctx["settings"] = resolved
     set_runtime_settings(resolved)
     return resolved
 
@@ -501,6 +497,7 @@ def index_item_followup_job_id(
     *,
     discriminator: str | None = None,
     missing_seasons: list[int] | None = None,
+    missing_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Return a stable follow-up index job id for delayed polling or inventory rechecks."""
 
@@ -510,6 +507,13 @@ def index_item_followup_job_id(
     if missing_seasons:
         normalized = "-".join(str(season) for season in sorted(set(missing_seasons)))
         suffix_parts.append(f"missing:{normalized}")
+    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
+    if normalized_episode_scope:
+        normalized = "_".join(
+            f"{season}-{'-'.join(str(episode) for episode in episodes)}"
+            for season, episodes in normalized_episode_scope.items()
+        )
+        suffix_parts.append(f"episodes:{normalized}")
     return ":".join([index_item_job_id(item_id), *suffix_parts])
 
 
@@ -537,13 +541,28 @@ def scrape_item_job_id(item_id: str) -> str:
     return f"scrape-item:{item_id}"
 
 
-def scrape_item_followup_job_id(item_id: str, *, missing_seasons: list[int] | None = None) -> str:
+def scrape_item_followup_job_id(
+    item_id: str,
+    *,
+    missing_seasons: list[int] | None = None,
+    missing_episodes: dict[str, list[int]] | None = None,
+) -> str:
     """Return a stable follow-up scrape job id for partial/ongoing requeues."""
 
-    if not missing_seasons:
+    if not missing_seasons and not missing_episodes:
         return scrape_item_job_id(item_id)
-    normalized = "-".join(str(season) for season in sorted(set(missing_seasons)))
-    return f"{scrape_item_job_id(item_id)}:missing:{normalized}"
+    suffix_parts: list[str] = [scrape_item_job_id(item_id)]
+    if missing_seasons:
+        normalized = "-".join(str(season) for season in sorted(set(missing_seasons)))
+        suffix_parts.append(f"missing:{normalized}")
+    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
+    if normalized_episode_scope:
+        normalized = "_".join(
+            f"{season}-{'-'.join(str(episode) for episode in episodes)}"
+            for season, episodes in normalized_episode_scope.items()
+        )
+        suffix_parts.append(f"episodes:{normalized}")
+    return ":".join(suffix_parts)
 
 
 def debrid_item_job_id(item_id: str) -> str:
@@ -710,6 +729,7 @@ async def enqueue_parse_scrape_results(
     item_id: str,
     queue_name: str,
     partial_seasons: list[int] | None = None,
+    partial_episodes: dict[str, list[int]] | None = None,
     tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the parse-scrape-results stage with a unique job id for idempotency."""
@@ -728,7 +748,8 @@ async def enqueue_parse_scrape_results(
         stage_name="parse_scrape_results",
         job_id=parse_scrape_results_job_id(item_id),
     )
-    if partial_seasons is None:
+    normalized_episode_scope = _normalize_requested_episode_scope(partial_episodes)
+    if partial_seasons is None and normalized_episode_scope is None:
         job = await redis.enqueue_job(
             "parse_scrape_results",
             item_id,
@@ -736,12 +757,21 @@ async def enqueue_parse_scrape_results(
             _queue_name=queue_name,
         )
     else:
-        job = await redis.enqueue_job(
-            "parse_scrape_results",
-            item_id,
-            _job_id=parse_scrape_results_job_id(item_id),
-            _queue_name=queue_name,
-            partial_seasons=partial_seasons,
+        kwargs: dict[str, object] = {}
+        if partial_seasons is not None:
+            kwargs["partial_seasons"] = partial_seasons
+        if normalized_episode_scope is not None:
+            kwargs["partial_episodes"] = normalized_episode_scope
+        job = cast(
+            Job | None,
+            await _enqueue_arq_job(
+                redis,
+                "parse_scrape_results",
+                item_id,
+                _job_id=parse_scrape_results_job_id(item_id),
+                _queue_name=queue_name,
+                **kwargs,
+            ),
         )
     return job is not None
 
@@ -772,6 +802,7 @@ async def enqueue_index_item(
     defer_by_seconds: int | None = None,
     job_id: str | None = None,
     missing_seasons: list[int] | None = None,
+    missing_episodes: dict[str, list[int]] | None = None,
 ) -> bool:
     """Enqueue the index stage with a unique job id for idempotency."""
 
@@ -799,6 +830,9 @@ async def enqueue_index_item(
         kwargs["_defer_by"] = timedelta(seconds=defer_by_seconds)
     if missing_seasons:
         kwargs["missing_seasons"] = missing_seasons
+    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
+    if normalized_episode_scope:
+        kwargs["missing_episodes"] = normalized_episode_scope
     job = await _enqueue_arq_job(redis, "index_item", item_id, **kwargs)
     return job is not None
 
@@ -811,6 +845,7 @@ async def enqueue_scrape_item(
     defer_by_seconds: int | None = None,
     job_id: str | None = None,
     missing_seasons: list[int] | None = None,
+    missing_episodes: dict[str, list[int]] | None = None,
     tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the scrape stage with a unique job id for idempotency."""
@@ -830,9 +865,15 @@ async def enqueue_scrape_item(
         stage_name="scrape_item",
         job_id=resolved_job_id,
     )
+    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
     if defer_by_seconds is not None and defer_by_seconds > 0:
         WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="scrape_item").observe(float(defer_by_seconds))
-        if missing_seasons:
+        if missing_seasons or normalized_episode_scope:
+            kwargs: dict[str, object] = {}
+            if missing_seasons:
+                kwargs["missing_seasons"] = missing_seasons
+            if normalized_episode_scope:
+                kwargs["missing_episodes"] = normalized_episode_scope
             job = await _enqueue_arq_job(
                 redis,
                 "scrape_item",
@@ -840,7 +881,7 @@ async def enqueue_scrape_item(
                 _job_id=resolved_job_id,
                 _queue_name=queue_name,
                 _defer_by=timedelta(seconds=defer_by_seconds),
-                missing_seasons=missing_seasons,
+                **kwargs,
             )
         else:
             job = await _enqueue_arq_job(
@@ -852,14 +893,19 @@ async def enqueue_scrape_item(
                 _defer_by=timedelta(seconds=defer_by_seconds),
             )
     else:
-        if missing_seasons:
+        if missing_seasons or normalized_episode_scope:
+            kwargs = {}
+            if missing_seasons:
+                kwargs["missing_seasons"] = missing_seasons
+            if normalized_episode_scope:
+                kwargs["missing_episodes"] = normalized_episode_scope
             job = await _enqueue_arq_job(
                 redis,
                 "scrape_item",
                 item_id,
                 _job_id=resolved_job_id,
                 _queue_name=queue_name,
-                missing_seasons=missing_seasons,
+                **kwargs,
             )
         else:
             job = await _enqueue_arq_job(
@@ -932,6 +978,7 @@ async def enqueue_rank_streams(
     item_id: str,
     queue_name: str,
     partial_seasons: list[int] | None = None,
+    partial_episodes: dict[str, list[int]] | None = None,
     tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the rank-streams stage with a unique job id for idempotency."""
@@ -950,14 +997,20 @@ async def enqueue_rank_streams(
         stage_name="rank_streams",
         job_id=rank_streams_job_id(item_id),
     )
-    if partial_seasons is not None:
+    normalized_episode_scope = _normalize_requested_episode_scope(partial_episodes)
+    if partial_seasons is not None or normalized_episode_scope is not None:
+        kwargs: dict[str, object] = {}
+        if partial_seasons is not None:
+            kwargs["partial_seasons"] = partial_seasons
+        if normalized_episode_scope is not None:
+            kwargs["partial_episodes"] = normalized_episode_scope
         job = await _enqueue_arq_job(
             redis,
             "rank_streams",
             item_id,
             _job_id=rank_streams_job_id(item_id),
             _queue_name=queue_name,
-            partial_seasons=partial_seasons,
+            **kwargs,
         )
     else:
         job = await _enqueue_arq_job(
@@ -1366,6 +1419,7 @@ async def _maybe_enqueue_parse_stage(
     *,
     item_id: str,
     partial_seasons: list[int] | None,
+    partial_episodes: dict[str, list[int]] | None,
 ) -> None:
     arq_redis = ctx.get("arq_redis")
     if arq_redis is None or not hasattr(arq_redis, "enqueue_job"):
@@ -1400,6 +1454,7 @@ async def _maybe_enqueue_parse_stage(
         item_id=item_id,
         queue_name=queue_name,
         partial_seasons=partial_seasons,
+        partial_episodes=partial_episodes,
         tenant_id=tenant_id,
     )
     _log_downstream_enqueue_result(
@@ -1574,6 +1629,72 @@ def _rank_failure_cooldown_seconds(settings: Settings, *, attempt_count: int) ->
     return max(0, int(settings.scraping.after_10 * 3600))
 
 
+async def _schedule_search_retry(
+    *,
+    ctx: dict[str, Any],
+    media_service: MediaService,
+    settings: Settings,
+    item_id: str,
+    failure_reason: str,
+    stage_name: str,
+) -> bool:
+    """Requeue one item for a fresh scrape cycle instead of failing immediately."""
+
+    arq_redis = ctx.get("arq_redis")
+    if arq_redis is None or not hasattr(arq_redis, "enqueue_job"):
+        return False
+
+    attempt_count = await _increment_item_recovery_attempt_count(ctx, item_id=item_id)
+    max_failed_attempts = settings.scraping.max_failed_attempts
+    if max_failed_attempts > 0 and attempt_count >= max_failed_attempts:
+        await _set_item_next_retry_at(ctx, item_id=item_id, value=None)
+        _worker_stage_logger().warning(
+            f"{stage_name}.max_attempts_reached",
+            item_id=item_id,
+            attempt_count=attempt_count,
+            max_failed_attempts=max_failed_attempts,
+            failure_reason=failure_reason,
+        )
+        return False
+
+    cooldown_seconds = _rank_failure_cooldown_seconds(settings, attempt_count=attempt_count)
+    next_retry_at = (
+        datetime.now(UTC) + timedelta(seconds=cooldown_seconds) if cooldown_seconds > 0 else None
+    )
+    await media_service.prepare_item_for_scrape_retry(
+        item_id,
+        message=f"{stage_name} retry scheduled: {failure_reason}",
+    )
+    requeue_job_id = f"{scrape_item_job_id(item_id)}:{stage_name}:retry:{attempt_count}"
+    enqueued = await _maybe_enqueue_next_stage(
+        ctx,
+        enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_scrape_item(
+            redis,
+            item_id=item_id,
+            queue_name=queue_name,
+            defer_by_seconds=cooldown_seconds if cooldown_seconds > 0 else None,
+            job_id=requeue_job_id,
+            tenant_id=tenant_id,
+        ),
+        item_id=item_id,
+        stage_name="scrape_item",
+        job_id=requeue_job_id,
+        cleanup_stage_job_ids=(("scrape_item", scrape_item_job_id(item_id)),),
+    )
+    if enqueued:
+        await _set_item_next_retry_at(ctx, item_id=item_id, value=next_retry_at)
+    _worker_stage_logger().info(
+        f"{stage_name}.requeue_scrape",
+        item_id=item_id,
+        attempt_count=attempt_count,
+        cooldown_seconds=cooldown_seconds,
+        next_retry_at=next_retry_at.isoformat() if next_retry_at is not None else None,
+        failure_reason=failure_reason,
+        next_stage="scrape_item",
+    )
+    return enqueued
+
+
 def _build_rank_no_winner_diagnostics(
     *,
     scraped_candidate_count: int | None,
@@ -1641,6 +1762,7 @@ async def index_item(
     item_id: str,
     *,
     missing_seasons: list[int] | None = None,
+    missing_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Enrich metadata in its own stage and enqueue scrape once the item is indexed."""
 
@@ -1659,12 +1781,20 @@ async def index_item(
             tenant_id=getattr(item, "tenant_id", None),
         )
         partial_seasons = _normalize_requested_seasons(missing_seasons)
+        partial_episodes = _normalize_requested_episode_scope(missing_episodes)
+        if partial_episodes:
+            partial_episode_seasons = _requested_seasons_from_episode_scope(partial_episodes)
+            if partial_episode_seasons:
+                partial_seasons = sorted(
+                    set(partial_seasons or []).union(partial_episode_seasons)
+                )
         if item.state in {ItemState.DOWNLOADED, ItemState.COMPLETED, ItemState.SCRAPED}:
             if item.state is ItemState.SCRAPED:
                 await _maybe_enqueue_parse_stage(
                     mutable_ctx,
                     item_id=item_id,
                     partial_seasons=partial_seasons,
+                    partial_episodes=partial_episodes,
                 )
             return item_id
 
@@ -1704,6 +1834,7 @@ async def index_item(
                 item_id=item_id,
                 queue_name=queue_name,
                 missing_seasons=partial_seasons,
+                missing_episodes=partial_episodes,
                 tenant_id=tenant_id,
             ),
             item_id=item_id,
@@ -1738,12 +1869,14 @@ async def parse_scrape_results(
     item_id: str,
     *,
     partial_seasons: list[int] | None = None,
+    partial_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Parse persisted raw candidates, validate them, and enqueue the rank stage."""
 
     mutable_ctx = cast(dict[str, Any], ctx)
     bind_worker_contextvars(ctx=mutable_ctx, stage="parse_scrape_results", item_id=item_id)
     media_service = _resolve_media_service(mutable_ctx)
+    settings = await _resolve_runtime_settings(mutable_ctx)
 
     try:
         item = await media_service.get_item(item_id)
@@ -1762,12 +1895,21 @@ async def parse_scrape_results(
                 "parse_scrape_results found no persisted scrape candidates",
                 extra=log_context,
             )
-            await _try_transition(
+            requeued = await _schedule_search_retry(
+                ctx=mutable_ctx,
                 media_service=media_service,
+                settings=settings,
                 item_id=item_id,
-                event=ItemEvent.FAIL,
-                message="parse_scrape_results failed: no_scrape_candidates",
+                failure_reason="no_scrape_candidates",
+                stage_name="parse_scrape_results",
             )
+            if not requeued:
+                await _try_transition(
+                    media_service=media_service,
+                    item_id=item_id,
+                    event=ItemEvent.FAIL,
+                    message="parse_scrape_results failed: no_scrape_candidates",
+                )
             return item_id
         streams = await media_service.get_stream_candidates(media_item_id=item_id)
         has_parsed_candidates = any(stream.parsed_title for stream in streams)
@@ -1782,12 +1924,21 @@ async def parse_scrape_results(
                 "parse_scrape_results produced no valid parsed candidates",
                 extra={**log_context, "parsed_count": parsed_count},
             )
-            await _try_transition(
+            requeued = await _schedule_search_retry(
+                ctx=mutable_ctx,
                 media_service=media_service,
+                settings=settings,
                 item_id=item_id,
-                event=ItemEvent.FAIL,
-                message="parse_scrape_results failed: no_valid_parsed_candidates",
+                failure_reason="no_valid_parsed_candidates",
+                stage_name="parse_scrape_results",
             )
+            if not requeued:
+                await _try_transition(
+                    media_service=media_service,
+                    item_id=item_id,
+                    event=ItemEvent.FAIL,
+                    message="parse_scrape_results failed: no_valid_parsed_candidates",
+                )
             return item_id
         logger.info(
             "parse_scrape_results completed",
@@ -1800,6 +1951,7 @@ async def parse_scrape_results(
                 item_id=item_id,
                 queue_name=queue_name,
                 partial_seasons=partial_seasons,
+                partial_episodes=partial_episodes,
                 tenant_id=tenant_id,
             ),
             item_id=item_id,
@@ -1827,6 +1979,7 @@ async def rank_streams(
     item_id: str,
     *,
     partial_seasons: list[int] | None = None,
+    partial_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Load RTN settings, rank persisted parsed streams, select a winner, and enqueue debrid."""
 
@@ -1878,22 +2031,34 @@ async def rank_streams(
         # for this ranking pass. Fall back to latest request scope only when no
         # explicit partial scope was provided.
         partial_requested_seasons: list[int] | None = _normalize_requested_seasons(partial_seasons)
+        partial_requested_episodes = _normalize_requested_episode_scope(partial_episodes)
         get_latest_item_request = getattr(media_service, "get_latest_item_request", None)
         if callable(get_latest_item_request):
             item_request = await get_latest_item_request(media_item_id=item_id)
-            if (
-                partial_requested_seasons is None
-                and item_request is not None
-                and item_request.is_partial
-            ):
-                partial_requested_seasons = _normalize_requested_seasons(
-                    item_request.requested_seasons
+            if item_request is not None and item_request.is_partial:
+                if partial_requested_seasons is None:
+                    partial_requested_seasons = _normalize_requested_seasons(
+                        item_request.requested_seasons
+                    )
+                if partial_requested_episodes is None:
+                    partial_requested_episodes = _normalize_requested_episode_scope(
+                        item_request.requested_episodes
+                    )
+        if partial_requested_episodes:
+            partial_episode_seasons = _requested_seasons_from_episode_scope(
+                partial_requested_episodes
+            )
+            if partial_episode_seasons:
+                partial_requested_seasons = sorted(
+                    set(partial_requested_seasons or []).union(partial_episode_seasons)
                 )
         if partial_requested_seasons is not None:
             structlog.contextvars.bind_contextvars(
                 partial_request=True,
                 requested_seasons=partial_requested_seasons,
             )
+        if partial_requested_episodes is not None:
+            structlog.contextvars.bind_contextvars(requested_episodes=partial_requested_episodes)
         ranked_results: list[RankedStreamCandidateRecord] = []
         rankable_streams: list[StreamORM] = []
         rank_batch_inputs: list[_RankBatchInput] = []
@@ -1920,6 +2085,7 @@ async def rank_streams(
                 partial_scope_reason = _partial_scope_rejection_reason(
                     stream,
                     partial_requested_seasons,
+                    partial_requested_episodes,
                 )
                 if partial_scope_reason is not None:
                     ranked_results.append(
@@ -1962,7 +2128,11 @@ async def rank_streams(
                     ),
                     "resolution": stream.resolution,
                     "partial_scope_bonus": (
-                        _partial_scope_rank_bonus(stream, partial_requested_seasons)
+                        _partial_scope_rank_bonus(
+                            stream,
+                            partial_requested_seasons,
+                            partial_requested_episodes,
+                        )
                         if partial_requested_seasons is not None
                         else 0
                     ),
@@ -2049,63 +2219,21 @@ async def rank_streams(
                 )
                 return item_id
 
-            attempt_count = await _increment_item_recovery_attempt_count(
-                mutable_ctx, item_id=item_id
+            requeued = await _schedule_search_retry(
+                ctx=mutable_ctx,
+                media_service=media_service,
+                settings=settings,
+                item_id=item_id,
+                failure_reason=failure_reason,
+                stage_name="rank_streams",
             )
-            max_failed_attempts = settings.scraping.max_failed_attempts
-            if max_failed_attempts > 0 and attempt_count >= max_failed_attempts:
-                await _set_item_next_retry_at(mutable_ctx, item_id=item_id, value=None)
-                _worker_stage_logger().warning(
-                    "rank_streams.max_attempts_reached",
-                    item_id=item_id,
-                    attempt_count=attempt_count,
-                    max_failed_attempts=max_failed_attempts,
-                )
+            if not requeued:
                 await _try_transition(
                     media_service=media_service,
                     item_id=item_id,
                     event=ItemEvent.FAIL,
                     message=f"rank_streams failed: {selection_reason}",
                 )
-                return item_id
-
-            cooldown_seconds = _rank_failure_cooldown_seconds(settings, attempt_count=attempt_count)
-            next_retry_at = (
-                datetime.now(UTC) + timedelta(seconds=cooldown_seconds)
-                if cooldown_seconds > 0
-                else None
-            )
-            requeue_job_id = f"{scrape_item_job_id(item_id)}:retry:{attempt_count}"
-            enqueued = await _maybe_enqueue_next_stage(
-                mutable_ctx,
-                enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_scrape_item(
-                    redis,
-                    item_id=item_id,
-                    queue_name=queue_name,
-                    defer_by_seconds=cooldown_seconds if cooldown_seconds > 0 else None,
-                    job_id=requeue_job_id,
-                    tenant_id=tenant_id,
-                ),
-                item_id=item_id,
-                stage_name="scrape_item",
-                job_id=requeue_job_id,
-                cleanup_stage_job_ids=(("scrape_item", scrape_item_job_id(item_id)),),
-            )
-            if enqueued:
-                await _set_item_next_retry_at(
-                    mutable_ctx,
-                    item_id=item_id,
-                    value=next_retry_at,
-                )
-            _worker_stage_logger().info(
-                "rank_streams.requeue_scrape",
-                item_id=item_id,
-                attempt_count=attempt_count,
-                cooldown_seconds=cooldown_seconds,
-                next_retry_at=next_retry_at.isoformat() if next_retry_at is not None else None,
-                next_stage="scrape_item",
-                failure_reason=failure_reason,
-            )
             return item_id
 
         assert selected_stream_id is not None
@@ -2395,7 +2523,13 @@ async def backfill_imdb_ids(ctx: dict[str, object]) -> dict[str, int]:
 
 
 @timed_stage("scrape_item")
-async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: list[int] | None = None) -> str:
+async def scrape_item(
+    ctx: dict[str, object],
+    item_id: str,
+    *,
+    missing_seasons: list[int] | None = None,
+    missing_episodes: dict[str, list[int]] | None = None,
+) -> str:
     """Run configured scrape providers, persist raw candidates, and enqueue parse."""
 
     mutable_ctx = cast(dict[str, Any], ctx)
@@ -2409,7 +2543,7 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
     )
 
     media_service = _resolve_media_service(mutable_ctx)
-    await _resolve_runtime_settings(mutable_ctx)
+    settings = await _resolve_runtime_settings(mutable_ctx)
 
     try:
         item = await media_service.get_item(item_id)
@@ -2450,20 +2584,31 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
         # intentionally overrides the original request scope. This prevents the
         # worker from repeatedly re-selecting already-satisfied seasons.
         partial_seasons: list[int] | None = None
+        partial_episodes: dict[str, list[int]] | None = None
         get_latest_item_request = getattr(media_service, "get_latest_item_request", None)
         if callable(get_latest_item_request):
             item_request = await get_latest_item_request(media_item_id=item_id)
             if item_request is not None and item_request.is_partial:
                 partial_seasons = _normalize_requested_seasons(item_request.requested_seasons)
+                partial_episodes = _normalize_requested_episode_scope(item_request.requested_episodes)
         if missing_seasons:
             normalized_missing_seasons = _normalize_requested_seasons(missing_seasons)
             partial_seasons = normalized_missing_seasons
             structlog.contextvars.bind_contextvars(missing_seasons=normalized_missing_seasons)
+        if missing_episodes:
+            partial_episodes = _normalize_requested_episode_scope(missing_episodes)
+            structlog.contextvars.bind_contextvars(missing_episodes=partial_episodes)
+        if partial_episodes:
+            partial_episode_seasons = _requested_seasons_from_episode_scope(partial_episodes)
+            if partial_episode_seasons:
+                partial_seasons = sorted(set(partial_seasons or []).union(partial_episode_seasons))
         if partial_seasons is not None:
             structlog.contextvars.bind_contextvars(
                 partial_request=True,
                 requested_seasons=partial_seasons,
             )
+        if partial_episodes is not None:
+            structlog.contextvars.bind_contextvars(requested_episodes=partial_episodes)
         if item.state in {
             ItemState.DOWNLOADED,
             ItemState.COMPLETED,
@@ -2495,6 +2640,7 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
                 mutable_ctx,
                 item_id=item_id,
                 partial_seasons=partial_seasons,
+                partial_episodes=partial_episodes,
             )
             _worker_stage_logger().warning(
                 "scrape_item resumed downstream parse enqueue for already-scraped item",
@@ -2510,6 +2656,7 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
             plugin_registry=plugin_registry,
             item=item,
             partial_seasons=partial_seasons,
+            partial_episodes=partial_episodes,
         )
         for summary in provider_summaries:
             _worker_stage_logger().debug(
@@ -2539,6 +2686,7 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
                         plugin_registry=plugin_registry,
                         item=item,
                         partial_seasons=partial_seasons,
+                        partial_episodes=partial_episodes,
                     )
                     for summary in provider_summaries:
                         _worker_stage_logger().debug(
@@ -2569,12 +2717,21 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
                     message="scrape_item no_candidates (but has existing media)",
                 )
             else:
-                await _try_transition(
+                requeued = await _schedule_search_retry(
+                    ctx=mutable_ctx,
                     media_service=media_service,
+                    settings=settings,
                     item_id=item_id,
-                    event=ItemEvent.FAIL,
-                    message="scrape_item failed: no_candidates",
+                    failure_reason="no_candidates",
+                    stage_name="scrape_item",
                 )
+                if not requeued:
+                    await _try_transition(
+                        media_service=media_service,
+                        item_id=item_id,
+                        event=ItemEvent.FAIL,
+                        message="scrape_item failed: no_candidates",
+                    )
             return item_id
 
         await media_service.persist_scrape_candidates(
@@ -2591,6 +2748,7 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
             mutable_ctx,
             item_id=item_id,
             partial_seasons=partial_seasons,
+            partial_episodes=partial_episodes,
         )
         return item_id
     except Exception as exc:
@@ -2862,6 +3020,7 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
         event = ItemEvent.COMPLETE
         message = "finalize done"
         missing_season_numbers: list[int] = []
+        missing_episode_scope: dict[str, list[int]] | None = None
 
         if _resolve_item_type(item) == "show":
             result = await _evaluate_show_completion(item, media_service._db, settings)
@@ -2881,6 +3040,7 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                 event = ItemEvent.PARTIAL_COMPLETE
                 message = "missing_episodes"
                 missing_season_numbers = sorted({s for s, _e in result.missing_released})
+                missing_episode_scope = _missing_episode_scope_from_pairs(result.missing_released)
             else:
                 arq_redis = await _resolve_arq_redis(mutable_ctx)
                 # Add a minimum defer so the pipeline doesn't tight-loop when
@@ -2896,8 +3056,10 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                         item.id,
                         discriminator="inventory-recheck",
                         missing_seasons=sorted({s for s, _e in result.missing_released}),
+                        missing_episodes=_missing_episode_scope_from_pairs(result.missing_released),
                     ),
                     missing_seasons=sorted({s for s, _e in result.missing_released}),
+                    missing_episodes=_missing_episode_scope_from_pairs(result.missing_released),
                 )
                 logger.info(
                     "finalize stage re-queued show without satisfied released episodes",
@@ -2974,8 +3136,10 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                         "ongoing-poll" if event is ItemEvent.MARK_ONGOING else "partial-followup"
                     ),
                     missing_seasons=missing_season_numbers or None,
+                    missing_episodes=missing_episode_scope,
                 ),
                 missing_seasons=missing_season_numbers or None,
+                missing_episodes=missing_episode_scope,
             )
 
         logger.info(
@@ -3165,7 +3329,7 @@ def _build_worker_plugin_context_provider(
 ) -> PluginContextProvider:
     """Build the worker-side plugin context provider from existing runtime objects."""
 
-    ctx.setdefault("settings", settings)
+    ctx["settings"] = settings
 
     event_bus = ctx.get("event_bus")
     if not isinstance(event_bus, EventBus):
@@ -3318,6 +3482,84 @@ def _normalize_requested_seasons(requested_seasons: list[int] | None) -> list[in
     return normalized or None
 
 
+def _normalize_requested_episode_scope(
+    requested_episodes: dict[str, list[int]] | dict[int, list[int]] | None,
+) -> dict[str, list[int]] | None:
+    """Return canonical episode scope keyed by season string with sorted unique episodes."""
+
+    if requested_episodes is None:
+        return None
+
+    normalized: dict[str, list[int]] = {}
+    for raw_season, raw_episodes in requested_episodes.items():
+        try:
+            season_number = int(raw_season)
+        except (TypeError, ValueError):
+            continue
+        if season_number <= 0 or not isinstance(raw_episodes, list):
+            continue
+        episodes = sorted(
+            {
+                episode
+                for episode in raw_episodes
+                if isinstance(episode, int) and episode > 0
+            }
+        )
+        if episodes:
+            normalized[str(season_number)] = episodes
+    return dict(sorted(normalized.items(), key=lambda item: int(item[0]))) or None
+
+
+def _requested_seasons_from_episode_scope(
+    requested_episodes: dict[str, list[int]] | None,
+) -> list[int] | None:
+    """Return season numbers referenced by one episode scope mapping."""
+
+    normalized = _normalize_requested_episode_scope(requested_episodes)
+    if normalized is None:
+        return None
+    return [int(season) for season in normalized]
+
+
+def _missing_episode_scope_from_pairs(
+    missing_released: list[tuple[int, int]],
+) -> dict[str, list[int]] | None:
+    """Return episode follow-up scope for explicit missing episode tuples."""
+
+    episode_scope: dict[str, list[int]] = {}
+    for season_number, episode_number in missing_released:
+        if season_number <= 0 or episode_number <= 0:
+            continue
+        episode_scope.setdefault(str(season_number), []).append(episode_number)
+    return _normalize_requested_episode_scope(episode_scope)
+
+
+def _parsed_episode_numbers_from_stream(stream: StreamORM) -> list[int] | None:
+    """Return normalized parsed episode numbers for one persisted stream candidate."""
+
+    parsed_title = stream.parsed_title if isinstance(stream.parsed_title, dict) else {}
+    raw_value = parsed_title.get("episode")
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, int):
+        return [raw_value] if raw_value > 0 else None
+    if isinstance(raw_value, str) and raw_value.strip().isdigit():
+        episode = int(raw_value.strip())
+        return [episode] if episode > 0 else None
+    if isinstance(raw_value, list):
+        episodes: set[int] = set()
+        for value in raw_value:
+            if isinstance(value, int) and value > 0:
+                episodes.add(value)
+            elif isinstance(value, str) and value.strip().isdigit():
+                episode = int(value.strip())
+                if episode > 0:
+                    episodes.add(episode)
+        if episodes:
+            return sorted(episodes)
+    return None
+
+
 def _parsed_seasons_from_stream(stream: StreamORM) -> list[int] | None:
     """Return normalized parsed season numbers for one persisted stream candidate."""
 
@@ -3347,29 +3589,15 @@ def _parsed_seasons_from_stream(stream: StreamORM) -> list[int] | None:
 def _parsed_episode_count_from_stream(stream: StreamORM) -> int:
     """Return the parsed episode count for one persisted stream candidate when available."""
 
-    parsed_title = stream.parsed_title if isinstance(stream.parsed_title, dict) else {}
-    raw_value = parsed_title.get("episode")
-    if raw_value is None:
-        return 0
-    if isinstance(raw_value, int):
-        return 1 if raw_value > 0 else 0
-    if isinstance(raw_value, str):
-        normalized = raw_value.strip()
-        return 1 if normalized.isdigit() and int(normalized) > 0 else 0
-    if isinstance(raw_value, list):
-        episodes: set[int] = set()
-        for value in raw_value:
-            if isinstance(value, int) and value > 0:
-                episodes.add(value)
-            elif isinstance(value, str) and value.strip().isdigit():
-                episode = int(value.strip())
-                if episode > 0:
-                    episodes.add(episode)
-        return len(episodes)
-    return 0
+    parsed_episodes = _parsed_episode_numbers_from_stream(stream)
+    return len(parsed_episodes or [])
 
 
-def _partial_scope_rank_bonus(stream: StreamORM, requested_seasons: list[int]) -> int:
+def _partial_scope_rank_bonus(
+    stream: StreamORM,
+    requested_seasons: list[int],
+    requested_episodes: dict[str, list[int]] | None = None,
+) -> int:
     """Return an additive bonus favouring broader coverage for partial show requests."""
 
     parsed_seasons = _parsed_seasons_from_stream(stream)
@@ -3385,6 +3613,16 @@ def _partial_scope_rank_bonus(stream: StreamORM, requested_seasons: list[int]) -
     episode_count = _parsed_episode_count_from_stream(stream)
     if episode_count == 0:
         return bonus + _PARTIAL_SCOPE_SEASON_PACK_BONUS
+    if requested_episodes:
+        parsed_episodes = set(_parsed_episode_numbers_from_stream(stream) or [])
+        matched_episodes = 0
+        for season in parsed_seasons:
+            season_key = str(season)
+            if season_key not in requested_episodes:
+                continue
+            matched_episodes += len(parsed_episodes.intersection(requested_episodes[season_key]))
+        if matched_episodes > 0:
+            return bonus + (matched_episodes * _PARTIAL_SCOPE_MULTI_EPISODE_BONUS)
     if episode_count > 1:
         return bonus + _PARTIAL_SCOPE_MULTI_EPISODE_BONUS
     return bonus
@@ -3394,13 +3632,14 @@ def _apply_partial_scope_rank_bonus(
     stream: StreamORM,
     ranked: RankedTorrent,
     requested_seasons: list[int] | None,
+    requested_episodes: dict[str, list[int]] | None = None,
 ) -> RankedTorrent:
     """Return one adjusted RTN result while preserving existing fetch/failure semantics."""
 
     if not requested_seasons:
         return ranked
 
-    bonus = _partial_scope_rank_bonus(stream, requested_seasons)
+    bonus = _partial_scope_rank_bonus(stream, requested_seasons, requested_episodes)
     if bonus <= 0:
         return ranked
 
@@ -3416,8 +3655,12 @@ def _apply_partial_scope_rank_bonus(
     )
 
 
-def _partial_scope_rejection_reason(stream: StreamORM, requested_seasons: list[int]) -> str | None:
-    """Return one rejection reason when a stream falls outside a partial-season request scope."""
+def _partial_scope_rejection_reason(
+    stream: StreamORM,
+    requested_seasons: list[int],
+    requested_episodes: dict[str, list[int]] | None = None,
+) -> str | None:
+    """Return one rejection reason when a stream falls outside a partial follow-up scope."""
 
     parsed_seasons = _parsed_seasons_from_stream(stream)
     if not parsed_seasons:
@@ -3425,6 +3668,19 @@ def _partial_scope_rejection_reason(stream: StreamORM, requested_seasons: list[i
     requested = set(requested_seasons)
     if requested.isdisjoint(parsed_seasons):
         return "partial_scope_season_mismatch"
+    if requested_episodes:
+        parsed_episode_numbers = _parsed_episode_numbers_from_stream(stream)
+        if parsed_episode_numbers is None:
+            # A whole-season pack is acceptable for one missing-episode retry.
+            return None
+        for season in parsed_seasons:
+            season_key = str(season)
+            requested_episode_numbers = requested_episodes.get(season_key)
+            if not requested_episode_numbers:
+                continue
+            if set(parsed_episode_numbers).intersection(requested_episode_numbers):
+                return None
+        return "partial_scope_episode_mismatch"
     return None
 
 
@@ -3478,6 +3734,7 @@ def _build_scraper_search_input(
     item: MediaItemRecord,
     *,
     season_override: int | None = None,
+    episode_override: int | None = None,
 ) -> ScraperSearchInput:
     """Build the search input for a scraper plugin call.
 
@@ -3494,7 +3751,7 @@ def _build_scraper_search_input(
         "season",
         "parent_season_number",
     )
-    episode_number = _extract_int_value(item.attributes, "episode_number", "episode")
+    episode_number = episode_override or _extract_int_value(item.attributes, "episode_number", "episode")
     return ScraperSearchInput(
         item_id=item.id,
         item_type=item_type,
@@ -3548,6 +3805,7 @@ async def _scrape_with_plugins(
     plugin_registry: PluginRegistry,
     item: MediaItemRecord,
     partial_seasons: list[int] | None = None,
+    partial_episodes: dict[str, list[int]] | None = None,
 ) -> tuple[list[ScrapeCandidateRecord], list[dict[str, object]]]:
     """Execute registered scraper plugins and normalize their outputs for persistence.
 
@@ -3561,18 +3819,26 @@ async def _scrape_with_plugins(
     if not scrapers:
         return [], []
 
-    # Build one search input per requested season. For full-scope requests,
-    # run exactly one broad query with no season override.
-    season_overrides: tuple[int | None, ...]
-    season_overrides = (
-        tuple(sorted(set(partial_seasons)))
-        if partial_seasons
-        else (None,)
-    )
+    normalized_episode_scope = _normalize_requested_episode_scope(partial_episodes)
+    search_scope_pairs: list[tuple[int | None, int | None]] = []
+    if partial_seasons:
+        search_scope_pairs.extend((season, None) for season in sorted(set(partial_seasons)))
+    if normalized_episode_scope:
+        for season_key, episodes in normalized_episode_scope.items():
+            season_number = int(season_key)
+            if (season_number, None) not in search_scope_pairs:
+                search_scope_pairs.append((season_number, None))
+            search_scope_pairs.extend((season_number, episode_number) for episode_number in episodes)
+    if not search_scope_pairs:
+        search_scope_pairs = [(None, None)]
 
     search_inputs = [
-        _build_scraper_search_input(item, season_override=season_override)
-        for season_override in season_overrides
+        _build_scraper_search_input(
+            item,
+            season_override=season_override,
+            episode_override=episode_override,
+        )
+        for season_override, episode_override in search_scope_pairs
     ]
 
     request_specs = [(scraper, search_input) for scraper in scrapers for search_input in search_inputs]
@@ -3655,10 +3921,13 @@ async def poll_ongoing_shows(ctx: dict[str, object]) -> dict[str, int]:
         # Guard: don't double-enqueue if a scrape job is already active for this show
         if await is_scrape_item_job_active(arq_redis, item_id=item.id):
             continue
+        missing_episode_scope = _missing_episode_scope_from_pairs(result.missing_released)
         await enqueue_scrape_item(
             arq_redis,
             item_id=item.id,
             queue_name=queue_name,
+            missing_seasons=sorted({season for season, _episode in result.missing_released}) or None,
+            missing_episodes=missing_episode_scope,
             tenant_id=item.tenant_id,
         )
         queued_count += 1

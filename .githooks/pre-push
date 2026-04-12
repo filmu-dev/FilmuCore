@@ -38,6 +38,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
   seen="${seen} ${key}"
 
+  "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_forbidden_publish_paths.ps1" -LocalRef "${local_ref}" -LocalSha "${local_sha}" -RemoteRef "${remote_ref}" -RemoteSha "${remote_sha}"
+
   "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_branch_hygiene.ps1" -Branch "${branch}" -ReviewBranch "${review_branch}" -Remote "${remote_name}"
 done
 
