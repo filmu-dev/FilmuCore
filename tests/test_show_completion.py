@@ -28,6 +28,10 @@ def _build_settings() -> Settings:
 @pytest.fixture(autouse=True)
 def _show_completion_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks, "get_settings", _build_settings)
+    async def _no_persisted_settings(_db: Any) -> None:
+        return None
+
+    monkeypatch.setattr(tasks, "load_settings", _no_persisted_settings)
 
 
 @dataclass
