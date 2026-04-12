@@ -166,28 +166,43 @@ async def _audit_authorization_decision(
     resource_scope = _resource_scope_for_path(path)
     audit_service = get_resources(request).authorization_audit_service
     if audit_service is not None:
-        await audit_service.record_decision(
-            path=path,
-            method=request.method,
-            resource_scope=resource_scope,
-            actor_id=auth_context.actor_id,
-            actor_type=auth_context.actor_type,
-            tenant_id=auth_context.tenant_id,
-            target_tenant_id=target_tenant_id,
-            required_permissions=required_permissions,
-            matched_permissions=decision.matched_permissions,
-            missing_permissions=decision.missing_permissions,
-            constrained_permissions=getattr(decision, "constrained_permissions", ()),
-            constraint_failures=getattr(decision, "constraint_failures", ()),
-            allowed=decision.allowed,
-            reason=decision.reason,
-            tenant_scope=decision.tenant_scope,
-            authentication_mode=auth_context.authentication_mode,
-            access_policy_version=policy.version,
-            access_policy_source=policy.source,
-            oidc_issuer=auth_context.oidc_issuer,
-            oidc_subject=auth_context.oidc_subject,
-        )
+        try:
+            await audit_service.record_decision(
+                path=path,
+                method=request.method,
+                resource_scope=resource_scope,
+                actor_id=auth_context.actor_id,
+                actor_type=auth_context.actor_type,
+                tenant_id=auth_context.tenant_id,
+                target_tenant_id=target_tenant_id,
+                required_permissions=required_permissions,
+                matched_permissions=decision.matched_permissions,
+                missing_permissions=decision.missing_permissions,
+                constrained_permissions=getattr(decision, "constrained_permissions", ()),
+                constraint_failures=getattr(decision, "constraint_failures", ()),
+                allowed=decision.allowed,
+                reason=decision.reason,
+                tenant_scope=decision.tenant_scope,
+                authentication_mode=auth_context.authentication_mode,
+                access_policy_version=policy.version,
+                access_policy_source=policy.source,
+                oidc_issuer=auth_context.oidc_issuer,
+                oidc_subject=auth_context.oidc_subject,
+            )
+        except Exception:
+            logger.exception(
+                "auth.permission_decision_audit_failed",
+                path=path,
+                method=request.method,
+                actor_id=auth_context.actor_id,
+                tenant_id=auth_context.tenant_id,
+                target_tenant_id=target_tenant_id,
+                required_permissions=list(required_permissions),
+                allowed=decision.allowed,
+                reason=decision.reason,
+                access_policy_version=policy.version,
+                access_policy_source=policy.source,
+            )
     log_method = logger.info if decision.allowed else logger.warning
     log_method(
         "auth.permission_decision",
