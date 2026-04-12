@@ -716,6 +716,16 @@ async def _enterprise_operations_governance(
         playback_gate_governance=playback_gate_governance,
     )
     runtime_snapshot = resources.runtime_lifecycle.snapshot()
+    queued_refresh_ready = (
+        settings.stream.refresh_dispatch_mode != "queued"
+        or (
+            resources.arq_redis is not None
+            and resources.queued_direct_playback_refresh_controller is not None
+            and resources.queued_hls_failed_lease_refresh_controller is not None
+            and resources.queued_hls_restricted_fallback_refresh_controller is not None
+        )
+    )
+    heavy_stage_policy = settings.orchestration.heavy_stage_isolation
     oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(settings)
     )
@@ -1120,7 +1130,11 @@ async def _enterprise_operations_governance(
         ),
         heavy_stage_workload_isolation=EnterpriseOperationsSliceResponse(
             name="Heavy-Stage Workload Isolation",
-            status="partial" if settings.arq_enabled else "not_ready",
+            status=(
+                "partial"
+                if settings.arq_enabled and queued_refresh_ready
+                else ("blocked" if settings.stream.refresh_dispatch_mode == "queued" else "not_ready")
+            ),
             evidence=[
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
@@ -1131,17 +1145,45 @@ async def _enterprise_operations_governance(
                 "tenant worker enqueue quotas can deny downstream stage fan-out",
                 "index_item, parse_scrape_results, and rank_streams execute inside bounded isolated stage budgets",
                 f"stream_refresh_dispatch_mode={settings.stream.refresh_dispatch_mode}",
+                f"stream_refresh_queue_ready={int(queued_refresh_ready)}",
+                f"heavy_stage_executor_mode={heavy_stage_policy.executor_mode}",
+                f"heavy_stage_max_workers={heavy_stage_policy.max_workers}",
+                (
+                    "heavy_stage_timeouts="
+                    "index_item:"
+                    f"{heavy_stage_policy.index_timeout_seconds},"
+                    "parse_scrape_results:"
+                    f"{heavy_stage_policy.parse_timeout_seconds},"
+                    "rank_streams:"
+                    f"{heavy_stage_policy.rank_timeout_seconds}"
+                ),
+                f"heavy_stage_proof_ref_count={len(heavy_stage_policy.proof_refs)}",
+                f"queued_refresh_proof_ref_count={len(settings.orchestration.queued_refresh_proof_refs)}",
                 "GET /api/v1/workers/queue and /api/v1/workers/queue/history expose queue pressure",
             ],
             required_actions=[
                 "promote_per_stage_cpu_memory_and_timeout_budgets_into_environment policy",
-                "exercise_queued_stream_link_refresh_path_under_real mounted pressure",
+                "record_queued_refresh_soak_evidence"
+                if not settings.orchestration.queued_refresh_proof_refs
+                else "exercise_queued_stream_link_refresh_path_under_real mounted pressure",
+                "record_heavy_stage_failure_injection_or_soak_evidence"
+                if not heavy_stage_policy.proof_refs
+                else "review_heavy_stage_isolation_evidence",
                 "add_crash_containment_and_retry_policy_for_heavy_jobs",
             ],
             remaining_gaps=[
                 "memory ceilings remain process-bounded rather than OS-enforced sandbox ceilings",
-                "queued stream-link refresh is implemented but still needs environment soak evidence",
+                (
+                    "queued stream-link refresh is implemented but still needs environment soak evidence"
+                    if not settings.orchestration.queued_refresh_proof_refs
+                    else "queued stream-link refresh proof is configured but still depends on external environment execution"
+                ),
                 "crash containment is executor-bounded rather than true sandbox isolation",
+                (
+                    "heavy-stage isolation proof refs have not been recorded"
+                    if not heavy_stage_policy.proof_refs
+                    else "heavy-stage isolation proof is configured but remains executor-bounded rather than sandbox-enforced"
+                ),
             ],
         ),
         release_metadata_performance=EnterpriseOperationsSliceResponse(

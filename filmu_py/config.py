@@ -664,6 +664,28 @@ class LogShipperSettings(CompatibilityModel):
     healthcheck_url: str | None = None
 
 
+class HeavyStageIsolationSettings(CompatibilityModel):
+    """Operator-managed policy for isolated CPU-heavy worker stages."""
+
+    executor_mode: Literal["process_pool_preferred", "thread_pool_only"] = (
+        "process_pool_preferred"
+    )
+    max_workers: int = 2
+    index_timeout_seconds: float = 45.0
+    parse_timeout_seconds: float = 30.0
+    rank_timeout_seconds: float = 60.0
+    proof_refs: list[str] = Field(default_factory=list)
+
+
+class OrchestrationSettings(CompatibilityModel):
+    """Operational settings for queue and heavy-stage orchestration posture."""
+
+    heavy_stage_isolation: HeavyStageIsolationSettings = Field(
+        default_factory=HeavyStageIsolationSettings
+    )
+    queued_refresh_proof_refs: list[str] = Field(default_factory=list)
+
+
 class StreamSettings(CompatibilityModel):
     """Streaming compatibility block."""
 
@@ -769,6 +791,10 @@ class Settings(BaseSettings):
     log_shipper: LogShipperSettings = Field(
         default_factory=LogShipperSettings,
         alias="FILMU_PY_LOG_SHIPPER",
+    )
+    orchestration: OrchestrationSettings = Field(
+        default_factory=OrchestrationSettings,
+        alias="FILMU_PY_ORCHESTRATION",
     )
     grpc_bind_address: str = Field(
         default="127.0.0.1:50051",

@@ -633,6 +633,16 @@ def test_stream_status_route_exposes_serving_governance_snapshot() -> None:
     assert payload["governance"]["hls_restricted_fallback_refresh_trigger_backoff_pending"] == 0
     assert payload["governance"]["hls_restricted_fallback_refresh_trigger_failures"] == 0
     assert payload["governance"]["hls_restricted_fallback_refresh_trigger_tasks_active"] == 0
+    assert payload["governance"]["stream_refresh_dispatch_mode"] == "in_process"
+    assert payload["governance"]["stream_refresh_queue_enabled"] == 0
+    assert payload["governance"]["stream_refresh_queue_ready"] == 1
+    assert payload["governance"]["stream_refresh_proof_ref_count"] == 0
+    assert payload["governance"]["heavy_stage_executor_mode"] == "process_pool_preferred"
+    assert payload["governance"]["heavy_stage_max_workers"] == 2
+    assert payload["governance"]["heavy_stage_index_timeout_seconds"] == 45.0
+    assert payload["governance"]["heavy_stage_parse_timeout_seconds"] == 30.0
+    assert payload["governance"]["heavy_stage_rank_timeout_seconds"] == 60.0
+    assert payload["governance"]["heavy_stage_proof_ref_count"] == 0
     assert payload["governance"]["inline_remote_hls_refresh_attempts"] == 0
     assert payload["governance"]["inline_remote_hls_refresh_recovered"] == 0
     assert payload["governance"]["inline_remote_hls_refresh_no_action"] == 0

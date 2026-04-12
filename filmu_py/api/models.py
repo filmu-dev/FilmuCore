@@ -564,6 +564,16 @@ class ServingGovernanceResponse(BaseModel):
     hls_restricted_fallback_refresh_trigger_backoff_pending: int
     hls_restricted_fallback_refresh_trigger_failures: int
     hls_restricted_fallback_refresh_trigger_tasks_active: int
+    stream_refresh_dispatch_mode: Literal["in_process", "queued"]
+    stream_refresh_queue_enabled: int
+    stream_refresh_queue_ready: int
+    stream_refresh_proof_ref_count: int
+    heavy_stage_executor_mode: Literal["process_pool_preferred", "thread_pool_only"]
+    heavy_stage_max_workers: int
+    heavy_stage_index_timeout_seconds: float
+    heavy_stage_parse_timeout_seconds: float
+    heavy_stage_rank_timeout_seconds: float
+    heavy_stage_proof_ref_count: int
     stream_abort_events: int
     local_stream_abort_events: int
     remote_stream_abort_events: int

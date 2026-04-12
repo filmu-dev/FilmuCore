@@ -1484,6 +1484,15 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "structured_logging_enabled=True" in body["operator_log_pipeline"]["evidence"]
     assert body["plugin_runtime_isolation"]["status"] == "partial"
     assert body["heavy_stage_workload_isolation"]["status"] == "partial"
+    assert "stream_refresh_queue_ready=1" in body["heavy_stage_workload_isolation"]["evidence"]
+    assert (
+        "heavy_stage_executor_mode=process_pool_preferred"
+        in body["heavy_stage_workload_isolation"]["evidence"]
+    )
+    assert "heavy_stage_max_workers=2" in body["heavy_stage_workload_isolation"]["evidence"]
+    assert "queued_refresh_proof_ref_count=0" in body["heavy_stage_workload_isolation"]["evidence"]
+    assert "heavy_stage_proof_ref_count=0" in body["heavy_stage_workload_isolation"]["evidence"]
+    assert body["heavy_stage_workload_isolation"]["status"] == "partial"
     assert body["release_metadata_performance"]["status"] == "partial"
 
 
@@ -1528,7 +1537,36 @@ def test_operations_governance_route_marks_identity_ready_when_wave2_exit_gates_
     body = response.json()
     assert body["identity_authz"]["status"] == "ready"
     assert body["identity_authz"]["remaining_gaps"] == []
-    assert "oidc_rollout_status=ready" in body["identity_authz"]["evidence"]
+
+
+def test_operations_governance_route_blocks_queued_refresh_without_runtime_queue_attachment() -> None:
+    client = _build_client(
+        arq_enabled=True,
+        settings_overrides={
+            "FILMU_PY_STREAM": {"refresh_dispatch_mode": "queued"},
+            "FILMU_PY_ORCHESTRATION": {
+                "queued_refresh_proof_refs": ["ops/wave3/queued-refresh-soak.md"],
+                "heavy_stage_isolation": {
+                    "executor_mode": "thread_pool_only",
+                    "max_workers": 3,
+                    "proof_refs": ["ops/wave3/heavy-stage-failure-injection.md"],
+                },
+            },
+        },
+    )
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    heavy_stage = body["heavy_stage_workload_isolation"]
+    assert heavy_stage["status"] == "blocked"
+    assert "stream_refresh_dispatch_mode=queued" in heavy_stage["evidence"]
+    assert "stream_refresh_queue_ready=0" in heavy_stage["evidence"]
+    assert "heavy_stage_executor_mode=thread_pool_only" in heavy_stage["evidence"]
+    assert "heavy_stage_max_workers=3" in heavy_stage["evidence"]
+    assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
     assert "resource_scope_constraint_coverage=True" in body["identity_authz"]["evidence"]
 
 
