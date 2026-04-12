@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/filmu-dev/FilmuCore/compare/v0.12.0...v0.13.0) (2026-04-12)
+
+
+### Features
+
+* Codex/wave3 orchestration hardening 20260412 ([#37](https://github.com/filmu-dev/FilmuCore/issues/37)) ([3398527](https://github.com/filmu-dev/FilmuCore/commit/3398527cb3f2ea7c8c4ca20b576c0b6f9efec657))
+
 ## [0.12.0](https://github.com/filmu-dev/FilmuCore/compare/v0.11.0...v0.12.0) (2026-04-12)
 
 
