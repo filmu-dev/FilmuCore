@@ -2520,7 +2520,11 @@ def test_finalize_item_partial_scope_incomplete(monkeypatch: Any) -> None:
     assert redis.calls[-1][0] == "index_item"
     assert redis.calls[-1][2].get("missing_seasons") == [1]
     assert "_defer_by" not in redis.calls[-1][2]
-    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_job_id(item_id)
+    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_followup_job_id(
+        item_id,
+        discriminator="partial-followup",
+        missing_seasons=[1],
+    )
 
 
 def test_finalize_item_full_show_ongoing(monkeypatch: Any) -> None:
@@ -2556,7 +2560,54 @@ def test_finalize_item_full_show_ongoing(monkeypatch: Any) -> None:
     assert media_service.state is ItemState.ONGOING
     assert media_service.transition_messages == [(ItemEvent.MARK_ONGOING, "waiting_on_unreleased_episodes")]
     assert redis.calls[-1][0] == "index_item"
-    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_job_id(item_id)
+    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_followup_job_id(
+        item_id,
+        discriminator="ongoing-poll",
+    )
+    assert redis.calls[-1][2].get("_defer_by") == timedelta(hours=24)
+
+
+def test_finalize_item_without_satisfied_released_episodes_defers_index_followup(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-finalize-no-inventory"
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        item_attributes={"item_type": "show"},
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def fake_evaluate(*_args: Any, **_kwargs: Any) -> ShowCompletionResult:
+        return ShowCompletionResult(
+            all_satisfied=False,
+            any_satisfied=False,
+            has_future_episodes=False,
+            missing_released=[(1, 2)],
+        )
+
+    async def fake_resolve_arq(_ctx: Any) -> FakeArqRedis:
+        return redis
+
+    monkeypatch.setattr(tasks, "_evaluate_show_completion", fake_evaluate)
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", fake_resolve_arq)
+    result = asyncio.run(
+        tasks.finalize_item(
+            {"settings": _build_worker_settings(), "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert redis.calls[-1][0] == "index_item"
+    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_followup_job_id(
+        item_id,
+        discriminator="inventory-recheck",
+        missing_seasons=[1],
+    )
+    assert redis.calls[-1][2].get("_defer_by") == timedelta(seconds=300)
+    assert redis.calls[-1][2].get("missing_seasons") == [1]
 
 
 def test_finalize_item_re_entry_path(monkeypatch: Any) -> None:
@@ -2642,6 +2693,96 @@ def test_finalize_item_no_stranding(monkeypatch: Any) -> None:
         )
     )
     assert media_service.state is not ItemState.DOWNLOADED
+
+
+def test_enqueue_index_item_supports_custom_job_id_and_defer(monkeypatch: Any) -> None:
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+
+    result = asyncio.run(
+        tasks.enqueue_index_item(
+            redis,
+            item_id="item-index-enqueue-followup",
+            queue_name="filmu-py",
+            tenant_id="tenant-a",
+            defer_by_seconds=90,
+            job_id=tasks.index_item_followup_job_id(
+                "item-index-enqueue-followup",
+                discriminator="release-poll",
+            ),
+            missing_seasons=[2],
+        )
+    )
+
+    assert result is True
+    assert redis.calls[-1][0] == "index_item"
+    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_followup_job_id(
+        "item-index-enqueue-followup",
+        discriminator="release-poll",
+    )
+    assert redis.calls[-1][2].get("_defer_by") == timedelta(seconds=90)
+    assert redis.calls[-1][2].get("missing_seasons") == [2]
+
+
+def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) -> None:
+    original_cache = dict(tasks._HEAVY_STAGE_EXECUTORS)
+    tasks._HEAVY_STAGE_EXECUTORS.clear()
+
+    class FakeExecutor:
+        def __init__(self, max_workers: int) -> None:
+            self.max_workers = max_workers
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    created: list[FakeExecutor] = []
+
+    def fake_thread_pool_executor(*, max_workers: int) -> FakeExecutor:
+        executor = FakeExecutor(max_workers=max_workers)
+        created.append(executor)
+        return executor
+
+    base_settings = _build_worker_settings()
+    first_settings = base_settings.model_copy(
+        update={
+            "orchestration": base_settings.orchestration.model_copy(
+                update={
+                    "heavy_stage_isolation": base_settings.orchestration.heavy_stage_isolation.model_copy(
+                        update={"executor_mode": "thread_pool_only", "max_workers": 1}
+                    )
+                }
+            )
+        }
+    )
+    second_settings = base_settings.model_copy(
+        update={
+            "orchestration": base_settings.orchestration.model_copy(
+                update={
+                    "heavy_stage_isolation": base_settings.orchestration.heavy_stage_isolation.model_copy(
+                        update={"executor_mode": "thread_pool_only", "max_workers": 2}
+                    )
+                }
+            )
+        }
+    )
+    current_settings = first_settings
+
+    monkeypatch.setattr(tasks, "ThreadPoolExecutor", fake_thread_pool_executor)
+    monkeypatch.setattr(tasks, "get_settings", lambda: current_settings)
+
+    try:
+        first_executor = tasks._heavy_stage_executor("index_item")
+        current_settings = second_settings
+        second_executor = tasks._heavy_stage_executor("index_item")
+        assert first_executor is not second_executor
+        assert created[0].shutdown_calls == [(False, True)]
+        assert len(tasks._HEAVY_STAGE_EXECUTORS) == 1
+    finally:
+        for executor in tasks._HEAVY_STAGE_EXECUTORS.values():
+            executor.shutdown(wait=False, cancel_futures=True)
+        tasks._HEAVY_STAGE_EXECUTORS.clear()
+        tasks._HEAVY_STAGE_EXECUTORS.update(original_cache)
 
 
 def test_evaluate_show_missing_specialization() -> None:

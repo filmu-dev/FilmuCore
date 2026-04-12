@@ -75,6 +75,7 @@ from filmu_py.services.playback import (
     trigger_hls_failed_lease_refresh_from_resources,
     trigger_hls_restricted_fallback_refresh_from_resources,
 )
+from filmu_py.workers import tasks as worker_tasks
 
 
 class DummyRedis:
@@ -5988,6 +5989,110 @@ def test_in_process_direct_playback_refresh_controller_shutdown_cancels_pending_
         assert controller.has_pending(item.id) is False
 
     asyncio.run(exercise())
+
+
+def test_queued_direct_playback_refresh_controller_tracks_pending_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_enqueue(*_args: Any, item_id: str, queue_name: str, **_kwargs: Any) -> bool:
+        _ = queue_name
+        calls.append(item_id)
+        return len(calls) == 1
+
+    monkeypatch.setattr(worker_tasks, "enqueue_refresh_direct_playback_link", fake_enqueue)
+
+    async def exercise() -> None:
+        controller = playback_service.QueuedDirectPlaybackRefreshController(
+            object(),
+            queue_name="filmu-py",
+        )
+
+        first = await controller.trigger("item-queued-direct")
+        assert first.outcome == "scheduled"
+        assert controller.has_pending("item-queued-direct") is True
+        last_result = controller.get_last_result("item-queued-direct")
+        assert last_result is not None
+        assert last_result.outcome == "scheduled"
+
+        second = await controller.trigger("item-queued-direct")
+        assert second.outcome == "already_pending"
+        assert controller.has_pending("item-queued-direct") is True
+        assert controller.get_last_result("item-queued-direct") == last_result
+
+    asyncio.run(exercise())
+    assert calls == ["item-queued-direct", "item-queued-direct"]
+
+
+def test_queued_hls_failed_lease_refresh_controller_reports_scheduled_until_worker_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_enqueue(*_args: Any, item_id: str, queue_name: str, **_kwargs: Any) -> bool:
+        _ = queue_name
+        calls.append(item_id)
+        return len(calls) == 1
+
+    monkeypatch.setattr(worker_tasks, "enqueue_refresh_selected_hls_failed_lease", fake_enqueue)
+
+    async def exercise() -> None:
+        controller = playback_service.QueuedHlsFailedLeaseRefreshController(
+            object(),
+            queue_name="filmu-py",
+        )
+
+        first = await controller.trigger("item-queued-hls-failed")
+        assert first.outcome == "scheduled"
+        assert controller.has_pending("item-queued-hls-failed") is True
+        last_result = controller.get_last_result("item-queued-hls-failed")
+        assert last_result is not None
+        assert last_result.outcome == "scheduled"
+
+        second = await controller.trigger("item-queued-hls-failed")
+        assert second.outcome == "already_pending"
+        assert controller.get_last_result("item-queued-hls-failed") == last_result
+
+    asyncio.run(exercise())
+    assert calls == ["item-queued-hls-failed", "item-queued-hls-failed"]
+
+
+def test_queued_hls_restricted_fallback_refresh_controller_tracks_pending_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_enqueue(*_args: Any, item_id: str, queue_name: str, **_kwargs: Any) -> bool:
+        _ = queue_name
+        calls.append(item_id)
+        return len(calls) == 1
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "enqueue_refresh_selected_hls_restricted_fallback",
+        fake_enqueue,
+    )
+
+    async def exercise() -> None:
+        controller = playback_service.QueuedHlsRestrictedFallbackRefreshController(
+            object(),
+            queue_name="filmu-py",
+        )
+
+        first = await controller.trigger("item-queued-hls-restricted")
+        assert first.outcome == "scheduled"
+        assert controller.has_pending("item-queued-hls-restricted") is True
+        last_result = controller.get_last_result("item-queued-hls-restricted")
+        assert last_result is not None
+        assert last_result.outcome == "scheduled"
+
+        second = await controller.trigger("item-queued-hls-restricted")
+        assert second.outcome == "already_pending"
+        assert controller.get_last_result("item-queued-hls-restricted") == last_result
+
+    asyncio.run(exercise())
+    assert calls == ["item-queued-hls-restricted", "item-queued-hls-restricted"]
 
 
 def test_trigger_direct_playback_refresh_from_resources_uses_attached_controller() -> None:

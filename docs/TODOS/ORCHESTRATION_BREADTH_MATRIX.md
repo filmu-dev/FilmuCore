@@ -49,11 +49,9 @@ Today the Python backend has:
 
 ### What it does **not** yet cover well
 
-- dedicated `index-item` metadata enrichment stage
-- explicit app-lifecycle orchestration equivalent to the TS `program` / `bootstrap` / `main-runner` split
-- heavy-stage isolation beyond the new `rank_streams` executor boundary
 - queue-backed link-resolver dedup for VFS beyond the new mount-side inline refresh dedup baseline
 - broader queue-lag/operator visibility and stronger enqueue-dedup/idempotency boundaries across the widened worker graph
+- deeper process/sandbox isolation beyond the current bounded heavy-stage executor budgets
 
 ---
 
