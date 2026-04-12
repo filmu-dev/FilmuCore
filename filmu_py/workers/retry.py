@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -109,6 +110,28 @@ def record_worker_retry(stage: str) -> None:
     WORKER_RETRY_TOTAL.labels(stage=stage).inc()
 
 
+def _dead_letter_reason_code(reason: str) -> str:
+    """Return one bounded operator-facing dead-letter reason code."""
+
+    normalized = reason.strip().lower()
+    if normalized == "":
+        return "unknown_failure"
+    if "timeout" in normalized:
+        return "timeout"
+    if "rate" in normalized and "limit" in normalized:
+        return "rate_limited"
+    if "no_candidates" in normalized:
+        return "no_candidates"
+    if "no_valid_parsed_candidates" in normalized:
+        return "no_valid_parsed_candidates"
+    if "no_passing_stream_candidates" in normalized:
+        return "no_passing_stream_candidates"
+    if "unknown item_id" in normalized:
+        return "unknown_item"
+    slug = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    return slug[:64] or "unknown_failure"
+
+
 def timed_stage(
     stage: str,
 ) -> Callable[[Callable[P, Coroutine[Any, Any, T]]], Callable[P, Coroutine[Any, Any, T]]]:
@@ -164,9 +187,12 @@ async def route_dead_letter(
 
     payload = json.dumps(
         {
+            "stage": task_name,
             "task": task_name,
             "item_id": item_id,
             "reason": reason,
+            "reason_code": _dead_letter_reason_code(reason),
+            "idempotency_key": f"{task_name}:{item_id}",
             "attempt": task_try_count(ctx),
             "queued_at": datetime.now(UTC).isoformat(),
         },

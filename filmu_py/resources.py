@@ -14,6 +14,7 @@ from .core.chunk_engine import ChunkCache
 from .core.event_bus import EventBus
 from .core.log_stream import LogStreamBroker
 from .core.rate_limiter import DistributedRateLimiter
+from .core.runtime_lifecycle import RuntimeLifecycleState
 from .db.runtime import DatabaseRuntime
 from .services.media import MediaService
 
@@ -49,6 +50,7 @@ class AppResources:
     db: DatabaseRuntime
     media_service: MediaService
     graphql_plugin_registry: GraphQLPluginRegistry
+    runtime_lifecycle: RuntimeLifecycleState = field(default_factory=RuntimeLifecycleState)
     chunk_cache: ChunkCache | None = None
     plugin_registry: PluginRegistry | None = None
     security_identity_service: SecurityIdentityService | None = None
@@ -64,6 +66,9 @@ class AppResources:
     hls_restricted_fallback_refresh_controller: (
         InProcessHlsRestrictedFallbackRefreshController | None
     ) = None
+    queued_direct_playback_refresh_controller: Any | None = None
+    queued_hls_failed_lease_refresh_controller: Any | None = None
+    queued_hls_restricted_fallback_refresh_controller: Any | None = None
     vfs_catalog_supplier: FilmuVfsCatalogSupplier | None = None
     vfs_catalog_server: FilmuVfsCatalogGrpcServer | None = None
     log_stream: LogStreamBroker = field(default_factory=LogStreamBroker)

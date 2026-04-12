@@ -23,6 +23,11 @@ from .core.chunk_engine import ChunkCache
 from .core.event_bus import EventBus
 from .core.rate_limiter import DistributedRateLimiter
 from .core.replay import RedisReplayEventBackplane
+from .core.runtime_lifecycle import (
+    RuntimeLifecycleHealth,
+    RuntimeLifecyclePhase,
+    RuntimeLifecycleState,
+)
 from .db import DatabaseRuntime, run_migrations
 from .graphql import GraphQLPluginRegistry, create_graphql_router
 from .logging import attach_log_stream, configure_logging, detach_log_stream
@@ -42,6 +47,9 @@ from .services.playback import (
     InProcessHlsFailedLeaseRefreshController,
     InProcessHlsRestrictedFallbackRefreshController,
     PlaybackSourceService,
+    QueuedDirectPlaybackRefreshController,
+    QueuedHlsFailedLeaseRefreshController,
+    QueuedHlsRestrictedFallbackRefreshController,
 )
 from .services.plugin_governance import PluginGovernanceService
 from .services.settings_service import load_settings
@@ -246,160 +254,229 @@ def _build_lifespan(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """Initialize and teardown shared runtime resources."""
 
+        runtime_lifecycle = RuntimeLifecycleState()
+        app.state.runtime_lifecycle = runtime_lifecycle
+        runtime_lifecycle.transition(
+            RuntimeLifecyclePhase.BOOTSTRAP,
+            detail="startup_initializing_core_dependencies",
+        )
         redis = _redis_from_settings(settings)
-        await _ping_redis(redis)
-        if settings.run_migrations_on_startup:
-            await asyncio.to_thread(run_migrations, settings.postgres_dsn)
-
-        db = DatabaseRuntime(settings.postgres_dsn, echo=settings.env == "development")
-        persisted_settings = await load_settings(db)
-        runtime_settings = settings
-        settings_source = "environment"
-        if persisted_settings is not None:
-            runtime_settings = Settings.from_compatibility_dict(persisted_settings)
-            settings_source = "database"
-        set_runtime_settings(runtime_settings)
-        configure_logging(runtime_settings)
-        logger.info(
-            "startup.settings.loaded",
-            extra={"source": settings_source, "persisted": persisted_settings is not None},
-        )
-
-        event_bus = EventBus()
+        resources: AppResources | None = None
+        db: DatabaseRuntime | None = None
         arq_redis: ArqRedis | None = None
-        queue_name = _arq_queue_name(runtime_settings)
-        if runtime_settings.arq_enabled:
-            arq_redis = await create_pool(
-                RedisSettings.from_dsn(str(runtime_settings.redis_url)),
-                default_queue_name=queue_name,
-            )
-            sentinel_exists = (
-                await redis.exists(_BACKFILL_IMDB_IDS_SENTINEL_KEY) if hasattr(redis, "exists") else 0
-            )
-            if not sentinel_exists:
-                await arq_redis.enqueue_job("backfill_imdb_ids")
-                if hasattr(redis, "set"):
-                    await redis.set(_BACKFILL_IMDB_IDS_SENTINEL_KEY, "1")
-                logger.info("backfill.imdb_ids.enqueued", extra={"one_shot": True})
-            await arq_redis.enqueue_job(
-                "recover_incomplete_library",
-                _job_id="startup-recover-incomplete-library",
-            )
-            logger.info("recover_incomplete_library.enqueued", extra={"one_shot": True})
-            await arq_redis.enqueue_job(
-                "retry_library",
-                _job_id="startup-retry-library",
-            )
-            logger.info("retry_library.enqueued", extra={"one_shot": True})
-        else:
-            logger.warning("backfill.imdb_ids.skipped", extra={"reason": "arq_not_enabled"})
+        hls_governance_task: asyncio.Task[None] | None = None
+        try:
+            await _ping_redis(redis)
+            if settings.run_migrations_on_startup:
+                await asyncio.to_thread(run_migrations, settings.postgres_dsn)
 
-        async def enqueue_scraped_item(item_id: str) -> None:
-            if arq_redis is None:
-                return
-            await enqueue_process_scraped_item(
-                arq_redis,
-                item_id=item_id,
-                queue_name=queue_name,
+            db = DatabaseRuntime(settings.postgres_dsn, echo=settings.env == "development")
+            persisted_settings = await load_settings(db)
+            runtime_settings = settings
+            settings_source = "environment"
+            if persisted_settings is not None:
+                runtime_settings = Settings.from_compatibility_dict(persisted_settings)
+                settings_source = "database"
+            set_runtime_settings(runtime_settings)
+            configure_logging(runtime_settings)
+            logger.info(
+                "startup.settings.loaded",
+                extra={"source": settings_source, "persisted": persisted_settings is not None},
             )
 
-        rate_limiter = DistributedRateLimiter(redis=redis)
-        media_service = MediaService(
-            db=db,
-            event_bus=event_bus,
-            scraped_item_enqueuer=(enqueue_scraped_item if arq_redis is not None else None),
-            settings=runtime_settings,
-            rate_limiter=rate_limiter,
-        )
-
-        resources = AppResources(
-            settings=runtime_settings,
-            redis=redis,
-            cache=CacheManager(redis=redis, namespace="filmu_py"),
-            chunk_cache=ChunkCache(max_bytes=256 * 1024 * 1024),
-            rate_limiter=rate_limiter,
-            event_bus=event_bus,
-            db=db,
-            media_service=media_service,
-            graphql_plugin_registry=plugin_registry.graphql,
-            plugin_registry=plugin_registry,
-            plugin_settings_payload=(persisted_settings or runtime_settings.to_compatibility_dict()),
-            arq_redis=arq_redis,
-            arq_queue_name=queue_name,
-        )
-        resources.security_identity_service = build_security_identity_service(resources)
-        await resources.security_identity_service.bootstrap(runtime_settings)
-        resources.access_policy_service = build_access_policy_service(resources)
-        resources.access_policy_snapshot = await resources.access_policy_service.bootstrap(
-            runtime_settings
-        )
-        resources.authorization_audit_service = build_authorization_audit_service(resources)
-        resources.control_plane_service = build_control_plane_service(resources)
-        resources.plugin_governance_service = build_plugin_governance_service(resources)
-        if runtime_settings.control_plane.event_backplane == "redis_stream":
-            event_bus.attach_replay_backplane(
-                RedisReplayEventBackplane(
-                    cast("Any", redis),
-                    stream_name=runtime_settings.control_plane.event_stream_name,
-                    maxlen=runtime_settings.control_plane.event_replay_maxlen,
-                    subscription_state_sink=resources.control_plane_service,
+            event_bus = EventBus()
+            queue_name = _arq_queue_name(runtime_settings)
+            if runtime_settings.arq_enabled:
+                arq_redis = await create_pool(
+                    RedisSettings.from_dsn(str(runtime_settings.redis_url)),
+                    default_queue_name=queue_name,
                 )
+                sentinel_exists = (
+                    await redis.exists(_BACKFILL_IMDB_IDS_SENTINEL_KEY)
+                    if hasattr(redis, "exists")
+                    else 0
+                )
+                if not sentinel_exists:
+                    await arq_redis.enqueue_job("backfill_imdb_ids")
+                    if hasattr(redis, "set"):
+                        await redis.set(_BACKFILL_IMDB_IDS_SENTINEL_KEY, "1")
+                    logger.info("backfill.imdb_ids.enqueued", extra={"one_shot": True})
+                await arq_redis.enqueue_job(
+                    "recover_incomplete_library",
+                    _job_id="startup-recover-incomplete-library",
+                )
+                logger.info("recover_incomplete_library.enqueued", extra={"one_shot": True})
+                await arq_redis.enqueue_job(
+                    "retry_library",
+                    _job_id="startup-retry-library",
+                )
+                logger.info("retry_library.enqueued", extra={"one_shot": True})
+            else:
+                logger.warning("backfill.imdb_ids.skipped", extra={"reason": "arq_not_enabled"})
+
+            async def enqueue_scraped_item(item_id: str) -> None:
+                if arq_redis is None:
+                    return
+                await enqueue_process_scraped_item(
+                    arq_redis,
+                    item_id=item_id,
+                    queue_name=queue_name,
+                )
+
+            rate_limiter = DistributedRateLimiter(redis=redis)
+            media_service = MediaService(
+                db=db,
+                event_bus=event_bus,
+                scraped_item_enqueuer=(enqueue_scraped_item if arq_redis is not None else None),
+                settings=runtime_settings,
+                rate_limiter=rate_limiter,
             )
-        plugin_context_provider = build_plugin_context_provider(resources)
-        app.state.plugin_capability_load_report = await asyncio.to_thread(
-            load_plugins,
-            runtime_settings.plugins_dir,
-            plugin_registry,
-            context_provider=plugin_context_provider,
-            host_version=runtime_settings.version,
-            trust_store_path=runtime_settings.plugin_trust_store_path,
-            strict_signatures=runtime_settings.plugin_strict_signatures,
-            register_graphql=False,
-            register_capabilities=True,
-        )
-        app.state.builtin_plugin_registrations = await asyncio.to_thread(
-            register_builtin_plugins,
-            plugin_registry,
-            context_provider=plugin_context_provider,
-        )
-        plugin_context_provider.lock()
-        resources.event_bus.attach_plugin_runtime(plugin_registry)
-        resources.playback_service = build_playback_service(resources)
-        resources.playback_refresh_controller = build_playback_refresh_controller(resources)
-        resources.hls_failed_lease_refresh_controller = build_hls_failed_lease_refresh_controller(
-            resources
-        )
-        resources.hls_restricted_fallback_refresh_controller = (
-            build_hls_restricted_fallback_refresh_controller(resources)
-        )
-        resources.vfs_catalog_supplier = build_vfs_catalog_supplier(resources)
-        if resources.vfs_catalog_supplier is not None:
-            resources.vfs_catalog_server = build_vfs_catalog_server(resources)
-            if resources.vfs_catalog_server is not None:
-                await resources.vfs_catalog_server.start()
-        app.state.resources = resources
-        attach_log_stream(resources.log_stream)
-        hls_governance_task = asyncio.create_task(byte_streaming.run_hls_governance_loop())
 
-        yield
+            resources = AppResources(
+                settings=runtime_settings,
+                redis=redis,
+                cache=CacheManager(redis=redis, namespace="filmu_py"),
+                chunk_cache=ChunkCache(max_bytes=256 * 1024 * 1024),
+                rate_limiter=rate_limiter,
+                event_bus=event_bus,
+                db=db,
+                media_service=media_service,
+                graphql_plugin_registry=plugin_registry.graphql,
+                runtime_lifecycle=runtime_lifecycle,
+                plugin_registry=plugin_registry,
+                plugin_settings_payload=(persisted_settings or runtime_settings.to_compatibility_dict()),
+                arq_redis=arq_redis,
+                arq_queue_name=queue_name,
+            )
+            resources.security_identity_service = build_security_identity_service(resources)
+            await resources.security_identity_service.bootstrap(runtime_settings)
+            resources.access_policy_service = build_access_policy_service(resources)
+            resources.access_policy_snapshot = await resources.access_policy_service.bootstrap(
+                runtime_settings
+            )
+            resources.authorization_audit_service = build_authorization_audit_service(resources)
+            resources.control_plane_service = build_control_plane_service(resources)
+            resources.plugin_governance_service = build_plugin_governance_service(resources)
+            if runtime_settings.control_plane.event_backplane == "redis_stream":
+                event_bus.attach_replay_backplane(
+                    RedisReplayEventBackplane(
+                        cast("Any", redis),
+                        stream_name=runtime_settings.control_plane.event_stream_name,
+                        maxlen=runtime_settings.control_plane.event_replay_maxlen,
+                        subscription_state_sink=resources.control_plane_service,
+                    )
+                )
+            runtime_lifecycle.transition(
+                RuntimeLifecyclePhase.PLUGIN_REGISTRATION,
+                detail="startup_registering_runtime_plugins",
+            )
+            plugin_context_provider = build_plugin_context_provider(resources)
+            app.state.plugin_capability_load_report = await asyncio.to_thread(
+                load_plugins,
+                runtime_settings.plugins_dir,
+                plugin_registry,
+                context_provider=plugin_context_provider,
+                host_version=runtime_settings.version,
+                trust_store_path=runtime_settings.plugin_trust_store_path,
+                strict_signatures=runtime_settings.plugin_strict_signatures,
+                register_graphql=False,
+                register_capabilities=True,
+            )
+            app.state.builtin_plugin_registrations = await asyncio.to_thread(
+                register_builtin_plugins,
+                plugin_registry,
+                context_provider=plugin_context_provider,
+            )
+            plugin_context_provider.lock()
+            resources.event_bus.attach_plugin_runtime(plugin_registry)
+            resources.playback_service = build_playback_service(resources)
+            resources.playback_refresh_controller = build_playback_refresh_controller(resources)
+            resources.hls_failed_lease_refresh_controller = (
+                build_hls_failed_lease_refresh_controller(resources)
+            )
+            resources.hls_restricted_fallback_refresh_controller = (
+                build_hls_restricted_fallback_refresh_controller(resources)
+            )
+            if (
+                runtime_settings.stream.refresh_dispatch_mode == "queued"
+                and arq_redis is not None
+            ):
+                resources.queued_direct_playback_refresh_controller = (
+                    QueuedDirectPlaybackRefreshController(
+                        arq_redis,
+                        queue_name=queue_name,
+                    )
+                )
+                resources.queued_hls_failed_lease_refresh_controller = (
+                    QueuedHlsFailedLeaseRefreshController(
+                        arq_redis,
+                        queue_name=queue_name,
+                    )
+                )
+                resources.queued_hls_restricted_fallback_refresh_controller = (
+                    QueuedHlsRestrictedFallbackRefreshController(
+                        arq_redis,
+                        queue_name=queue_name,
+                    )
+                )
+            resources.vfs_catalog_supplier = build_vfs_catalog_supplier(resources)
+            if resources.vfs_catalog_supplier is not None:
+                resources.vfs_catalog_server = build_vfs_catalog_server(resources)
+                if resources.vfs_catalog_server is not None:
+                    await resources.vfs_catalog_server.start()
+            app.state.resources = resources
+            attach_log_stream(resources.log_stream)
+            hls_governance_task = asyncio.create_task(byte_streaming.run_hls_governance_loop())
+            plugin_failure_count = len(getattr(app.state.plugin_capability_load_report, "failed", []))
+            runtime_lifecycle.transition(
+                RuntimeLifecyclePhase.STEADY_STATE,
+                health=(
+                    RuntimeLifecycleHealth.DEGRADED
+                    if plugin_failure_count
+                    else RuntimeLifecycleHealth.HEALTHY
+                ),
+                detail=(
+                    f"runtime_ready plugin_failures={plugin_failure_count}"
+                    if plugin_failure_count
+                    else "runtime_ready"
+                ),
+            )
 
-        hls_governance_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await hls_governance_task
-        if resources.vfs_catalog_server is not None:
-            await resources.vfs_catalog_server.stop()
-        detach_log_stream()
-        if resources.hls_restricted_fallback_refresh_controller is not None:
-            await resources.hls_restricted_fallback_refresh_controller.shutdown()
-        if resources.hls_failed_lease_refresh_controller is not None:
-            await resources.hls_failed_lease_refresh_controller.shutdown()
-        if resources.playback_refresh_controller is not None:
-            await resources.playback_refresh_controller.shutdown()
-        if resources.arq_redis is not None:
-            await resources.arq_redis.aclose()
-        await db.dispose()
-        await redis.aclose()
-        reset_runtime_settings()
+            yield
+        except Exception as exc:
+            runtime_lifecycle.transition(
+                RuntimeLifecyclePhase.DEGRADED,
+                health=RuntimeLifecycleHealth.DEGRADED,
+                detail=f"startup_failed:{type(exc).__name__}",
+            )
+            raise
+        finally:
+            runtime_lifecycle.transition(
+                RuntimeLifecyclePhase.SHUTTING_DOWN,
+                health=runtime_lifecycle.snapshot().health,
+                detail="runtime_shutdown_started",
+            )
+            if hls_governance_task is not None:
+                hls_governance_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await hls_governance_task
+            if resources is not None and resources.vfs_catalog_server is not None:
+                await resources.vfs_catalog_server.stop()
+            detach_log_stream()
+            if resources is not None and resources.hls_restricted_fallback_refresh_controller is not None:
+                await resources.hls_restricted_fallback_refresh_controller.shutdown()
+            if resources is not None and resources.hls_failed_lease_refresh_controller is not None:
+                await resources.hls_failed_lease_refresh_controller.shutdown()
+            if resources is not None and resources.playback_refresh_controller is not None:
+                await resources.playback_refresh_controller.shutdown()
+            if resources is not None and resources.arq_redis is not None:
+                await resources.arq_redis.aclose()
+            elif arq_redis is not None:
+                await arq_redis.aclose()
+            if db is not None:
+                await db.dispose()
+            await redis.aclose()
+            reset_runtime_settings()
 
     return lifespan
 

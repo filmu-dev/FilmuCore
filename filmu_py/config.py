@@ -671,6 +671,7 @@ class StreamSettings(CompatibilityModel):
     connect_timeout_seconds: int = 30
     chunk_wait_timeout_seconds: int = 300
     activity_timeout_seconds: int = 360
+    refresh_dispatch_mode: Literal["in_process", "queued"] = "in_process"
 
 
 class Settings(BaseSettings):

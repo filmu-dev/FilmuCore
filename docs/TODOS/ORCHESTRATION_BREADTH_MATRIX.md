@@ -49,8 +49,9 @@ Today the Python backend has:
 
 ### What it does **not** yet cover well
 
-- content-source intake (Overseerr/Plex webhooks)
 - dedicated `index-item` metadata enrichment stage
+- explicit app-lifecycle orchestration equivalent to the TS `program` / `bootstrap` / `main-runner` split
+- heavy-stage isolation beyond the new `rank_streams` executor boundary
 - queue-backed link-resolver dedup for VFS beyond the new mount-side inline refresh dedup baseline
 - broader queue-lag/operator visibility and stronger enqueue-dedup/idempotency boundaries across the widened worker graph
 
@@ -60,6 +61,7 @@ Today the Python backend has:
 
 The current local TS working tree includes a much broader execution model with distinct flow families and stage boundaries, including:
 
+- explicit `xstate` machine hierarchy across program lifecycle, bootstrap, plugin registration, and main-runner steady state
 - request-content-services intake
 - index-item flow
 - scrape-item flow
@@ -69,6 +71,8 @@ The current local TS working tree includes a much broader execution model with d
 - **find-valid-torrent step**
 - retry-library recovery
 - sandboxed heavy-stage jobs on disk for parse/map/validate work
+- queue-backed `stream-link-requested` handling on the VFS side
+- downloader provider-list / cache-check hook families before final download resolution
 - plugin hook workers on typed events
 - publishable-event governance for plugin fan-out
 
@@ -83,17 +87,20 @@ This is the reference breadth the Python roadmap should explicitly account for.
 | Capability                           | Current Python state                                  | TS reference breadth                                   | Why it matters                                                            | Status                 |
 | ------------------------------------ | ----------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------- | ---------------------- |
 | **Request-content-services intake**  | Overseerr/Jellyseerr webhook intake plus scheduled content-service polling now exist, with partial-range tracking on `ItemRequestORM` | Explicit TS flow exists                                | Separates inbound request ingestion from later lifecycle stages           | ✅ Done — Overseerr webhook at `/api/v1/webhook/overseerr` + `poll_content_services` ARQ cron (30 min) + partial season/episode range on `ItemRequestORM` (migration 0019) |
-| **Index stage**                      | TMDB metadata enrichment exists for item detail/search; no dedicated `index-item` worker stage | Explicit TS flow exists                                | Required for metadata enrichment and correct lifecycle progression        | 🔶 Partial             |
+| **Index stage**                      | Dedicated `index_item` worker stage exists, item intake/recovery now re-enter through it, and metadata enrichment no longer hides inside `scrape_item` | Explicit TS flow exists                                | Required for metadata enrichment and correct lifecycle progression        | ✅ Done baseline       |
+| **Formal runtime lifecycle graph**   | Explicit runtime lifecycle state now tracks bootstrap, plugin registration, steady state, degraded startup, and shutdown on `/api/v1/operations/runtime` | TS `program` / `bootstrap` / `plugin-registrar` / `main-runner` hierarchy exists | Keeps boot, plugin registration, and runtime transitions explicit and observable | ✅ Done baseline       |
 | **Scrape stage**                     | ✅ Real plugin-backed provider stage with `ScrapeCandidateORM` persistence and built-in Prowlarr/RARBG/Torrentio scrapers | Explicit TS flow exists                                | Core discovery stage                                                      | ✅ Done                |
 | **Parse-scrape-results stage**       | ✅ Dedicated `parse_scrape_results` ARQ stage parses torrent names, validates content compatibility, persists parsed candidates to `StreamORM` | Separate TS step (`parse-scrape-results.processor`)    | Keeps scrape collection and parse/validate separated                      | ✅ Done                |
 | **Torrent-file validation / selection** | ✅ `select_stream_candidate()` chooses best passing candidate by rank_score/lev_ratio/part-aware tie-break, persists `StreamORM.selected` | TS now centers on `find-valid-torrent` plus sandboxed `validate-torrent-files` work | Important for correctness and provider/debrid decoupling                  | ✅ Done baseline       |
 | **Ranking stage**                    | ✅ `rank_streams` ARQ stage with RTN-compatible Levenshtein + multi-axis scoring, fetch-check filtering, configurable `RankingModel`, and partial-scope coverage bonus | Separate TS step (`rank-streams.processor`)            | Needed for repeatable selection logic and configurable quality policy      | ✅ Done / deepen       |
 | **Download fan-out / orchestration** | ✅ `debrid_item` calls enabled provider download-pipeline client, persists `MediaEntryORM` rows | TS has broader fan-out behavior                        | Supports partial success and richer downloader selection                   | ✅ Done (single-provider) |
 | **Retry-library recovery**           | ✅ Scheduled `recover_incomplete_library` cron (15 min), stage-aware re-entry, deduplication | TS has explicit actor/flow                             | Crucial for restart recovery and incomplete-library progression           | ✅ Done                |
+| **Queue-backed stream-link resolution** | Mount-side inline stale-link refresh and dedup still exist in Rust, and the Python control plane now has an optional queued refresh dispatch path for direct-play and HLS refresh work | TS VFS `open` publishes `stream-link-requested` and dedups at queue level | Matters if link resolution pressure needs to be separated from read/open latency | ✅ Done baseline / deepen |
 | **Plugin hook workers**              | Implemented baseline (in-process typed hook dispatch with timeout isolation) | TS has queue-backed plugin hook workers                | Required for plugin platform parity beyond capability-protocol contributions | Done baseline / deepen |
 | **Publishable-event governance**     | Implemented baseline                                  | TS tracks publishable events explicitly                | Prevents queue buildup and undefined plugin-event fan-out                 | Done baseline          |
 | **Transactional outbox**             | ✅ `OutboxEventORM` + scheduled `publish_outbox_events` cron (30 sec) | Not identical in TS, but needed for Python correctness | Needed for publish consistency and replay-safe growth                     | ✅ Done                |
-| **Idempotency boundaries**           | 🔶 Stage-aware deduplication via `enqueue_process_scraped_item()`, recovery-attempt counters | Needed regardless of TS                                | Required for safe retries, replays, and recovery                          | 🔶 Partial             |
+| **Idempotency boundaries**           | Stable job ids, stage-idempotency counters, DLQ reason codes, and queue-history DLQ taxonomy now exist across the widened worker graph | Needed regardless of TS                                | Required for safe retries, replays, and recovery                          | ✅ Done baseline / deepen |
+| **Heavy-stage isolation**            | `index_item`, `parse_scrape_results`, and `rank_streams` now run under bounded isolated stage budgets and explicit timeouts | TS keeps sandboxed heavy jobs on disk for parse/map/validate work | Needed for crash containment, bounded CPU pressure, and enterprise workload isolation | ✅ Done baseline / deepen |
 
 ---
 
@@ -272,6 +279,11 @@ Priority 3 should be considered meaningfully advanced when:
 - recovery/retry-library behavior is explicit, stage-aware, and scheduled
 - retries are safe because outbox, deduplication, and recovery-attempt counters are defined
 - plugin execution can grow beyond capability protocols without collapsing orchestration clarity
+
+Current checkpoint:
+
+- Reached for the core scrape -> parse -> rank -> debrid -> finalize pipeline and baseline recovery.
+- Still open for dedicated index-stage breadth, formal lifecycle orchestration depth, stronger idempotency boundaries, deliberate stream-link-resolution architecture, and heavy-stage isolation beyond `rank_streams`.
 
 ## Serving-core update (March 2026)
 
