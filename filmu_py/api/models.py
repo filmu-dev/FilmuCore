@@ -239,6 +239,10 @@ class PluginGovernanceSummaryResponse(BaseModel):
     load_failed_plugins: int
     ready_plugins: int
     unready_plugins: int
+    healthy_plugins: int
+    degraded_plugins: int
+    non_builtin_plugins: int
+    isolated_non_builtin_plugins: int
     quarantined_plugins: int
     quarantine_recommended_plugins: int
     unsigned_external_plugins: int
@@ -247,6 +251,10 @@ class PluginGovernanceSummaryResponse(BaseModel):
     trust_policy_rejections: int
     sandbox_profile_counts: dict[str, int]
     tenancy_mode_counts: dict[str, int]
+    runtime_policy_mode: Literal[
+        "report_only", "deny_non_builtin", "isolated_runtime_required"
+    ]
+    runtime_isolation_ready: bool
     recommended_actions: list[str]
     remaining_gaps: list[str]
 

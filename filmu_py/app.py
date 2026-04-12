@@ -33,7 +33,7 @@ from .graphql import GraphQLPluginRegistry, create_graphql_router
 from .logging import attach_log_stream, configure_logging, detach_log_stream
 from .middleware import RequestIdMiddleware
 from .observability import setup_observability
-from .plugins import load_plugins, register_builtin_plugins
+from .plugins import PluginRuntimePolicy, load_plugins, register_builtin_plugins
 from .plugins.context import HostPluginDatasource, PluginContextProvider
 from .plugins.registry import PluginRegistry
 from .resources import AppResources
@@ -173,6 +173,19 @@ def build_plugin_context_provider(resources: AppResources) -> PluginContextProvi
             if datasource_name == "host"
             else None
         ),
+    )
+
+
+def _plugin_runtime_policy_from_settings(settings: Settings) -> PluginRuntimePolicy:
+    """Translate app settings into the loader's runtime-isolation policy object."""
+
+    policy = settings.plugin_runtime
+    return PluginRuntimePolicy(
+        enforcement_mode=policy.enforcement_mode,
+        require_strict_signatures=policy.require_strict_signatures,
+        require_source_digest=policy.require_source_digest,
+        allowed_non_builtin_sandbox_profiles=tuple(policy.allowed_non_builtin_sandbox_profiles),
+        allowed_non_builtin_tenancy_modes=tuple(policy.allowed_non_builtin_tenancy_modes),
     )
 
 
@@ -378,7 +391,11 @@ def _build_lifespan(
                 context_provider=plugin_context_provider,
                 host_version=runtime_settings.version,
                 trust_store_path=runtime_settings.plugin_trust_store_path,
-                strict_signatures=runtime_settings.plugin_strict_signatures,
+                strict_signatures=(
+                    runtime_settings.plugin_strict_signatures
+                    or runtime_settings.plugin_runtime.require_strict_signatures
+                ),
+                runtime_policy=_plugin_runtime_policy_from_settings(runtime_settings),
                 register_graphql=False,
                 register_capabilities=True,
             )
@@ -493,7 +510,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         plugin_registry,
         host_version=current_settings.version,
         trust_store_path=current_settings.plugin_trust_store_path,
-        strict_signatures=current_settings.plugin_strict_signatures,
+        strict_signatures=(
+            current_settings.plugin_strict_signatures
+            or current_settings.plugin_runtime.require_strict_signatures
+        ),
+        runtime_policy=_plugin_runtime_policy_from_settings(current_settings),
         register_graphql=True,
         register_capabilities=False,
     )

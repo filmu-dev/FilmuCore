@@ -191,12 +191,19 @@ def _plugin_recommended_actions(
 
 def _plugin_governance_summary(
     plugins: list[PluginCapabilityStatusResponse],
+    *,
+    runtime_policy: Any,
 ) -> PluginGovernanceSummaryResponse:
     """Return a bounded plugin trust/isolation rollup for operators."""
 
     sandbox_profile_counts: dict[str, int] = {}
     tenancy_mode_counts: dict[str, int] = {}
     recommended_actions: set[str] = set()
+    non_builtin_plugins = [
+        plugin
+        for plugin in plugins
+        if plugin.release_channel != "builtin" and plugin.source != "builtin"
+    ]
     for plugin in plugins:
         sandbox_profile = plugin.sandbox_profile or "unspecified"
         sandbox_profile_counts[sandbox_profile] = sandbox_profile_counts.get(sandbox_profile, 0) + 1
@@ -204,12 +211,41 @@ def _plugin_governance_summary(
         tenancy_mode_counts[tenancy_mode] = tenancy_mode_counts.get(tenancy_mode, 0) + 1
         recommended_actions.update(_plugin_recommended_actions(plugin))
 
+    runtime_isolation_ready = (
+        runtime_policy.health_rollup_enabled
+        and runtime_policy.enforcement_mode == "isolated_runtime_required"
+        and runtime_policy.require_strict_signatures
+        and runtime_policy.require_source_digest
+        and bool(runtime_policy.proof_refs)
+        and all(plugin.ready for plugin in plugins)
+        and not any(plugin.quarantined or plugin.quarantine_recommended for plugin in plugins)
+        and not any(plugin.status == "load_failed" for plugin in plugins)
+        and not any(
+            plugin.publisher_policy_decision in {"rejected", "untrusted"}
+            or plugin.trust_policy_decision in {"rejected", "untrusted"}
+            for plugin in plugins
+        )
+        and all(
+            (plugin.sandbox_profile in runtime_policy.allowed_non_builtin_sandbox_profiles)
+            and (plugin.tenancy_mode in runtime_policy.allowed_non_builtin_tenancy_modes)
+            and (not runtime_policy.require_source_digest or bool(plugin.source_sha256))
+            and (not runtime_policy.require_strict_signatures or plugin.signature_verified)
+            for plugin in non_builtin_plugins
+        )
+    )
+
     return PluginGovernanceSummaryResponse(
         total_plugins=len(plugins),
         loaded_plugins=sum(1 for plugin in plugins if plugin.status == "loaded"),
         load_failed_plugins=sum(1 for plugin in plugins if plugin.status == "load_failed"),
         ready_plugins=sum(1 for plugin in plugins if plugin.ready),
         unready_plugins=sum(1 for plugin in plugins if not plugin.ready),
+        healthy_plugins=sum(1 for plugin in plugins if plugin.ready and not plugin.warnings),
+        degraded_plugins=sum(1 for plugin in plugins if (not plugin.ready) or bool(plugin.warnings)),
+        non_builtin_plugins=len(non_builtin_plugins),
+        isolated_non_builtin_plugins=sum(
+            1 for plugin in non_builtin_plugins if plugin.sandbox_profile == "isolated"
+        ),
         quarantined_plugins=sum(1 for plugin in plugins if plugin.quarantined),
         quarantine_recommended_plugins=sum(1 for plugin in plugins if plugin.quarantine_recommended),
         unsigned_external_plugins=sum(
@@ -232,12 +268,18 @@ def _plugin_governance_summary(
         ),
         sandbox_profile_counts=dict(sorted(sandbox_profile_counts.items())),
         tenancy_mode_counts=dict(sorted(tenancy_mode_counts.items())),
+        runtime_policy_mode=runtime_policy.enforcement_mode,
+        runtime_isolation_ready=runtime_isolation_ready,
         recommended_actions=sorted(recommended_actions),
-        remaining_gaps=[
-            "runtime sandbox isolation is still in-process",
-            "operator quarantine/revocation still needs sandbox-enforced execution boundaries",
-            "external plugin artifact provenance is not yet SBOM/signing-policy complete",
-        ],
+        remaining_gaps=(
+            []
+            if runtime_isolation_ready
+            else [
+                "non-builtin plugin runtime isolation exit gates are not fully satisfied",
+                "operator quarantine/revocation still depends on runtime policy enforcement",
+                "external plugin artifact provenance or signature verification is still incomplete",
+            ]
+        ),
     )
 
 
@@ -782,18 +824,25 @@ async def _enterprise_operations_governance(
 
     normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
     structured_log_path = f"{normalized_log_dir}/{settings.logging.structured_filename}"
-    log_required_actions = [
-        "configure_log_shipper_for_structured_ndjson"
-        if not settings.log_shipper.enabled
-        else "monitor_log_shipper_health",
-        "define_search_index_mapping_and_retention_policy"
-        if not settings.log_shipper.target
-        else "validate_search_index_contract",
-    ]
-    if settings.otel_enabled and settings.otel_exporter_otlp_endpoint:
-        log_required_actions.append("verify_trace_export_in_collector")
-    else:
-        log_required_actions.append("configure_otlp_trace_export")
+    observability_policy = settings.observability
+    operator_log_pipeline_ready = (
+        settings.logging.enabled
+        and settings.log_shipper.enabled
+        and bool(settings.log_shipper.target)
+        and bool(settings.log_shipper.healthcheck_url)
+        and settings.otel_enabled
+        and bool(settings.otel_exporter_otlp_endpoint)
+        and observability_policy.environment_shipping_enabled
+        and observability_policy.alerting_enabled
+        and observability_policy.rust_trace_correlation_enabled
+        and observability_policy.search_backend != "none"
+        and bool(observability_policy.required_correlation_fields)
+        and bool(observability_policy.proof_refs)
+    )
+    plugin_governance_summary = _plugin_governance_summary(
+        plugins,
+        runtime_policy=settings.plugin_runtime,
+    )
 
     vfs_data_plane_status: Literal["ready", "partial", "blocked", "not_ready"] = "partial"
     vfs_required_actions = [
@@ -1089,7 +1138,11 @@ async def _enterprise_operations_governance(
         ),
         operator_log_pipeline=EnterpriseOperationsSliceResponse(
             name="Durable Operator Log Pipeline",
-            status="partial" if settings.logging.enabled else "blocked",
+            status=(
+                "ready"
+                if operator_log_pipeline_ready
+                else ("partial" if settings.logging.enabled else "blocked")
+            ),
             evidence=[
                 f"structured_logging_enabled={settings.logging.enabled}",
                 f"structured_log_path={structured_log_path}",
@@ -1099,24 +1152,76 @@ async def _enterprise_operations_governance(
                 f"log_shipper_enabled={settings.log_shipper.enabled}",
                 f"log_shipper_type={settings.log_shipper.type}",
                 f"log_shipper_target_configured={bool(settings.log_shipper.target)}",
+                f"log_shipper_healthcheck_configured={bool(settings.log_shipper.healthcheck_url)}",
                 f"log_field_mapping_version={settings.log_shipper.field_mapping_version}",
+                f"log_search_backend={observability_policy.search_backend}",
+                f"observability_environment_shipping_enabled={observability_policy.environment_shipping_enabled}",
+                f"observability_alerting_enabled={observability_policy.alerting_enabled}",
+                f"rust_trace_correlation_enabled={observability_policy.rust_trace_correlation_enabled}",
+                (
+                    "correlation_fields="
+                    + ",".join(observability_policy.required_correlation_fields)
+                ),
+                f"observability_proof_ref_count={len(observability_policy.proof_refs)}",
                 "docs/OPERATOR_LOG_PIPELINE.md defines shipping/search/replay taxonomy",
             ],
-            required_actions=log_required_actions,
-            remaining_gaps=[
-                "shipper/search backend still requires environment provisioning even though repo config is present",
-                "trace/span coverage is still partial",
-                "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
-            ],
+            required_actions=(
+                []
+                if operator_log_pipeline_ready
+                else [
+                    "configure_log_shipper_for_structured_ndjson"
+                    if not settings.log_shipper.enabled
+                    else "monitor_log_shipper_health",
+                    "define_search_index_mapping_and_retention_policy"
+                    if not settings.log_shipper.target
+                    or observability_policy.search_backend == "none"
+                    else "validate_search_index_contract",
+                    "configure_otlp_trace_export"
+                    if not (settings.otel_enabled and settings.otel_exporter_otlp_endpoint)
+                    else "verify_trace_export_in_collector",
+                    "enable_environment_log_shipping"
+                    if not observability_policy.environment_shipping_enabled
+                    else "review_environment_log_shipping_rollout",
+                    "enable_alerting_for_log_search_and_trace_pipeline"
+                    if not observability_policy.alerting_enabled
+                    else "review_log_pipeline_alert_thresholds",
+                    "wire_rust_trace_correlation_fields"
+                    if not observability_policy.rust_trace_correlation_enabled
+                    else "review_cross_process_trace_correlation",
+                    "record_log_pipeline_rollout_evidence"
+                    if not observability_policy.proof_refs
+                    else "review_log_pipeline_rollout_evidence",
+                ]
+            ),
+            remaining_gaps=(
+                []
+                if operator_log_pipeline_ready
+                else [
+                    "shipper/search backend still requires environment provisioning even though repo config is present",
+                    "cross-process trace correlation is not fully enforced",
+                    "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
+                ]
+            ),
         ),
         plugin_runtime_isolation=EnterpriseOperationsSliceResponse(
             name="Plugin Trust / Runtime Isolation",
-            status="partial",
+            status="ready" if plugin_governance_summary.runtime_isolation_ready else "partial",
             evidence=[
                 f"plugin_total={len(plugins)}",
+                f"plugin_non_builtin={plugin_governance_summary.non_builtin_plugins}",
+                f"plugin_healthy={plugin_governance_summary.healthy_plugins}",
+                f"plugin_degraded={plugin_governance_summary.degraded_plugins}",
                 (
                     "plugin_sandbox_profiles="
                     + ",".join(sorted({plugin.sandbox_profile or 'unspecified' for plugin in plugins}))
+                ),
+                (
+                    "plugin_allowed_non_builtin_sandbox_profiles="
+                    + ",".join(settings.plugin_runtime.allowed_non_builtin_sandbox_profiles)
+                ),
+                (
+                    "plugin_allowed_non_builtin_tenancy_modes="
+                    + ",".join(settings.plugin_runtime.allowed_non_builtin_tenancy_modes)
                 ),
                 f"plugin_quarantined={sum(1 for plugin in plugins if plugin.quarantined)}",
                 (
@@ -1124,18 +1229,30 @@ async def _enterprise_operations_governance(
                     f"{sum(1 for plugin in plugins if plugin.quarantine_recommended)}"
                 ),
                 f"plugin_operator_overrides={plugin_override_count}",
+                f"plugin_runtime_enforcement_mode={settings.plugin_runtime.enforcement_mode}",
+                f"plugin_runtime_health_rollup_enabled={settings.plugin_runtime.health_rollup_enabled}",
+                f"plugin_runtime_require_strict_signatures={settings.plugin_runtime.require_strict_signatures}",
+                f"plugin_runtime_require_source_digest={settings.plugin_runtime.require_source_digest}",
+                f"plugin_runtime_proof_ref_count={len(settings.plugin_runtime.proof_refs)}",
+                f"plugin_runtime_exit_ready={int(plugin_governance_summary.runtime_isolation_ready)}",
                 "GET /api/v1/plugins/governance summarizes signature, publisher-policy, and tenancy posture",
             ],
-            required_actions=[
-                "promote_plugin_quarantine_and_revocation_into_persisted_operator_workflows",
-                "move_runtime_plugin_execution_into_real_sandbox_boundaries",
-                "require_external_plugin_artifact_provenance_and_signing_policy",
-            ],
-            remaining_gaps=[
-                "plugin runtime isolation remains process-local rather than sandboxed execution",
-                "quarantine and revocation are persisted but still enforced inside the host process",
-                "external plugin artifact provenance is not yet SBOM/signing-policy complete",
-            ],
+            required_actions=(
+                []
+                if plugin_governance_summary.runtime_isolation_ready
+                else [
+                    "enable_non_builtin_plugin_runtime_enforcement"
+                    if settings.plugin_runtime.enforcement_mode == "report_only"
+                    else "review_non_builtin_plugin_runtime_enforcement",
+                    "require_isolated_non_builtin_plugin_sandbox_profiles"
+                    if settings.plugin_runtime.enforcement_mode != "isolated_runtime_required"
+                    else "review_non_builtin_plugin_health_rollups",
+                    "record_plugin_runtime_isolation_evidence"
+                    if not settings.plugin_runtime.proof_refs
+                    else "review_plugin_runtime_isolation_evidence",
+                ]
+            ),
+            remaining_gaps=plugin_governance_summary.remaining_gaps,
         ),
         heavy_stage_workload_isolation=EnterpriseOperationsSliceResponse(
             name="Heavy-Stage Workload Isolation",
@@ -2027,8 +2144,12 @@ async def get_plugin_governance(request: Request) -> PluginGovernanceResponse:
     """Return plugin trust, quarantine, and isolation posture for operators."""
 
     plugins = await get_plugins(request)
+    resources = request.app.state.resources
     return PluginGovernanceResponse(
-        summary=_plugin_governance_summary(plugins),
+        summary=_plugin_governance_summary(
+            plugins,
+            runtime_policy=resources.settings.plugin_runtime,
+        ),
         plugins=plugins,
     )
 
