@@ -53,7 +53,7 @@ from ..models import (
     StatsResponse,
     TenantQuotaPolicyResponse,
 )
-from .stream import _vfs_runtime_governance_snapshot
+from .stream import _playback_gate_governance_snapshot, _vfs_runtime_governance_snapshot
 
 router = APIRouter(tags=["default"])
 _MAX_API_KEY_ID_LENGTH = 128
@@ -368,11 +368,16 @@ def _actor_key(auth_context: Any) -> str:
     return f"{tenant_id}:{actor_id}"
 
 
-def _vfs_data_plane_evidence(request: Request) -> list[str]:
+def _vfs_data_plane_evidence(
+    request: Request,
+    *,
+    runtime_governance: dict[str, int | float | str | list[str]] | None = None,
+) -> list[str]:
     """Return bounded VFS runtime evidence for enterprise-governance posture."""
 
     resources = request.app.state.resources
-    runtime_governance = _vfs_runtime_governance_snapshot()
+    if runtime_governance is None:
+        runtime_governance = _vfs_runtime_governance_snapshot()
     evidence = [
         f"vfs_catalog_server_enabled={resources.vfs_catalog_server is not None}",
         f"chunk_cache_enabled={resources.chunk_cache is not None}",
@@ -404,6 +409,18 @@ def _vfs_data_plane_evidence(request: Request) -> list[str]:
                 (
                     "vfs_runtime_rollout_reasons="
                     + (",".join(rollout_reasons) if rollout_reasons else "none")
+                ),
+                (
+                    "vfs_runtime_rollout_canary_decision="
+                    f"{runtime_governance['vfs_runtime_rollout_canary_decision']}"
+                ),
+                (
+                    "vfs_runtime_rollout_merge_gate="
+                    f"{runtime_governance['vfs_runtime_rollout_merge_gate']}"
+                ),
+                (
+                    "vfs_runtime_rollout_environment_class="
+                    f"{runtime_governance['vfs_runtime_rollout_environment_class']}"
                 ),
                 (
                     "vfs_runtime_cache_hit_ratio="
@@ -457,7 +474,10 @@ async def _enterprise_operations_governance(
     settings = resources.settings
     auth_context = get_auth_context(request)
     policy_decisions = _auth_policy_decisions(auth_context)
-    vfs_runtime_governance = _vfs_runtime_governance_snapshot()
+    playback_gate_governance = _playback_gate_governance_snapshot()
+    vfs_runtime_governance = _vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate_governance,
+    )
 
     identity_required_actions = [
         "configure_real_oidc_issuer_and_audience"
@@ -517,14 +537,26 @@ async def _enterprise_operations_governance(
         rollout_readiness = cast(str, vfs_runtime_governance["vfs_runtime_rollout_readiness"])
         rollout_next_action = cast(str, vfs_runtime_governance["vfs_runtime_rollout_next_action"])
         rollout_reasons = cast(list[str], vfs_runtime_governance["vfs_runtime_rollout_reasons"])
+        canary_decision = cast(str, vfs_runtime_governance["vfs_runtime_rollout_canary_decision"])
+        merge_gate = cast(str, vfs_runtime_governance["vfs_runtime_rollout_merge_gate"])
         if rollout_readiness == "blocked":
             vfs_data_plane_status = "blocked"
+        elif rollout_readiness == "ready" and merge_gate == "ready":
+            vfs_data_plane_status = "ready"
         if rollout_next_action and rollout_next_action not in vfs_required_actions:
             vfs_required_actions.insert(0, rollout_next_action)
+        if canary_decision and canary_decision not in vfs_required_actions:
+            vfs_required_actions.insert(0, canary_decision)
         if rollout_reasons:
             vfs_remaining_gaps.insert(
                 0,
                 "live runtime rollout reasons are present: " + ", ".join(rollout_reasons),
+            )
+        if merge_gate != "ready":
+            vfs_remaining_gaps.insert(
+                0,
+                "VFS canary promotion is not yet merge-gate ready: "
+                f"merge_gate={merge_gate} canary_decision={canary_decision}",
             )
     else:
         vfs_required_actions.insert(0, "configure_vfs_runtime_status_export")
@@ -537,20 +569,73 @@ async def _enterprise_operations_governance(
         generated_at=datetime.now(UTC).isoformat(),
         playback_gate=EnterpriseOperationsSliceResponse(
             name="Playback Gate Promotion / Merge Policy Proof",
-            status="partial",
+            status=(
+                "blocked"
+                if cast(str, playback_gate_governance["playback_gate_rollout_readiness"]) == "blocked"
+                else (
+                    "ready"
+                    if cast(str, playback_gate_governance["playback_gate_rollout_readiness"])
+                    == "ready"
+                    else "partial"
+                )
+            ),
             evidence=[
                 "proof:playback:gate:enterprise package entrypoint exists",
                 "playback gate workflow writes github-main-policy-expected.json",
-                "check_github_main_policy.ps1 can validate live policy with gh admin auth",
+                "check_github_main_policy.ps1 can validate and now persist live policy artifacts with gh admin auth",
+                (
+                    "playback_gate_snapshot_available="
+                    f"{playback_gate_governance['playback_gate_snapshot_available']}"
+                ),
+                (
+                    "playback_gate_gate_mode="
+                    f"{playback_gate_governance['playback_gate_gate_mode']}"
+                ),
+                (
+                    "playback_gate_environment_class="
+                    f"{playback_gate_governance['playback_gate_environment_class']}"
+                ),
+                (
+                    "playback_gate_provider_gate_required="
+                    f"{playback_gate_governance['playback_gate_provider_gate_required']}"
+                ),
+                (
+                    "playback_gate_provider_gate_ran="
+                    f"{playback_gate_governance['playback_gate_provider_gate_ran']}"
+                ),
+                (
+                    "playback_gate_provider_parity_ready="
+                    f"{playback_gate_governance['playback_gate_provider_parity_ready']}"
+                ),
+                (
+                    "playback_gate_windows_provider_ready="
+                    f"{playback_gate_governance['playback_gate_windows_provider_ready']}"
+                ),
+                (
+                    "playback_gate_windows_soak_ready="
+                    f"{playback_gate_governance['playback_gate_windows_soak_ready']}"
+                ),
+                (
+                    "playback_gate_policy_validation_status="
+                    f"{playback_gate_governance['playback_gate_policy_validation_status']}"
+                ),
+                (
+                    "playback_gate_rollout_readiness="
+                    f"{playback_gate_governance['playback_gate_rollout_readiness']}"
+                ),
+                (
+                    "playback_gate_rollout_reasons="
+                    + ",".join(cast(list[str], playback_gate_governance["playback_gate_rollout_reasons"]))
+                ),
             ],
             required_actions=[
-                "run proof:playback:policy:enterprise:validate from an admin-authenticated host",
+                cast(str, playback_gate_governance["playback_gate_rollout_next_action"]),
                 "ensure Playback Gate / Playback Gate is a required protected-branch check",
                 "retain playback/provider/windows proof artifacts as merge evidence",
             ],
             remaining_gaps=[
-                "this API host cannot prove GitHub branch-protection state without gh admin auth",
-                "provider and Windows proof promotion still depends on repeated green evidence",
+                "this API host still depends on a recorded admin-authenticated policy artifact to prove live branch protection",
+                "playback/provider/windows proof promotion remains evidence-backed rather than assumption-backed",
             ],
         ),
         identity_authz=EnterpriseOperationsSliceResponse(
@@ -600,7 +685,10 @@ async def _enterprise_operations_governance(
         vfs_data_plane=EnterpriseOperationsSliceResponse(
             name="FilmuVFS Enterprise Data Plane",
             status=vfs_data_plane_status,
-            evidence=_vfs_data_plane_evidence(request),
+            evidence=_vfs_data_plane_evidence(
+                request,
+                runtime_governance=vfs_runtime_governance,
+            ),
             required_actions=vfs_required_actions,
             remaining_gaps=vfs_remaining_gaps,
         ),

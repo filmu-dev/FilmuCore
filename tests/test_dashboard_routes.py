@@ -1304,6 +1304,146 @@ def test_operations_governance_route_surfaces_live_vfs_rollout_posture(
     )
 
 
+def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_ready(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 2,
+                    "peak_open_handles": 4,
+                    "active_reads": 1,
+                    "peak_active_reads": 2,
+                    "chunk_cache_weighted_bytes": 4096,
+                },
+                "chunk_cache": {
+                    "backend": "hybrid",
+                    "hits": 8,
+                    "misses": 2,
+                    "memory_bytes": 2048,
+                    "memory_max_bytes": 8192,
+                    "memory_hits": 6,
+                    "memory_misses": 2,
+                    "disk_bytes": 8192,
+                    "disk_max_bytes": 65536,
+                    "disk_hits": 2,
+                    "disk_misses": 0,
+                    "disk_writes": 1,
+                    "disk_write_errors": 0,
+                    "disk_evictions": 0,
+                },
+                "handle_startup": {
+                    "total": 3,
+                    "ok": 3,
+                    "error": 0,
+                    "estale": 0,
+                    "cancelled": 0,
+                    "average_duration_ms": 41,
+                    "max_duration_ms": 88,
+                },
+                "mounted_reads": {
+                    "total": 6,
+                    "ok": 6,
+                    "error": 0,
+                    "estale": 0,
+                    "cancelled": 0,
+                    "average_duration_ms": 8,
+                    "max_duration_ms": 18,
+                },
+                "upstream_failures": {
+                    "unexpected_status_too_many_requests": 0,
+                    "unexpected_status_server_error": 0,
+                },
+                "upstream_retryable_events": {
+                    "status_too_many_requests": 0,
+                    "status_server_error": 0,
+                },
+                "backend_fallback": {
+                    "attempts": 0,
+                    "success": 0,
+                    "failure": 0,
+                },
+                "prefetch": {
+                    "available_permits": 4,
+                    "active_permits": 0,
+                    "active_background_tasks": 0,
+                    "background_backpressure": 0,
+                    "fairness_denied": 0,
+                    "global_backpressure_denied": 0,
+                    "background_error": 0,
+                },
+                "chunk_coalescing": {
+                    "waits_miss": 0,
+                },
+                "inline_refresh": {
+                    "error": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    (artifacts_root / "stability-summary-20260412-020101.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:01Z",
+                "environment_class": "windows-native:enterprise",
+                "repeat_count": 2,
+                "dry_run": False,
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "ci-execution-summary.json").write_text(
+        json.dumps(
+            {
+                "required_check_name": "Playback Gate / Playback Gate",
+                "gate_mode": "full",
+                "provider_gate_required": True,
+                "provider_gate_ran": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "media-server-gate-20260412-020102.json").write_text(
+        json.dumps({"timestamp": "2026-04-12T02:01:02Z", "all_green": True}),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-020103.json").write_text(
+        json.dumps({"timestamp": "2026-04-12T02:01:03Z", "results": [{"status": "passed"}]}),
+        encoding="utf-8",
+    )
+    (windows_artifacts_root / "soak-stability-20260412-020104.json").write_text(
+        json.dumps({"timestamp": "2026-04-12T02:01:04Z", "all_green": True}),
+        encoding="utf-8",
+    )
+    (artifacts_root / "github-main-policy-current.json").write_text(
+        json.dumps({"timestamp": "2026-04-12T02:01:05Z", "validation": {"status": "ready"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    client = _build_client(arq_enabled=True)
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["playback_gate"]["status"] == "ready"
+    assert "playback_gate_rollout_readiness=ready" in body["playback_gate"]["evidence"]
+    assert "keep_required_checks_enforced" in body["playback_gate"]["required_actions"]
+    assert body["vfs_data_plane"]["status"] == "ready"
+    assert "vfs_runtime_rollout_canary_decision=promote_to_next_environment_class" in body[
+        "vfs_data_plane"
+    ]["evidence"]
+    assert "vfs_runtime_rollout_merge_gate=ready" in body["vfs_data_plane"]["evidence"]
+
+
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:
     client = _build_client(
         settings_overrides={
