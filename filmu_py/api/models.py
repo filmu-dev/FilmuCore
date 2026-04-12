@@ -82,6 +82,8 @@ class AuthPolicyDecisionResponse(BaseModel):
     required_permissions: list[str]
     matched_permissions: list[str]
     missing_permissions: list[str]
+    constrained_permissions: list[str] = []
+    constraint_failures: list[str] = []
     target_tenant_id: str
     tenant_scope: str
 
@@ -97,11 +99,16 @@ class AuthPolicyResponse(BaseModel):
     authorized_tenant_ids: list[str]
     oidc_claims_present: bool
     oidc_token_validated: bool
+    oidc_allow_api_key_fallback: bool
+    oidc_rollout_status: Literal["ready", "partial", "blocked"]
+    oidc_configuration_complete: bool
     access_policy_version: str
     quota_policy_version: str | None = None
     permissions_model: str
     policy_source: str
     role_grants: dict[str, list[str]]
+    permission_constraints: dict[str, dict[str, list[str]]] = {}
+    audit_mode: str
     decisions: list[AuthPolicyDecisionResponse]
     warnings: list[str] = []
     remaining_gaps: list[str] = []
@@ -125,6 +132,7 @@ class AccessPolicyRevisionResponse(BaseModel):
     principal_roles: dict[str, list[str]]
     principal_scopes: dict[str, list[str]]
     principal_tenant_grants: dict[str, list[str]]
+    permission_constraints: dict[str, dict[str, list[str]]] = {}
     audit_decisions: bool
 
 
@@ -146,6 +154,7 @@ class AccessPolicyRevisionWriteRequest(BaseModel):
     principal_roles: dict[str, list[str]] = {}
     principal_scopes: dict[str, list[str]] = {}
     principal_tenant_grants: dict[str, list[str]] = {}
+    permission_constraints: dict[str, dict[str, list[str]]] = {}
     audit_decisions: bool = True
 
 
@@ -156,11 +165,49 @@ class AccessPolicyRevisionApprovalRequest(BaseModel):
     activate: bool = False
 
 
+class AccessPolicyAuditAlertResponse(BaseModel):
+    """Repeated-denial or policy-drift candidate surfaced from audit search."""
+
+    code: str
+    severity: Literal["warning", "critical"]
+    count: int
+    message: str
+
+
+class AccessPolicyAuditEntryResponse(BaseModel):
+    """One structured authorization decision returned by audit search."""
+
+    occurred_at: str
+    path: str
+    method: str
+    resource_scope: str
+    actor_id: str
+    actor_type: str
+    tenant_id: str
+    target_tenant_id: str
+    required_permissions: list[str]
+    matched_permissions: list[str]
+    missing_permissions: list[str]
+    constrained_permissions: list[str] = []
+    constraint_failures: list[str] = []
+    allowed: bool
+    reason: str
+    tenant_scope: str
+    authentication_mode: str
+    access_policy_version: str
+    access_policy_source: str
+    oidc_issuer: str | None = None
+    oidc_subject: str | None = None
+    summary: str
+
+
 class AccessPolicyAuditResponse(BaseModel):
     """Bounded audit-search response for access-policy governance actions."""
 
     total_matches: int
     entries: list[str]
+    records: list[AccessPolicyAuditEntryResponse] = []
+    alerts: list[AccessPolicyAuditAlertResponse] = []
 
 
 class PluginEventStatusResponse(BaseModel):
