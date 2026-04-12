@@ -69,7 +69,20 @@ class CorrelationContextFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         context = get_contextvars()
-        for key in ("request_id", "item_id", "worker_stage", "job_id", "worker_id", "plugin"):
+        for key in (
+            "request_id",
+            "item_id",
+            "item_request_id",
+            "worker_stage",
+            "job_id",
+            "worker_id",
+            "plugin",
+            "tenant_id",
+            "actor_id",
+            "actor_type",
+            "api_key_id",
+            "authentication_mode",
+        ):
             if not hasattr(record, key) and key in context:
                 setattr(record, key, context[key])
 
@@ -109,10 +122,16 @@ class StructuredJsonFormatter(logging.Formatter):
             "code.line": record.lineno,
             "request.id": extra.pop("request_id", None),
             "item.id": extra.pop("item_id", None),
+            "item.request_id": extra.pop("item_request_id", None),
             "worker.stage": extra.pop("worker_stage", None) or extra.pop("stage", None),
             "worker.job_id": extra.pop("job_id", None),
             "worker.id": extra.pop("worker_id", None),
             "plugin.name": extra.pop("plugin", None),
+            "tenant.id": extra.pop("tenant_id", None),
+            "auth.actor.id": extra.pop("actor_id", None),
+            "auth.actor.type": extra.pop("actor_type", None),
+            "auth.api_key_id": extra.pop("api_key_id", None),
+            "auth.mode": extra.pop("authentication_mode", None),
             "trace.id": extra.pop("trace_id", None) or trace_context["trace_id"],
             "span.id": extra.pop("span_id", None) or trace_context["span_id"],
         }

@@ -664,6 +664,48 @@ class LogShipperSettings(CompatibilityModel):
     healthcheck_url: str | None = None
 
 
+class PluginRuntimeSettings(CompatibilityModel):
+    """Operator-managed runtime isolation policy for non-builtin plugins."""
+
+    enforcement_mode: Literal[
+        "report_only", "deny_non_builtin", "isolated_runtime_required"
+    ] = "report_only"
+    health_rollup_enabled: bool = True
+    require_strict_signatures: bool = False
+    require_source_digest: bool = False
+    allowed_non_builtin_sandbox_profiles: list[str] = Field(
+        default_factory=lambda: ["isolated"]
+    )
+    allowed_non_builtin_tenancy_modes: list[str] = Field(
+        default_factory=lambda: ["shared", "tenant"]
+    )
+    proof_refs: list[str] = Field(default_factory=list)
+
+
+class ObservabilityConvergenceSettings(CompatibilityModel):
+    """Cross-process log/search and trace convergence policy."""
+
+    environment_shipping_enabled: bool = False
+    search_backend: Literal["none", "opensearch", "elasticsearch", "loki"] = "none"
+    alerting_enabled: bool = False
+    rust_trace_correlation_enabled: bool = False
+    required_correlation_fields: list[str] = Field(
+        default_factory=lambda: [
+            "request.id",
+            "item.id",
+            "item.request_id",
+            "tenant.id",
+            "auth.actor.id",
+            "worker.stage",
+            "worker.job_id",
+            "plugin.name",
+            "trace.id",
+            "span.id",
+        ]
+    )
+    proof_refs: list[str] = Field(default_factory=list)
+
+
 class HeavyStageIsolationSettings(CompatibilityModel):
     """Operator-managed policy for isolated CPU-heavy worker stages."""
 
@@ -794,6 +836,14 @@ class Settings(BaseSettings):
     log_shipper: LogShipperSettings = Field(
         default_factory=LogShipperSettings,
         alias="FILMU_PY_LOG_SHIPPER",
+    )
+    plugin_runtime: PluginRuntimeSettings = Field(
+        default_factory=PluginRuntimeSettings,
+        alias="FILMU_PY_PLUGIN_RUNTIME",
+    )
+    observability: ObservabilityConvergenceSettings = Field(
+        default_factory=ObservabilityConvergenceSettings,
+        alias="FILMU_PY_OBSERVABILITY",
     )
     orchestration: OrchestrationSettings = Field(
         default_factory=OrchestrationSettings,

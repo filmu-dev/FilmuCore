@@ -924,3 +924,114 @@ class RevokedPublisherQuery:
     assert len(report.failed) == 1
     assert report.failed[0].plugin_name == "revoked-publisher-plugin"
     assert report.failed[0].reason == "plugin_publisher_policy_publisher_status_revoked"
+
+
+def test_filesystem_plugin_loader_runtime_policy_rejects_non_builtin_plugins(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    _write_plugin(
+        plugins_dir / "filesystem-plugin",
+        manifest={
+            "name": "filesystem-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "distribution": "filesystem",
+            "publisher": "community",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["FilesystemQuery"]},
+        },
+        module_source="""import strawberry
+
+@strawberry.type
+class FilesystemQuery:
+    @strawberry.field
+    def hello(self) -> str:
+        return "hi"
+""",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(
+        plugins_dir,
+        registry,
+        runtime_policy=plugin_loader.PluginRuntimePolicy(
+            enforcement_mode="deny_non_builtin"
+        ),
+    )
+
+    assert report.loaded == []
+    assert len(report.failed) == 1
+    assert report.failed[0].reason == "plugin_runtime_policy_non_builtin_disabled"
+
+
+def test_filesystem_plugin_loader_runtime_policy_allows_isolated_signed_plugin(tmp_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    module_source = """import strawberry
+
+@strawberry.type
+class IsolatedQuery:
+    @strawberry.field
+    def isolated_echo(self) -> str:
+        return "isolated"
+"""
+    _write_plugin(
+        plugins_dir / "isolated-plugin",
+        manifest={
+            "name": "isolated-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "distribution": "filesystem",
+            "publisher": "filmu-labs",
+            "trust_level": "trusted",
+            "sandbox_profile": "isolated",
+            "tenancy_mode": "tenant",
+            "signing_key_id": "filmu-labs-root",
+            "entry_module": "plugin.py",
+            "graphql": {"query_resolvers": ["IsolatedQuery"]},
+        },
+        module_source=module_source,
+    )
+    module_digest = hashlib.sha256(
+        (plugins_dir / "isolated-plugin" / "plugin.py").read_bytes()
+    ).hexdigest()
+    signature = hmac.new(b"top-secret", module_digest.encode("utf-8"), hashlib.sha256).hexdigest()
+    manifest_path = plugins_dir / "isolated-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_sha256"] = module_digest
+    manifest["signature"] = f"hmac-sha256:{signature}"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    trust_store_path = tmp_path / "plugin-trust-store.json"
+    trust_store_path.write_text(
+        json.dumps(
+            {
+                "keys": {
+                    "filmu-labs-root": {
+                        "secret": "top-secret",
+                        "algorithm": "hmac-sha256",
+                        "status": "active",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = GraphQLPluginRegistry()
+    report = load_graphql_plugins(
+        plugins_dir,
+        registry,
+        trust_store_path=trust_store_path,
+        strict_signatures=True,
+        runtime_policy=plugin_loader.PluginRuntimePolicy(
+            enforcement_mode="isolated_runtime_required",
+            require_strict_signatures=True,
+            require_source_digest=True,
+            allowed_non_builtin_sandbox_profiles=("isolated",),
+            allowed_non_builtin_tenancy_modes=("tenant", "shared"),
+        ),
+    )
+
+    assert len(report.loaded) == 1
+    assert report.failed == []
+    assert report.loaded[0].plugin_name == "isolated-plugin"
+    assert report.loaded[0].signature_verified is True

@@ -50,6 +50,8 @@ def _plugin_load_result(reason: str) -> str:
         return "skipped_signature"
     if reason.startswith("plugin_publisher_policy_"):
         return "skipped_policy"
+    if reason.startswith("plugin_runtime_policy_"):
+        return "skipped_runtime_policy"
     if "plugin.json" in reason or "manifest" in reason:
         return "skipped_manifest"
     return "failed"
@@ -108,6 +110,17 @@ class PackagedPluginDefinition:
 
     manifest: PluginManifest | dict[str, Any]
     module: object
+
+
+@dataclass(frozen=True, slots=True)
+class PluginRuntimePolicy:
+    """Host runtime-isolation policy enforced for non-builtin plugins at load time."""
+
+    enforcement_mode: str = "report_only"
+    require_strict_signatures: bool = True
+    require_source_digest: bool = True
+    allowed_non_builtin_sandbox_profiles: tuple[str, ...] = ("isolated",)
+    allowed_non_builtin_tenancy_modes: tuple[str, ...] = ("shared", "tenant")
 
 
 @dataclass(slots=True)
@@ -197,6 +210,36 @@ def _load_packaged_plugin(
     raise TypeError("entry point factory must return a (manifest, module) pair")
 
 
+def _enforce_runtime_policy(
+    *,
+    manifest: PluginManifest,
+    runtime_policy: PluginRuntimePolicy | None,
+    trust_store: PluginTrustStore | None,
+    signature_verified: bool,
+) -> None:
+    """Reject non-builtin plugins that violate the host runtime-isolation policy."""
+
+    if manifest.distribution == "builtin" or runtime_policy is None:
+        return
+    if runtime_policy.enforcement_mode == "report_only":
+        return
+    if runtime_policy.enforcement_mode == "deny_non_builtin":
+        raise ValueError("plugin_runtime_policy_non_builtin_disabled")
+    if manifest.sandbox_profile not in runtime_policy.allowed_non_builtin_sandbox_profiles:
+        raise ValueError("plugin_runtime_policy_sandbox_profile_disallowed")
+    if manifest.tenancy_mode not in runtime_policy.allowed_non_builtin_tenancy_modes:
+        raise ValueError("plugin_runtime_policy_tenancy_mode_disallowed")
+    if runtime_policy.require_source_digest and manifest.source_sha256 is None:
+        raise ValueError("plugin_runtime_policy_source_digest_required")
+    if runtime_policy.require_strict_signatures:
+        if manifest.signature is None:
+            raise ValueError("plugin_runtime_policy_signature_required")
+        if trust_store is None:
+            raise ValueError("plugin_runtime_policy_trust_store_required")
+        if not signature_verified:
+            raise ValueError("plugin_runtime_policy_signature_unverified")
+
+
 def _register_plugin(
     *,
     manifest_source: Path,
@@ -206,6 +249,7 @@ def _register_plugin(
     host_version: str,
     trust_store: PluginTrustStore | None = None,
     strict_signatures: bool = False,
+    runtime_policy: PluginRuntimePolicy | None = None,
     context_provider: PluginContextProvider | None = None,
     register_graphql: bool = True,
     register_capabilities: bool = True,
@@ -250,6 +294,12 @@ def _register_plugin(
             raise ValueError(f"plugin_signature_{signature_verification.reason}")
     if not publisher_policy.allowed:
         raise ValueError(f"plugin_publisher_policy_{publisher_policy.reason}")
+    _enforce_runtime_policy(
+        manifest=manifest,
+        runtime_policy=runtime_policy,
+        trust_store=trust_store,
+        signature_verified=signature_verification.verified,
+    )
     registry.register_manifest(manifest)
 
     skipped_messages: list[str] = []
@@ -408,6 +458,7 @@ def load_plugins(
     host_version: str = "0.1.0",
     trust_store_path: Path | None = None,
     strict_signatures: bool = False,
+    runtime_policy: PluginRuntimePolicy | None = None,
     register_graphql: bool = True,
     register_capabilities: bool = True,
 ) -> PluginLoadReport:
@@ -445,6 +496,7 @@ def load_plugins(
                     host_version=host_version,
                     trust_store=trust_store,
                     strict_signatures=strict_signatures,
+                    runtime_policy=runtime_policy,
                     context_provider=context_provider,
                     register_graphql=register_graphql,
                     register_capabilities=register_capabilities,
@@ -503,6 +555,7 @@ def load_plugins(
                 host_version=host_version,
                 trust_store=trust_store,
                 strict_signatures=strict_signatures,
+                runtime_policy=runtime_policy,
                 context_provider=context_provider,
                 register_graphql=register_graphql,
                 register_capabilities=register_capabilities,
@@ -560,6 +613,7 @@ def load_graphql_plugins(
     host_version: str = "0.1.0",
     trust_store_path: Path | None = None,
     strict_signatures: bool = False,
+    runtime_policy: PluginRuntimePolicy | None = None,
 ) -> PluginLoadReport:
     """Backward-compatible wrapper that preserves the GraphQL-only loader surface."""
 
@@ -571,6 +625,7 @@ def load_graphql_plugins(
         host_version=host_version,
         trust_store_path=trust_store_path,
         strict_signatures=strict_signatures,
+        runtime_policy=runtime_policy,
         register_graphql=True,
         register_capabilities=False,
     )

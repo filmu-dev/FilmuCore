@@ -840,6 +840,10 @@ def test_plugin_governance_route_returns_operator_policy_summary() -> None:
         "load_failed_plugins": 0,
         "ready_plugins": 1,
         "unready_plugins": 0,
+        "healthy_plugins": 1,
+        "degraded_plugins": 0,
+        "non_builtin_plugins": 1,
+        "isolated_non_builtin_plugins": 0,
         "quarantined_plugins": 0,
         "quarantine_recommended_plugins": 0,
         "unsigned_external_plugins": 1,
@@ -848,14 +852,39 @@ def test_plugin_governance_route_returns_operator_policy_summary() -> None:
         "trust_policy_rejections": 0,
         "sandbox_profile_counts": {"restricted": 1},
         "tenancy_mode_counts": {"tenant": 1},
+        "runtime_policy_mode": "report_only",
+        "runtime_isolation_ready": False,
         "recommended_actions": ["require_external_plugin_signature"],
         "remaining_gaps": [
-            "runtime sandbox isolation is still in-process",
-            "operator quarantine/revocation still needs sandbox-enforced execution boundaries",
-            "external plugin artifact provenance is not yet SBOM/signing-policy complete",
+            "non-builtin plugin runtime isolation exit gates are not fully satisfied",
+            "operator quarantine/revocation still depends on runtime policy enforcement",
+            "external plugin artifact provenance or signature verification is still incomplete",
         ],
     }
     assert body["plugins"][0]["name"] == "external-scraper"
+
+
+def test_plugin_governance_route_marks_wave4_runtime_policy_ready() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "isolated_runtime_required",
+                "require_strict_signatures": True,
+                "require_source_digest": True,
+                "proof_refs": ["ops/wave4/plugin-runtime-isolation.md"],
+            }
+        }
+    )
+
+    response = client.get("/api/v1/plugins/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["runtime_policy_mode"] == "isolated_runtime_required"
+    assert body["summary"]["runtime_isolation_ready"] is True
+    assert body["summary"]["healthy_plugins"] == 0
+    assert body["summary"]["degraded_plugins"] == 0
+    assert body["summary"]["remaining_gaps"] == []
 
 
 def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness() -> None:
@@ -1612,6 +1641,54 @@ def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satis
     assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_exit_ready=1" in heavy_stage["evidence"]
+
+
+def test_operations_governance_route_marks_wave4_ready_when_exit_gates_are_satisfied() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel.example.test/v1/traces",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "http://logs.example.test",
+                "healthcheck_url": "http://logs.example.test/health",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
+            },
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "isolated_runtime_required",
+                "require_strict_signatures": True,
+                "require_source_digest": True,
+                "proof_refs": ["ops/wave4/plugin-runtime-isolation.md"],
+            },
+        }
+    )
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["operator_log_pipeline"]["status"] == "ready"
+    assert body["operator_log_pipeline"]["required_actions"] == []
+    assert body["operator_log_pipeline"]["remaining_gaps"] == []
+    assert "log_search_backend=opensearch" in body["operator_log_pipeline"]["evidence"]
+    assert (
+        "rust_trace_correlation_enabled=True" in body["operator_log_pipeline"]["evidence"]
+    )
+    assert body["plugin_runtime_isolation"]["status"] == "ready"
+    assert body["plugin_runtime_isolation"]["required_actions"] == []
+    assert body["plugin_runtime_isolation"]["remaining_gaps"] == []
+    assert (
+        "plugin_runtime_enforcement_mode=isolated_runtime_required"
+        in body["plugin_runtime_isolation"]["evidence"]
+    )
+    assert "plugin_runtime_exit_ready=1" in body["plugin_runtime_isolation"]["evidence"]
     assert "resource_scope_constraint_coverage=True" in body["identity_authz"]["evidence"]
 
 

@@ -56,6 +56,7 @@ Current incremental note:
 - `Wave 1` is now code-complete in local `main`: the remaining requirement is to keep the external proof artifacts and protected-branch policy green in real environments, not to land more application code for slices `G` through `J`.
 - `Wave 2` is now implementation-complete in local `main`: the repo now encodes route/resource-scope ABAC coverage, OIDC rollout-proof gates, and policy-alert thresholds. Remaining work is environment activation and operator evidence, not missing backend capability.
 - `Wave 3` is now fully closed in local `main`: the repo now encodes the lifecycle graph, dedicated index stage, DLQ/idempotency taxonomy, process-required heavy-stage isolation exit gates, and operator-visible queued stream-link refresh readiness/proof state. Ongoing soak evidence is steady-state operations work, not an open Wave 3 implementation gap.
+- `Wave 4` is now fully closed in local `main`: the repo now encodes plugin health rollups, enforceable non-builtin runtime-isolation policy, cross-process log/search/trace convergence exit gates, and enterprise governance `ready` paths for both plugin isolation and the durable operator log pipeline. Recurring shipper/search rollout and alert tuning are steady-state operations work, not an open Wave 4 implementation gap.
 
 ---
 
@@ -159,6 +160,11 @@ Exit gate:
 
 - plugin health and isolation are enforceable
 - cross-process log and trace convergence exists outside the local reference stack
+
+Current checkpoint:
+
+- Fully closed in-repo: plugin health and isolation are now enforceable through explicit non-builtin runtime policy, and the operator log pipeline has explicit shipping, alerting, and cross-process trace-correlation exit gates.
+- Remaining work is steady-state operations execution of the configured rollout, not missing Wave 4 application code.
 
 ---
 

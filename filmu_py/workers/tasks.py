@@ -38,7 +38,7 @@ from filmu_py.plugins import ExternalIdentifiers, ScraperSearchInput
 from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.context import HostPluginDatasource, PluginContextProvider
 from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
-from filmu_py.plugins.loader import load_plugins
+from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.rtn import RTN, ParsedData, RankedTorrent, RankingProfile
 from filmu_py.services.debrid import (
@@ -3180,7 +3180,21 @@ async def _resolve_plugin_registry(ctx: dict[str, Any]) -> PluginRegistry:
         context_provider=context_provider,
         host_version=settings.version,
         trust_store_path=settings.plugin_trust_store_path,
-        strict_signatures=settings.plugin_strict_signatures,
+        strict_signatures=(
+            settings.plugin_strict_signatures
+            or settings.plugin_runtime.require_strict_signatures
+        ),
+        runtime_policy=PluginRuntimePolicy(
+            enforcement_mode=settings.plugin_runtime.enforcement_mode,
+            require_strict_signatures=settings.plugin_runtime.require_strict_signatures,
+            require_source_digest=settings.plugin_runtime.require_source_digest,
+            allowed_non_builtin_sandbox_profiles=tuple(
+                settings.plugin_runtime.allowed_non_builtin_sandbox_profiles
+            ),
+            allowed_non_builtin_tenancy_modes=tuple(
+                settings.plugin_runtime.allowed_non_builtin_tenancy_modes
+            ),
+        ),
         register_graphql=False,
         register_capabilities=True,
     )
