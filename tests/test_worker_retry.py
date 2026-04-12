@@ -136,17 +136,22 @@ def test_scrape_item_routes_dead_letter_on_terminal_attempt(
     monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: object())
     monkeypatch.setattr(tasks, "_acquire_worker_rate_limit", no_rate_limit)
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: FailingMediaService())
-    
     async def fake_resolve_plugin_registry(*args: Any, **kwargs: Any) -> Any:
         _ = (args, kwargs)
-        raise RuntimeError("scrape dependency failed")
+        return object()
 
     monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_resolve_plugin_registry)
+
+    async def fake_scrape_with_plugins(*args: Any, **kwargs: Any) -> Any:
+        _ = (args, kwargs)
+        raise RuntimeError("scrape execution failed")
+
+    monkeypatch.setattr(tasks, "_scrape_with_plugins", fake_scrape_with_plugins)
 
     redis = FakeRedis()
     ctx: dict[str, object] = {"job_try": 4, "redis": redis, "queue_name": "q"}
 
-    with pytest.raises(RuntimeError, match="scrape dependency failed"):
+    with pytest.raises(RuntimeError, match="scrape execution failed"):
         asyncio.run(tasks.scrape_item(ctx, "item-2"))
 
     assert len(redis.entries) == 1
@@ -154,3 +159,4 @@ def test_scrape_item_routes_dead_letter_on_terminal_attempt(
     assert key == "arq:dead-letter:q"
     parsed = json.loads(payload)
     assert parsed["attempt"] == 4
+    assert parsed["reason"] == "scrape execution failed"

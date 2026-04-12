@@ -144,6 +144,10 @@ def _heavy_stage_executor(stage_name: str) -> Executor:
         policy.max_workers,
         policy.max_tasks_per_child,
     )
+    stale_keys = [key for key in _HEAVY_STAGE_EXECUTORS if key[1:] != executor_key[1:]]
+    for stale_key in stale_keys:
+        stale_executor = _HEAVY_STAGE_EXECUTORS.pop(stale_key)
+        stale_executor.shutdown(wait=False, cancel_futures=True)
     executor = _HEAVY_STAGE_EXECUTORS.get(executor_key)
     if executor is not None:
         return executor
@@ -492,6 +496,23 @@ def index_item_job_id(item_id: str) -> str:
     return f"index-item:{item_id}"
 
 
+def index_item_followup_job_id(
+    item_id: str,
+    *,
+    discriminator: str | None = None,
+    missing_seasons: list[int] | None = None,
+) -> str:
+    """Return a stable follow-up index job id for delayed polling or inventory rechecks."""
+
+    suffix_parts: list[str] = ["followup"]
+    if discriminator:
+        suffix_parts.append(discriminator)
+    if missing_seasons:
+        normalized = "-".join(str(season) for season in sorted(set(missing_seasons)))
+        suffix_parts.append(f"missing:{normalized}")
+    return ":".join([index_item_job_id(item_id), *suffix_parts])
+
+
 def parse_scrape_results_job_id(item_id: str) -> str:
     """Return a stable ARQ job identifier for parse-scrape-results processing."""
 
@@ -748,6 +769,8 @@ async def enqueue_index_item(
     item_id: str,
     queue_name: str,
     tenant_id: str | None = None,
+    defer_by_seconds: int | None = None,
+    job_id: str | None = None,
     missing_seasons: list[int] | None = None,
 ) -> bool:
     """Enqueue the index stage with a unique job id for idempotency."""
@@ -760,16 +783,20 @@ async def enqueue_index_item(
         stage_name="index_item",
     ):
         return False
+    resolved_job_id = job_id or index_item_job_id(item_id)
     await _clear_stale_downstream_job(
         redis,
         item_id=item_id,
         stage_name="index_item",
-        job_id=index_item_job_id(item_id),
+        job_id=resolved_job_id,
     )
     kwargs: dict[str, object] = {
-        "_job_id": index_item_job_id(item_id),
+        "_job_id": resolved_job_id,
         "_queue_name": queue_name,
     }
+    if defer_by_seconds is not None and defer_by_seconds > 0:
+        WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="index_item").observe(float(defer_by_seconds))
+        kwargs["_defer_by"] = timedelta(seconds=defer_by_seconds)
     if missing_seasons:
         kwargs["missing_seasons"] = missing_seasons
     job = await _enqueue_arq_job(redis, "index_item", item_id, **kwargs)
@@ -964,6 +991,12 @@ def _show_completion_retry_delay_seconds(settings: Settings, *, event: ItemEvent
     if event is ItemEvent.PARTIAL_COMPLETE:
         return 0
     return _ongoing_show_poll_interval_hours(settings) * 3600
+
+
+def _show_inventory_retry_delay_seconds(settings: Settings) -> int:
+    """Return a bounded retry delay when released show inventory is still empty."""
+
+    return min(_ongoing_show_poll_interval_hours(settings) * 3600, 300)
 
 
 _PARTIAL_SCOPE_SEASON_COVERAGE_BONUS = 10_000
@@ -2852,14 +2885,18 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                 arq_redis = await _resolve_arq_redis(mutable_ctx)
                 # Add a minimum defer so the pipeline doesn't tight-loop when
                 # show inventory/metadata hasn't stabilised yet.
-                no_inventory_defer = _show_completion_retry_delay_seconds(
-                    settings, event=ItemEvent.PARTIAL_COMPLETE
-                )
+                no_inventory_defer = _show_inventory_retry_delay_seconds(settings)
                 await enqueue_index_item(
                     arq_redis,
                     item_id=item.id,
                     queue_name=_queue_name(settings),
                     tenant_id=item.tenant_id,
+                    defer_by_seconds=no_inventory_defer,
+                    job_id=index_item_followup_job_id(
+                        item.id,
+                        discriminator="inventory-recheck",
+                        missing_seasons=sorted({s for s, _e in result.missing_released}),
+                    ),
                     missing_seasons=sorted({s for s, _e in result.missing_released}),
                 )
                 logger.info(
@@ -2924,11 +2961,20 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                 )
         elif event in {ItemEvent.PARTIAL_COMPLETE, ItemEvent.MARK_ONGOING}:
             arq_redis = await _resolve_arq_redis(mutable_ctx)
+            followup_defer = _show_completion_retry_delay_seconds(settings, event=event)
             await enqueue_index_item(
                 arq_redis,
                 item_id=item.id,
                 queue_name=_queue_name(settings),
                 tenant_id=item.tenant_id,
+                defer_by_seconds=followup_defer if followup_defer > 0 else None,
+                job_id=index_item_followup_job_id(
+                    item.id,
+                    discriminator=(
+                        "ongoing-poll" if event is ItemEvent.MARK_ONGOING else "partial-followup"
+                    ),
+                    missing_seasons=missing_season_numbers or None,
+                ),
                 missing_seasons=missing_season_numbers or None,
             )
 
@@ -3657,6 +3703,10 @@ async def poll_unreleased_items(ctx: dict[str, object]) -> dict[str, int]:
                 item_id=str(item.id),
                 queue_name=queue_name,
                 tenant_id=item.tenant_id,
+                job_id=index_item_followup_job_id(
+                    str(item.id),
+                    discriminator="release-poll",
+                ),
             )
             transitioned_count += 1
 
