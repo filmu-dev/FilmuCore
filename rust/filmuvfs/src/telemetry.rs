@@ -1152,7 +1152,15 @@ impl FilmuvfsMetrics {
             + self
                 .windows_projfs_notification_other
                 .load(Ordering::Relaxed);
-        if callback_count == 0 && opened == 0 && reused == 0 && notifications == 0 {
+        let callbacks_cancelled = self
+            .windows_projfs_callbacks_cancelled
+            .load(Ordering::Relaxed);
+        if callback_count == 0
+            && opened == 0
+            && reused == 0
+            && notifications == 0
+            && callbacks_cancelled == 0
+        {
             return;
         }
 
@@ -1173,6 +1181,7 @@ impl FilmuvfsMetrics {
             callbacks_ok = self.windows_projfs_callbacks_ok.load(Ordering::Relaxed),
             callbacks_estale = self.windows_projfs_callbacks_estale.load(Ordering::Relaxed),
             callbacks_error = self.windows_projfs_callbacks_error.load(Ordering::Relaxed),
+            callbacks_cancelled,
             callback_count,
             callback_avg_ms = avg_ms,
             callback_max_ms = max_ms,

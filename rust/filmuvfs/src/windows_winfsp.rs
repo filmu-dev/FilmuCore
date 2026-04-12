@@ -10,7 +10,8 @@ use std::{
 use tokio::runtime::Handle;
 use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{
-    EXCEPTION_NONCONTINUABLE_EXCEPTION, STATUS_BUFFER_OVERFLOW, STATUS_REPARSE, STATUS_SUCCESS,
+    EXCEPTION_NONCONTINUABLE_EXCEPTION, STATUS_BUFFER_OVERFLOW, STATUS_CANCELLED, STATUS_REPARSE,
+    STATUS_SUCCESS,
 };
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
 use winfsp_wrs::{
@@ -2016,7 +2017,7 @@ fn ntstatus_from_mount_error(error: MountRuntimeError) -> NTSTATUS {
         MountRuntimeError::MissingDetails { .. }
         | MountRuntimeError::MissingUrl { .. }
         | MountRuntimeError::Io { .. } => STATUS_IO_DEVICE_ERROR,
-        MountRuntimeError::ReadAborted { .. } => STATUS_SUCCESS,
+        MountRuntimeError::ReadAborted { .. } => STATUS_CANCELLED,
         MountRuntimeError::HandleNotFound { .. }
         | MountRuntimeError::HandleInodeMismatch { .. }
         | MountRuntimeError::InvalidName { .. } => STATUS_INVALID_PARAMETER,
@@ -2042,8 +2043,8 @@ pub const fn winfsp_backend_compiled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        legacy_winfsp_mountpoint_spec, stable_volume_serial, strip_stream_suffix,
-        winfsp_mountpoint_spec, WinfspFilesystem,
+        legacy_winfsp_mountpoint_spec, ntstatus_from_mount_error, stable_volume_serial,
+        strip_stream_suffix, winfsp_mountpoint_spec, WinfspFilesystem, STATUS_CANCELLED,
     };
     use std::{path::PathBuf, sync::Arc};
 
@@ -2127,5 +2128,15 @@ mod tests {
         );
         assert_eq!(winfsp_mountpoint_spec(&PathBuf::from(r"X:")), r"X:");
         assert_eq!(winfsp_mountpoint_spec(&PathBuf::from(r"X:\")), r"X:");
+    }
+
+    #[test]
+    fn maps_read_aborted_to_cancelled_status() {
+        assert_eq!(
+            ntstatus_from_mount_error(crate::mount::MountRuntimeError::ReadAborted {
+                path: "/movies/Avatar.mkv".to_owned(),
+            }),
+            STATUS_CANCELLED
+        );
     }
 }

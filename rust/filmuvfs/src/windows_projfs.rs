@@ -438,23 +438,28 @@ impl WindowsProjfsInstance {
         let instance = Arc::clone(self);
         self.runtime_handle.spawn(async move {
             let completion_result = instance.get_file_data_for_command(&request).await;
-            instance.pending_commands.remove(&request.command_id);
-            let complete_hr = unsafe {
-                PrjCompleteCommand(
-                    request.namespace_context,
-                    request.command_id,
-                    completion_result,
-                    null(),
-                )
-            };
-            if complete_hr != S_OK {
-                warn!(
-                    path = %request.normalized_path,
-                    command_id = request.command_id,
-                    completion_result = format_hresult(completion_result),
-                    complete_hr = format_hresult(complete_hr),
-                    "projfs.get_file_data completion command failed"
-                );
+            if instance
+                .pending_commands
+                .remove(&request.command_id)
+                .is_some()
+            {
+                let complete_hr = unsafe {
+                    PrjCompleteCommand(
+                        request.namespace_context,
+                        request.command_id,
+                        completion_result,
+                        null(),
+                    )
+                };
+                if complete_hr != S_OK {
+                    warn!(
+                        path = %request.normalized_path,
+                        command_id = request.command_id,
+                        completion_result = format_hresult(completion_result),
+                        complete_hr = format_hresult(complete_hr),
+                        "projfs.get_file_data completion command failed"
+                    );
+                }
             }
         });
 
