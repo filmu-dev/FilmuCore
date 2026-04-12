@@ -61,6 +61,7 @@ from filmu_py.services.tvdb import TvdbClient, TvdbSeriesMetadata
 from filmu_py.state.item import ItemEvent, ItemState, ItemStateMachine
 
 _NOTIFICATION_ITEM_TYPES = {"movie", "show", "season", "episode"}
+_SATISFYING_MEDIA_ENTRY_REFRESH_STATES = ("ready", "stale", "refreshing")
 logger = logging.getLogger(__name__)
 structlogger = structlog.get_logger(__name__)
 _STATE_CHANGED_EVENT_TOPIC = "item.state.changed"
@@ -1096,7 +1097,11 @@ def _build_detail_record(
     if summary.type in {"show", "tv"}:
         season_set: set[int] = set()
         for entry in item.media_entries:
-            if getattr(entry, "refresh_state", None) != "ready" or getattr(entry, "entry_type", None) != "media":
+            if (
+                getattr(entry, "refresh_state", None)
+                not in _SATISFYING_MEDIA_ENTRY_REFRESH_STATES
+                or getattr(entry, "entry_type", None) != "media"
+            ):
                 continue
             # Use range-aware inference so pack torrents named "S01-S04"
             # expand to [1,2,3,4] rather than just [1].
@@ -3042,7 +3047,7 @@ async def _evaluate_show_completion(
                 select(MediaEntryORM.item_id)
                 .where(
                     MediaEntryORM.item_id.in_(list(episode_item_ids_by_scope.values())),
-                    MediaEntryORM.refresh_state == "ready",
+                    MediaEntryORM.refresh_state.in_(_SATISFYING_MEDIA_ENTRY_REFRESH_STATES),
                     MediaEntryORM.entry_type == "media",
                 )
                 .distinct()
@@ -3056,7 +3061,7 @@ async def _evaluate_show_completion(
                 select(MediaEntryORM.provider_file_path, MediaEntryORM.original_filename)
                 .where(
                     MediaEntryORM.item_id == item.id,
-                    MediaEntryORM.refresh_state == "ready",
+                    MediaEntryORM.refresh_state.in_(_SATISFYING_MEDIA_ENTRY_REFRESH_STATES),
                     MediaEntryORM.entry_type == "media",
                 )
             )
@@ -3261,7 +3266,7 @@ class MediaService:
             media_entries_result = await session.execute(
                 select(MediaEntryORM.id).where(
                     MediaEntryORM.item_id == item.id,
-                    MediaEntryORM.refresh_state == "ready",
+                    MediaEntryORM.refresh_state.in_(_SATISFYING_MEDIA_ENTRY_REFRESH_STATES),
                     MediaEntryORM.entry_type == "media",
                 ).limit(1)
             )
@@ -3383,7 +3388,7 @@ class MediaService:
             select(MediaEntryORM.item_id)
             .where(
                 MediaEntryORM.item_id.in_(expected_episodes),
-                MediaEntryORM.refresh_state == "ready",
+                MediaEntryORM.refresh_state.in_(_SATISFYING_MEDIA_ENTRY_REFRESH_STATES),
                 MediaEntryORM.entry_type == "media",
             )
             .distinct()
@@ -4074,6 +4079,40 @@ class MediaService:
             active_stream_cleared=False,
             scrape_job_enqueued=job is not None,
         )
+
+    async def prepare_item_for_scrape_retry(
+        self,
+        item_id: str,
+        *,
+        message: str,
+    ) -> MediaItemRecord:
+        """Move one item back to requested so the worker can run a fresh scrape cycle."""
+
+        async with self._db.session() as session:
+            item = (
+                await session.execute(select(MediaItemORM).where(MediaItemORM.id == item_id))
+            ).scalar_one_or_none()
+            if item is None:
+                raise ItemNotFoundError(f"unknown item_id={item_id}")
+
+            item.next_retry_at = None
+            session.add(
+                self._build_retry_reset_state_event(
+                    item,
+                    event_name="search_retry",
+                    message=message,
+                )
+            )
+            snapshot = MediaItemRecord(
+                id=item.id,
+                external_ref=item.external_ref,
+                title=item.title,
+                state=ItemState(item.state),
+                attributes=dict(cast(dict[str, object], item.attributes or {})),
+                has_media_entries=False,
+            )
+            await session.commit()
+            return snapshot
 
     async def reset_item(
         self,
@@ -5021,14 +5060,26 @@ class MediaService:
     ) -> ItemActionResult:
         """Create request records for the current `/api/v1/items/add` compatibility route."""
 
-        normalized_identifiers = _normalize_identifier_list(
-            identifiers if identifiers is not None else (tmdb_ids if media_type == "movie" else tvdb_ids)
-        )
+        explicit_identifiers = identifiers is not None
+        if explicit_identifiers:
+            normalized_identifiers = _normalize_identifier_list(identifiers)
+            request_identifiers = list(normalized_identifiers)
+        else:
+            preferred_identifiers = tmdb_ids if media_type == "movie" else tvdb_ids
+            fallback_identifiers = tvdb_ids if media_type == "movie" else tmdb_ids
+            normalized_identifiers = _normalize_identifier_list(preferred_identifiers)
+            identifier_system = "tmdb" if media_type == "movie" else "tvdb"
+            if not normalized_identifiers:
+                normalized_identifiers = _normalize_identifier_list(fallback_identifiers)
+                identifier_system = "tvdb" if media_type == "movie" else "tmdb"
+            request_identifiers = [
+                f"{identifier_system}:{identifier}" for identifier in normalized_identifiers
+            ]
         if not normalized_identifiers:
             raise ValueError("no identifiers supplied for requested media type")
 
         requested_ids: list[str] = []
-        for identifier in normalized_identifiers:
+        for identifier in request_identifiers:
             enriched = await self._fetch_request_metadata(
                 media_type=media_type, identifier=identifier
             )
@@ -5045,11 +5096,7 @@ class MediaService:
                 )
             if requested_seasons is not None or requested_episodes is not None:
                 record = await self.request_item(
-                    external_ref=(
-                        identifier
-                        if ":" in identifier
-                        else _external_ref_for_media_type(media_type, identifier)
-                    ),
+                    external_ref=identifier,
                     media_type=media_type,
                     title=request_title,
                     attributes=attributes,
@@ -5059,11 +5106,7 @@ class MediaService:
                 )
             else:
                 record = await self.request_item(
-                    external_ref=(
-                        identifier
-                        if ":" in identifier
-                        else _external_ref_for_media_type(media_type, identifier)
-                    ),
+                    external_ref=identifier,
                     media_type=media_type,
                     title=request_title,
                     attributes=attributes,

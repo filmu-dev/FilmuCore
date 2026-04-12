@@ -594,6 +594,69 @@ def test_finalize_show_item_requeues_single_missing_season(
     assert index_calls[0][2].get("missing_seasons") == [5]
 
 
+def test_finalize_show_item_requeues_missing_episodes_alongside_seasons(
+    monkeypatch: Any,
+) -> None:
+    item = MediaItemRecord(
+        id="show-episode-followup",
+        external_ref="tvdb:episode-followup",
+        title="Episode Followup Show",
+        state=ItemState.DOWNLOADED,
+        attributes={"item_type": "show"},
+    )
+
+    class _MediaService:
+        _db: object = object()
+
+        async def get_item(self, item_id: str) -> MediaItemRecord | None:
+            return item
+
+        async def get_latest_item_request_id(self, *, media_item_id: str) -> str | None:
+            return "req-episode-followup"
+
+        async def transition_item(
+            self, *, item_id: str, event: ItemEvent, message: str | None = None
+        ) -> MediaItemRecord:
+            return item
+
+    class _FakeRedis:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+        async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> object:
+            self.calls.append((function, args, kwargs))
+            return object()
+
+        async def delete(self, _key: str) -> int:
+            return 1
+
+    redis = _FakeRedis()
+
+    async def fake_evaluate(*_args: Any, **_kwargs: Any) -> ShowCompletionResult:
+        return ShowCompletionResult(
+            all_satisfied=False,
+            any_satisfied=True,
+            has_future_episodes=False,
+            missing_released=[(4, 3), (4, 5), (6, 0)],
+        )
+
+    async def fake_resolve_arq(_ctx: Any) -> _FakeRedis:
+        return redis
+
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: _MediaService())
+    monkeypatch.setattr(tasks, "_evaluate_show_completion", fake_evaluate)
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", fake_resolve_arq)
+
+    asyncio.run(
+        tasks.finalize_item({"settings": _build_settings(), "queue_name": "filmu-py"}, item.id)
+    )
+
+    index_calls = [call for call in redis.calls if call[0] == "index_item"]
+    assert len(index_calls) == 1
+    assert index_calls[0][2].get("missing_seasons") == [4, 6]
+    assert index_calls[0][2].get("missing_episodes") == {"4": [3, 5]}
+
+
 def test_evaluate_show_completion_does_not_self_satisfy_full_show_from_single_episode_pack() -> None:
     """Full-show + no inventory must not be marked complete from one SxxEyy path alone."""
 
