@@ -67,7 +67,8 @@ The local guard path is now:
 
 - `npm run branch:hygiene -- -ReviewBranch <remote-branch-name>` to audit the exact local-main -> remote-review-branch publish path
 - `npm run branch:codex:push -- <remote-branch-name>` to run that hygiene check and only then push `HEAD` to the target remote review branch
-- `.githooks/pre-push` now passes both the local branch and the destination remote branch name into the hygiene check, so pushes to stale or previously closed/merged review-branch names are blocked before GitHub reports them
+- `.githooks/pre-push` now passes both the local branch and the destination remote branch name into the hygiene check, and it rejects generated/runtime artifacts such as `logs/**`, `ci-artifacts/**`, and `playback-proof-artifacts/**` before GitHub ever sees them
+- `.githooks/commit-msg` now normalizes new commit subjects to Conventional Commit prefixes automatically when the subject is still free-form, so day-to-day Codex commits do not rely on memory for `feat` / `fix` / `docs` / `build` / `test` / `refactor` / `chore`
 
 The earlier local-preflight path is now:
 
@@ -76,7 +77,19 @@ The earlier local-preflight path is now:
 - audit the current branch before opening or updating a PR with `npm run branch:hygiene`
 - install the repo-managed pre-push hook once with `npm run hooks:install`
 
-`branch:codex:new` creates a timestamped `codex/<topic>-<utc>` branch from current `origin/main` and refuses to run when tracked changes are present, which prevents accidental reuse of a dirty or already-stacked branch. `branch:codex:publish` is the safer path when local work accumulates on a long-lived branch such as `dev`: it creates a fresh timestamped `codex/<topic>-<utc>` branch from current `origin/main`, applies only the net content diff from the source branch, and commits that clean delta as a single publish commit. `branch:hygiene` checks ahead/behind state against `origin/main` and, when GitHub is reachable, also checks whether the destination review branch name already belongs to an open, merged, or closed PR. `branch:codex:push` is the required guarded push path for local-`main` publishing. `hooks:install` configures the repo's `.githooks/pre-push` hook so branch hygiene runs automatically on every push.
+`branch:codex:new` creates a timestamped `codex/<topic>-<utc>` branch from current `origin/main` and refuses to run when tracked changes are present, which prevents accidental reuse of a dirty or already-stacked branch. `branch:codex:publish` is the safer path when local work accumulates on a long-lived branch such as `dev`: it creates a fresh timestamped `codex/<topic>-<utc>` branch from current `origin/main`, applies only the net content diff from the source branch, and commits that clean delta as a single publish commit. `branch:hygiene` checks ahead/behind state against `origin/main` and, when GitHub is reachable, also checks whether the destination review branch name already belongs to an open, merged, or closed PR. `branch:codex:push` is the required guarded push path for local-`main` publishing. `hooks:install` configures the repo's `.githooks/commit-msg` and `.githooks/pre-push` hooks so commit prefixes are normalized automatically and forbidden generated artifacts are blocked on every push.
+
+## Generated Artifact Policy
+
+Generated runtime outputs are not part of the repository contract.
+
+Never publish:
+
+- `logs/**`
+- `ci-artifacts/**`
+- `playback-proof-artifacts/**`
+
+Those paths are now both ignored in Git and blocked by the repo-managed `pre-push` hook. If one of those files appears in `git status`, treat that as a repo-hygiene bug and fix the ignore/index state instead of committing the files.
 
 ## Why This Policy Exists
 
@@ -201,7 +214,8 @@ Use this when your working branch is local-only `dev` and GitHub PRs always targ
 One-time setup:
 
 1. Run `npm run hooks:install`.
-2. Confirm pushes are now guarded by the local `pre-push` hygiene check.
+2. Confirm new commits receive an automatic conventional prefix when the subject is still free-form.
+3. Confirm pushes are now guarded by the local `pre-push` hygiene and generated-artifact checks.
 
 For each new piece of work:
 

@@ -22,6 +22,8 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - After any squash merge to GitHub `main` or any merged release PR, re-sync local `main` before the next push to every still-open review branch.
 - If a local branch is created accidentally, move the intended changes back onto `main`, delete the accidental local branch, and continue from local `main`.
 - Use conventional commit tags automatically. Pick the narrowest accurate prefix from `feat`, `fix`, `docs`, `build`, `test`, `refactor`, or `chore` instead of free-form commit subjects.
+- Generated runtime outputs must never be published. Keep `logs/`, `ci-artifacts/`, and `playback-proof-artifacts/` out of Git history and treat any attempt to stage them as a workflow bug to fix, not as content to commit.
+- Install the repo-managed hooks with `npm run hooks:install` so `commit-msg` can normalize commit prefixes and `pre-push` can reject forbidden generated artifacts before GitHub sees them.
 
 ## Common commands
 - Install Python dev dependencies:
