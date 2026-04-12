@@ -9674,6 +9674,212 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
         "disk_cache_write_errors",
     ]
     assert governance["vfs_runtime_rollout_next_action"] == "resolve_blocking_runtime_failures"
+    assert governance["vfs_runtime_rollout_canary_decision"] == "rollback_current_environment"
+    assert governance["vfs_runtime_rollout_merge_gate"] == "blocked"
+
+
+def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 2,
+                    "peak_open_handles": 4,
+                    "active_reads": 1,
+                    "peak_active_reads": 2,
+                    "chunk_cache_weighted_bytes": 4096,
+                },
+                "handle_startup": {
+                    "total": 3,
+                    "ok": 3,
+                    "error": 0,
+                    "estale": 0,
+                    "cancelled": 0,
+                    "average_duration_ms": 41.2,
+                    "max_duration_ms": 88.4,
+                },
+                "mounted_reads": {
+                    "total": 6,
+                    "ok": 6,
+                    "error": 0,
+                    "estale": 0,
+                    "cancelled": 0,
+                    "average_duration_ms": 8.1,
+                    "max_duration_ms": 18.0,
+                },
+                "upstream_fetch": {
+                    "operations": 2,
+                    "bytes_total": 32768,
+                    "average_duration_ms": 17.0,
+                    "max_duration_ms": 29.0,
+                },
+                "upstream_failures": {
+                    "invalid_url": 0,
+                    "build_request": 0,
+                    "network": 0,
+                    "stale_status": 0,
+                    "unexpected_status": 0,
+                    "unexpected_status_too_many_requests": 0,
+                    "unexpected_status_server_error": 0,
+                    "read_body": 0,
+                },
+                "upstream_retryable_events": {
+                    "network": 0,
+                    "read_body": 0,
+                    "status_too_many_requests": 0,
+                    "status_server_error": 0,
+                },
+                "backend_fallback": {
+                    "attempts": 0,
+                    "success": 0,
+                    "failure": 0,
+                    "attempts_direct_read_failure": 0,
+                    "attempts_inline_refresh_unavailable": 0,
+                    "attempts_post_inline_refresh_failure": 0,
+                    "success_direct_read_failure": 0,
+                    "success_inline_refresh_unavailable": 0,
+                    "success_post_inline_refresh_failure": 0,
+                    "failure_direct_read_failure": 0,
+                    "failure_inline_refresh_unavailable": 0,
+                    "failure_post_inline_refresh_failure": 0,
+                },
+                "chunk_cache": {
+                    "backend": "hybrid",
+                    "hits": 8,
+                    "misses": 2,
+                    "inserts": 2,
+                    "prefetch_hits": 1,
+                    "memory_bytes": 2048,
+                    "memory_max_bytes": 8192,
+                    "memory_hits": 6,
+                    "memory_misses": 2,
+                    "disk_bytes": 8192,
+                    "disk_max_bytes": 65536,
+                    "disk_hits": 2,
+                    "disk_misses": 0,
+                    "disk_writes": 1,
+                    "disk_write_errors": 0,
+                    "disk_evictions": 0,
+                },
+                "prefetch": {
+                    "concurrency_limit": 4,
+                    "available_permits": 4,
+                    "active_permits": 0,
+                    "active_background_tasks": 0,
+                    "peak_active_background_tasks": 1,
+                    "background_spawned": 1,
+                    "background_backpressure": 0,
+                    "fairness_denied": 0,
+                    "global_backpressure_denied": 0,
+                    "background_error": 0,
+                },
+                "chunk_coalescing": {
+                    "in_flight_chunks": 0,
+                    "peak_in_flight_chunks": 1,
+                    "waits_total": 1,
+                    "waits_hit": 1,
+                    "waits_miss": 0,
+                    "wait_average_duration_ms": 3.0,
+                    "wait_max_duration_ms": 3.0,
+                },
+                "inline_refresh": {
+                    "success": 1,
+                    "no_url": 0,
+                    "error": 0,
+                    "timeout": 0,
+                },
+                "windows_projfs": {
+                    "callbacks_cancelled": 0,
+                    "callbacks_error": 0,
+                    "callbacks_estale": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    (artifacts_root / "stability-summary-20260412-010101.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:01Z",
+                "environment_class": "windows-native:enterprise",
+                "repeat_count": 2,
+                "dry_run": False,
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "ci-execution-summary.json").write_text(
+        json.dumps(
+            {
+                "required_check_name": "Playback Gate / Playback Gate",
+                "gate_mode": "full",
+                "provider_gate_required": True,
+                "provider_gate_ran": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "media-server-gate-20260412-010102.json").write_text(
+        json.dumps({"timestamp": "2026-04-12T01:01:02Z", "all_green": True}),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:03Z",
+                "results": [{"provider": "plex", "status": "passed"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (windows_artifacts_root / "soak-stability-20260412-010104.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:04Z",
+                "environment_class": "windows-native:enterprise",
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "github-main-policy-current.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:05Z",
+                "validation": {"status": "ready"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    client, _ = _build_client()
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["playback_gate_snapshot_available"] == 1
+    assert governance["playback_gate_stability_ready"] == 1
+    assert governance["playback_gate_provider_parity_ready"] == 1
+    assert governance["playback_gate_windows_provider_ready"] == 1
+    assert governance["playback_gate_windows_soak_ready"] == 1
+    assert governance["playback_gate_policy_validation_status"] == "ready"
+    assert governance["playback_gate_policy_ready"] == 1
+    assert governance["playback_gate_rollout_readiness"] == "ready"
+    assert governance["playback_gate_rollout_reasons"] == ["enterprise_playback_gate_green"]
+    assert governance["playback_gate_rollout_next_action"] == "keep_required_checks_enforced"
+    assert governance["vfs_runtime_rollout_readiness"] == "ready"
+    assert governance["vfs_runtime_rollout_canary_decision"] == "promote_to_next_environment_class"
+    assert governance["vfs_runtime_rollout_merge_gate"] == "ready"
+    assert governance["vfs_runtime_rollout_environment_class"] == "windows-native:enterprise"
 
 
 def test_hls_route_failure_governance_counts_generation_timeout(

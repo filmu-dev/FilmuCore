@@ -72,11 +72,9 @@ INLINE_REMOTE_HLS_REFRESH_EVENTS = Counter(
     "Count of inline remote-HLS media-entry repair attempts by outcome.",
     labelnames=("event",),
 )
+_PLAYBACK_PROOF_ARTIFACTS_ROOT = Path(__file__).resolve().parents[3] / "playback-proof-artifacts"
 _MANAGED_WINDOWS_VFS_STATE_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "playback-proof-artifacts"
-    / "windows-native-stack"
-    / "filmuvfs-windows-state.json"
+    _PLAYBACK_PROOF_ARTIFACTS_ROOT / "windows-native-stack" / "filmuvfs-windows-state.json"
 )
 
 _HLS_ROUTE_FAILURE_GOVERNANCE = {
@@ -504,6 +502,9 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | li
         "vfs_runtime_rollout_readiness": "unknown",
         "vfs_runtime_rollout_reasons": ["runtime_snapshot_unavailable"],
         "vfs_runtime_rollout_next_action": "capture_runtime_status",
+        "vfs_runtime_rollout_canary_decision": "capture_runtime_status",
+        "vfs_runtime_rollout_merge_gate": "blocked",
+        "vfs_runtime_rollout_environment_class": "",
         "vfs_runtime_active_handle_summaries": [],
     }
 
@@ -633,13 +634,324 @@ def _load_vfs_runtime_status_payload() -> dict[str, object] | None:
     return None
 
 
-def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str]]:
+def _candidate_playback_artifacts_roots() -> list[Path]:
+    """Return playback-proof artifact roots in precedence order."""
+
+    roots: list[Path] = []
+    env_root = os.getenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT")
+    if env_root and env_root.strip():
+        roots.append(Path(env_root.strip()))
+    roots.append(_PLAYBACK_PROOF_ARTIFACTS_ROOT)
+
+    unique_roots: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        normalized = root.expanduser()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_roots.append(normalized)
+    return unique_roots
+
+
+def _candidate_github_main_policy_paths() -> list[Path]:
+    """Return candidate current-policy artifact paths in precedence order."""
+
+    paths: list[Path] = []
+    env_path = os.getenv("FILMU_PY_GITHUB_MAIN_POLICY_PATH")
+    if env_path and env_path.strip():
+        paths.append(Path(env_path.strip()))
+    for root in _candidate_playback_artifacts_roots():
+        paths.append(root / "github-main-policy-current.json")
+
+    unique_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        normalized = path.expanduser()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_paths.append(normalized)
+    return unique_paths
+
+
+def _load_json_file(path: Path) -> dict[str, object] | None:
+    """Load one JSON file if it exists and contains an object payload."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(payload, dict):
+        return cast(dict[str, object], payload)
+    return None
+
+
+def _load_latest_json_artifact(*, prefix: str, subdir: str | None = None) -> dict[str, object] | None:
+    """Load the newest matching JSON artifact from the playback-proof artifact tree."""
+
+    for root in _candidate_playback_artifacts_roots():
+        candidate_root = root / subdir if subdir is not None else root
+        try:
+            matches = list(candidate_root.glob(f"{prefix}*.json"))
+        except OSError:
+            continue
+        newest_path: Path | None = None
+        newest_mtime = -1.0
+        for path in matches:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_mtime > newest_mtime:
+                newest_mtime = stat.st_mtime
+                newest_path = path
+        if newest_path is None:
+            continue
+        payload = _load_json_file(newest_path)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _load_current_github_main_policy_artifact() -> dict[str, object] | None:
+    """Load the newest available GitHub main-policy validation artifact, if present."""
+
+    for path in _candidate_github_main_policy_paths():
+        payload = _load_json_file(path)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _load_playback_artifact_at_relative_path(relative_path: str) -> dict[str, object] | None:
+    """Load one playback-proof artifact by relative path across candidate roots."""
+
+    for root in _candidate_playback_artifacts_roots():
+        payload = _load_json_file(root / relative_path)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _empty_playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
+    """Return the default playback-gate promotion snapshot."""
+
+    return {
+        "playback_gate_snapshot_available": 0,
+        "playback_gate_artifact_generated_at": "",
+        "playback_gate_environment_class": "",
+        "playback_gate_repeat_count": 0,
+        "playback_gate_gate_mode": "unknown",
+        "playback_gate_provider_gate_required": 0,
+        "playback_gate_provider_gate_ran": 0,
+        "playback_gate_stability_ready": 0,
+        "playback_gate_provider_parity_ready": 0,
+        "playback_gate_windows_provider_ready": 0,
+        "playback_gate_windows_soak_ready": 0,
+        "playback_gate_policy_validation_status": "unverified",
+        "playback_gate_policy_ready": 0,
+        "playback_gate_rollout_readiness": "not_ready",
+        "playback_gate_rollout_reasons": ["missing_playback_gate_artifacts"],
+        "playback_gate_rollout_next_action": "run_proof_playback_gate_enterprise",
+    }
+
+
+def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
+    """Return machine-shaped playback-gate promotion posture from local artifacts."""
+
+    governance = _empty_playback_gate_governance_snapshot()
+    stability_summary = _load_latest_json_artifact(prefix="stability-summary-")
+    ci_summary = _load_playback_artifact_at_relative_path("ci-execution-summary.json")
+    provider_summary = _load_latest_json_artifact(prefix="media-server-gate-")
+    windows_provider_summary = _load_latest_json_artifact(prefix="windows-media-server-gate-")
+    windows_soak_summary = _load_latest_json_artifact(
+        prefix="soak-stability-",
+        subdir="windows-native-stack",
+    )
+    policy_summary = _load_current_github_main_policy_artifact()
+
+    if stability_summary is not None:
+        governance["playback_gate_snapshot_available"] = 1
+        governance["playback_gate_artifact_generated_at"] = _as_str(
+            stability_summary.get("timestamp"),
+        )
+        governance["playback_gate_environment_class"] = _as_str(
+            stability_summary.get("environment_class"),
+        )
+        governance["playback_gate_repeat_count"] = _as_int(stability_summary.get("repeat_count"))
+        if bool(stability_summary.get("all_green")) and not bool(stability_summary.get("dry_run")):
+            governance["playback_gate_stability_ready"] = 1
+
+    if ci_summary is not None:
+        governance["playback_gate_gate_mode"] = _as_str(
+            ci_summary.get("gate_mode"),
+            default="unknown",
+        )
+        governance["playback_gate_provider_gate_required"] = _as_int(
+            ci_summary.get("provider_gate_required"),
+        )
+        governance["playback_gate_provider_gate_ran"] = _as_int(
+            ci_summary.get("provider_gate_ran"),
+        )
+
+    provider_summary_available = provider_summary is not None
+    if provider_summary is not None and bool(provider_summary.get("all_green")):
+        governance["playback_gate_provider_parity_ready"] = 1
+
+    windows_provider_summary_available = windows_provider_summary is not None
+    if windows_provider_summary is not None:
+        results = windows_provider_summary.get("results")
+        if (
+            isinstance(results, list)
+            and any(
+                isinstance(result, dict) and result.get("status") == "passed" for result in results
+            )
+            and all(
+                not isinstance(result, dict) or result.get("status") in {"passed", "skipped"}
+                for result in results
+            )
+        ):
+            governance["playback_gate_windows_provider_ready"] = 1
+
+    windows_soak_summary_available = windows_soak_summary is not None
+    if windows_soak_summary is not None and bool(windows_soak_summary.get("all_green")):
+        governance["playback_gate_windows_soak_ready"] = 1
+
+    if policy_summary is not None:
+        validation = policy_summary.get("validation")
+        if isinstance(validation, dict):
+            validation_status = _as_str(validation.get("status"), default="unverified")
+            governance["playback_gate_policy_validation_status"] = validation_status
+            if validation_status == "ready":
+                governance["playback_gate_policy_ready"] = 1
+
+    rollout_reasons: list[str] = []
+    if governance["playback_gate_snapshot_available"] == 0:
+        rollout_reasons.append("missing_playback_gate_artifacts")
+    elif governance["playback_gate_gate_mode"] == "dry_run":
+        rollout_reasons.append("playback_gate_dry_run_mode")
+    elif governance["playback_gate_stability_ready"] == 0:
+        rollout_reasons.append("playback_gate_failed_or_incomplete")
+
+    provider_gate_required = _as_int(governance["playback_gate_provider_gate_required"]) > 0
+    provider_gate_ran = _as_int(governance["playback_gate_provider_gate_ran"]) > 0
+    if provider_gate_required and not provider_gate_ran:
+        rollout_reasons.append("provider_gate_not_run")
+    elif provider_gate_ran:
+        if not provider_summary_available:
+            rollout_reasons.append("provider_gate_artifact_missing")
+        elif _as_int(governance["playback_gate_provider_parity_ready"]) == 0:
+            rollout_reasons.append("provider_gate_not_green")
+
+    if not windows_provider_summary_available:
+        rollout_reasons.append("windows_provider_gate_artifact_missing")
+    elif _as_int(governance["playback_gate_windows_provider_ready"]) == 0:
+        rollout_reasons.append("windows_provider_gate_not_green")
+
+    if not windows_soak_summary_available:
+        rollout_reasons.append("windows_vfs_soak_artifact_missing")
+    elif _as_int(governance["playback_gate_windows_soak_ready"]) == 0:
+        rollout_reasons.append("windows_vfs_soak_not_green")
+
+    policy_status = _as_str(governance["playback_gate_policy_validation_status"], default="unverified")
+    if policy_status == "not_ready":
+        rollout_reasons.append("github_main_policy_not_ready")
+    elif policy_status == "unverified":
+        rollout_reasons.append("github_main_policy_unverified")
+
+    blocked_reasons = {
+        "playback_gate_failed_or_incomplete",
+        "provider_gate_not_green",
+        "windows_provider_gate_not_green",
+        "windows_vfs_soak_not_green",
+        "github_main_policy_not_ready",
+    }
+    warning_reasons = {
+        "missing_playback_gate_artifacts",
+        "playback_gate_dry_run_mode",
+        "provider_gate_not_run",
+        "provider_gate_artifact_missing",
+        "windows_provider_gate_artifact_missing",
+        "windows_vfs_soak_artifact_missing",
+        "github_main_policy_unverified",
+    }
+
+    if any(reason in blocked_reasons for reason in rollout_reasons):
+        governance["playback_gate_rollout_readiness"] = "blocked"
+        governance["playback_gate_rollout_next_action"] = "resolve_failed_playback_gate_proofs"
+    elif any(reason in warning_reasons for reason in rollout_reasons):
+        governance["playback_gate_rollout_readiness"] = "warning"
+        governance["playback_gate_rollout_next_action"] = "record_enterprise_playback_gate_evidence"
+    else:
+        governance["playback_gate_rollout_readiness"] = "ready"
+        governance["playback_gate_rollout_next_action"] = "keep_required_checks_enforced"
+        rollout_reasons.append("enterprise_playback_gate_green")
+
+    governance["playback_gate_rollout_reasons"] = rollout_reasons
+    return governance
+
+
+def _apply_vfs_rollout_policy(
+    governance: dict[str, int | float | str | list[str]],
+    *,
+    playback_gate_governance: dict[str, int | str | list[str]] | None = None,
+) -> dict[str, int | float | str | list[str]]:
+    """Apply canary and rollback policy to the runtime-derived VFS rollout posture."""
+
+    canary_environment = ""
+    if playback_gate_governance is not None:
+        canary_environment = _as_str(
+            playback_gate_governance.get("playback_gate_environment_class"),
+        )
+
+    governance["vfs_runtime_rollout_environment_class"] = canary_environment
+    governance["vfs_runtime_rollout_canary_decision"] = "capture_runtime_status"
+    governance["vfs_runtime_rollout_merge_gate"] = "blocked"
+
+    if _as_int(governance["vfs_runtime_snapshot_available"]) <= 0:
+        return governance
+
+    rollout_readiness = _as_str(
+        governance["vfs_runtime_rollout_readiness"],
+        default="unknown",
+    )
+    windows_soak_ready = (
+        playback_gate_governance is not None
+        and _as_int(playback_gate_governance.get("playback_gate_windows_soak_ready")) > 0
+    )
+
+    if rollout_readiness == "blocked":
+        governance["vfs_runtime_rollout_canary_decision"] = "rollback_current_environment"
+        governance["vfs_runtime_rollout_merge_gate"] = "blocked"
+    elif not windows_soak_ready:
+        governance["vfs_runtime_rollout_canary_decision"] = "hold_until_windows_soak_is_green"
+        governance["vfs_runtime_rollout_merge_gate"] = "hold"
+        rollout_reasons = cast(list[str], governance["vfs_runtime_rollout_reasons"])
+        if "windows_vfs_soak_not_green" not in rollout_reasons:
+            rollout_reasons.append("windows_vfs_soak_not_green")
+    elif rollout_readiness == "warning":
+        governance["vfs_runtime_rollout_canary_decision"] = "hold_canary_and_repeat_soak"
+        governance["vfs_runtime_rollout_merge_gate"] = "hold"
+    else:
+        governance["vfs_runtime_rollout_canary_decision"] = "promote_to_next_environment_class"
+        governance["vfs_runtime_rollout_merge_gate"] = "ready"
+
+    return governance
+
+
+def _vfs_runtime_governance_snapshot(
+    playback_gate_governance: dict[str, int | str | list[str]] | None = None,
+) -> dict[str, int | float | str | list[str]]:
     """Return additive governance counters extracted from the Rust runtime snapshot."""
 
     payload = _load_vfs_runtime_status_payload()
     governance = _empty_vfs_runtime_governance_snapshot()
     if payload is None:
-        return governance
+        return _apply_vfs_rollout_policy(
+            governance,
+            playback_gate_governance=playback_gate_governance,
+        )
     governance["vfs_runtime_snapshot_available"] = 1
     governance["vfs_runtime_open_handles"] = _as_int(_nested_mapping_value(payload, "runtime", "open_handles"))
     governance["vfs_runtime_peak_open_handles"] = _as_int(
@@ -1001,7 +1313,10 @@ def _vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str
     governance["vfs_runtime_active_handle_summaries"] = _as_str_list(
         _nested_mapping_value(payload, "runtime", "active_handle_summaries")
     )
-    return governance
+    return _apply_vfs_rollout_policy(
+        governance,
+        playback_gate_governance=playback_gate_governance,
+    )
 
 
 def _hls_failed_lease_trigger_governance_snapshot() -> dict[str, int]:
@@ -1987,7 +2302,10 @@ async def get_stream_status(
         if resources.vfs_catalog_server is not None
         else build_empty_vfs_catalog_governance_snapshot()
     )
-    vfs_runtime_governance = _vfs_runtime_governance_snapshot()
+    playback_gate_governance = _playback_gate_governance_snapshot()
+    vfs_runtime_governance = _vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate_governance,
+    )
     sessions = [
         ServingSessionResponse(
             session_id=session.session_id,
@@ -2040,6 +2358,7 @@ async def get_stream_status(
                 **playback_governance,
                 **vfs_governance,
                 **vfs_runtime_governance,
+                **playback_gate_governance,
                 "serving_active_session_summaries": [
                     f"{session.session_id}:{session.category}:{session.resource}"
                     for session in sessions[:10]
