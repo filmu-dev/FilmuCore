@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -134,6 +134,7 @@ class FakePipelineMediaService:
     selected_stream_id: str | None = None
     calls: list[str] = field(default_factory=list)
     transition_messages: list[tuple[ItemEvent, str | None]] = field(default_factory=list)
+    prepared_retry_messages: list[str] = field(default_factory=list)
     persisted_downloads: list[dict[str, object]] = field(default_factory=list)
     persisted_ranked_results: list[RankedStreamCandidateRecord] = field(default_factory=list)
     persisted_scrape_candidates: list[ScrapeCandidateRecord] = field(default_factory=list)
@@ -331,6 +332,25 @@ class FakePipelineMediaService:
             title="Example Movie",
             state=self.state,
             attributes=dict(self.item_attributes),
+        )
+
+    async def prepare_item_for_scrape_retry(
+        self,
+        item_id: str,
+        *,
+        message: str,
+    ) -> MediaItemRecord:
+        self.calls.append("prepare_item_for_scrape_retry")
+        assert item_id == self.item_id
+        self.state = ItemState.REQUESTED
+        self.prepared_retry_messages.append(message)
+        return MediaItemRecord(
+            id=self.item_id,
+            external_ref=f"tmdb:{self.item_id}",
+            title="Example Movie",
+            state=self.state,
+            attributes=dict(self.item_attributes),
+            has_media_entries=self.has_media_entries,
         )
 
     async def get_latest_item_request_id(self, *, media_item_id: str) -> str | None:
@@ -740,6 +760,60 @@ def test_scrape_item_transitions_to_failed_when_all_providers_return_empty(
     ]
 
 
+def test_scrape_item_requeues_search_when_all_providers_return_empty_and_arq_is_available(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-scrape-empty-retry"
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.INDEXED,
+        item_attributes={"item_type": "movie", "tmdb_id": "603", "imdb_id": "tt0133093"},
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+
+    class _EmptyScraperPlugin:
+        async def search(self, metadata: ScraperSearchInput) -> list[PluginScraperResult]:
+            assert metadata.external_ids == ExternalIdentifiers(tmdb_id="603", imdb_id="tt0133093")
+            return []
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([_EmptyScraperPlugin()])
+
+    async def fake_resolve_runtime_settings(_: dict[str, object]) -> Settings:
+        return settings
+
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+    monkeypatch.setattr(tasks, "_resolve_runtime_settings", fake_resolve_runtime_settings)
+
+    result = asyncio.run(
+        tasks.scrape_item(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.state is ItemState.REQUESTED
+    assert media_service.transition_messages == []
+    assert media_service.prepared_retry_messages == [
+        "scrape_item retry scheduled: no_candidates"
+    ]
+    assert redis.calls == [
+        (
+            "scrape_item",
+            (item_id,),
+            {
+                "_job_id": f"{tasks.scrape_item_job_id(item_id)}:scrape_item:retry:1",
+                "_queue_name": "filmu-py",
+                "_defer_by": timedelta(minutes=5),
+            },
+        )
+    ]
+
+
 def test_scrape_item_marks_partial_complete_when_no_candidates_but_media_exists(
     monkeypatch: Any,
 ) -> None:
@@ -1020,6 +1094,65 @@ def test_scrape_item_prefers_missing_seasons_over_original_partial_scope(monkeyp
         (item_id,),
         {
             "partial_seasons": [1, 2],
+            "_job_id": tasks.parse_scrape_results_job_id(item_id),
+            "_queue_name": "filmu-py",
+        },
+    )
+
+
+def test_scrape_item_propagates_missing_episode_scope(monkeypatch: Any) -> None:
+    item_id = "item-scrape-partial-episodes"
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.INDEXED,
+        item_attributes={"item_type": "show", "tvdb_id": "456"},
+        latest_item_request=ItemRequestSummaryRecord(
+            is_partial=True,
+            requested_seasons=[1],
+            requested_episodes={"1": [1, 2]},
+        ),
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+
+    class _SuccessfulScraperPlugin:
+        async def search(self, metadata: ScraperSearchInput) -> list[PluginScraperResult]:
+            _ = metadata
+            return [
+                PluginScraperResult(
+                    title="Example.Show.S01E03.1080p.WEB-DL",
+                    provider="prowlarr",
+                    size_bytes=1234,
+                    info_hash="abc124",
+                )
+            ]
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([_SuccessfulScraperPlugin()])
+
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+
+    result = asyncio.run(
+        tasks.scrape_item(
+            {
+                "settings": _build_worker_settings(),
+                "arq_redis": redis,
+                "queue_name": "filmu-py",
+            },
+            item_id,
+            missing_seasons=[1],
+            missing_episodes={"1": [3, 5]},
+        )
+    )
+
+    assert result == item_id
+    assert redis.calls[-1] == (
+        "parse_scrape_results",
+        (item_id,),
+        {
+            "partial_seasons": [1],
+            "partial_episodes": {"1": [3, 5]},
             "_job_id": tasks.parse_scrape_results_job_id(item_id),
             "_queue_name": "filmu-py",
         },
@@ -1396,6 +1529,52 @@ def test_parse_scrape_results_rejects_wrong_media_type(monkeypatch: Any) -> None
     ]
 
 
+def test_parse_scrape_results_requeues_search_when_no_valid_candidates_and_arq_is_available(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-parse-retry"
+    wrong = _build_stream(stream_id="stream-episode", item_id=item_id, parsed=False)
+    wrong.raw_title = "Example.Show.S01E01.1080p.WEB-DL"
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        streams=[wrong],
+        item_attributes={"item_type": "movie", "tmdb_id": "123"},
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def fake_resolve_runtime_settings(_: dict[str, object]) -> Settings:
+        return settings
+
+    monkeypatch.setattr(tasks, "_resolve_runtime_settings", fake_resolve_runtime_settings)
+
+    result = asyncio.run(
+        tasks.parse_scrape_results(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.state is ItemState.REQUESTED
+    assert media_service.transition_messages == []
+    assert media_service.prepared_retry_messages == [
+        "parse_scrape_results retry scheduled: no_valid_parsed_candidates"
+    ]
+    assert redis.calls == [
+        (
+            "scrape_item",
+            (item_id,),
+            {
+                "_job_id": f"{tasks.scrape_item_job_id(item_id)}:parse_scrape_results:retry:1",
+                "_queue_name": "filmu-py",
+                "_defer_by": timedelta(minutes=5),
+            },
+        )
+    ]
+
+
 def test_parse_scrape_results_rejects_wrong_season(monkeypatch: Any) -> None:
     item_id = "item-parse-wrong-season"
     wrong = _build_stream(stream_id="stream-season", item_id=item_id, parsed=False)
@@ -1524,7 +1703,13 @@ def test_rank_streams_skips_non_dubbed_anime_when_enabled(monkeypatch: Any) -> N
     )
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
     settings = _build_worker_settings()
-    settings.scraping = {"dubbed_anime_only": True, "bucket_limit": 5}
+    settings.scraping.dubbed_anime_only = True
+    settings.scraping.bucket_limit = 5
+
+    async def fake_resolve_runtime_settings(_: dict[str, object]) -> Settings:
+        return settings
+
+    monkeypatch.setattr(tasks, "_resolve_runtime_settings", fake_resolve_runtime_settings)
 
     result = asyncio.run(tasks.rank_streams({"settings": settings}, item_id))
 
@@ -2233,8 +2418,14 @@ def test_worker_plugin_registry_refreshes_when_plugin_settings_payload_changes(m
         build_calls.append({"phase": "builtin", "settings": worker_ctx["plugin_settings_payload"]})
         return ("torrentio",)
 
+    async def fake_load_settings(_: object) -> dict[str, object] | None:
+        persisted = settings.to_compatibility_dict()
+        persisted.update(cast(dict[str, object], worker_ctx["plugin_settings_payload"]))
+        return persisted
+
     monkeypatch.setattr(tasks, "load_plugins", fake_load_plugins)
     monkeypatch.setattr(tasks, "register_builtin_plugins", fake_register_builtin_plugins)
+    monkeypatch.setattr(tasks, "load_settings", fake_load_settings)
 
     first = asyncio.run(tasks._resolve_plugin_registry(worker_ctx))
     second = asyncio.run(tasks._resolve_plugin_registry(worker_ctx))
@@ -2246,8 +2437,12 @@ def test_worker_plugin_registry_refreshes_when_plugin_settings_payload_changes(m
     assert third is not first
     builtin_calls = [call for call in build_calls if call["phase"] == "builtin"]
     assert len(builtin_calls) == 2
-    assert builtin_calls[0]["settings"] == {"scraping": {"torrentio": {"enabled": False}}}
-    assert builtin_calls[1]["settings"] == {"scraping": {"torrentio": {"enabled": True}}}
+    assert cast(dict[str, object], builtin_calls[0]["settings"])["scraping"] == {
+        "torrentio": {"enabled": False}
+    }
+    assert cast(dict[str, object], builtin_calls[1]["settings"])["scraping"] == {
+        "torrentio": {"enabled": True}
+    }
 
 
 def test_transition_item_enqueues_scraped_item_processing_job() -> None:
@@ -2519,11 +2714,13 @@ def test_finalize_item_partial_scope_incomplete(monkeypatch: Any) -> None:
     assert media_service.transition_messages == [(ItemEvent.PARTIAL_COMPLETE, "missing_episodes")]
     assert redis.calls[-1][0] == "index_item"
     assert redis.calls[-1][2].get("missing_seasons") == [1]
+    assert redis.calls[-1][2].get("missing_episodes") == {"1": [2]}
     assert "_defer_by" not in redis.calls[-1][2]
     assert redis.calls[-1][2].get("_job_id") == tasks.index_item_followup_job_id(
         item_id,
         discriminator="partial-followup",
         missing_seasons=[1],
+        missing_episodes={"1": [2]},
     )
 
 
@@ -2605,9 +2802,11 @@ def test_finalize_item_without_satisfied_released_episodes_defers_index_followup
         item_id,
         discriminator="inventory-recheck",
         missing_seasons=[1],
+        missing_episodes={"1": [2]},
     )
     assert redis.calls[-1][2].get("_defer_by") == timedelta(seconds=300)
     assert redis.calls[-1][2].get("missing_seasons") == [1]
+    assert redis.calls[-1][2].get("missing_episodes") == {"1": [2]}
 
 
 def test_finalize_item_re_entry_path(monkeypatch: Any) -> None:
