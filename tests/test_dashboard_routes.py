@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from authlib.jose import jwt
@@ -1202,6 +1204,104 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert body["plugin_runtime_isolation"]["status"] == "partial"
     assert body["heavy_stage_workload_isolation"]["status"] == "partial"
     assert body["release_metadata_performance"]["status"] == "partial"
+
+
+def test_operations_governance_route_surfaces_live_vfs_rollout_posture(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 4,
+                    "peak_open_handles": 9,
+                    "active_reads": 2,
+                    "peak_active_reads": 5,
+                    "chunk_cache_weighted_bytes": 8192,
+                },
+                "chunk_cache": {
+                    "backend": "hybrid",
+                    "hits": 9,
+                    "misses": 3,
+                    "memory_bytes": 4096,
+                    "memory_max_bytes": 16384,
+                    "memory_hits": 6,
+                    "memory_misses": 4,
+                    "disk_bytes": 12288,
+                    "disk_max_bytes": 65536,
+                    "disk_hits": 3,
+                    "disk_misses": 1,
+                    "disk_writes": 2,
+                    "disk_write_errors": 1,
+                    "disk_evictions": 4,
+                },
+                "handle_startup": {
+                    "total": 5,
+                    "ok": 3,
+                    "error": 1,
+                    "estale": 1,
+                    "average_duration_ms": 105,
+                    "max_duration_ms": 412,
+                },
+                "mounted_reads": {
+                    "total": 8,
+                    "ok": 6,
+                    "error": 1,
+                    "estale": 1,
+                    "average_duration_ms": 13,
+                    "max_duration_ms": 48,
+                },
+                "upstream_failures": {
+                    "unexpected_status_too_many_requests": 2,
+                    "unexpected_status_server_error": 1,
+                },
+                "upstream_retryable_events": {
+                    "status_too_many_requests": 8,
+                    "status_server_error": 9,
+                },
+                "backend_fallback": {
+                    "attempts": 10,
+                    "success": 7,
+                    "failure": 3,
+                },
+                "prefetch": {
+                    "available_permits": 1,
+                    "active_permits": 3,
+                    "active_background_tasks": 2,
+                    "background_backpressure": 2,
+                    "fairness_denied": 1,
+                    "global_backpressure_denied": 1,
+                    "background_error": 1,
+                },
+                "chunk_coalescing": {
+                    "waits_miss": 1,
+                },
+                "inline_refresh": {
+                    "error": 2,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    client = _build_client(arq_enabled=True)
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    vfs_data_plane = response.json()["vfs_data_plane"]
+    assert vfs_data_plane["status"] == "blocked"
+    assert "vfs_runtime_snapshot_available=1" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_rollout_readiness=blocked" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_rollout_reasons=backend_fallback_failures,mounted_read_errors,prefetch_background_errors,disk_cache_write_errors" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_cache_hit_ratio=0.750" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_provider_pressure_incidents=22" in vfs_data_plane["evidence"]
+    assert "resolve_blocking_runtime_failures" in vfs_data_plane["required_actions"]
+    assert any(
+        gap.startswith("live runtime rollout reasons are present:")
+        for gap in vfs_data_plane["remaining_gaps"]
+    )
 
 
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:

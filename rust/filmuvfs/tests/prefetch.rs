@@ -8,7 +8,7 @@ use filmuvfs::{
     chunk_engine::{ChunkEngine, ChunkEngineConfig, ChunkReadRequest},
     chunk_planner::ChunkPlannerConfig,
     prefetch::VelocityTracker,
-    upstream::UpstreamReader,
+    upstream::{ReadCancellation, UpstreamReader},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -166,6 +166,7 @@ async fn test_prefetch_triggers_background_fetch() {
         offset: 131_072,
         length: 1024,
         file_size: Some(900_000),
+        cancellation: ReadCancellation::none(),
     };
 
     let bytes = engine
@@ -219,6 +220,7 @@ async fn test_prefetch_enforces_per_handle_background_fairness() {
         offset: 131_072,
         length: 1024,
         file_size: Some(900_000),
+        cancellation: ReadCancellation::none(),
     };
 
     engine

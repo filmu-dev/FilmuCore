@@ -16,8 +16,8 @@ use hyper::header::RANGE;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::oneshot,
-    time::{sleep, Duration},
+    sync::{oneshot, Notify},
+    time::{sleep, timeout, Duration},
 };
 
 fn runtime_with_movie_url(url: String) -> (MountRuntime, u64, u64) {
@@ -124,6 +124,71 @@ async fn spawn_range_response_server(
     (
         format!("http://{address}/movie.mkv"),
         request_count,
+        shutdown_tx,
+        task,
+    )
+}
+
+async fn spawn_blocked_range_response_server(
+    body: Vec<u8>,
+) -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<Notify>,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener address should resolve");
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let body = Arc::new(body);
+    let release_notify = Arc::new(Notify::new());
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+    let task = tokio::spawn({
+        let body = Arc::clone(&body);
+        let request_count = Arc::clone(&request_count);
+        let release_notify = Arc::clone(&release_notify);
+        async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let (mut socket, _) = accepted.expect("range server should accept a client");
+                        let mut request_buffer = vec![0_u8; 4096];
+                        let request_len = socket
+                            .read(&mut request_buffer)
+                            .await
+                            .expect("request should be readable");
+                        let request_text = String::from_utf8_lossy(&request_buffer[..request_len]);
+                        let (start, end_exclusive) = parse_requested_range(&request_text, body.len());
+                        let payload = &body[start..end_exclusive];
+
+                        let request_index = request_count.fetch_add(1, Ordering::SeqCst);
+                        if request_index == 0 {
+                            release_notify.notified().await;
+                        }
+
+                        let response = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.write_all(payload).await;
+                    }
+                }
+            }
+        }
+    });
+
+    (
+        format!("http://{address}/movie.mkv"),
+        request_count,
+        release_notify,
         shutdown_tx,
         task,
     )
@@ -534,4 +599,64 @@ async fn read_beyond_eof_is_clamped() {
     server_task
         .await
         .expect("range server task should shut down cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn released_handle_aborts_inflight_read_without_retracking_handle_state() {
+    let body = patterned_bytes(900_000);
+    let expected = Bytes::copy_from_slice(&body[..4096]);
+    let (url, request_count, release_notify, shutdown_tx, server_task) =
+        spawn_blocked_range_response_server(body).await;
+    let (runtime, movie_inode, handle_id) = runtime_with_movie_url_and_size(url, 900_000);
+
+    let read_task = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move { runtime.read_bytes(handle_id, movie_inode, 0, 4096).await })
+    };
+
+    timeout(Duration::from_secs(2), async {
+        while request_count.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first blocked upstream request should start");
+
+    let released = runtime
+        .release(handle_id)
+        .expect("releasing the active handle should succeed");
+    assert_eq!(released.handle_id, handle_id);
+    release_notify.notify_waiters();
+
+    let read_error = read_task
+        .await
+        .expect("read task should join")
+        .expect_err("released handle should abort the in-flight read");
+    match read_error {
+        MountRuntimeError::ReadAborted { path } => {
+            assert_eq!(
+                path,
+                "/movies/Example Movie (2024)/Example Movie (2024).mkv"
+            );
+        }
+        other => panic!("expected read-aborted error, got {other:?}"),
+    }
+
+    assert_eq!(runtime.open_handle_count(), 0);
+    assert_eq!(runtime.tracked_chunk_handle_count(), 0);
+
+    let reopened = runtime
+        .open_by_inode(movie_inode)
+        .expect("reopening after an aborted read should succeed");
+    let resumed = runtime
+        .read_bytes(reopened.handle_id, movie_inode, 0, 4096)
+        .await
+        .expect("reopened handle should read cleanly after abort");
+    assert_eq!(resumed, expected);
+    assert_eq!(request_count.load(Ordering::SeqCst), 2);
+
+    let _ = shutdown_tx.send(());
+    server_task
+        .await
+        .expect("blocked range server should shut down cleanly");
 }
