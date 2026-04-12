@@ -283,7 +283,7 @@ Priority 3 should be considered meaningfully advanced when:
 Current checkpoint:
 
 - Reached for the core scrape -> parse -> rank -> debrid -> finalize pipeline and baseline recovery.
-- Still open for dedicated index-stage breadth, formal lifecycle orchestration depth, stronger idempotency boundaries, deliberate stream-link-resolution architecture, and heavy-stage isolation beyond `rank_streams`.
+- Remaining gap is no longer missing worker-graph breadth inside the repo. The open work is environment proof, queue-pressure soak, and stricter sandbox/process ceilings above the now-implemented lifecycle, index, idempotency, queued-refresh, and heavy-stage policy baseline.
 
 ## Serving-core update (March 2026)
 

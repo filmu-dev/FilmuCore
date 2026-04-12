@@ -109,12 +109,7 @@ WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
     ["stage"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
 )
-_HEAVY_STAGE_EXECUTORS: dict[str, Executor] = {}
-_HEAVY_STAGE_TIMEOUT_SECONDS: dict[str, float] = {
-    "index_item": 45.0,
-    "parse_scrape_results": 30.0,
-    "rank_streams": 60.0,
-}
+_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int], Executor] = {}
 
 
 class _RankBatchInput(TypedDict):
@@ -141,29 +136,39 @@ class _RankBatchRecord(TypedDict):
 def _heavy_stage_executor(stage_name: str) -> Executor:
     """Return the bounded executor used for one CPU-heavy worker stage."""
 
-    executor = _HEAVY_STAGE_EXECUTORS.get(stage_name)
+    settings = get_settings()
+    policy = settings.orchestration.heavy_stage_isolation
+    executor_key = (stage_name, policy.executor_mode, policy.max_workers)
+    executor = _HEAVY_STAGE_EXECUTORS.get(executor_key)
     if executor is not None:
         return executor
-    if "PYTEST_CURRENT_TEST" in os.environ:
-        executor = ThreadPoolExecutor(max_workers=2)
+    if policy.executor_mode == "thread_pool_only" or "PYTEST_CURRENT_TEST" in os.environ:
+        executor = ThreadPoolExecutor(max_workers=policy.max_workers)
     elif multiprocessing.get_start_method(allow_none=True) == "fork":
-        executor = ProcessPoolExecutor(max_workers=2)
+        executor = ProcessPoolExecutor(max_workers=policy.max_workers)
     else:
         try:
             executor = ProcessPoolExecutor(
-                max_workers=2,
+                max_workers=policy.max_workers,
                 mp_context=multiprocessing.get_context("spawn"),
             )
         except (ValueError, RuntimeError):
-            executor = ThreadPoolExecutor(max_workers=2)
-    _HEAVY_STAGE_EXECUTORS[stage_name] = executor
+            executor = ThreadPoolExecutor(max_workers=policy.max_workers)
+    _HEAVY_STAGE_EXECUTORS[executor_key] = executor
     return executor
 
 
 def _heavy_stage_timeout_seconds(stage_name: str) -> float:
     """Return the configured timeout budget for one isolated heavy stage."""
 
-    return _HEAVY_STAGE_TIMEOUT_SECONDS.get(stage_name, 30.0)
+    policy = get_settings().orchestration.heavy_stage_isolation
+    if stage_name == "index_item":
+        return policy.index_timeout_seconds
+    if stage_name == "parse_scrape_results":
+        return policy.parse_timeout_seconds
+    if stage_name == "rank_streams":
+        return policy.rank_timeout_seconds
+    return max(policy.parse_timeout_seconds, 30.0)
 
 
 def _rank_stream_batch(
