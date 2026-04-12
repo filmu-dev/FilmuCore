@@ -13,13 +13,15 @@ from pydantic import SecretStr
 
 from filmu_py.api.deps import get_auth_context, require_permissions
 from filmu_py.audit import audit_action
-from filmu_py.authz import evaluate_permissions
+from filmu_py.authz import evaluate_permissions, permission_constraints_from_mapping
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
 from ..models import (
+    AccessPolicyAuditAlertResponse,
+    AccessPolicyAuditEntryResponse,
     AccessPolicyAuditResponse,
     AccessPolicyRevisionApprovalRequest,
     AccessPolicyRevisionListResponse,
@@ -71,6 +73,15 @@ _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("policy_approve", ("security:policy.approve",)),
     ("api_key_rotate", ("security:apikey.rotate",)),
 )
+
+_AUTH_POLICY_PROBE_PATHS: dict[str, str] = {
+    "library_read": "/api/v1/items",
+    "playback_operate": "/api/v1/stream",
+    "settings_write": "/api/v1/settings",
+    "policy_write": "/api/v1/auth/policy/revisions",
+    "policy_approve": "/api/v1/auth/policy/revisions/review",
+    "api_key_rotate": "/api/v1/generateapikey",
+}
 
 
 def _plugin_load_report_maps(request: Request) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -285,10 +296,51 @@ def _resolve_target_tenant_id(
     return normalized_tenant_id
 
 
-def _auth_policy_decisions(auth_context: Any) -> list[AuthPolicyDecisionResponse]:
+def _oidc_rollout_snapshot(settings: Any) -> tuple[str, bool, list[str], list[str]]:
+    """Return operator-facing OIDC rollout posture derived from configuration."""
+
+    evidence = [
+        f"oidc_enabled={settings.oidc.enabled}",
+        f"oidc_issuer_configured={bool(settings.oidc.issuer)}",
+        f"oidc_audience_configured={bool(settings.oidc.audience)}",
+        f"oidc_jwks_configured={bool(settings.oidc.jwks_url or settings.oidc.jwks_json)}",
+        (
+            "oidc_claim_mapping_configured="
+            f"{all(bool(value) for value in (settings.oidc.actor_id_claim, settings.oidc.tenant_id_claim, settings.oidc.roles_claim))}"
+        ),
+        f"oidc_allow_api_key_fallback={settings.oidc.allow_api_key_fallback}",
+    ]
+    remaining_gaps: list[str] = []
+    configuration_complete = bool(
+        settings.oidc.enabled
+        and settings.oidc.issuer
+        and settings.oidc.audience
+        and (settings.oidc.jwks_url or settings.oidc.jwks_json)
+        and settings.oidc.actor_id_claim
+        and settings.oidc.tenant_id_claim
+        and settings.oidc.roles_claim
+    )
+    if not settings.oidc.enabled:
+        remaining_gaps.append("OIDC/SSO validation is disabled for this environment")
+        return "blocked", configuration_complete, evidence, remaining_gaps
+    if not configuration_complete:
+        remaining_gaps.append("OIDC is enabled but issuer/audience/JWKS/claim mapping is incomplete")
+        return "partial", configuration_complete, evidence, remaining_gaps
+    if settings.oidc.allow_api_key_fallback:
+        remaining_gaps.append("API-key fallback remains enabled for OIDC traffic")
+        return "partial", configuration_complete, evidence, remaining_gaps
+    return "ready", configuration_complete, evidence, remaining_gaps
+
+
+def _auth_policy_decisions(
+    auth_context: Any,
+    *,
+    permission_constraints: dict[str, dict[str, list[str]]],
+) -> list[AuthPolicyDecisionResponse]:
     """Return standard authorization probes for the current actor."""
 
     responses: list[AuthPolicyDecisionResponse] = []
+    resolved_constraints = permission_constraints_from_mapping(permission_constraints)
     for name, required_permissions in _AUTH_POLICY_PROBES:
         decision = evaluate_permissions(
             granted_permissions=auth_context.effective_permissions,
@@ -296,6 +348,10 @@ def _auth_policy_decisions(auth_context: Any) -> list[AuthPolicyDecisionResponse
             actor_tenant_id=auth_context.tenant_id,
             target_tenant_id=auth_context.tenant_id,
             authorized_tenant_ids=auth_context.authorized_tenant_ids,
+            actor_type=auth_context.actor_type,
+            authentication_mode=auth_context.authentication_mode,
+            request_path=_AUTH_POLICY_PROBE_PATHS.get(name),
+            permission_constraints=resolved_constraints,
         )
         responses.append(
             AuthPolicyDecisionResponse(
@@ -305,6 +361,8 @@ def _auth_policy_decisions(auth_context: Any) -> list[AuthPolicyDecisionResponse
                 required_permissions=list(required_permissions),
                 matched_permissions=list(decision.matched_permissions),
                 missing_permissions=list(decision.missing_permissions),
+                constrained_permissions=list(decision.constrained_permissions),
+                constraint_failures=list(decision.constraint_failures),
                 target_tenant_id=decision.target_tenant_id,
                 tenant_scope=decision.tenant_scope,
             )
@@ -339,6 +397,13 @@ def _access_policy_revision_response(record: Any) -> AccessPolicyRevisionRespons
             principal: list(tenants)
             for principal, tenants in sorted(record.principal_tenant_grants.items())
         },
+        permission_constraints={
+            permission: {
+                field: list(values)
+                for field, values in sorted(constraints.items())
+            }
+            for permission, constraints in sorted(record.permission_constraints.items())
+        },
         audit_decisions=record.audit_decisions,
     )
 
@@ -366,6 +431,43 @@ def _actor_key(auth_context: Any) -> str:
     actor_id = str(getattr(auth_context, "actor_id", "operator")).strip() or "operator"
     tenant_id = str(getattr(auth_context, "tenant_id", "global")).strip() or "global"
     return f"{tenant_id}:{actor_id}"
+
+
+def _authorization_audit_summary(record: Any) -> str:
+    """Return a stable human-readable summary for one audit row."""
+
+    outcome = "allowed" if record.allowed else "denied"
+    permissions = ",".join(record.required_permissions) if record.required_permissions else "none"
+    return (
+        f"{record.occurred_at.isoformat()} {outcome} {record.method} {record.path} "
+        f"actor={record.actor_id} tenant={record.tenant_id}->{record.target_tenant_id} "
+        f"reason={record.reason} permissions={permissions}"
+    )
+
+
+def _authorization_audit_alerts(records: list[Any]) -> list[AccessPolicyAuditAlertResponse]:
+    """Return bounded repeated-denial alert candidates from audit search results."""
+
+    repeated_denials: dict[tuple[str, str, str], int] = {}
+    for record in records:
+        if record.allowed:
+            continue
+        key = (record.actor_id, record.reason, record.path)
+        repeated_denials[key] = repeated_denials.get(key, 0) + 1
+    alerts = [
+        AccessPolicyAuditAlertResponse(
+            code="repeated_denials",
+            severity="warning" if count < 5 else "critical",
+            count=count,
+            message=(
+                f"actor '{actor_id}' saw {count} denied authorization decisions for "
+                f"{path} ({reason}) in the current result set"
+            ),
+        )
+        for (actor_id, reason, path), count in sorted(repeated_denials.items())
+        if count >= 3
+    ]
+    return alerts[:10]
 
 
 def _vfs_data_plane_evidence(
@@ -473,10 +575,21 @@ async def _enterprise_operations_governance(
     resources = request.app.state.resources
     settings = resources.settings
     auth_context = get_auth_context(request)
-    policy_decisions = _auth_policy_decisions(auth_context)
+    policy_constraints = (
+        resources.access_policy_snapshot.permission_constraints
+        if resources.access_policy_snapshot is not None
+        else settings.access_policy.permission_constraints
+    )
+    policy_decisions = _auth_policy_decisions(
+        auth_context,
+        permission_constraints=policy_constraints,
+    )
     playback_gate_governance = _playback_gate_governance_snapshot()
     vfs_runtime_governance = _vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
+    )
+    oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
+        _oidc_rollout_snapshot(settings)
     )
 
     identity_required_actions = [
@@ -486,6 +599,9 @@ async def _enterprise_operations_governance(
         "promote_operator_managed_access_policy_revisions"
         if auth_context.access_policy_source == "settings"
         else "review_access_policy_revision_history",
+        "persist_authorization_decision_audit_history"
+        if resources.authorization_audit_service is None
+        else "monitor_repeated_authorization_denials",
     ]
     if any(not decision.allowed for decision in policy_decisions):
         identity_required_actions.append("grant_or_document_missing_control_plane_permissions")
@@ -640,7 +756,15 @@ async def _enterprise_operations_governance(
         ),
         identity_authz=EnterpriseOperationsSliceResponse(
             name="Enterprise Identity / OIDC / ABAC",
-            status="partial",
+            status=(
+                "ready"
+                if (
+                    oidc_rollout_status == "ready"
+                    and resources.authorization_audit_service is not None
+                    and bool(policy_constraints)
+                )
+                else ("blocked" if oidc_rollout_status == "blocked" else "partial")
+            ),
             evidence=[
                 f"authentication_mode={auth_context.authentication_mode}",
                 f"authorization_tenant_scope={auth_context.authorization_tenant_scope}",
@@ -648,20 +772,28 @@ async def _enterprise_operations_governance(
                 f"oidc_token_validated={auth_context.oidc_token_validated}",
                 f"access_policy_version={auth_context.access_policy_version}",
                 f"access_policy_source={auth_context.access_policy_source}",
+                f"permission_constraint_count={len(policy_constraints)}",
+                (
+                    "authorization_decision_audit_persistence="
+                    f"{resources.authorization_audit_service is not None}"
+                ),
                 (
                     "oidc_claims_present="
                     f"{auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None}"
                 ),
+                f"oidc_rollout_status={oidc_rollout_status}",
+                f"oidc_configuration_complete={oidc_configuration_complete}",
                 "GET /api/v1/auth/policy exposes standard authorization probes",
                 "GET /api/v1/auth/policy/revisions exposes persisted policy revision inventory",
                 "POST /api/v1/auth/policy/revisions/{version}/approve|reject adds approval workflow state",
                 "GET /api/v1/auth/policy/audit exposes bounded audit-search history",
+                *oidc_evidence,
             ],
             required_actions=identity_required_actions,
             remaining_gaps=[
-                "OIDC is setting-gated and must be enabled per environment",
-                "ABAC is currently permission plus tenant-scope based",
-                "policy CRUD/version workflows exist but broader resource-level ABAC rollout is still incomplete",
+                *oidc_remaining_gaps,
+                "ABAC is now route-context aware, but item/stream/plugin ownership policy still needs broader rollout",
+                "policy CRUD/version workflows exist, but environment SSO rollout and alert automation still need promotion",
             ],
         ),
         tenant_boundary=EnterpriseOperationsSliceResponse(
@@ -909,6 +1041,16 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
     """Return tenant-aware authorization posture for the current actor."""
 
     auth_context = get_auth_context(request)
+    resources = request.app.state.resources
+    policy_snapshot = resources.access_policy_snapshot
+    policy_constraints = (
+        policy_snapshot.permission_constraints
+        if policy_snapshot is not None
+        else resources.settings.access_policy.permission_constraints
+    )
+    oidc_rollout_status, oidc_configuration_complete, _oidc_evidence, oidc_remaining_gaps = (
+        _oidc_rollout_snapshot(resources.settings)
+    )
     warnings: list[str] = []
     if auth_context.authentication_mode == "api_key":
         warnings.append("authentication is still API-key anchored")
@@ -918,8 +1060,6 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         warnings.append("oidc claims were supplied by headers and were not token-validated")
     if auth_context.authorization_tenant_scope == "all":
         warnings.append("actor has global tenant scope")
-
-    resources = request.app.state.resources
     return AuthPolicyResponse(
         authentication_mode=auth_context.authentication_mode,
         actor_id=auth_context.actor_id,
@@ -931,9 +1071,12 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
             auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None
         ),
         oidc_token_validated=auth_context.oidc_token_validated,
+        oidc_allow_api_key_fallback=resources.settings.oidc.allow_api_key_fallback,
+        oidc_rollout_status=cast(Literal["ready", "partial", "blocked"], oidc_rollout_status),
+        oidc_configuration_complete=oidc_configuration_complete,
         access_policy_version=auth_context.access_policy_version,
         quota_policy_version=auth_context.quota_policy_version,
-        permissions_model="role_scope_effective_permissions_with_tenant_scope",
+        permissions_model="role_scope_effective_permissions_with_route_constraints_and_tenant_scope",
         policy_source=auth_context.access_policy_source,
         role_grants={
             role: list(permissions)
@@ -945,12 +1088,27 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
                 ).items()
             )
         },
-        decisions=_auth_policy_decisions(auth_context),
+        permission_constraints={
+            permission: {
+                field: list(values)
+                for field, values in sorted(constraints.items())
+            }
+            for permission, constraints in sorted(policy_constraints.items())
+        },
+        audit_mode=(
+            "persisted_decision_ledger"
+            if resources.authorization_audit_service is not None
+            else "structured_log_history_only"
+        ),
+        decisions=_auth_policy_decisions(
+            auth_context,
+            permission_constraints=policy_constraints,
+        ),
         warnings=warnings,
         remaining_gaps=[
-            "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
-            "ABAC policy is limited to permission and tenant-scope checks",
-            "policy approval/version workflows now exist, but broader ABAC resource policies still need rollout",
+            *oidc_remaining_gaps,
+            "ABAC policy now supports route-context constraints, but broader resource ownership rollout is still incomplete",
+            "policy approval/version workflows now exist, but alert automation and environment SSO promotion still need rollout",
         ],
     )
 
@@ -1005,6 +1163,13 @@ async def list_auth_policy_revisions(
                         principal: list(tenants)
                         for principal, tenants in sorted(snapshot.principal_tenant_grants.items())
                     },
+                    permission_constraints={
+                        permission: {
+                            field: list(values)
+                            for field, values in sorted(constraints.items())
+                        }
+                        for permission, constraints in sorted(snapshot.permission_constraints.items())
+                    },
                     audit_decisions=snapshot.audit_decisions,
                 )
             ],
@@ -1046,6 +1211,7 @@ async def write_auth_policy_revision(
         principal_roles=payload.principal_roles,
         principal_scopes=payload.principal_scopes,
         principal_tenant_grants=payload.principal_tenant_grants,
+        permission_constraints=payload.permission_constraints,
         audit_decisions=payload.audit_decisions,
         proposed_by=_actor_key(auth_context),
         approval_notes=payload.approval_notes,
@@ -1180,17 +1346,71 @@ async def reject_auth_policy_revision(
 async def get_auth_policy_audit(
     request: Request,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    actor_id: Annotated[str | None, Query()] = None,
+    tenant_id: Annotated[str | None, Query()] = None,
+    target_tenant_id: Annotated[str | None, Query()] = None,
+    permission: Annotated[str | None, Query()] = None,
+    allowed: Annotated[bool | None, Query()] = None,
+    reason: Annotated[str | None, Query()] = None,
+    path_prefix: Annotated[str | None, Query()] = None,
 ) -> AccessPolicyAuditResponse:
     """Return bounded operator audit-search results for access-policy governance actions."""
 
-    history = request.app.state.resources.log_stream.history()
-    matches = [
-        line
-        for line in history
-        if "security.access_policy." in line or "access_policy." in line
+    resources = request.app.state.resources
+    audit_service = resources.authorization_audit_service
+    if audit_service is None:
+        history = resources.log_stream.history()
+        matches = [
+            line
+            for line in history
+            if "security.access_policy." in line or "auth.permission_decision" in line
+        ]
+        bounded = matches[-limit:]
+        return AccessPolicyAuditResponse(total_matches=len(matches), entries=bounded)
+
+    search = await audit_service.search(
+        limit=limit,
+        actor_id=actor_id,
+        tenant_id=tenant_id,
+        target_tenant_id=target_tenant_id,
+        permission=permission,
+        allowed=allowed,
+        reason=reason,
+        path_prefix=path_prefix,
+    )
+    records = [
+        AccessPolicyAuditEntryResponse(
+            occurred_at=record.occurred_at.isoformat(),
+            path=record.path,
+            method=record.method,
+            resource_scope=record.resource_scope,
+            actor_id=record.actor_id,
+            actor_type=record.actor_type,
+            tenant_id=record.tenant_id,
+            target_tenant_id=record.target_tenant_id,
+            required_permissions=list(record.required_permissions),
+            matched_permissions=list(record.matched_permissions),
+            missing_permissions=list(record.missing_permissions),
+            constrained_permissions=list(record.constrained_permissions),
+            constraint_failures=list(record.constraint_failures),
+            allowed=record.allowed,
+            reason=record.reason,
+            tenant_scope=record.tenant_scope,
+            authentication_mode=record.authentication_mode,
+            access_policy_version=record.access_policy_version,
+            access_policy_source=record.access_policy_source,
+            oidc_issuer=record.oidc_issuer,
+            oidc_subject=record.oidc_subject,
+            summary=_authorization_audit_summary(record),
+        )
+        for record in search.records
     ]
-    bounded = matches[-limit:]
-    return AccessPolicyAuditResponse(total_matches=len(matches), entries=bounded)
+    return AccessPolicyAuditResponse(
+        total_matches=search.total_matches,
+        entries=[record.summary for record in records],
+        records=records,
+        alerts=_authorization_audit_alerts(search.records),
+    )
 
 
 @router.get("/logs", operation_id="default.logs", response_model=LogsResponse)

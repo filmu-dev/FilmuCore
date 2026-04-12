@@ -33,6 +33,7 @@ from .plugins.context import HostPluginDatasource, PluginContextProvider
 from .plugins.registry import PluginRegistry
 from .resources import AppResources
 from .services.access_policy import AccessPolicyService
+from .services.authorization_audit import AuthorizationDecisionAuditService
 from .services.control_plane import ControlPlaneService
 from .services.identity import SecurityIdentityService
 from .services.media import MediaService
@@ -121,6 +122,12 @@ def build_control_plane_service(resources: AppResources) -> ControlPlaneService:
     """Build the persisted control-plane subscriber state service."""
 
     return ControlPlaneService(resources.db)
+
+
+def build_authorization_audit_service(resources: AppResources) -> AuthorizationDecisionAuditService:
+    """Build the persisted authorization-decision audit service."""
+
+    return AuthorizationDecisionAuditService(resources.db)
 
 
 def build_plugin_governance_service(resources: AppResources) -> PluginGovernanceService:
@@ -326,6 +333,7 @@ def _build_lifespan(
         resources.access_policy_snapshot = await resources.access_policy_service.bootstrap(
             runtime_settings
         )
+        resources.authorization_audit_service = build_authorization_audit_service(resources)
         resources.control_plane_service = build_control_plane_service(resources)
         resources.plugin_governance_service = build_plugin_governance_service(resources)
         if runtime_settings.control_plane.event_backplane == "redis_stream":

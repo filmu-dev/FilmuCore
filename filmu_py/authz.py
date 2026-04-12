@@ -23,6 +23,18 @@ class AuthorizationDecision:
     tenant_scope: str
     matched_permissions: tuple[str, ...] = ()
     missing_permissions: tuple[str, ...] = ()
+    constrained_permissions: tuple[str, ...] = ()
+    constraint_failures: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionConstraint:
+    """Context-aware ABAC overlay for one effective permission."""
+
+    actor_types: tuple[str, ...] = ()
+    authentication_modes: tuple[str, ...] = ()
+    route_prefixes: tuple[str, ...] = ()
+    tenant_scopes: tuple[str, ...] = ()
 
 
 def _normalize_permission(value: str) -> str:
@@ -43,6 +55,59 @@ def _normalize_tenant_scope_values(values: Iterable[str]) -> tuple[str, ...]:
         if (value := _normalize_tenant_id(raw)) is not None
     }
     return tuple(sorted(normalized))
+
+
+def permission_constraints_from_mapping(
+    raw: Mapping[str, Mapping[str, Iterable[str]]] | None,
+) -> dict[str, PermissionConstraint]:
+    """Return normalized permission constraints from one compatibility payload."""
+
+    if raw is None:
+        return {}
+    normalized: dict[str, PermissionConstraint] = {}
+    for permission, payload in raw.items():
+        normalized_permission = _normalize_permission(permission)
+        if not normalized_permission:
+            continue
+        normalized[normalized_permission] = PermissionConstraint(
+            actor_types=tuple(
+                sorted(
+                    {
+                        value.strip().lower()
+                        for value in payload.get("actor_types", ())
+                        if isinstance(value, str) and value.strip()
+                    }
+                )
+            ),
+            authentication_modes=tuple(
+                sorted(
+                    {
+                        value.strip().lower()
+                        for value in payload.get("authentication_modes", ())
+                        if isinstance(value, str) and value.strip()
+                    }
+                )
+            ),
+            route_prefixes=tuple(
+                sorted(
+                    {
+                        value.strip()
+                        for value in payload.get("route_prefixes", ())
+                        if isinstance(value, str) and value.strip()
+                    }
+                )
+            ),
+            tenant_scopes=tuple(
+                sorted(
+                    {
+                        value.strip().lower()
+                        for value in payload.get("tenant_scopes", ())
+                        if isinstance(value, str) and value.strip()
+                    }
+                )
+            ),
+        )
+    return normalized
 
 
 def _implied_permissions(permission: str) -> set[str]:
@@ -129,6 +194,10 @@ def evaluate_permissions(
     actor_tenant_id: str,
     target_tenant_id: str | None = None,
     authorized_tenant_ids: Iterable[str] = (),
+    actor_type: str | None = None,
+    authentication_mode: str | None = None,
+    request_path: str | None = None,
+    permission_constraints: Mapping[str, PermissionConstraint] | None = None,
 ) -> AuthorizationDecision:
     """Return a stable authz decision for one tenant-scoped request."""
 
@@ -186,6 +255,54 @@ def evaluate_permissions(
             target_tenant_id=resolved_target_tenant_id,
             tenant_scope=tenant_scope,
             matched_permissions=normalized_required,
+        )
+
+    normalized_actor_type = actor_type.strip().lower() if actor_type is not None else ""
+    normalized_authentication_mode = (
+        authentication_mode.strip().lower() if authentication_mode is not None else ""
+    )
+    resolved_constraints = permission_constraints or {}
+    constrained_permissions: list[str] = []
+    constraint_failures: list[str] = []
+    for permission in normalized_required:
+        constraint = resolved_constraints.get(permission)
+        if constraint is None:
+            continue
+        if constraint.actor_types and normalized_actor_type not in constraint.actor_types:
+            constrained_permissions.append(permission)
+            constraint_failures.append(f"{permission}:actor_type")
+            continue
+        if (
+            constraint.authentication_modes
+            and normalized_authentication_mode not in constraint.authentication_modes
+        ):
+            constrained_permissions.append(permission)
+            constraint_failures.append(f"{permission}:authentication_mode")
+            continue
+        if constraint.route_prefixes and (
+            request_path is None
+            or not any(request_path.startswith(prefix) for prefix in constraint.route_prefixes)
+        ):
+            constrained_permissions.append(permission)
+            constraint_failures.append(f"{permission}:route_prefix")
+            continue
+        if constraint.tenant_scopes and tenant_scope.lower() not in constraint.tenant_scopes:
+            constrained_permissions.append(permission)
+            constraint_failures.append(f"{permission}:tenant_scope")
+            continue
+    if constrained_permissions:
+        return AuthorizationDecision(
+            allowed=False,
+            reason="permission_constrained",
+            target_tenant_id=resolved_target_tenant_id,
+            tenant_scope=tenant_scope,
+            matched_permissions=tuple(
+                permission
+                for permission in normalized_required
+                if permission not in set(constrained_permissions)
+            ),
+            constrained_permissions=tuple(sorted(set(constrained_permissions))),
+            constraint_failures=tuple(sorted(set(constraint_failures))),
         )
 
     return AuthorizationDecision(

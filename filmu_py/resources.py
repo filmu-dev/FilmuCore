@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .graphql.plugin_registry import GraphQLPluginRegistry
     from .plugins.registry import PluginRegistry
     from .services.access_policy import AccessPolicyService, AccessPolicySnapshot
+    from .services.authorization_audit import AuthorizationDecisionAuditService
     from .services.control_plane import ControlPlaneService
     from .services.identity import SecurityIdentityService
     from .services.playback import (
@@ -53,6 +54,7 @@ class AppResources:
     security_identity_service: SecurityIdentityService | None = None
     access_policy_service: AccessPolicyService | None = None
     access_policy_snapshot: AccessPolicySnapshot | None = None
+    authorization_audit_service: AuthorizationDecisionAuditService | None = None
     control_plane_service: ControlPlaneService | None = None
     plugin_governance_service: PluginGovernanceService | None = None
     plugin_settings_payload: Mapping[str, Any] | None = None
