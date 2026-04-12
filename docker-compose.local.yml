@@ -267,9 +267,7 @@ services:
       - filmu-local
 
   frontend:
-    build:
-      context: ${FILMU_FRONTEND_CONTEXT:-../../Triven_riven-fork/Triven_frontend}
-      dockerfile: Dockerfile
+    image: coldspirit/cineflow-frontend:dev
     container_name: frontend
     restart: unless-stopped
     environment:

@@ -23,7 +23,7 @@ Recovery crons feed back into this pipeline for stuck items.
 |---|---|---|
 | 1 Scrape | `scrape_item` | Fan-out across registered plugin scrapers; persists `ScrapeCandidateORM` rows |
 | 2 Parse | `parse_scrape_results` | Deduplicates candidates by `info_hash`; builds `StreamORM` rows |
-| 3 Rank | `rank_streams` | RTN-compatible scoring plus partial-request scope handling; exponential backoff on no-winner |
+| 3 Rank | `rank_streams` | RTN-compatible scoring plus partial-request scope handling; the expensive ranking/sorting batch now runs in a bounded isolated executor; exponential backoff on no-winner |
 | 4 Debrid | `debrid_item` | Adds magnet to provider; polls **every 2 s** until `downloaded`/`ready`; circuit-breaker on failure |
 | 5 Finalize | `finalize_item` | Evaluates show completion scope; transitions to`COMPLETE`, `ONGOING`, `PARTIALLY_COMPLETED`, or re-queues scrape |
 | 6 Recovery | `retry_library` (cron) | Re-enqueues `REQUESTED`, `INDEXED`, `SCRAPED`, and **`DOWNLOADED`** orphans |
@@ -34,13 +34,43 @@ Recovery crons feed back into this pipeline for stuck items.
 
 ## Show Completion Logic
 
-See [RIVEN_TS_SHOW_COMPLETION_BEHAVIOR.md](./RIVEN_TS_SHOW_COMPLETION_BEHAVIOR.md) for full details.
-
 Key points:
 - Episode satisfaction = `MediaEntryORM` row exists for that episode's `media_item_id`
   (download URL persisted by debrid pipeline).
 - `ActiveStreamORM` is used **only** for VFS playback-role tagging — not for completion evaluation.
 - Shows with zero satisfied released episodes are re-queued for scrape without any state transition.
+
+### State outcomes from `finalize_item`
+
+| Condition | Outcome |
+|---|---|
+| Item is a movie | Always -> `COMPLETE` |
+| Show: all released/requested episodes satisfied, no future episodes | -> `COMPLETE` |
+| Show: all released episodes satisfied, future episodes exist | -> `ONGOING` |
+| Show: some released episodes satisfied, some missing | -> `PARTIALLY_COMPLETED` |
+| Show: zero released episodes satisfied | Re-queue `scrape_item`, no state transition |
+
+### Scope evaluation
+
+`_evaluate_show_completion()` computes four sets:
+
+| Set | Description |
+|---|---|
+| `requested_scope` | `(season, episode)` tuples derived from `ItemRequestORM` |
+| `released_scope` | Subset of `requested_scope` where `aired_at <= now` |
+| `future_scope` | Subset of `requested_scope` where `aired_at > now` |
+| `satisfied_scope` | Episodes in `released_scope` with a `MediaEntryORM` row |
+
+`missing_released = released_scope - satisfied_scope`
+
+A show is complete only if `missing_released == []` and `future_scope == []`.
+A show is ongoing if `missing_released == []` and `future_scope != []`.
+
+### Legacy and TS reference
+
+- The old Python/Riven backend promoted a show to complete far too early, effectively treating one satisfied episode as enough for the parent show.
+- Current `riven-ts` still derives parent state from child completion counts, even though the broader request and re-index wiring has evolved.
+- FilmuCore now goes further by reasoning about requested scope plus release dates, which is why it can disambiguate `ONGOING` from `PARTIALLY_COMPLETED` more accurately for partial or future-facing show requests.
 
 ### Partial request ranking semantics
 
@@ -59,6 +89,8 @@ Important boundary:
 
 - FilmuCore still does **not** fully replicate the TS download/container validation path yet.
 - The current improvement is rank-time scope awareness, not full torrent-content completeness validation.
+- Wave 3 closed the repo-owned heavy-stage isolation baseline: `index_item`, `parse_scrape_results`, and `rank_streams` now run under bounded isolated stage budgets with explicit timeouts and process-required exit gates.
+- The remaining gap is operational and future-facing rather than missing baseline plumbing: recurring soak evidence under real queue pressure, stricter OS-level sandbox ceilings, and extending the same isolation policy to any newly introduced heavy stages beyond the current graph.
 
 ---
 

@@ -8,9 +8,7 @@ The primary product objective is not an abstract mount feature; it is a real mou
 
 Detailed comparison notes for the current gap versus the audited TypeScript implementation:
 
-- [`filmcore_vs_ts_vfs.md`](filmcore_vs_ts_vfs.md)
-- [`filmcore_vs_riven_ts_audit.md`](filmcore_vs_riven_ts_audit.md)
-- [`RIVEN_TS_UPSTREAM_DELTA_2026_04_06.md`](RIVEN_TS_UPSTREAM_DELTA_2026_04_06.md)
+- [`RIVEN_TS_AUDIT.md`](RIVEN_TS_AUDIT.md)
 
 ## Current status
 
@@ -46,6 +44,7 @@ Detailed comparison notes for the current gap versus the audited TypeScript impl
 - An internal status surface at [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) exposes the current serving-runtime/governance state.
 - The status surface now also includes a first cross-process VFS governance layer from [`../filmu_py/services/vfs_server.py`](../filmu_py/services/vfs_server.py): watch-session lifecycle, reconnect-delta churn, supplier snapshot/delta failures, provider-backed refresh outcomes, and explicit inline refresh request outcomes are additive counters on [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) rather than log-only signals.
 - That same status surface now also ingests the Rust sidecar's structured `filmuvfs-runtime-status.json` snapshot when it is available through the managed Windows stack state or an explicit `FILMU_PY_VFS_RUNTIME_STATUS_PATH` override, so mounted-read result counts, upstream fetch totals/durations, chunk-cache activity, prefetch pressure, inline refresh outcomes, and Windows callback failures are visible through the same operator-facing API instead of only through separate sidecar artifacts.
+- Cross-process correlation is no longer only a proto intention: `session_id` and `handle_key` already flow through the gRPC path, and [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) now exposes joined active-session and active-handle summaries so Python control-plane state and Rust mounted-read activity can be correlated from one operator surface.
 - The Rust runtime snapshot now also carries first-class upstream failure and retryable-pressure classifications rather than only aggregate read/error totals: invalid URL, request-build, network, stale-status, unexpected-status, read-body, and retryable 429/5xx transport-pressure events are captured in the sidecar snapshot and surfaced on [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) as additive `vfs_runtime_upstream_*` counters.
 - Mounted backend fallback behavior is now first-class too: the Rust sidecar snapshot records backend HTTP fallback attempts, successes, and failures split by `direct_read_failure`, `inline_refresh_unavailable`, and `post_inline_refresh_failure`, and [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) now exposes those as additive `vfs_runtime_backend_fallback_*` counters instead of leaving fallback behavior implicit in log text.
 - Mounted startup latency is now first-class on that same runtime surface: the Rust sidecar snapshot records handle-open to first completed read counts and latency (`handle_startup.total/ok/error/estale`, average/max ms), [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) now exposes those as additive `vfs_runtime_handle_startup_*` counters, and the Windows soak artifact bundle now preserves the same startup metrics in `runtime_status_delta` / `runtime_diagnostics`.
@@ -60,7 +59,7 @@ Detailed comparison notes for the current gap versus the audited TypeScript impl
 - The upstream `riven-ts` `feat/rust-vfs` branch validates that a split backend/daemon model with an explicit transport contract is worth taking seriously.
 - It does **not** currently replace the local TS backend as the behavior baseline, because the audited branch is still thinner in path modeling, read heuristics, chunk reuse, and config/doc alignment.
 - Filmu should therefore borrow the **process-boundary idea** without regressing from the current shared serving-core strategy.
-- See [`RIVEN_TS_RUST_VFS_BRANCH_AUDIT.md`](RIVEN_TS_RUST_VFS_BRANCH_AUDIT.md) for the verified branch-vs-local findings.
+- See [`RIVEN_TS_AUDIT.md`](RIVEN_TS_AUDIT.md) for the verified branch-vs-local findings and the current baseline interpretation.
 
 ## Compatibility targets
 

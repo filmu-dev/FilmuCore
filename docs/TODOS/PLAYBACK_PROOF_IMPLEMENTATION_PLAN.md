@@ -73,12 +73,16 @@ The first implementation slice for this plan is now in the repository.
 
 #### Still open
 
-- [x] stale-link / refresh-path proof during active playback (route-level recovery proven live; persisted item-detail lease projection still needs follow-up hardening)
-- [x] harness completion hang removal so successful proof runs now emit `summary.json` and exit cleanly
-- [x] GitHub-hosted playback-gate workflow merged to `main` and green on the last PR before merge
 - [ ] verify the live protected-branch policy from an admin-authenticated GitHub host using [`../../scripts/check_github_main_policy.ps1`](../../scripts/check_github_main_policy.ps1) `-ValidateCurrent`; this environment cannot prove repository settings without `gh` + admin auth
 - [ ] keep runner variables/secrets intentionally configured for the GitHub-hosted CI execution path, including `FILMU_FRONTEND_REPOSITORY` when overriding the default public frontend checkout plus `PLEX_TOKEN` / `EMBY_API_KEY` when provider parity should auto-run; [`../../scripts/check_playback_gate_runner.ps1`](../../scripts/check_playback_gate_runner.ps1) remains the authoritative readiness check and should fail only for real runner gaps
 - [ ] keep the new Windows-native soak gate green on `C:\FilmuCoreVFS` under long playback, seek/resume, and concurrent-reader pressure; the explicit thresholded soak profiles now exist in [`../../scripts/run_windows_vfs_soak.ps1`](../../scripts/run_windows_vfs_soak.ps1) and are exposed as `proof:windows:vfs:soak:continuous`, `proof:windows:vfs:soak:seek`, `proof:windows:vfs:soak:concurrent`, and `proof:windows:vfs:soak:full`
+- [ ] rerun native Windows Emby and native Windows Plex provider proofs for both `movie` and `tv` media types through [`../../scripts/run_windows_media_server_gate.ps1`](../../scripts/run_windows_media_server_gate.ps1), and keep the artifact bundle plus provider logs clean enough that operators can confirm visibility, playback-info, stream-open/playback-start, and session behavior without manual log forensics
+
+#### Closed during this plan
+
+- [x] stale-link / refresh-path proof during active playback (route-level recovery proven live; persisted item-detail lease projection still needs follow-up hardening)
+- [x] harness completion hang removal so successful proof runs now emit `summary.json` and exit cleanly
+- [x] GitHub-hosted playback-gate workflow merged to `main` and green on the last PR before merge
 - [x] add a real Docker Plex playback-start proof stage to [`../../scripts/run_playback_proof.ps1`](../../scripts/run_playback_proof.ps1) so the currently operator-validated path becomes repeatable artifacted evidence
 - [x] turn the remaining Docker Plex proof warnings into explicit pass/fail evidence instead of artifact-only warnings: host-binary freshness, entry-id refresh-identity visibility, and foreground-fetch/coalescing visibility
 - [x] finish native Windows Plex proof on top of the same `C:\FilmuCoreVFS` path now that a real local Plex Media Server is installed; [`../../scripts/run_windows_media_server_gate.ps1`](../../scripts/run_windows_media_server_gate.ps1) now targets `http://127.0.0.1:32400` with the local admin token and reran green on April 9, 2026

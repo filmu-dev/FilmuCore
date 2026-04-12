@@ -16,6 +16,45 @@ If there is any conflict between the two documents, [`PLUGIN_QUICKSTART.md`](PLU
 
 1. Python entry points (`filmu.plugins`) — now implemented for packaged distribution.
 2. Drop-in directories under `$FILMU_PLUGINS_DIR` with valid `plugin.json` — implemented baseline.
+3. Built-in plugins registered programmatically at startup — implemented baseline.
+
+## Current distribution and compatibility contract
+
+Supported distribution modes:
+
+- `builtin`: shipped inside the FilmuCore repository and registered programmatically
+- `filesystem`: discovered from a plugin directory that contains a validated `plugin.json`
+- `entry_point`: discovered from an installed Python distribution entry point under `filmu.plugins`
+
+Required manifest contract:
+
+- `name`
+- `version`
+- `api_version`
+- `entry_module`
+
+Optional compatibility bounds:
+
+- `min_host_version`
+- `max_host_version`
+
+Optional governance and provenance fields:
+
+- `source_sha256`
+- `signature`
+- `signing_key_id`
+- `sandbox_profile`
+- `tenancy_mode`
+- `quarantined`
+- `quarantine_reason`
+
+The current host supports only plugin `api_version = "1"`.
+
+Compatibility rules:
+
+- a plugin is rejected with `api_version_incompatible` when its manifest declares an unsupported API version
+- a plugin is rejected with `host_version_incompatible` when the running FilmuCore version is below `min_host_version` or above `max_host_version`
+- manifest validation failures remain isolated to the failing plugin and must not block other plugin loads
 
 ## Contract boundary
 
@@ -100,13 +139,22 @@ Current runtime ownership:
 
 Beyond the currently implemented runtime baseline, the plugin platform should still grow toward:
 
-- stronger compatibility/version policy and manifest/schema validation
 - richer datasource surfaces only where they are justified by real plugin needs
 - distributable external-author ergonomics around packaged plugins
-- deeper operator/runtime policy around the now-real MDBList/StremThru/notification integrations
+- deeper operator/runtime policy around the now-real MDBList/StremThru/notification integrations and persisted governance overrides
 - queue-backed or otherwise more durable hook execution only if/when the in-process executor stops being sufficient
 
 The publishable-event governance piece is already implemented and matters because the TS backend treats event publication as a governed capability rather than an unrestricted side effect. Filmu should preserve and deepen that boundary as the plugin model broadens.
+
+Current operator governance baseline:
+
+- persisted plugin governance overrides now exist above manifest defaults in [`../filmu_py/services/plugin_governance.py`](../filmu_py/services/plugin_governance.py)
+- `GET /api/v1/plugins` is the operator-facing runtime view for plugin readiness and compatibility posture
+- operators can review posture on [`/api/v1/plugins/governance`](../filmu_py/api/routes/default.py) and persisted overrides on [`/api/v1/plugins/governance/overrides`](../filmu_py/api/routes/default.py)
+- plugin overrides can explicitly mark a plugin `approved`, `quarantined`, or `revoked`
+- runtime plugin readiness now treats those overrides as authoritative alongside manifest trust and publisher policy
+- the runtime view now exposes version, API version, min/max host bounds, source/distribution, readiness, configuration warnings, provenance/signature posture, tenancy posture, and persisted operator override effects
+- built-in integrations can also expose readiness warnings derived from runtime settings, such as `stremthru` being present but not configured with a token
 
 ## Current packaged discovery path
 
@@ -130,9 +178,8 @@ The loader applies the same manifest validation and GraphQL resolver-registratio
   - `filmu_py/plugins/hooks.py`
   - `filmu_py/plugins/builtins.py`
 - Remaining:
-  - stricter compatibility/version policy beyond the minimal manifest fields
   - richer external-author packaging/distribution guidance
-  - deeper compatibility/version policy and external-author guidance around the now-real MDBList, StremThru, and notification integrations
+  - deeper external-author guidance and runtime isolation around the now-real MDBList, StremThru, and notification integrations
 
 ## TS backend audit reference
 

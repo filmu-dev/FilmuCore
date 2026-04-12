@@ -8,12 +8,14 @@ Use [WINDOWS_README.md](/E:/Dev/Filmu/FilmuCore/WINDOWS_README.md).
 
 Summary:
 
-- run `docker-compose.windows.yml` for the backend services
-- run `filmuvfs.exe` natively on Windows with a folder mount such as `C:\FilmuCoreVFS`
+- use `pnpm run stack:start` as the canonical startup path; it auto-detects Windows vs Unix-like hosts and dispatches to the correct stack launcher
+- `docker-compose.windows.yml` is backend-only on Windows and does **not** start the native `filmuvfs.exe` mount by itself
+- the Windows launcher then runs `filmuvfs.exe` natively on Windows with a folder mount such as `C:\FilmuCoreVFS`
 - point Jellyfin, Plex, or Emby at `C:\FilmuCoreVFS\movies` and `C:\FilmuCoreVFS\shows`
-- `auto` still resolves to `projfs` by default on Windows
-- `winfsp` still requires explicit opt-in (`FILMUVFS_ENABLE_EXPERIMENTAL_WINFSP=1`), but it is now the verified native playback path for current Windows-host Jellyfin validation
+- `auto` now prefers `winfsp` on Windows when the current build includes the WinFSP backend, and falls back to `projfs` otherwise
+- `winfsp` is the verified native playback path for current Windows-host Jellyfin validation and avoids ProjFS hydration consuming the mount volume
 - use `pnpm run stack:validate` to sanity-check the split stack files and helper scripts
+- set `FILMU_STACK_VFS_MODE=auto|windows|unix` and use `pnpm run stack:start`, `pnpm run stack:status`, and `pnpm run stack:stop` for the unified launcher
 
 ## Linux and Unix-like hosts
 
@@ -21,10 +23,12 @@ Use [LINUX_UNIX_README.md](/E:/Dev/Filmu/FilmuCore/LINUX_UNIX_README.md).
 
 Summary:
 
-- run the default `docker-compose.yml` stack, including the Linux `filmuvfs` sidecar
+- use `pnpm run stack:start` as the canonical startup path; it auto-detects Windows vs Unix-like hosts and dispatches to the correct stack launcher
+- the Unix/Linux path then runs the default `docker-compose.yml` stack, including the Linux `filmuvfs` sidecar
 - mount into `/mnt/filmuvfs`
 - point Jellyfin, Plex, or Emby at `/mnt/filmuvfs/movies` and `/mnt/filmuvfs/shows`
 - use `pnpm run stack:validate` to sanity-check the split stack files and helper scripts
+- `FILMU_STACK_VFS_MODE=auto` resolves to the Unix `/mnt/filmuvfs` launcher on Unix-like hosts
 
 ## Legacy WSL helper scripts
 

@@ -11,7 +11,7 @@ GRPC_ENDPOINT="${FILMUVFS_GRPC_SERVER:-${GRPC_ENDPOINT:-$DEFAULT_GRPC_ENDPOINT}}
 MOUNTPOINT="${MOUNTPOINT:-/mnt/filmuvfs}"
 LOG_PATH="${LOG_PATH:-/tmp/filmuvfs_persistent.log}"
 PID_PATH="${PID_PATH:-/tmp/filmuvfs_persistent.pid}"
-WAIT_SECONDS="${WAIT_SECONDS:-15}"
+WAIT_SECONDS="${WAIT_SECONDS:-45}"
 TARGET_DIR="${FILMUVFS_TARGET_DIR:-/tmp/filmuvfs-target}"
 BINARY_PATH="$TARGET_DIR/release/filmuvfs"
 
@@ -54,6 +54,14 @@ has_healthy_catalog_root() {
   printf '%s\n' "$listing" | grep -qE '^(movies|shows)$'
 }
 
+mount_is_ready() {
+  local mountpoint="$1"
+  if mountpoint -q "$mountpoint" >/dev/null 2>&1; then
+    return 0
+  fi
+  has_healthy_catalog_root "$mountpoint"
+}
+
 cleanup_stale_mount() {
   local mountpoint="$1"
 
@@ -73,22 +81,42 @@ cleanup_stale_mount() {
   sleep 1
 }
 
+ensure_mountpoint_directory() {
+  local mountpoint="$1"
+
+  if [[ -e "$mountpoint" || -L "$mountpoint" ]]; then
+    if ! ls -d "$mountpoint" >/dev/null 2>&1; then
+      echo "[filmuvfs] mountpoint path is inaccessible; forcing cleanup"
+      fusermount3 -uz "$mountpoint" >/dev/null 2>&1 \
+        || umount -l "$mountpoint" >/dev/null 2>&1 \
+        || true
+      sleep 1
+      rm -rf "$mountpoint" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  mkdir -p "$mountpoint"
+}
+
 wait_for_mount() {
   local deadline=$((SECONDS + WAIT_SECONDS))
-  while (( SECONDS < deadline )); do
-    if mountpoint -q "$MOUNTPOINT" || has_healthy_catalog_root "$MOUNTPOINT"; then
+  while true; do
+    if mount_is_ready "$MOUNTPOINT"; then
       return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      break
     fi
     sleep 0.25
   done
-  return 1
+  mount_is_ready "$MOUNTPOINT"
 }
 
 require_fuse
 ensure_binary
 
-mkdir -p "$MOUNTPOINT"
 cleanup_stale_mount "$MOUNTPOINT"
+ensure_mountpoint_directory "$MOUNTPOINT"
 
 if [[ -f "$PID_PATH" ]]; then
   EXISTING_PID="$(cat "$PID_PATH" 2>/dev/null || true)"
