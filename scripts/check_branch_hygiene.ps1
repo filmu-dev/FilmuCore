@@ -112,7 +112,7 @@ if ($behindBy -gt 0) {
 if ($aheadBy -eq 0) {
     $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from a real feature branch instead.")
 }
-if ($null -ne $closedReuse -and $null -eq $openPr) {
+if ($null -ne $closedReuse) {
     $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
     $actions.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Create a fresh single-use branch from current main instead of reusing it.")
 }

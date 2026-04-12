@@ -32,10 +32,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [[ "${remote_ref}" != refs/heads/* ]]; then
     review_branch="${branch}"
   fi
-  if [[ " ${seen} " == *" ${branch} "* ]]; then
+  key="${branch}->${review_branch}"
+  if [[ " ${seen} " == *" ${key} "* ]]; then
     continue
   fi
-  seen="${seen} ${branch}"
+  seen="${seen} ${key}"
 
   "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_branch_hygiene.ps1" -Branch "${branch}" -ReviewBranch "${review_branch}" -Remote "${remote_name}"
 done
