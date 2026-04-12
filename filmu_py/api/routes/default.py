@@ -67,8 +67,10 @@ API_KEY_ROTATION_WARNING = (
 )
 _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("library_read", ("library:read",)),
+    ("item_write", ("library:write",)),
     ("playback_operate", ("playback:operate",)),
     ("settings_write", ("settings:write",)),
+    ("plugin_governance_write", ("settings:write",)),
     ("policy_write", ("settings:write",)),
     ("policy_approve", ("security:policy.approve",)),
     ("api_key_rotate", ("security:apikey.rotate",)),
@@ -76,11 +78,24 @@ _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _AUTH_POLICY_PROBE_PATHS: dict[str, str] = {
     "library_read": "/api/v1/items",
+    "item_write": "/api/v1/items/reset",
     "playback_operate": "/api/v1/stream",
     "settings_write": "/api/v1/settings",
+    "plugin_governance_write": "/api/v1/plugins/governance/example",
     "policy_write": "/api/v1/auth/policy/revisions",
     "policy_approve": "/api/v1/auth/policy/revisions/probe-version/approve",
     "api_key_rotate": "/api/v1/generateapikey",
+}
+
+_AUTH_POLICY_PROBE_RESOURCE_SCOPES: dict[str, str] = {
+    "library_read": "items",
+    "item_write": "items",
+    "playback_operate": "stream",
+    "settings_write": "settings",
+    "plugin_governance_write": "plugin_governance",
+    "policy_write": "access_policy",
+    "policy_approve": "access_policy",
+    "api_key_rotate": "settings",
 }
 
 
@@ -296,11 +311,44 @@ def _resolve_target_tenant_id(
     return normalized_tenant_id
 
 
+def _resolved_access_policy_snapshot(request: Request) -> Any:
+    """Return the active access-policy snapshot or the runtime settings baseline."""
+
+    resources = request.app.state.resources
+    snapshot = resources.access_policy_snapshot
+    if snapshot is not None:
+        return snapshot
+    return resources.settings.access_policy
+
+
+def _wave2_constraint_coverage(
+    permission_constraints: dict[str, dict[str, list[str]]],
+) -> tuple[bool, list[str]]:
+    """Return whether Wave 2 resource-scope ABAC coverage is present."""
+
+    required = {
+        "library:write": ("route_prefixes", "resource_scopes"),
+        "playback:operate": ("route_prefixes", "resource_scopes"),
+        "settings:write": ("route_prefixes", "resource_scopes"),
+        "security:policy.approve": ("route_prefixes", "resource_scopes"),
+    }
+    gaps: list[str] = []
+    for permission, required_fields in required.items():
+        payload = permission_constraints.get(permission, {})
+        for field_name in required_fields:
+            if not payload.get(field_name):
+                gaps.append(f"{permission}:{field_name}")
+    return (not gaps), gaps
+
+
 def _oidc_rollout_snapshot(settings: Any) -> tuple[str, bool, list[str], list[str]]:
     """Return operator-facing OIDC rollout posture derived from configuration."""
 
     evidence = [
         f"oidc_enabled={settings.oidc.enabled}",
+        f"oidc_rollout_stage={settings.oidc.rollout_stage}",
+        f"oidc_rollout_evidence_count={len(settings.oidc.rollout_evidence_refs)}",
+        f"oidc_subject_mapping_ready={settings.oidc.subject_mapping_ready}",
         f"oidc_issuer_configured={bool(settings.oidc.issuer)}",
         f"oidc_audience_configured={bool(settings.oidc.audience)}",
         f"oidc_jwks_configured={bool(settings.oidc.jwks_url or settings.oidc.jwks_json)}",
@@ -325,6 +373,15 @@ def _oidc_rollout_snapshot(settings: Any) -> tuple[str, bool, list[str], list[st
         return "blocked", configuration_complete, evidence, remaining_gaps
     if not configuration_complete:
         remaining_gaps.append("OIDC is enabled but issuer/audience/JWKS/claim mapping is incomplete")
+        return "partial", configuration_complete, evidence, remaining_gaps
+    if settings.oidc.rollout_stage != "enforced":
+        remaining_gaps.append("OIDC rollout is not yet in enforced mode for this environment")
+        return "partial", configuration_complete, evidence, remaining_gaps
+    if not settings.oidc.subject_mapping_ready:
+        remaining_gaps.append("OIDC subject-to-application mapping is not yet marked ready")
+        return "partial", configuration_complete, evidence, remaining_gaps
+    if not settings.oidc.rollout_evidence_refs:
+        remaining_gaps.append("OIDC rollout evidence references have not been recorded")
         return "partial", configuration_complete, evidence, remaining_gaps
     if settings.oidc.allow_api_key_fallback:
         remaining_gaps.append("API-key fallback remains enabled for OIDC traffic")
@@ -351,6 +408,7 @@ def _auth_policy_decisions(
             actor_type=auth_context.actor_type,
             authentication_mode=auth_context.authentication_mode,
             request_path=_AUTH_POLICY_PROBE_PATHS.get(name),
+            resource_scope=_AUTH_POLICY_PROBE_RESOURCE_SCOPES.get(name),
             permission_constraints=resolved_constraints,
         )
         responses.append(
@@ -405,6 +463,9 @@ def _access_policy_revision_response(record: Any) -> AccessPolicyRevisionRespons
             for permission, constraints in sorted(record.permission_constraints.items())
         },
         audit_decisions=record.audit_decisions,
+        alerting_enabled=record.alerting_enabled,
+        repeated_denial_warning_threshold=record.repeated_denial_warning_threshold,
+        repeated_denial_critical_threshold=record.repeated_denial_critical_threshold,
     )
 
 
@@ -444,8 +505,20 @@ def _authorization_audit_summary(record: Any) -> str:
     )
 
 
-def _authorization_audit_alerts(records: list[Any]) -> list[AccessPolicyAuditAlertResponse]:
-    """Return bounded repeated-denial alert candidates from audit search results."""
+def _authorization_audit_alerts(
+    records: list[Any],
+    *,
+    alerting_enabled: bool,
+    repeated_denial_warning_threshold: int,
+    repeated_denial_critical_threshold: int,
+) -> list[AccessPolicyAuditAlertResponse]:
+    """Return bounded policy-alert candidates from audit search results."""
+
+    if not alerting_enabled:
+        return []
+
+    warning_threshold = max(1, repeated_denial_warning_threshold)
+    critical_threshold = max(warning_threshold, repeated_denial_critical_threshold)
 
     repeated_denials: dict[tuple[str, str, str], int] = {}
     for record in records:
@@ -453,10 +526,11 @@ def _authorization_audit_alerts(records: list[Any]) -> list[AccessPolicyAuditAle
             continue
         key = (record.actor_id, record.reason, record.path)
         repeated_denials[key] = repeated_denials.get(key, 0) + 1
+
     alerts = [
         AccessPolicyAuditAlertResponse(
             code="repeated_denials",
-            severity="warning" if count < 5 else "critical",
+            severity="warning" if count < critical_threshold else "critical",
             count=count,
             message=(
                 f"actor '{actor_id}' saw {count} denied authorization decisions for "
@@ -464,8 +538,33 @@ def _authorization_audit_alerts(records: list[Any]) -> list[AccessPolicyAuditAle
             ),
         )
         for (actor_id, reason, path), count in sorted(repeated_denials.items())
-        if count >= 3
+        if count >= warning_threshold
     ]
+
+    privileged_api_key_usage = sum(
+        1
+        for record in records
+        if record.allowed
+        and record.authentication_mode == "api_key"
+        and record.resource_scope in {"access_policy", "plugin_governance", "settings", "operations"}
+    )
+    if privileged_api_key_usage >= warning_threshold:
+        alerts.append(
+            AccessPolicyAuditAlertResponse(
+                code="privileged_api_key_usage",
+                severity=(
+                    "warning"
+                    if privileged_api_key_usage < critical_threshold
+                    else "critical"
+                ),
+                count=privileged_api_key_usage,
+                message=(
+                    "privileged control-plane actions are still being exercised through "
+                    f"API-key auth ({privileged_api_key_usage} matches in the current result set)"
+                ),
+            )
+        )
+
     return alerts[:10]
 def _vfs_data_plane_evidence(
     request: Request,
@@ -572,10 +671,13 @@ async def _enterprise_operations_governance(
     resources = request.app.state.resources
     settings = resources.settings
     auth_context = get_auth_context(request)
-    policy_constraints = (
-        resources.access_policy_snapshot.permission_constraints
-        if resources.access_policy_snapshot is not None
-        else settings.access_policy.permission_constraints
+    policy_snapshot = _resolved_access_policy_snapshot(request)
+    policy_constraints = policy_snapshot.permission_constraints
+    alerting_enabled = policy_snapshot.alerting_enabled
+    repeated_denial_warning_threshold = policy_snapshot.repeated_denial_warning_threshold
+    repeated_denial_critical_threshold = policy_snapshot.repeated_denial_critical_threshold
+    wave2_constraint_coverage_ready, wave2_constraint_gaps = _wave2_constraint_coverage(
+        policy_constraints
     )
     policy_decisions = _auth_policy_decisions(
         auth_context,
@@ -600,6 +702,16 @@ async def _enterprise_operations_governance(
         if resources.authorization_audit_service is None
         else "monitor_repeated_authorization_denials",
     ]
+    if settings.oidc.rollout_stage != "enforced":
+        identity_required_actions.append("promote_oidc_rollout_to_enforced")
+    if not settings.oidc.subject_mapping_ready:
+        identity_required_actions.append("complete_oidc_subject_mapping_rollout")
+    if not settings.oidc.rollout_evidence_refs:
+        identity_required_actions.append("record_oidc_rollout_evidence")
+    if not alerting_enabled:
+        identity_required_actions.append("enable_access_policy_alerting")
+    if wave2_constraint_gaps:
+        identity_required_actions.append("expand_resource_scope_abac_constraints")
     if any(not decision.allowed for decision in policy_decisions):
         identity_required_actions.append("grant_or_document_missing_control_plane_permissions")
 
@@ -759,6 +871,8 @@ async def _enterprise_operations_governance(
                     oidc_rollout_status == "ready"
                     and resources.authorization_audit_service is not None
                     and bool(policy_constraints)
+                    and alerting_enabled
+                    and wave2_constraint_coverage_ready
                 )
                 else ("blocked" if oidc_rollout_status == "blocked" else "partial")
             ),
@@ -774,12 +888,21 @@ async def _enterprise_operations_governance(
                     "authorization_decision_audit_persistence="
                     f"{resources.authorization_audit_service is not None}"
                 ),
+                f"policy_alerting_enabled={alerting_enabled}",
+                (
+                    "policy_alert_thresholds="
+                    f"{repeated_denial_warning_threshold}/{repeated_denial_critical_threshold}"
+                ),
+                f"resource_scope_constraint_coverage={wave2_constraint_coverage_ready}",
                 (
                     "oidc_claims_present="
                     f"{auth_context.oidc_issuer is not None and auth_context.oidc_subject is not None}"
                 ),
                 f"oidc_rollout_status={oidc_rollout_status}",
                 f"oidc_configuration_complete={oidc_configuration_complete}",
+                f"oidc_rollout_stage={settings.oidc.rollout_stage}",
+                f"oidc_subject_mapping_ready={settings.oidc.subject_mapping_ready}",
+                f"oidc_rollout_evidence_count={len(settings.oidc.rollout_evidence_refs)}",
                 "GET /api/v1/auth/policy exposes standard authorization probes",
                 "GET /api/v1/auth/policy/revisions exposes persisted policy revision inventory",
                 "POST /api/v1/auth/policy/revisions/{version}/approve|reject adds approval workflow state",
@@ -789,8 +912,19 @@ async def _enterprise_operations_governance(
             required_actions=identity_required_actions,
             remaining_gaps=[
                 *oidc_remaining_gaps,
-                "ABAC is now route-context aware, but item/stream/plugin ownership policy still needs broader rollout",
-                "policy CRUD/version workflows exist, but environment SSO rollout and alert automation still need promotion",
+                *(
+                    []
+                    if wave2_constraint_coverage_ready
+                    else [
+                        "ABAC route/resource-scope coverage is still incomplete for some Wave 2 control-plane permissions: "
+                        + ", ".join(wave2_constraint_gaps)
+                    ]
+                ),
+                *(
+                    []
+                    if alerting_enabled
+                    else ["policy alerting is disabled for the active access-policy revision"]
+                ),
             ],
         ),
         tenant_boundary=EnterpriseOperationsSliceResponse(
@@ -1039,11 +1173,10 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
 
     auth_context = get_auth_context(request)
     resources = request.app.state.resources
-    policy_snapshot = resources.access_policy_snapshot
-    policy_constraints = (
-        policy_snapshot.permission_constraints
-        if policy_snapshot is not None
-        else resources.settings.access_policy.permission_constraints
+    policy_snapshot = _resolved_access_policy_snapshot(request)
+    policy_constraints = policy_snapshot.permission_constraints
+    wave2_constraint_coverage_ready, wave2_constraint_gaps = _wave2_constraint_coverage(
+        policy_constraints
     )
     oidc_rollout_status, oidc_configuration_complete, _oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(resources.settings)
@@ -1069,21 +1202,20 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         ),
         oidc_token_validated=auth_context.oidc_token_validated,
         oidc_allow_api_key_fallback=resources.settings.oidc.allow_api_key_fallback,
+        oidc_rollout_stage=resources.settings.oidc.rollout_stage,
+        oidc_rollout_evidence_refs=list(resources.settings.oidc.rollout_evidence_refs),
+        oidc_subject_mapping_ready=resources.settings.oidc.subject_mapping_ready,
         oidc_rollout_status=cast(Literal["ready", "partial", "blocked"], oidc_rollout_status),
         oidc_configuration_complete=oidc_configuration_complete,
         access_policy_version=auth_context.access_policy_version,
         quota_policy_version=auth_context.quota_policy_version,
-        permissions_model="role_scope_effective_permissions_with_route_constraints_and_tenant_scope",
+        permissions_model=(
+            "role_scope_effective_permissions_with_route_and_resource_scope_constraints_and_tenant_scope"
+        ),
         policy_source=auth_context.access_policy_source,
         role_grants={
             role: list(permissions)
-            for role, permissions in sorted(
-                (
-                    resources.access_policy_snapshot.role_grants
-                    if resources.access_policy_snapshot is not None
-                    else resources.settings.access_policy.role_grants
-                ).items()
-            )
+            for role, permissions in sorted(policy_snapshot.role_grants.items())
         },
         permission_constraints={
             permission: {
@@ -1097,6 +1229,9 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
             if resources.authorization_audit_service is not None
             else "structured_log_history_only"
         ),
+        policy_alerting_enabled=policy_snapshot.alerting_enabled,
+        repeated_denial_warning_threshold=policy_snapshot.repeated_denial_warning_threshold,
+        repeated_denial_critical_threshold=policy_snapshot.repeated_denial_critical_threshold,
         decisions=_auth_policy_decisions(
             auth_context,
             permission_constraints=policy_constraints,
@@ -1104,8 +1239,19 @@ async def get_auth_policy_context(request: Request) -> AuthPolicyResponse:
         warnings=warnings,
         remaining_gaps=[
             *oidc_remaining_gaps,
-            "ABAC policy now supports route-context constraints, but broader resource ownership rollout is still incomplete",
-            "policy approval/version workflows now exist, but alert automation and environment SSO promotion still need rollout",
+            *(
+                []
+                if wave2_constraint_coverage_ready
+                else [
+                    "ABAC route/resource-scope coverage is still incomplete for some Wave 2 permissions: "
+                    + ", ".join(wave2_constraint_gaps)
+                ]
+            ),
+            *(
+                []
+                if policy_snapshot.alerting_enabled
+                else ["policy alerting is disabled for the active access-policy revision"]
+            ),
         ],
     )
 
@@ -1168,6 +1314,9 @@ async def list_auth_policy_revisions(
                         for permission, constraints in sorted(snapshot.permission_constraints.items())
                     },
                     audit_decisions=snapshot.audit_decisions,
+                    alerting_enabled=snapshot.alerting_enabled,
+                    repeated_denial_warning_threshold=snapshot.repeated_denial_warning_threshold,
+                    repeated_denial_critical_threshold=snapshot.repeated_denial_critical_threshold,
                 )
             ],
         )
@@ -1210,6 +1359,9 @@ async def write_auth_policy_revision(
         principal_tenant_grants=payload.principal_tenant_grants,
         permission_constraints=payload.permission_constraints,
         audit_decisions=payload.audit_decisions,
+        alerting_enabled=payload.alerting_enabled,
+        repeated_denial_warning_threshold=payload.repeated_denial_warning_threshold,
+        repeated_denial_critical_threshold=payload.repeated_denial_critical_threshold,
         proposed_by=_actor_key(auth_context),
         approval_notes=payload.approval_notes,
         auto_approve=can_approve,
@@ -1355,6 +1507,7 @@ async def get_auth_policy_audit(
 
     resources = request.app.state.resources
     audit_service = resources.authorization_audit_service
+    policy_snapshot = _resolved_access_policy_snapshot(request)
     if audit_service is None:
         history = resources.log_stream.history()
         matches = [
@@ -1406,7 +1559,12 @@ async def get_auth_policy_audit(
         total_matches=search.total_matches,
         entries=[record.summary for record in records],
         records=records,
-        alerts=_authorization_audit_alerts(search.records),
+        alerts=_authorization_audit_alerts(
+            list(search.records),
+            alerting_enabled=policy_snapshot.alerting_enabled,
+            repeated_denial_warning_threshold=policy_snapshot.repeated_denial_warning_threshold,
+            repeated_denial_critical_threshold=policy_snapshot.repeated_denial_critical_threshold,
+        ),
     )
 
 
