@@ -49,6 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
       FILMU_PY_REALDEBRID_API_TOKEN: ${{ secrets.FILMU_PY_REALDEBRID_API_TOKEN }}
       REAL_DEBRID_API_KEY: ${{ secrets.REAL_DEBRID_API_KEY }}
@@ -73,12 +74,12 @@ jobs:
       FILMU_REQUIRE_PROVIDER_GATE: ${{ secrets.PLEX_TOKEN != '' && secrets.EMBY_API_KEY != '' && '1' || '0' }}
     steps:
       - name: Checkout backend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout frontend repo
         if: ${{ env.FILMU_FRONTEND_REPOSITORY != '' }}
         continue-on-error: true
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.FILMU_FRONTEND_REPOSITORY }}
           ref: ${{ vars.FILMU_FRONTEND_REF != '' && vars.FILMU_FRONTEND_REF || 'main' }}
@@ -195,7 +196,7 @@ jobs:
 
       - name: Upload playback gate artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playback-gate-artifacts-${{ github.run_id }}
           path: |

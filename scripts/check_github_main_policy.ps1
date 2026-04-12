@@ -142,7 +142,7 @@ function Get-ValidationExitCode {
 function Write-PolicyArtifactIfRequested {
     param(
         [Parameter(Mandatory = $true)][object] $Payload,
-        [Parameter(Mandatory = $true)][string] $Path
+        [AllowEmptyString()][string] $Path = ''
     )
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
