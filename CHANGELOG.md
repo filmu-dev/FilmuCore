@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Documentation
+
+* clarify platform-aware stack startup: `pnpm run stack:start` is now documented as the canonical auto-detect entrypoint, while `docker-compose.windows.yml` is explicitly documented as backend-only on Windows and not responsible for starting the native `filmuvfs.exe` mount
+
 ## [0.13.0](https://github.com/filmu-dev/FilmuCore/compare/v0.12.0...v0.13.0) (2026-04-12)
 
 

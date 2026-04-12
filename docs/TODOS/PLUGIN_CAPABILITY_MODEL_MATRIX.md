@@ -52,6 +52,7 @@ What it does **not** yet provide:
 - durable/queue-backed hook execution if operational pressure eventually requires it
 - stronger environment/runtime evidence for the now-enforced non-builtin isolation policy
 - pluginized parity for Seerr/Listrr intake, Comet scraping, Plex post-download hooks, and TMDB/TVDB index-provider plugins
+- GraphQL-facing operator/control-plane additions comparable to the TS VFS/settings/query surface where they are actually useful
 
 StremThru DownloaderPlugin is now a real implementation (Slice E): `add_magnet()`, `get_status()`, and `get_download_links()` now talk to the StremThru v0 API with token-based auth, `httpx.AsyncClient`, and downloader-plugin DTO normalization. With that change, all three built-in plugin stubs called out in the earlier Slice D update are now real implementations.
 
@@ -249,6 +250,7 @@ Current checkpoint:
 - Current Filmu built-in plugin breadth is narrower and more explicit: `TorrentioScraper`, `ProwlarrScraper`, `RarbgScraper`, `MDBListContentService`, `StremThruDownloaderPlugin`, and `WebhookNotificationPlugin` are source-verified; this is a real baseline, but it is not yet the same breadth as the TS packaged ecosystem.
 - TMDB and TVDB are currently host services in Filmu, not pluginized index-provider equivalents.
 - There is still no current built-in Filmu equivalent to Seerr intake, Plex post-download hook plugins, Comet scraping, or Listrr intake.
+- The TS closed PR history also shows a broader GraphQL-facing plugin/control-plane culture than the current Filmu baseline; Filmu should copy the useful operator surfaces, not adopt GraphQL-first sprawl by default.
 
 ## Serving-control note (March 2026)
 

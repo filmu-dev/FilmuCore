@@ -300,3 +300,52 @@ def test_tvdb_request_metadata_falls_back_to_tvdb_then_tmdb_imdb_lookup() -> Non
     assert enriched.metadata.attributes["imdb_id"] == "tt0903747"
     assert enriched.metadata.attributes["poster_path"] == "/breaking-bad.jpg"
     assert enriched.enrichment.source == "tmdb_via_tvdb"
+
+
+def test_request_items_by_identifiers_prefixes_tvdb_and_tmdb_inputs() -> None:
+    service = _build_media_service(settings=_build_settings())
+    seen_identifiers: list[str] = []
+    seen_external_refs: list[str] = []
+
+    async def fake_fetch(*, media_type: str, identifier: str):  # type: ignore[no-untyped-def]
+        assert media_type == "tv"
+        seen_identifiers.append(identifier)
+
+        class _Metadata:
+            def __init__(self) -> None:
+                self.title = "Stranger Things"
+                self.attributes = {"item_type": "show", "tvdb_id": "305288", "tmdb_id": "66732"}
+
+        class _Resolution:
+            def __init__(self) -> None:
+                self.metadata = _Metadata()
+                self.enrichment = type("Enrichment", (), {"source": "test"})()
+
+        return _Resolution()
+
+    async def fake_request_item(
+        external_ref: str,
+        title: str | None = None,
+        *,
+        media_type: str | None = None,
+        attributes: dict[str, object] | None = None,
+        requested_seasons: list[int] | None = None,
+        requested_episodes: dict[str, list[int]] | None = None,
+        tenant_id: str = "global",
+    ) -> object:
+        _ = (title, media_type, attributes, requested_seasons, requested_episodes, tenant_id)
+        seen_external_refs.append(external_ref)
+        return type("ItemRecord", (), {"id": "item-1"})()
+
+    service._fetch_request_metadata = fake_fetch  # type: ignore[method-assign]
+    service.request_item = fake_request_item  # type: ignore[method-assign]
+
+    __import__("asyncio").run(
+        service.request_items_by_identifiers(media_type="tv", tvdb_ids=["305288"])
+    )
+    __import__("asyncio").run(
+        service.request_items_by_identifiers(media_type="tv", tmdb_ids=["66732"])
+    )
+
+    assert seen_identifiers == ["tvdb:305288", "tmdb:66732"]
+    assert seen_external_refs == ["tvdb:305288", "tmdb:66732"]

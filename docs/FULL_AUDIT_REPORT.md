@@ -30,7 +30,7 @@ Tests updated: `tests/test_show_completion.py` — `_FakeShowSession` now matche
 `from media_entries`; `_FakeRedis` in the `poll_ongoing_shows` test now stubs `pipeline()`
 to satisfy `arq.Job.status()` (which uses `async with redis.pipeline()`).
 
-**Docs updated**: `ORCHESTRATION.md`, `RIVEN_TS_SHOW_COMPLETION_BEHAVIOR.md`.
+**Docs updated**: `ORCHESTRATION.md` (now also carries the show-completion semantics that used to live in a separate note).
 
 ---
 

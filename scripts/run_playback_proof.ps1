@@ -1,5 +1,6 @@
 param(
     [string] $TmdbId = '603',
+    [string] $TvdbId = '',
     [string] $Title = 'The Matrix',
     [ValidateSet('movie', 'tv')]
     [string] $MediaType = 'movie',
@@ -15,11 +16,15 @@ param(
     [string] $BackendUrl = 'http://localhost:8000',
     [string] $FrontendUrl = 'http://localhost:3000',
     [string] $ApiKey = '',
+    [string] $BackendActorId = 'automation:playback-proof',
+    [string] $BackendActorType = 'service',
+    [string] $BackendActorRoles = 'platform:admin,settings:write,playback:operator',
+    [string] $BackendActorScopes = '',
     [string] $WslDistro = 'Ubuntu-22.04',
     [string] $MountRoot = '/mnt/filmuvfs',
     [int] $FrontendTimeoutSeconds = 60,
     [int] $AcquisitionTimeoutSeconds = 900,
-    [int] $MediaServerTimeoutSeconds = 60,
+    [int] $MediaServerTimeoutSeconds = 180,
     [int] $MountVisibilityTimeoutSeconds = 60,
     [int] $PollIntervalSeconds = 5,
     [int] $MountedReadBytes = 1048576,
@@ -119,6 +124,11 @@ function ConvertTo-BashSingleQuoted {
     return $singleQuote + $escaped + $singleQuote
 }
 
+function Get-MediaServerTimeoutMilliseconds {
+    $seconds = [Math]::Max(5, [int] $MediaServerTimeoutSeconds)
+    return $seconds * 1000
+}
+
 function Write-JsonFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -185,6 +195,40 @@ function Get-DotEnvMap {
     }
 
     return $result
+}
+
+function Get-TmdbApiKey {
+    if (-not [string]::IsNullOrWhiteSpace([string] $env:TMDB_API_KEY)) {
+        return [string] $env:TMDB_API_KEY
+    }
+    if ($script:DotEnv.ContainsKey('TMDB_API_KEY') -and -not [string]::IsNullOrWhiteSpace([string] $script:DotEnv['TMDB_API_KEY'])) {
+        return [string] $script:DotEnv['TMDB_API_KEY']
+    }
+    return ''
+}
+
+function Resolve-TvdbIdForProof {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $TmdbId
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($TvdbId)) {
+        return $TvdbId
+    }
+
+    $tmdbApiKey = Get-TmdbApiKey
+    if ([string]::IsNullOrWhiteSpace($tmdbApiKey)) {
+        throw 'TMDB_API_KEY is required to resolve a TVDB identifier for tv playback proof runs.'
+    }
+
+    $uri = "https://api.themoviedb.org/3/tv/$TmdbId/external_ids?api_key=$tmdbApiKey"
+    $response = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 20
+    $resolvedTvdbId = [string] $response.tvdb_id
+    if ([string]::IsNullOrWhiteSpace($resolvedTvdbId)) {
+        throw ("Unable to resolve a TVDB identifier from TMDB id {0} for tv playback proof." -f $TmdbId)
+    }
+    return $resolvedTvdbId
 }
 
 function Write-SummaryFile {
@@ -352,6 +396,32 @@ function Get-BackendJson {
     return Invoke-RestMethod -Method Get -Uri $Uri -Headers $script:BackendHeaders -TimeoutSec 15
 }
 
+function Get-BackendHeaders {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ApiKey,
+        [string] $ActorId = '',
+        [string] $ActorType = '',
+        [string] $ActorRoles = '',
+        [string] $ActorScopes = ''
+    )
+
+    $headers = @{ 'x-api-key' = $ApiKey }
+    if (-not [string]::IsNullOrWhiteSpace($ActorId)) {
+        $headers['x-actor-id'] = $ActorId
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ActorType)) {
+        $headers['x-actor-type'] = $ActorType
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ActorRoles)) {
+        $headers['x-actor-roles'] = $ActorRoles
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ActorScopes)) {
+        $headers['x-actor-scopes'] = $ActorScopes
+    }
+    return $headers
+}
+
 function Post-BackendJson {
     param(
         [Parameter(Mandatory = $true)]
@@ -384,7 +454,7 @@ function Get-JellyfinJson {
         [string] $ApiKey
     )
 
-    return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ 'X-Emby-Token' = $ApiKey } -TimeoutSec 20
+    return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ 'X-Emby-Token' = $ApiKey } -TimeoutSec $MediaServerTimeoutSeconds
 }
 
 function Resolve-JellyfinContext {
@@ -494,8 +564,8 @@ function Get-JellyfinStreamOpenSignal {
     $uri = "$($Context.base_url)/Videos/$JellyfinItemId/stream?$query"
     $request = [System.Net.HttpWebRequest]::Create($uri)
     $request.Method = 'GET'
-    $request.Timeout = 20000
-    $request.ReadWriteTimeout = 20000
+    $request.Timeout = Get-MediaServerTimeoutMilliseconds
+    $request.ReadWriteTimeout = Get-MediaServerTimeoutMilliseconds
     $request.AddRange(0, 1023)
 
     try {
@@ -578,7 +648,7 @@ function Invoke-JellyfinSessionProof {
 
     foreach ($entry in $steps.GetEnumerator()) {
         $uri = "$($Context.base_url)/$($entry.Value)"
-        $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec 20
+        $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec $MediaServerTimeoutSeconds
         $results[$entry.Key] = [int] $response.StatusCode
     }
 
@@ -708,7 +778,7 @@ function Invoke-JellyfinMetadataRefresh {
     )
 
     $refreshUri = "$($Context.base_url)/Items/$JellyfinItemId/Refresh?MetadataRefreshMode=FullRefresh&ImageRefreshMode=FullRefresh&ReplaceAllMetadata=true&ReplaceAllImages=true"
-    $response = Invoke-WebRequest -Method Post -Uri $refreshUri -Headers @{ 'X-Emby-Token' = $Context.api_key } -UseBasicParsing -TimeoutSec 20
+    $response = Invoke-WebRequest -Method Post -Uri $refreshUri -Headers @{ 'X-Emby-Token' = $Context.api_key } -UseBasicParsing -TimeoutSec $MediaServerTimeoutSeconds
     $statusCode = [int] $response.StatusCode
 
     $result = [ordered]@{
@@ -784,7 +854,7 @@ function Get-EmbyJson {
         [string] $ApiKey
     )
 
-    return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ 'X-Emby-Token' = $ApiKey } -TimeoutSec 20
+    return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ 'X-Emby-Token' = $ApiKey } -TimeoutSec $MediaServerTimeoutSeconds
 }
 
 function New-EmbyAuthorizationHeader {
@@ -819,7 +889,7 @@ function Invoke-EmbyAuthenticateByName {
 
     $headers = @{ 'X-Emby-Authorization' = (New-EmbyAuthorizationHeader) }
     $body = @{ Username = $Username; Pw = $Password } | ConvertTo-Json -Depth 4
-    return Invoke-RestMethod -Method Post -Uri "$BaseUrl/Users/AuthenticateByName" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 20
+    return Invoke-RestMethod -Method Post -Uri "$BaseUrl/Users/AuthenticateByName" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec $MediaServerTimeoutSeconds
 }
 
 function Resolve-EmbyContext {
@@ -964,8 +1034,8 @@ function Get-EmbyStreamOpenSignal {
 
     $request = [System.Net.HttpWebRequest]::Create($uri)
     $request.Method = 'GET'
-    $request.Timeout = 20000
-    $request.ReadWriteTimeout = 20000
+    $request.Timeout = Get-MediaServerTimeoutMilliseconds
+    $request.ReadWriteTimeout = Get-MediaServerTimeoutMilliseconds
     $request.AddRange(0, 1023)
 
     try {
@@ -1046,7 +1116,7 @@ function Invoke-EmbySessionProof {
 
     foreach ($entry in $steps.GetEnumerator()) {
         $uri = "$($Context.base_url)/$($entry.Value)"
-        $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec 20
+        $response = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec $MediaServerTimeoutSeconds
         $results[$entry.Key] = [int] $response.StatusCode
     }
 
@@ -1292,13 +1362,17 @@ function Get-PlexVisibilitySignal {
         [string] $SearchTerm
     )
 
-    $uri = "$($Context.base_url)/library/sections/$($Context.library_id)/all"
+    $sectionPath = if ($MediaType -eq 'tv') { 'allLeaves' } else { 'all' }
+    $uri = "$($Context.base_url)/library/sections/$($Context.library_id)/$sectionPath"
     $xml = Get-PlexXml -Uri $uri -Token $Context.api_key
     $target = $SearchTerm.ToLowerInvariant()
     $normalizedTarget = ($target -replace '^[^a-z0-9]+|[^a-z0-9]+$', '') -replace '[^a-z0-9]+', ' '
     $articleTrimmedTarget = ($normalizedTarget -replace '^(the|a|an)\s+', '').Trim()
-    $items = @($xml.MediaContainer.Video)
-    if ($items.Count -eq 0) {
+    $items = @()
+    if ($xml.MediaContainer.PSObject.Properties.Name -contains 'Video') {
+        $items = @($xml.MediaContainer.Video)
+    }
+    if (($items.Count -eq 0) -and ($xml.MediaContainer.PSObject.Properties.Name -contains 'Directory')) {
         $items = @($xml.MediaContainer.Directory)
     }
 
@@ -1306,7 +1380,16 @@ function Get-PlexVisibilitySignal {
         $title = [string] $_.title
         $normalizedTitle = (($title.ToLowerInvariant() -replace '^[^a-z0-9]+|[^a-z0-9]+$', '') -replace '[^a-z0-9]+', ' ').Trim()
         $articleTrimmedTitle = ($normalizedTitle -replace '^(the|a|an)\s+', '').Trim()
-        $filePath = [string] ($_.Media.Part.file)
+        $filePath = ''
+        if ($_.PSObject.Properties.Name -contains 'Media') {
+            $firstMedia = @($_.Media) | Select-Object -First 1
+            if (($null -ne $firstMedia) -and ($firstMedia.PSObject.Properties.Name -contains 'Part')) {
+                $firstPart = @($firstMedia.Part) | Select-Object -First 1
+                if ($null -ne $firstPart) {
+                    $filePath = [string] $firstPart.file
+                }
+            }
+        }
         $normalizedFilePath = (($filePath.ToLowerInvariant() -replace '[\\/_\.\-\(\)\[\]]+', ' ') -replace '\s+', ' ').Trim()
 
         $title.ToLowerInvariant().Contains($target) -or
@@ -1392,8 +1475,8 @@ function Get-PlexStreamOpenSignal {
 
     $request = [System.Net.HttpWebRequest]::Create($uri)
     $request.Method = 'GET'
-    $request.Timeout = 20000
-    $request.ReadWriteTimeout = 20000
+    $request.Timeout = Get-MediaServerTimeoutMilliseconds
+    $request.ReadWriteTimeout = Get-MediaServerTimeoutMilliseconds
     $request.AddRange(0, 1023)
     $request.Headers['X-Plex-Token'] = $Context.api_key
 
@@ -1487,8 +1570,8 @@ function Invoke-HttpPlaybackStartSignal {
 
     $request = [System.Net.HttpWebRequest]::Create($Uri)
     $request.Method = 'GET'
-    $request.Timeout = 20000
-    $request.ReadWriteTimeout = 20000
+    $request.Timeout = Get-MediaServerTimeoutMilliseconds
+    $request.ReadWriteTimeout = Get-MediaServerTimeoutMilliseconds
     foreach ($entry in $Headers.GetEnumerator()) {
         $request.Headers[[string] $entry.Key] = [string] $entry.Value
     }
@@ -2041,7 +2124,22 @@ function Invoke-DirectPlaybackRouteRangeRead {
     if (Test-Path $headersPath) { Remove-Item $headersPath -Force }
     if (Test-Path $bodyPath) { Remove-Item $bodyPath -Force }
 
-    & curl.exe -sS -D $headersPath -H ("x-api-key: {0}" -f $ApiKey) -H ("Range: bytes=0-{0}" -f ($Bytes - 1)) $url -o $bodyPath
+    $curlArgs = @(
+        '-sS',
+        '-D', $headersPath,
+        '-H', ("x-api-key: {0}" -f $ApiKey),
+        '-H', ("x-actor-id: {0}" -f $BackendActorId),
+        '-H', ("x-actor-type: {0}" -f $BackendActorType),
+        '-H', ("x-actor-roles: {0}" -f $BackendActorRoles),
+        '-H', ("Range: bytes=0-{0}" -f ($Bytes - 1)),
+        $url,
+        '-o', $bodyPath
+    )
+    if (-not [string]::IsNullOrWhiteSpace($BackendActorScopes)) {
+        $curlArgs = @($curlArgs[0..5] + @('-H', ("x-actor-scopes: {0}" -f $BackendActorScopes)) + $curlArgs[6..($curlArgs.Count - 1)])
+    }
+
+    & curl.exe @curlArgs
     if ($LASTEXITCODE -ne 0) {
         throw 'direct playback route request failed during stale-refresh proof'
     }
@@ -2437,7 +2535,12 @@ if (-not [string]::IsNullOrWhiteSpace($MediaServerProvider)) {
     }
 }
 
-$script:BackendHeaders = @{ 'x-api-key' = $ApiKey }
+$script:BackendHeaders = Get-BackendHeaders `
+    -ApiKey $ApiKey `
+    -ActorId $BackendActorId `
+    -ActorType $BackendActorType `
+    -ActorRoles $BackendActorRoles `
+    -ActorScopes $BackendActorScopes
 
 New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
 
@@ -2631,12 +2734,25 @@ try {
     $deadline = (Get-Date).AddSeconds($AcquisitionTimeoutSeconds)
     if ($null -eq $itemSummary) {
         $addPayload = [ordered]@{
-            tmdb_ids   = @($TmdbId)
             media_type = $MediaType
+            tmdb_ids   = @()
+            tvdb_ids   = @()
+        }
+        if ($MediaType -eq 'tv') {
+            $resolvedTvdbId = Resolve-TvdbIdForProof -TmdbId $TmdbId
+            $addPayload.tvdb_ids = @($resolvedTvdbId)
+        }
+        else {
+            $addPayload.tmdb_ids = @($TmdbId)
         }
         $addResponse = Post-BackendJson -Uri "$BackendUrl/api/v1/items/add" -Body $addPayload
         Write-JsonFile -Path (Join-Path $artifactDir 'add-response.json') -Value $addResponse
-        Add-StepResult -Name 'request_movie' -Status 'passed' -Details ("Submitted TMDB {0} ({1})." -f $TmdbId, $Title)
+        if ($MediaType -eq 'tv') {
+            Add-StepResult -Name 'request_movie' -Status 'passed' -Details ("Submitted TMDB {0} / TVDB {1} ({2})." -f $TmdbId, $resolvedTvdbId, $Title)
+        }
+        else {
+            Add-StepResult -Name 'request_movie' -Status 'passed' -Details ("Submitted TMDB {0} ({1})." -f $TmdbId, $Title)
+        }
 
         while ((Get-Date) -lt $deadline) {
             $itemSummary = Get-ProofItemSummary
@@ -2689,9 +2805,11 @@ try {
 
     $resolvedTitle = if ([string]::IsNullOrWhiteSpace($itemSummary.title)) { $Title } else { $itemSummary.title }
     $summary.movie.resolved_title = $resolvedTitle
+    $mountCategory = if ($MediaType -eq 'tv') { 'shows' } else { 'movies' }
+    $mountArtifactLabel = if ($MediaType -eq 'tv') { 'show episode file' } else { 'movie file' }
     $quotedMountRoot = ConvertTo-BashSingleQuoted -Value $MountRoot
     $quotedTitle = ConvertTo-BashSingleQuoted -Value $resolvedTitle
-    $mountListingCommand = "find $quotedMountRoot/movies -type f 2>/dev/null | grep -i --fixed-strings -- $quotedTitle | head -n 1"
+    $mountListingCommand = "find $quotedMountRoot/$mountCategory -type f 2>/dev/null | grep -i --fixed-strings -- $quotedTitle | head -n 1"
     $mountDeadline = (Get-Date).AddSeconds($MountVisibilityTimeoutSeconds)
     $mountedFile = $null
     while ((Get-Date) -lt $mountDeadline) {
@@ -2706,7 +2824,7 @@ try {
     }
     if ([string]::IsNullOrWhiteSpace($mountedFile)) {
         Invoke-WslBash -Command "find $quotedMountRoot -maxdepth 3 -type f 2>/dev/null | head -n 50" | Set-Content -Path (Join-Path $artifactDir 'mount-find.txt') -Encoding UTF8
-        throw ("No mounted movie file matching title '{0}' was found under {1}." -f $resolvedTitle, $MountRoot)
+        throw ("No mounted {0} matching title '{1}' was found under {2}." -f $mountArtifactLabel, $resolvedTitle, $MountRoot)
     }
 
     $summary.mount.file_path = $mountedFile

@@ -657,6 +657,10 @@ function Resolve-EffectiveMountAdapter {
     )
 
     if ($RequestedMountAdapter -eq 'auto') {
+        if (($null -ne $Capabilities) -and $Capabilities.windows_winfsp_compiled) {
+            return 'winfsp'
+        }
+
         return 'projfs'
     }
 
@@ -1358,11 +1362,6 @@ $MountPath = Resolve-ManagedMountPath -MountPath $MountPath
 $requestedMountAdapter = Normalize-MountAdapter -MountAdapter $MountAdapter
 $filmuvfsCapabilities = Get-FilmuVfsCapabilities -BinaryPath $binaryPath
 $effectiveMountAdapter = Resolve-EffectiveMountAdapter -RequestedMountAdapter $requestedMountAdapter -Capabilities $filmuvfsCapabilities
-$experimentalWinfspEnabled = ($env:FILMUVFS_ENABLE_EXPERIMENTAL_WINFSP -eq '1')
-
-if (($requestedMountAdapter -eq 'winfsp') -and (-not $experimentalWinfspEnabled)) {
-    throw 'WinFSP is experimental and disabled by default. Set FILMUVFS_ENABLE_EXPERIMENTAL_WINFSP=1 to opt in, or use -MountAdapter projfs (recommended).'
-}
 
 $normalizedDriveLetter = $null
 if (-not [string]::IsNullOrWhiteSpace($DriveLetter)) {
@@ -1406,7 +1405,7 @@ elseif ($requestedMountAdapter -eq 'auto') {
     Write-Host ("      [OK] Requested adapter: {0}" -f $requestedMountAdapter) -ForegroundColor Green
     Write-Host ("      [OK] Effective adapter: {0}" -f $effectiveMountAdapter) -ForegroundColor Green
     if (($null -eq $filmuvfsCapabilities) -or (-not $filmuvfsCapabilities.windows_winfsp_compiled)) {
-        Write-Host '      WinFSP still requires explicit opt-in; auto resolves to projfs on Windows.' -ForegroundColor Yellow
+        Write-Host '      WinFSP backend is unavailable in the current binary; auto falls back to projfs on Windows.' -ForegroundColor Yellow
     }
     Write-Host ''
 }

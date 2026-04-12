@@ -172,6 +172,11 @@ Phase C core breadth is already meaningfully advanced. The current next checkpoi
 - playback routes share intentional stream/VFS foundations instead of route-local hacks
 - the next emphasis can then shift more heavily toward plugin breadth, orchestration depth, and FilmuVFS performance work
 
+Current checkpoint:
+
+- Reached for compatibility-route breadth.
+- Still open for playback maturity and end-to-end player/BFF hardening, which is now tracked primarily in the playback and VFS docs rather than as missing route breadth.
+
 ## Serving-core update (March 2026)
 
 - `/api/v1/stream/file/{item_id}` now has explicit byte-range behavior through the shared serving core.

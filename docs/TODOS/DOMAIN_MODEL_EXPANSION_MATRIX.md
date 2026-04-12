@@ -68,6 +68,12 @@ Remaining limitations of this baseline:
 - Domain model gaps are now closed across 20 migrations. All planned entity types are persisted.
 - Remaining evolution is read-model deepening for VFS-facing surfaces and richer specialization consumption in calendar and detail projections.
 
+### Current status summary
+
+- Done now: planned entities and core projections are persisted and wired into real route/service surfaces.
+- Partial only: VFS-facing and richer detail/calendar read-model adoption still need deepening.
+- Still missing: no new first-class entity family is currently missing from the original planning set; the remaining work is read-model and control-plane consumption depth.
+
 ---
 
 ## Reference breadth from the original TS platform
@@ -294,6 +300,11 @@ Priority 2 should be considered meaningfully advanced when:
 - dashboard/library/calendar responses are backed by intentional models/projections
 - orchestration can evolve without abusing free-form JSON metadata fields
 - FilmuVFS planning has real entities to attach stream/file/subtitle behavior to
+
+Current checkpoint:
+
+- Reached for the entity layer.
+- Not fully closed for read-model depth, especially VFS-facing projections and richer specialization consumption.
 
 ## Serving-session note (March 2026)
 

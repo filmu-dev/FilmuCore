@@ -62,7 +62,7 @@ impl MountAdapterKind {
 
         #[cfg(target_os = "windows")]
         {
-            Self::Projfs
+            Self::Winfsp
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -84,7 +84,7 @@ impl MountAdapterKind {
 
                 #[cfg(target_os = "windows")]
                 {
-                    Ok(ResolvedMountAdapterKind::Projfs)
+                    Ok(ResolvedMountAdapterKind::Winfsp)
                 }
 
                 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -598,12 +598,12 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn resolves_auto_to_windows_projfs() {
+    fn resolves_auto_to_windows_winfsp() {
         assert_eq!(
             MountAdapterKind::Auto
                 .resolve()
                 .expect("auto should resolve on Windows"),
-            ResolvedMountAdapterKind::Projfs
+            ResolvedMountAdapterKind::Winfsp
         );
     }
 

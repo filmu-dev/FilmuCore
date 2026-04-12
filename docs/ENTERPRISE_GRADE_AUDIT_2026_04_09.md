@@ -13,6 +13,15 @@ This audit updates the current Filmu baseline against:
 
 The result is not just a parity note. It is a direction-setting audit for building Filmu past `riven-ts`.
 
+## 2026-04-11 source re-audit note
+
+Parts of this document remain historically useful, but some of its gap statements are now operationally stale.
+
+- authz is no longer a missing future capability: current source now includes OIDC/JWKS validation, tenant auth context propagation, access-policy revisions, and `/api/v1/auth/policy`
+- plugin governance is no longer only aspirational future work: current source now includes trust-store verification, quarantine and override controls, and `/api/v1/plugins/governance`
+- the active `riven-ts` comparison baseline for current planning is upstream `main` at `f98cc31`
+- use `RIVEN_TS_AUDIT.md` and `STATUS.md` as the current source-of-truth for present-state comparison; use this document mainly for strategic framing and historical rationale
+
 ## Strategic bar
 
 Filmu should be treated as an **enterprise-grade, state-of-the-art media orchestration and delivery platform** across every major concern:
@@ -44,25 +53,24 @@ Those are real advantages. They are not yet enough to call the overall system en
 
 ## Underdocumented gaps that must now be first-class
 
-### 1. Enterprise identity, tenancy, and authorization are still missing
+### 1. Enterprise identity, tenancy, and authorization are no longer missing in-repo
 
-Current code still enforces one backend API key in [`filmu_py/api/deps.py`](../filmu_py/api/deps.py), accepting `x-api-key`, bearer token, or query parameter forms of the same shared secret.
+Current source now has a real identity and authorization baseline rather than only one shared backend API key:
 
-That is enough for local compatibility.
-It is not enough for enterprise-grade operation.
+- validated OIDC/JWKS bearer-token support
+- delegated tenant authorization context
+- route and resource-scope ABAC constraints
+- persisted access-policy revisions and approval flows
+- durable authorization-decision audit retention/search
+- actor-aware API-key rotation posture and alert candidates
+- operator-facing `/api/v1/auth/policy`, `/api/v1/auth/policy/revisions`, and `/api/v1/auth/policy/audit`
 
-Missing first-class work:
+The remaining work is operational rather than primitive-missing:
 
-- multi-user identity
-- service-to-service identity
-- RBAC / ABAC
-- tenant isolation
-- admin/operator separation
-- audit logs for privileged actions
-- SSO / OIDC / SAML readiness
-- API key rotation policy with actor attribution
-
-This is only lightly implied in current docs and is not treated as a top-level program track.
+- environment-owned OIDC/SSO activation and subject rollout
+- recurring operator evidence on real hosts
+- deeper product-facing ownership semantics above the delegated-tenant baseline
+- long-lived service-to-service rollout discipline and frontend session integration
 
 ### 2. Multi-node control-plane semantics are not established
 
@@ -83,7 +91,7 @@ It means Filmu does not yet define enterprise behavior for:
 
 Current docs talk about observability and orchestration, but they do not elevate this to a top-level availability and scale requirement.
 
-### 2a. The operator log pipeline is still below current upstream `riven-ts`
+### 2a. The operator log pipeline is no longer missing in-repo, but still trails in environment execution
 
 Current upstream `riven-ts` now has a materially stronger logging stack:
 
@@ -94,45 +102,41 @@ Current upstream `riven-ts` now has a materially stronger logging stack:
 - source and worker tagging
 - Filebeat shipping into local Elasticsearch/Kibana
 
-Filmu currently has useful structured logs and a compatibility-friendly bounded in-memory broker, but it does not yet match that operator story.
+Filmu no longer stops at useful structured logs and an in-memory broker. The repo now has structured log-shipping policy, cross-process trace-correlation policy, and governance exit gates for the operator log pipeline.
 
-Missing first-class work:
+The remaining work is rollout and operations execution:
 
-- durable structured log files outside process memory
-- retention and rotation policy
-- shipper-friendly structured format
-- trace/span correlation fields embedded in log events
-- local and production log shipping/search workflow
+- recurring shipper/search deployment in real environments
+- retention and alert-tuning discipline on top of the landed structured outputs
+- externally hosted search/export and day-2 operator workflows
+- deeper trace/span rollout coverage across all long-running environments
 
 This gap matters both for enterprise operations and for honest comparison against current `riven-ts`.
 
-### 3. Plugin trust is ahead of parity, but still below enterprise
+### 3. Plugin trust is ahead of parity and now materially stronger in-repo
 
 The plugin manifest and loader are intentionally safe-by-default:
 
 - [`filmu_py/plugins/manifest.py`](../filmu_py/plugins/manifest.py)
 - [`filmu_py/plugins/loader.py`](../filmu_py/plugins/loader.py)
 
-Current protections are still mostly:
+Current protections now include:
 
-- shape validation
-- export-symbol validation
-- host-version minimum checks
+- manifest and compatibility validation
+- trust-store-backed signature verification
+- provenance and source-digest checks
+- quarantine, revocation, and operator override controls
+- enforceable non-builtin runtime policy and governance visibility
 - safe registration / skip behavior
 
-Missing enterprise plugin controls:
+Remaining work is narrower and more operational:
 
-- signed plugins and provenance verification
-- capability permission scopes
-- network / filesystem / process isolation
-- sandbox execution for untrusted extensions
-- policy enforcement before load
-- plugin revocation and quarantine
-- compatibility certification and release channels
+- recurring external-author and runtime evidence
+- stricter deployment/runtime sandbox ceilings where environments require them
+- broader plugin/package breadth without weakening the now-landed policy model
+- compatibility certification and release-process maturity for external authors
 
-This gap is larger than the current docs imply.
-
-### 4. Heavy-job isolation is still behind current upstream `riven-ts`
+### 4. Heavy-job isolation baseline now exists, but deeper sandboxing still trails current upstream `riven-ts`
 
 Current upstream `riven-ts` `main` now explicitly runs heavy work through sandboxed or worker-thread style execution for:
 
@@ -140,7 +144,7 @@ Current upstream `riven-ts` `main` now explicitly runs heavy work through sandbo
 - `download-item.map-items-to-files`
 - `download-item.validate-torrent-files`
 
-Filmu has a real ARQ stage graph in [`filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py), but it still does not provide an equivalent isolated execution model for CPU-heavy or high-risk parsing/validation stages.
+Filmu now has a real ARQ stage graph in [`filmu_py/workers/tasks.py`](../filmu_py/workers/tasks.py) and a Wave 3 baseline for bounded isolated execution on `index_item`, `parse_scrape_results`, and `rank_streams`.
 
 That matters for:
 
@@ -150,12 +154,11 @@ That matters for:
 - bounded memory growth
 - future multi-tenant operation
 
-This should now be treated as an enterprise requirement, not just a parity nicety.
+The remaining gap is stricter sandbox/process ceilings, broader heavy-job breadth, and real-environment evidence, not the absence of any heavy-stage isolation model.
 
-### 5. Filmu lacks an explicit SRE / operations program
+### 5. Filmu now has an explicit SRE / operations program baseline
 
-The repository has strong local proof scripts and validation work.
-It still does not document an enterprise operations bar for:
+The repository no longer stops at local proof scripts. It now documents an enterprise operations bar, but still needs recurring execution evidence for:
 
 - SLOs and error budgets
 - backup and restore
@@ -167,7 +170,7 @@ It still does not document an enterprise operations bar for:
 - load testing targets
 - incident response and operator runbooks
 
-Current docs mention observability and quality, but not an overall production operations program.
+Current docs now include an overall production operations program; the remaining gap is disciplined execution and evidence retention in real environments.
 
 ### 6. FilmuVFS is strategically strong but not yet enterprise-complete
 
@@ -199,14 +202,13 @@ Remaining platform-class work includes:
 - better control-plane/data-plane correlation
 - operational contracts for upgrades, reconnects, and recovery under real load
 
-### 7. Metadata/index governance is still below the final target
+### 7. Metadata/index governance is now materially stronger, but still below the final target
 
 Filmu has request-time enrichment, backfills, partial show handling, ongoing polling, and content-service polling.
 That is materially better than a thin compatibility shell.
 
-What is still not framed strongly enough in the docs:
+What still remains beyond the now-landed dedicated `index_item` stage:
 
-- dedicated indexing as a first-class pipeline
 - reindex scheduling and replay
 - canonical-identifier reconciliation policy
 - source-confidence scoring
