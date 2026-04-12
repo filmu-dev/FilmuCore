@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/filmu-dev/FilmuCore/compare/v0.9.0...v0.10.0) (2026-04-12)
+
+
+### Features
+
+* Codex/wave1 rollout governance 20260412 ([#30](https://github.com/filmu-dev/FilmuCore/issues/30)) ([cf21b13](https://github.com/filmu-dev/FilmuCore/commit/cf21b13d0cc35cbaed15c982f25e2425a69fde1e))
+
 ## [0.9.0](https://github.com/filmu-dev/FilmuCore/compare/v0.8.0...v0.9.0) (2026-04-12)
 
 
