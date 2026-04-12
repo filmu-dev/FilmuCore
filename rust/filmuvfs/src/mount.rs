@@ -2019,6 +2019,7 @@ mod linux_fuse {
     };
 
     use async_stream::stream;
+    use bytes::Bytes;
     use fuse3::{
         raw::{prelude::*, MountHandle as RawMountHandle, Session as RawSession},
         Errno, MountOptions, Result as FuseResult, Timestamp,
