@@ -7,6 +7,7 @@
   "scripts": {
     "branch:codex:new": "pwsh -NoProfile -File ./scripts/new_codex_branch.ps1",
     "branch:codex:publish": "pwsh -NoProfile -File ./scripts/publish_codex_branch.ps1",
+    "branch:codex:push": "pwsh -NoProfile -File ./scripts/push_review_branch.ps1",
     "branch:hygiene": "pwsh -NoProfile -File ./scripts/check_branch_hygiene.ps1",
     "hooks:install": "pwsh -NoProfile -File ./scripts/install_git_hooks.ps1",
     "lint": ".\\.venv\\Scripts\\python.exe -m ruff check . && .\\.venv\\Scripts\\python.exe -m mypy filmu_py",

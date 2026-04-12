@@ -47,7 +47,7 @@ The required flow is:
 
 1. fetch and sync local `main` to current `origin/main`
 2. do the work on local `main`
-3. push local `main` to a fresh remote review branch with `git push origin HEAD:refs/heads/<remote-branch-name>`
+3. push local `main` to a fresh remote review branch with `npm run branch:codex:push -- <remote-branch-name>`
 4. open or update the PR from that remote branch to GitHub `main`
 
 Rules:
@@ -57,10 +57,17 @@ Rules:
 - never reuse a remote review branch name after its PR was merged or closed
 - only reuse the same remote review branch while that PR is still open
 - if GitHub `main` moved, sync local `main` first before pushing the review branch again
+- after any squash merge or merged release PR, treat every still-open review branch as stale until local `main` has been re-synced and repushed through the guarded publish path
 
 This rule exists because a squash-merged PR leaves the old review branch on a different history line than `main`. Reusing that old remote branch name is what causes repeated `PR Branch Hygiene` failures, merge conflicts on already-touched files, and duplicated PR history.
 
 The repository now enforces this with [`../.github/workflows/pr-branch-hygiene.yml`](../.github/workflows/pr-branch-hygiene.yml).
+
+The local guard path is now:
+
+- `npm run branch:hygiene -- -ReviewBranch <remote-branch-name>` to audit the exact local-main -> remote-review-branch publish path
+- `npm run branch:codex:push -- <remote-branch-name>` to run that hygiene check and only then push `HEAD` to the target remote review branch
+- `.githooks/pre-push` now passes both the local branch and the destination remote branch name into the hygiene check, so pushes to stale or previously closed/merged review-branch names are blocked before GitHub reports them
 
 The earlier local-preflight path is now:
 
@@ -69,7 +76,7 @@ The earlier local-preflight path is now:
 - audit the current branch before opening or updating a PR with `npm run branch:hygiene`
 - install the repo-managed pre-push hook once with `npm run hooks:install`
 
-`branch:codex:new` creates a timestamped `codex/<topic>-<utc>` branch from current `origin/main` and refuses to run when tracked changes are present, which prevents accidental reuse of a dirty or already-stacked branch. `branch:codex:publish` is the safer path when local work accumulates on a long-lived branch such as `dev`: it creates a fresh timestamped `codex/<topic>-<utc>` branch from current `origin/main`, applies only the net content diff from the source branch, and commits that clean delta as a single publish commit. `branch:hygiene` checks ahead/behind state against `origin/main` and, when GitHub is reachable, also checks whether the same branch name was already used by a merged PR. `hooks:install` configures the repo's `.githooks/pre-push` hook so branch hygiene runs automatically on every push.
+`branch:codex:new` creates a timestamped `codex/<topic>-<utc>` branch from current `origin/main` and refuses to run when tracked changes are present, which prevents accidental reuse of a dirty or already-stacked branch. `branch:codex:publish` is the safer path when local work accumulates on a long-lived branch such as `dev`: it creates a fresh timestamped `codex/<topic>-<utc>` branch from current `origin/main`, applies only the net content diff from the source branch, and commits that clean delta as a single publish commit. `branch:hygiene` checks ahead/behind state against `origin/main` and, when GitHub is reachable, also checks whether the destination review branch name already belongs to an open, merged, or closed PR. `branch:codex:push` is the required guarded push path for local-`main` publishing. `hooks:install` configures the repo's `.githooks/pre-push` hook so branch hygiene runs automatically on every push.
 
 ## Why This Policy Exists
 

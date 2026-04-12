@@ -1,5 +1,6 @@
 param(
     [string] $Branch = '',
+    [string] $ReviewBranch = '',
     [string] $Remote = 'origin',
     [string] $BaseBranch = 'main',
     [string] $Repository = '',
@@ -39,6 +40,9 @@ if ([string]::IsNullOrWhiteSpace($Branch)) {
 if ([string]::IsNullOrWhiteSpace($Branch)) {
     throw 'Cannot audit branch hygiene from a detached HEAD.'
 }
+if ([string]::IsNullOrWhiteSpace($ReviewBranch)) {
+    $ReviewBranch = $Branch
+}
 
 if (-not $NoFetch) {
     Invoke-GitCapture -Arguments @('fetch', $Remote, $BaseBranch, '--prune') | Out-Null
@@ -60,13 +64,14 @@ $repositoryName = if ([string]::IsNullOrWhiteSpace($Repository)) {
     $Repository
 }
 $owner = if ([string]::IsNullOrWhiteSpace($repositoryName)) { '' } else { $repositoryName.Split('/')[0] }
-$releasePleaseBranch = $Branch -like 'release-please--*'
-$mergedReuse = $null
+$releasePleaseBranch = $ReviewBranch -like 'release-please--*'
+$closedReuse = $null
+$openPr = $null
 $reuseCheckStatus = if ($releasePleaseBranch) { 'skipped_release_please' } elseif ([string]::IsNullOrWhiteSpace($repositoryName)) { 'repository_unknown' } else { 'checked' }
 
 if ($reuseCheckStatus -eq 'checked') {
-    $headFilter = [System.Uri]::EscapeDataString("${owner}:$Branch")
-    $uri = "https://api.github.com/repos/$repositoryName/pulls?state=closed&head=$headFilter&per_page=100"
+    $headFilter = [System.Uri]::EscapeDataString("${owner}:$ReviewBranch")
+    $uri = "https://api.github.com/repos/$repositoryName/pulls?state=all&head=$headFilter&per_page=100"
 
     try {
         $response = Invoke-RestMethod -Headers @{
@@ -74,12 +79,24 @@ if ($reuseCheckStatus -eq 'checked') {
             'Accept' = 'application/vnd.github+json'
         } -Uri $uri
 
-        $merged = @($response | Where-Object { $null -ne $_.merged_at } | Sort-Object merged_at -Descending)
-        if ($merged.Count -gt 0) {
-            $latest = $merged[0]
-            $mergedReuse = [ordered]@{
+        $open = @($response | Where-Object { $_.state -eq 'open' } | Sort-Object number -Descending)
+        if ($open.Count -gt 0) {
+            $latestOpen = $open[0]
+            $openPr = [ordered]@{
+                number = [int] $latestOpen.number
+                state = [string] $latestOpen.state
+                merged = [bool] ($null -ne $latestOpen.merged_at)
+            }
+        }
+
+        $closed = @($response | Where-Object { $_.state -eq 'closed' } | Sort-Object updated_at -Descending)
+        if ($closed.Count -gt 0) {
+            $latest = $closed[0]
+            $closedReuse = [ordered]@{
                 number = [int] $latest.number
-                merged_at = [string] $latest.merged_at
+                state = [string] $latest.state
+                merged = [bool] ($null -ne $latest.merged_at)
+                closed_at = [string] $latest.closed_at
             }
         }
     }
@@ -95,20 +112,23 @@ if ($behindBy -gt 0) {
 if ($aheadBy -eq 0) {
     $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from a real feature branch instead.")
 }
-if ($null -ne $mergedReuse) {
-    $actions.Add("Branch '$Branch' was already used by merged PR #$($mergedReuse.number). Create a fresh single-use branch from current main instead of reusing it.")
+if ($null -ne $closedReuse) {
+    $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
+    $actions.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Create a fresh single-use branch from current main instead of reusing it.")
 }
 
 $status = if ($actions.Count -eq 0) { 'ready' } else { 'not_ready' }
 $result = [ordered]@{
     branch = $Branch
+    review_branch = $ReviewBranch
     base_branch = "$Remote/$BaseBranch"
     ahead_by = $aheadBy
     behind_by = $behindBy
     release_please_branch = $releasePleaseBranch
     repository = if ([string]::IsNullOrWhiteSpace($repositoryName)) { $null } else { $repositoryName }
     reuse_check_status = $reuseCheckStatus
-    merged_branch_reuse = $mergedReuse
+    open_pr = $openPr
+    closed_branch_reuse = $closedReuse
     status = $status
     actions = @($actions)
 }
@@ -123,8 +143,12 @@ else {
     Write-Output "behind_by=$($result.behind_by)"
     Write-Output "reuse_check_status=$($result.reuse_check_status)"
     Write-Output "status=$($result.status)"
-    if ($null -ne $mergedReuse) {
-        Write-Output "merged_branch_reuse=#$($mergedReuse.number) merged at $($mergedReuse.merged_at)"
+    if ($null -ne $openPr) {
+        Write-Output "open_pr=#$($openPr.number)"
+    }
+    if ($null -ne $closedReuse) {
+        $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
+        Write-Output "closed_branch_reuse=#$($closedReuse.number) $stateLabel at $($closedReuse.closed_at)"
     }
     foreach ($action in $result.actions) {
         Write-Output "action=$action"

@@ -28,12 +28,17 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
 
   branch="${local_ref#refs/heads/}"
-  if [[ " ${seen} " == *" ${branch} "* ]]; then
+  review_branch="${remote_ref#refs/heads/}"
+  if [[ "${remote_ref}" != refs/heads/* ]]; then
+    review_branch="${branch}"
+  fi
+  key="${branch}->${review_branch}"
+  if [[ " ${seen} " == *" ${key} "* ]]; then
     continue
   fi
-  seen="${seen} ${branch}"
+  seen="${seen} ${key}"
 
-  "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_branch_hygiene.ps1" -Branch "${branch}" -Remote "${remote_name}"
+  "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_branch_hygiene.ps1" -Branch "${branch}" -ReviewBranch "${review_branch}" -Remote "${remote_name}"
 done
 
 exit 0
