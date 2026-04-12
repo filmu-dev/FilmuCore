@@ -316,16 +316,16 @@ async def add_items(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    # Immediately enqueue scrape jobs for newly created items (best-effort).
+    # Immediately enqueue index jobs for newly created items (best-effort).
     resources = get_resources(request)
     arq_redis = resources.arq_redis
     if arq_redis is not None and result.ids:
-        from filmu_py.workers.tasks import enqueue_scrape_item
+        from filmu_py.workers.tasks import enqueue_index_item
 
         queue_name = resources.arq_queue_name
         for item_id in result.ids:
             try:
-                await enqueue_scrape_item(
+                await enqueue_index_item(
                     arq_redis,
                     item_id=item_id,
                     queue_name=queue_name,
@@ -335,7 +335,7 @@ async def add_items(
                 import logging
 
                 logging.getLogger(__name__).warning(
-                    "failed to enqueue scrape_item for %s", item_id, exc_info=True
+                    "failed to enqueue index_item for %s", item_id, exc_info=True
                 )
 
     return MessageResponse(message=result.message)

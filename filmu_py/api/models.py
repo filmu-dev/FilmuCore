@@ -307,6 +307,37 @@ class EnterpriseOperationsSliceResponse(BaseModel):
     remaining_gaps: list[str]
 
 
+class RuntimeLifecycleTransitionResponse(BaseModel):
+    """One observable runtime lifecycle transition."""
+
+    phase: Literal[
+        "bootstrap",
+        "plugin_registration",
+        "steady_state",
+        "degraded",
+        "shutting_down",
+    ]
+    health: Literal["healthy", "degraded"]
+    detail: str
+    at: str
+
+
+class RuntimeLifecycleResponse(BaseModel):
+    """Current runtime lifecycle state plus bounded history."""
+
+    phase: Literal[
+        "bootstrap",
+        "plugin_registration",
+        "steady_state",
+        "degraded",
+        "shutting_down",
+    ]
+    health: Literal["healthy", "degraded"]
+    detail: str
+    updated_at: str
+    transitions: list[RuntimeLifecycleTransitionResponse]
+
+
 class EnterpriseOperationsGovernanceResponse(BaseModel):
     """Machine-readable posture for the current enterprise operations slices."""
 
@@ -316,6 +347,7 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
     tenant_boundary: EnterpriseOperationsSliceResponse
     vfs_data_plane: EnterpriseOperationsSliceResponse
     distributed_control_plane: EnterpriseOperationsSliceResponse
+    runtime_lifecycle: EnterpriseOperationsSliceResponse
     sre_program: EnterpriseOperationsSliceResponse
     operator_log_pipeline: EnterpriseOperationsSliceResponse
     plugin_runtime_isolation: EnterpriseOperationsSliceResponse
@@ -354,6 +386,7 @@ class QueueStatusResponse(BaseModel):
     alerts: list["QueueAlertResponse"] = []
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
+    dead_letter_reason_counts: dict[str, int] = {}
 
 
 class QueueAlertResponse(BaseModel):
@@ -377,6 +410,7 @@ class QueueStatusHistoryPointResponse(BaseModel):
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
     alert_level: Literal["ok", "warning", "critical"] = "ok"
+    dead_letter_reason_counts: dict[str, int] = {}
 
 
 class QueueStatusHistorySummaryResponse(BaseModel):
@@ -389,6 +423,7 @@ class QueueStatusHistorySummaryResponse(BaseModel):
     max_ready_jobs: int
     max_dead_letter_jobs: int
     max_oldest_ready_age_seconds: float | None = None
+    latest_dead_letter_reason_counts: dict[str, int] = {}
 
 
 class QueueStatusHistoryResponse(BaseModel):

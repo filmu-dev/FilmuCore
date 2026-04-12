@@ -2517,13 +2517,10 @@ def test_finalize_item_partial_scope_incomplete(monkeypatch: Any) -> None:
     assert result == item_id
     assert media_service.state is ItemState.PARTIALLY_COMPLETED
     assert media_service.transition_messages == [(ItemEvent.PARTIAL_COMPLETE, "missing_episodes")]
-    assert redis.calls[-1][0] == "scrape_item"
+    assert redis.calls[-1][0] == "index_item"
     assert redis.calls[-1][2].get("missing_seasons") == [1]
     assert "_defer_by" not in redis.calls[-1][2]
-    assert redis.calls[-1][2].get("_job_id") == tasks.scrape_item_followup_job_id(
-        item_id,
-        missing_seasons=[1],
-    )
+    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_job_id(item_id)
 
 
 def test_finalize_item_full_show_ongoing(monkeypatch: Any) -> None:
@@ -2558,8 +2555,8 @@ def test_finalize_item_full_show_ongoing(monkeypatch: Any) -> None:
     assert result == item_id
     assert media_service.state is ItemState.ONGOING
     assert media_service.transition_messages == [(ItemEvent.MARK_ONGOING, "waiting_on_unreleased_episodes")]
-    assert redis.calls[-1][0] == "scrape_item"
-    assert redis.calls[-1][2].get("_job_id") == tasks.scrape_item_job_id(item_id)
+    assert redis.calls[-1][0] == "index_item"
+    assert redis.calls[-1][2].get("_job_id") == tasks.index_item_job_id(item_id)
 
 
 def test_finalize_item_re_entry_path(monkeypatch: Any) -> None:

@@ -1753,7 +1753,10 @@ def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    controller = resources.hls_failed_lease_refresh_controller
+    controller = (
+        resources.queued_hls_failed_lease_refresh_controller
+        or resources.hls_failed_lease_refresh_controller
+    )
     if controller is None:
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1789,7 +1792,10 @@ def _start_hls_restricted_fallback_refresh_trigger(
         _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    controller = resources.hls_restricted_fallback_refresh_controller
+    controller = (
+        resources.queued_hls_restricted_fallback_refresh_controller
+        or resources.hls_restricted_fallback_refresh_controller
+    )
     if controller is None:
         _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1826,7 +1832,10 @@ def _start_direct_playback_refresh_trigger(*, request: Request, item_identifier:
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    controller = resources.playback_refresh_controller
+    controller = (
+        resources.queued_direct_playback_refresh_controller
+        or resources.playback_refresh_controller
+    )
     if controller is None:
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return

@@ -443,12 +443,12 @@ async def _queue_real_scrape(
 
     resources = get_resources(request)
     queue_client = await _resolve_scrape_queue_client(request)
-    enqueue_scrape_item = cast(
+    enqueue_index_item = cast(
         Callable[..., Awaitable[bool]],
-        import_module("filmu_py.workers.tasks").enqueue_scrape_item,
+        import_module("filmu_py.workers.tasks").enqueue_index_item,
     )
 
-    queued = await enqueue_scrape_item(
+    queued = await enqueue_index_item(
         queue_client,
         item_id=item.id,
         queue_name=resources.arq_queue_name,

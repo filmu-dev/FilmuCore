@@ -1452,6 +1452,7 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
         "tenant_boundary",
         "vfs_data_plane",
         "distributed_control_plane",
+        "runtime_lifecycle",
         "sre_program",
         "operator_log_pipeline",
         "plugin_runtime_isolation",
@@ -1476,6 +1477,8 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "chunk_cache_enabled=True" in body["vfs_data_plane"]["evidence"]
     assert body["distributed_control_plane"]["status"] == "not_ready"
     assert "EventBus backend=process_local" in body["distributed_control_plane"]["evidence"]
+    assert body["runtime_lifecycle"]["status"] == "blocked"
+    assert "runtime_phase=bootstrap" in body["runtime_lifecycle"]["evidence"]
     assert body["sre_program"]["status"] == "partial"
     assert body["operator_log_pipeline"]["status"] == "partial"
     assert "structured_logging_enabled=True" in body["operator_log_pipeline"]["evidence"]
@@ -1847,7 +1850,22 @@ def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
         "max_ready_jobs": 1,
         "max_dead_letter_jobs": 0,
         "max_oldest_ready_age_seconds": history[0]["oldest_ready_age_seconds"],
+        "latest_dead_letter_reason_counts": {},
     }
+
+
+def test_runtime_lifecycle_route_returns_bounded_transition_history() -> None:
+    client = _build_client()
+
+    response = client.get("/api/v1/operations/runtime", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phase"] == "bootstrap"
+    assert body["health"] == "healthy"
+    assert body["detail"] == "runtime_bootstrap_pending"
+    assert len(body["transitions"]) == 1
+    assert body["transitions"][0]["phase"] == "bootstrap"
 
 
 def test_stats_route_rejects_cross_tenant_requests_without_delegated_scope() -> None:

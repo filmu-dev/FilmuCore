@@ -16,6 +16,7 @@ from filmu_py.audit import audit_action
 from filmu_py.authz import evaluate_permissions, permission_constraints_from_mapping
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.queue_status import QueueStatusReader
+from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
@@ -51,6 +52,8 @@ from ..models import (
     QueueStatusHistoryResponse,
     QueueStatusHistorySummaryResponse,
     QueueStatusResponse,
+    RuntimeLifecycleResponse,
+    RuntimeLifecycleTransitionResponse,
     StatsMediaYearRelease,
     StatsResponse,
     TenantQuotaPolicyResponse,
@@ -281,6 +284,31 @@ def _summarize_queue_history(
             ),
             default=None,
         ),
+        latest_dead_letter_reason_counts=(
+            dict(history[0].dead_letter_reason_counts) if history else {}
+        ),
+    )
+
+
+def _runtime_lifecycle_response(request: Request) -> RuntimeLifecycleResponse:
+    """Return the explicit runtime lifecycle state and bounded transition history."""
+
+    resources = request.app.state.resources
+    snapshot = resources.runtime_lifecycle.snapshot()
+    return RuntimeLifecycleResponse(
+        phase=snapshot.phase,
+        health=snapshot.health,
+        detail=snapshot.detail,
+        updated_at=snapshot.updated_at.isoformat(),
+        transitions=[
+            RuntimeLifecycleTransitionResponse(
+                phase=transition.phase,
+                health=transition.health,
+                detail=transition.detail,
+                at=transition.at.isoformat(),
+            )
+            for transition in snapshot.transitions
+        ],
     )
 
 
@@ -687,6 +715,7 @@ async def _enterprise_operations_governance(
     vfs_runtime_governance = _vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
     )
+    runtime_snapshot = resources.runtime_lifecycle.snapshot()
     oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(settings)
     )
@@ -984,6 +1013,41 @@ async def _enterprise_operations_governance(
                 "node coordination and failover promotion are not fully automated",
             ],
         ),
+        runtime_lifecycle=EnterpriseOperationsSliceResponse(
+            name="Formal Runtime Lifecycle Graph",
+            status=(
+                "ready"
+                if runtime_snapshot.phase is RuntimeLifecyclePhase.STEADY_STATE
+                and runtime_snapshot.health is RuntimeLifecycleHealth.HEALTHY
+                else (
+                    "partial"
+                    if runtime_snapshot.phase is RuntimeLifecyclePhase.STEADY_STATE
+                    else "blocked"
+                )
+            ),
+            evidence=[
+                f"runtime_phase={runtime_snapshot.phase}",
+                f"runtime_health={runtime_snapshot.health}",
+                f"runtime_detail={runtime_snapshot.detail}",
+                f"runtime_transition_count={len(runtime_snapshot.transitions)}",
+                "GET /api/v1/operations/runtime exposes bounded lifecycle transition history",
+            ],
+            required_actions=(
+                ["resolve_runtime_degraded_state"]
+                if runtime_snapshot.health is RuntimeLifecycleHealth.DEGRADED
+                else ["keep_runtime_transition_history_visible"]
+            ),
+            remaining_gaps=(
+                []
+                if runtime_snapshot.phase is RuntimeLifecyclePhase.STEADY_STATE
+                and runtime_snapshot.health is RuntimeLifecycleHealth.HEALTHY
+                else [
+                    "runtime has not yet reached a healthy steady-state phase"
+                    if runtime_snapshot.phase is not RuntimeLifecyclePhase.STEADY_STATE
+                    else f"runtime steady state is degraded: {runtime_snapshot.detail}"
+                ]
+            ),
+        ),
         sre_program=EnterpriseOperationsSliceResponse(
             name="SRE / Production Operations Program",
             status="partial",
@@ -1060,20 +1124,24 @@ async def _enterprise_operations_governance(
             evidence=[
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
-                "worker stages include scrape_item, parse_scrape_results, rank_streams, debrid_item, and finalize_item",
+                (
+                    "worker stages include index_item, scrape_item, parse_scrape_results, "
+                    "rank_streams, debrid_item, finalize_item, and queued playback refresh jobs"
+                ),
                 "tenant worker enqueue quotas can deny downstream stage fan-out",
-                "rank_streams now executes RTN ranking/sorting in a bounded isolated executor",
+                "index_item, parse_scrape_results, and rank_streams execute inside bounded isolated stage budgets",
+                f"stream_refresh_dispatch_mode={settings.stream.refresh_dispatch_mode}",
                 "GET /api/v1/workers/queue and /api/v1/workers/queue/history expose queue pressure",
             ],
             required_actions=[
-                "split_parse_map_validate_index_stages_into_isolated_workers_or_sandboxes",
-                "define_per_stage_cpu_memory_and_timeout_budgets",
+                "promote_per_stage_cpu_memory_and_timeout_budgets_into_environment policy",
+                "exercise_queued_stream_link_refresh_path_under_real mounted pressure",
                 "add_crash_containment_and_retry_policy_for_heavy_jobs",
             ],
             remaining_gaps=[
-                "parse/map/validate stages still need the same isolation treatment as rank_streams",
-                "no per-stage memory ceiling is enforced yet",
-                "crash containment exists for ranking but not every heavy stage",
+                "memory ceilings remain process-bounded rather than OS-enforced sandbox ceilings",
+                "queued stream-link refresh is implemented but still needs environment soak evidence",
+                "crash containment is executor-bounded rather than true sandbox isolation",
             ],
         ),
         release_metadata_performance=EnterpriseOperationsSliceResponse(
@@ -1128,6 +1196,17 @@ async def health(request: Request) -> HealthResponse:
         status=status,
         checks=checks,
     )
+
+
+@router.get(
+    "/operations/runtime",
+    operation_id="default.operations_runtime",
+    response_model=RuntimeLifecycleResponse,
+)
+async def get_runtime_lifecycle(request: Request) -> RuntimeLifecycleResponse:
+    """Return the explicit runtime lifecycle graph and bounded transition history."""
+
+    return _runtime_lifecycle_response(request)
 
 
 @router.get(
@@ -1656,6 +1735,7 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
         ],
         oldest_ready_age_seconds=snapshot.oldest_ready_age_seconds,
         next_scheduled_in_seconds=snapshot.next_scheduled_in_seconds,
+        dead_letter_reason_counts=dict(snapshot.dead_letter_reason_counts),
     )
 
 
@@ -1686,6 +1766,7 @@ async def get_worker_queue_history(
             oldest_ready_age_seconds=item.oldest_ready_age_seconds,
             next_scheduled_in_seconds=item.next_scheduled_in_seconds,
             alert_level=item.alert_level,
+            dead_letter_reason_counts=dict(item.dead_letter_reason_counts),
         )
         for item in history
     ]
