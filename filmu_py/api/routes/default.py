@@ -432,7 +432,6 @@ def _actor_key(auth_context: Any) -> str:
     tenant_id = str(getattr(auth_context, "tenant_id", "global")).strip() or "global"
     return f"{tenant_id}:{actor_id}"
 
-
 def _authorization_audit_summary(record: Any) -> str:
     """Return a stable human-readable summary for one audit row."""
 
@@ -468,8 +467,6 @@ def _authorization_audit_alerts(records: list[Any]) -> list[AccessPolicyAuditAle
         if count >= 3
     ]
     return alerts[:10]
-
-
 def _vfs_data_plane_evidence(
     request: Request,
     *,
