@@ -589,15 +589,14 @@ class QueuedDirectPlaybackRefreshController:
             queue_name=self._queue_name,
         )
         existing_result = self._last_results_by_item_identifier.get(item_identifier)
-        scheduling_result = (
-            DirectPlaybackRefreshSchedulingResult(outcome="scheduled")
-            if enqueued
-            else (
-                existing_result
-                if self.has_pending(item_identifier) and existing_result is not None
-                else DirectPlaybackRefreshSchedulingResult(outcome="no_action")
-            )
-        )
+        still_pending = self.has_pending(item_identifier) and existing_result is not None
+        if enqueued:
+            scheduling_result = DirectPlaybackRefreshSchedulingResult(outcome="scheduled")
+        elif still_pending:
+            assert existing_result is not None
+            scheduling_result = existing_result
+        else:
+            scheduling_result = DirectPlaybackRefreshSchedulingResult(outcome="no_action")
         self._last_results_by_item_identifier[item_identifier] = scheduling_result
         if enqueued:
             self._pending_deadline_by_item_identifier[item_identifier] = (
@@ -605,7 +604,7 @@ class QueuedDirectPlaybackRefreshController:
             )
         return DirectPlaybackRefreshControlPlaneTriggerResult(
             item_identifier=item_identifier,
-            outcome="scheduled" if enqueued else "already_pending",
+            outcome="scheduled" if enqueued else ("already_pending" if still_pending else "no_action"),
             scheduling_result=scheduling_result,
         )
 
@@ -656,21 +655,20 @@ class QueuedHlsFailedLeaseRefreshController:
             queue_name=self._queue_name,
         )
         existing_result = self._last_results_by_item_identifier.get(item_identifier)
-        refresh_result = (
-            HlsFailedLeaseRefreshResult(
+        still_pending = self.has_pending(item_identifier) and existing_result is not None
+        if enqueued:
+            refresh_result = HlsFailedLeaseRefreshResult(
                 item_identifier=item_identifier,
                 outcome="scheduled",
             )
-            if enqueued
-            else (
-                existing_result
-                if self.has_pending(item_identifier) and existing_result is not None
-                else HlsFailedLeaseRefreshResult(
-                    item_identifier=item_identifier,
-                    outcome="no_action",
-                )
+        elif still_pending:
+            assert existing_result is not None
+            refresh_result = existing_result
+        else:
+            refresh_result = HlsFailedLeaseRefreshResult(
+                item_identifier=item_identifier,
+                outcome="no_action",
             )
-        )
         self._last_results_by_item_identifier[item_identifier] = refresh_result
         if enqueued:
             self._pending_deadline_by_item_identifier[item_identifier] = (
@@ -678,7 +676,7 @@ class QueuedHlsFailedLeaseRefreshController:
             )
         return HlsFailedLeaseRefreshControlPlaneTriggerResult(
             item_identifier=item_identifier,
-            outcome="scheduled" if enqueued else "already_pending",
+            outcome="scheduled" if enqueued else ("already_pending" if still_pending else "no_action"),
             refresh_result=refresh_result,
         )
 
@@ -732,21 +730,20 @@ class QueuedHlsRestrictedFallbackRefreshController:
             queue_name=self._queue_name,
         )
         existing_result = self._last_results_by_item_identifier.get(item_identifier)
-        refresh_result = (
-            HlsRestrictedFallbackRefreshResult(
+        still_pending = self.has_pending(item_identifier) and existing_result is not None
+        if enqueued:
+            refresh_result = HlsRestrictedFallbackRefreshResult(
                 item_identifier=item_identifier,
                 outcome="scheduled",
             )
-            if enqueued
-            else (
-                existing_result
-                if self.has_pending(item_identifier) and existing_result is not None
-                else HlsRestrictedFallbackRefreshResult(
-                    item_identifier=item_identifier,
-                    outcome="no_action",
-                )
+        elif still_pending:
+            assert existing_result is not None
+            refresh_result = existing_result
+        else:
+            refresh_result = HlsRestrictedFallbackRefreshResult(
+                item_identifier=item_identifier,
+                outcome="no_action",
             )
-        )
         self._last_results_by_item_identifier[item_identifier] = refresh_result
         if enqueued:
             self._pending_deadline_by_item_identifier[item_identifier] = (
@@ -754,7 +751,7 @@ class QueuedHlsRestrictedFallbackRefreshController:
             )
         return HlsRestrictedFallbackRefreshControlPlaneTriggerResult(
             item_identifier=item_identifier,
-            outcome="scheduled" if enqueued else "already_pending",
+            outcome="scheduled" if enqueued else ("already_pending" if still_pending else "no_action"),
             refresh_result=refresh_result,
         )
 
