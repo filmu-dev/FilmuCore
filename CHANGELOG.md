@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/filmu-dev/FilmuCore/compare/v0.8.0...v0.9.0) (2026-04-12)
+
+
+### Features
+
+* Codex/abort safe mounted reads 20260412 ([#28](https://github.com/filmu-dev/FilmuCore/issues/28)) ([dfe2c69](https://github.com/filmu-dev/FilmuCore/commit/dfe2c69de27650e1a6b286ca971d96791320b7c7))
+
 ## [0.8.0](https://github.com/filmu-dev/FilmuCore/compare/v0.7.0...v0.8.0) (2026-04-11)
 
 
