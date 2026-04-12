@@ -67,7 +67,7 @@ The local guard path is now:
 
 - `npm run branch:hygiene -- -ReviewBranch <remote-branch-name>` to audit the exact local-main -> remote-review-branch publish path
 - `npm run branch:codex:push -- <remote-branch-name>` to run that hygiene check and only then push `HEAD` to the target remote review branch
-- `.githooks/pre-push` now passes both the local branch and the destination remote branch name into the hygiene check, and it rejects generated/runtime artifacts such as `logs/**`, `ci-artifacts/**`, and `playback-proof-artifacts/**` before GitHub ever sees them
+- `.githooks/pre-push` now passes both the local branch and the destination remote branch name into the hygiene check, and it rejects generated/runtime artifacts such as `logs/**`, `ci-artifacts/**`, and `playback-proof-artifacts/**` plus protected root-surface files like `README.md`, `CHANGELOG.md`, `QUICK_START.md`, `WINDOWS_README.md`, `LINUX_UNIX_README.md`, and `login_page.html` before GitHub ever sees them
 - `.githooks/commit-msg` now normalizes new commit subjects to Conventional Commit prefixes automatically when the subject is still free-form, so day-to-day Codex commits do not rely on memory for `feat` / `fix` / `docs` / `build` / `test` / `refactor` / `chore`
 
 The earlier local-preflight path is now:
@@ -88,6 +88,12 @@ Never publish:
 - `logs/**`
 - `ci-artifacts/**`
 - `playback-proof-artifacts/**`
+- `README.md`
+- `CHANGELOG.md`
+- `QUICK_START.md`
+- `WINDOWS_README.md`
+- `LINUX_UNIX_README.md`
+- `login_page.html`
 
 Those paths are now both ignored in Git and blocked by the repo-managed `pre-push` hook. If one of those files appears in `git status`, treat that as a repo-hygiene bug and fix the ignore/index state instead of committing the files.
 

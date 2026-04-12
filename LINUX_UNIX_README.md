@@ -70,14 +70,6 @@ docker compose up -d --build
 
 This includes the Linux `filmuvfs` sidecar container and mounts FilmuVFS at `/mnt/filmuvfs`.
 
-Or use the unified launcher:
-
-```bash
-pnpm run stack:start
-```
-
-`FILMU_STACK_VFS_MODE=auto` resolves to the Unix `/mnt/filmuvfs` launcher on Unix-like hosts. You can also force `FILMU_STACK_VFS_MODE=unix`.
-
 ## 4. Configure your media server
 
 Use normal local filesystem paths:
@@ -113,7 +105,6 @@ If you want the deeper Linux validation flow, use [docs/FILMUVFS_LINUX_HOST_VALI
 ## 6. Stop the stack
 
 ```bash
-pnpm run stack:stop
 docker compose down
 ```
 

@@ -50,9 +50,9 @@ FilmuVFS now exists as a Rust sidecar with platform-specific host adapters:
 
 Current Windows build status:
 
-- `winfsp` is now the preferred Windows-native adapter for playback because it avoids ProjFS hydration consuming the mount volume.
-- `auto` now resolves to `winfsp` on Windows when the current build includes the WinFSP backend, and falls back to `projfs` otherwise.
-- `projfs` remains available for diagnostics, but the raw WinFSP folder-mount path in [`rust/filmuvfs/src/windows_winfsp.rs`](/E:/Dev/Filmu/FilmuCore/rust/filmuvfs/src/windows_winfsp.rs) is the verified Windows-host playback path at `C:\FilmuCoreVFS`.
+- `projfs` remains the policy/default Windows-native adapter.
+- `auto` is the default helper mode and still resolves to `projfs` on Windows.
+- `winfsp` still requires explicit opt-in with `FILMUVFS_ENABLE_EXPERIMENTAL_WINFSP=1`, but the raw WinFSP folder-mount path in [`rust/filmuvfs/src/windows_winfsp.rs`](/E:/Dev/Filmu/FilmuCore/rust/filmuvfs/src/windows_winfsp.rs) now has a verified Windows-host playback path at `C:\FilmuCoreVFS`.
 - Current verified Windows playback result: the WinFSP path now survives the native soak/remux gate on `C:\FilmuCoreVFS`, Jellyfin reaches sustained mounted reads and successful software transcode, native Emby playback/probe/stream-open checks succeed through the real provider proof on the same mount, and native Windows Plex now also reran green through the real local PMS at `http://127.0.0.1:32400` using the local admin token. The repo exposes that native Windows provider-gate surface in [`scripts/run_windows_media_server_gate.ps1`](/E:/Dev/Filmu/FilmuCore/scripts/run_windows_media_server_gate.ps1). The remaining Windows Plex work is no longer claim/setup bring-up; it is keeping the now-green proof path stable through repeatable reruns and CI/merge-policy promotion.
 - Current verified Linux/WSL parity result: the isolated Docker Plex instance now works against the shared `/mnt/filmuvfs` mount and the direct provider proof gate reran green on April 9, 2026 for Docker Plex plus native Windows Emby. The playback-proof bundle now emits explicit Docker/WSL Plex evidence in `summary.json` plus a dedicated `plex-wsl-evidence.json` artifact covering mount visibility, host-binary freshness, refresh-identity visibility, and foreground-fetch/coalescing visibility. Those checks are now explicit rather than warning-only and reran green twice on April 9, 2026 after adding the WSL mount preflight plus ANSI-safe evidence parsing. Native Windows Plex parity is now also green through the real local PMS on `http://127.0.0.1:32400`, so the remaining Plex work is CI/merge-policy promotion plus longer-running stability hardening rather than first native parity.
 
@@ -80,11 +80,6 @@ Compose files:
 
 - Linux default: [docker-compose.yml](/E:/Dev/Filmu/FilmuCore/docker-compose.yml)
 - Windows backend-only: [docker-compose.windows.yml](/E:/Dev/Filmu/FilmuCore/docker-compose.windows.yml)
-
-Canonical startup path:
-
-- use `pnpm run stack:start` to auto-detect Windows vs Unix-like hosts and dispatch to the correct launcher
-- on Windows, raw `docker-compose.windows.yml` only starts backend containers; the native FilmuVFS mount is started separately by [start_windows_stack.ps1](/E:/Dev/Filmu/FilmuCore/scripts/start_windows_stack.ps1)
 
 Windows helper entrypoints:
 
