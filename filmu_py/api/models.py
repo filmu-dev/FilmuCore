@@ -616,6 +616,25 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_rollout_readiness: str
     vfs_runtime_rollout_reasons: list[str]
     vfs_runtime_rollout_next_action: str
+    vfs_runtime_rollout_canary_decision: str
+    vfs_runtime_rollout_merge_gate: str
+    vfs_runtime_rollout_environment_class: str
+    playback_gate_snapshot_available: int
+    playback_gate_artifact_generated_at: str
+    playback_gate_environment_class: str
+    playback_gate_repeat_count: int
+    playback_gate_gate_mode: str
+    playback_gate_provider_gate_required: int
+    playback_gate_provider_gate_ran: int
+    playback_gate_stability_ready: int
+    playback_gate_provider_parity_ready: int
+    playback_gate_windows_provider_ready: int
+    playback_gate_windows_soak_ready: int
+    playback_gate_policy_validation_status: str
+    playback_gate_policy_ready: int
+    playback_gate_rollout_readiness: str
+    playback_gate_rollout_reasons: list[str]
+    playback_gate_rollout_next_action: str
     serving_active_session_summaries: list[str] = []
     vfs_runtime_active_handle_summaries: list[str] = []
 

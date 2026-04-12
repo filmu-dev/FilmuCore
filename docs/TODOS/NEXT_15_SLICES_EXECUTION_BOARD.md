@@ -41,8 +41,11 @@ Additional bar for enterprise-grade claims:
 
 Current incremental note:
 
-- `Slice G` now has an initial baseline landed: the enterprise `vfs_data_plane` governance slice consumes the same live runtime rollout posture already exposed by `/api/v1/stream/status`, including runtime-snapshot availability, rollout readiness, rollout reasons, cache/fallback/prefetch ratios, and provider/fairness pressure incidents.
-- `Slice H` now has an initial runtime hardening baseline landed in the Rust sidecar: mounted foreground reads inherit explicit per-handle cancellation, released handles can no longer repopulate chunk-engine tracking state after an interrupted read, ProjFS command cancellation is wired into the async callback path, and cancelled read outcomes now surface in runtime status and `/api/v1/stream/status`.
+- `Slice G` is implemented: the enterprise `vfs_data_plane` governance slice consumes the same live runtime rollout posture already exposed by `/api/v1/stream/status`, including runtime-snapshot availability, rollout readiness, rollout reasons, cache/fallback/prefetch ratios, and provider/fairness pressure incidents.
+- `Slice H` is implemented: mounted foreground reads inherit explicit per-handle cancellation, released handles can no longer repopulate chunk-engine tracking state after an interrupted read, ProjFS command cancellation is wired into the async callback path, and cancelled read outcomes now surface in runtime status and `/api/v1/stream/status`.
+- `Slice I` is implemented: `/api/v1/stream/status` and `/api/v1/operations/governance` derive explicit VFS canary decisions and merge-gate posture from live runtime blockers plus Windows soak evidence, and the governance/evidence path now shares the same playback-proof inputs so canary promotion is internally consistent.
+- `Slice J` is implemented: the same status/governance surfaces ingest playback-gate stability, provider parity, Windows-provider parity, Windows soak, and recorded GitHub main-policy validation artifacts; missing evidence is treated as a warning posture, failed evidence blocks promotion, and the admin-authenticated policy check can be persisted as `playback-proof-artifacts/github-main-policy-current.json`.
+- `Wave 1` is now code-complete in local `main`: the remaining requirement is to keep the external proof artifacts and protected-branch policy green in real environments, not to land more application code for slices `G` through `J`.
 
 ---
 
@@ -88,6 +91,7 @@ Exit gate:
 - repeated playback gate green
 - soak evidence classified
 - VFS rollout blocking wired to governance posture
+- governance surfaces classify missing proof as warning, failed proof as blocked, and green proof as merge-ready
 
 ### Wave 2
 

@@ -8,6 +8,7 @@ param(
     [int] $MinimumApprovingReviewCount = 1,
     [switch] $RequireAdminsEnforced,
     [switch] $ValidateCurrent,
+    [string] $OutputPath = '',
     [switch] $AsJson
 )
 
@@ -138,6 +139,24 @@ function Get-ValidationExitCode {
     return 1
 }
 
+function Write-PolicyArtifactIfRequested {
+    param(
+        [Parameter(Mandatory = $true)][object] $Payload,
+        [AllowEmptyString()][string] $Path = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    $directory = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    $Payload | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding UTF8
+}
+
 $expected = New-ExpectedPolicy `
     -Branch $Branch `
     -RequirePlaybackGate:$RequirePlaybackGate `
@@ -227,9 +246,12 @@ if ($ValidateCurrent) {
 }
 
 if ($AsJson) {
+    Write-PolicyArtifactIfRequested -Payload $result -Path $OutputPath
     $result | ConvertTo-Json -Depth 10
     exit (Get-ValidationExitCode -Validation $result.validation)
 }
+
+Write-PolicyArtifactIfRequested -Payload $result -Path $OutputPath
 
 Write-Host ("[github-main-policy] repository: {0}" -f $Repository)
 Write-Host ("[github-main-policy] branch: {0}" -f $Branch)

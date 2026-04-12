@@ -115,6 +115,7 @@ pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGat
 pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -ValidateCurrent
 pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -RequireProviderGate -RequireWindowsVfsGate -RequireWindowsVfsProvidersGate -MinimumApprovingReviewCount 1 -RequireAdminsEnforced
 pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -RequireProviderGate -RequireWindowsVfsGate -RequireWindowsVfsProvidersGate -MinimumApprovingReviewCount 1 -RequireAdminsEnforced -ValidateCurrent
+pwsh -NoProfile -File ./scripts/check_github_main_policy.ps1 -RequirePlaybackGate -RequireProviderGate -RequireWindowsVfsGate -RequireWindowsVfsProvidersGate -MinimumApprovingReviewCount 1 -RequireAdminsEnforced -ValidateCurrent -OutputPath ./playback-proof-artifacts/github-main-policy-current.json
 ```
 
 Or via package scripts:
@@ -124,6 +125,7 @@ npm run proof:playback:policy
 npm run proof:playback:policy:validate
 npm run proof:playback:policy:enterprise
 npm run proof:playback:policy:enterprise:validate
+npm run proof:playback:policy:enterprise:validate:record
 ```
 
 What it does:
@@ -134,6 +136,9 @@ What it does:
 - when `gh` is installed and authenticated with repo-admin access, validates the current GitHub repository and branch-protection state instead of relying on manual memory
 - exits non-zero for `-ValidateCurrent` when the live policy is `not_ready` or `unverified`, so the checker can be used as a real CI gate instead of a report-only helper
 - keeps the print-only mode (`proof:playback:policy` without `-ValidateCurrent`) exit-zero so operators can inspect the canonical expected policy on machines that do not have `gh` configured
+- when `-OutputPath` is provided, writes the same JSON result to disk so Wave 1 rollout posture can ingest a recorded admin-authenticated policy validation artifact (`playback-proof-artifacts/github-main-policy-current.json`)
+- `/api/v1/stream/status` and `/api/v1/operations/governance` consume these recorded artifacts in precedence order, so a locally supplied artifact root can deterministically drive rollout posture during tests, canaries, and operator reviews
+- missing recorded proof is treated as a warning posture that keeps promotion incomplete, while explicitly failed proof artifacts or `not_ready` policy validation block promotion outright
 
 ## 3. CI behavior
 
