@@ -167,10 +167,11 @@ async fn spawn_blocked_range_response_server(
                         let request_text = String::from_utf8_lossy(&request_buffer[..request_len]);
                         let (start, end_exclusive) = parse_requested_range(&request_text, body.len());
                         let payload = &body[start..end_exclusive];
+                        let release_wait = release_notify.notified();
 
                         let request_index = request_count.fetch_add(1, Ordering::SeqCst);
                         if request_index == 0 {
-                            release_notify.notified().await;
+                            release_wait.await;
                         }
 
                         let response = format!(
