@@ -237,6 +237,55 @@ class AccessPolicyRevisionORM(Base):
     )
 
 
+class AuthorizationDecisionAuditORM(Base):
+    """Durable authorization-decision ledger for operator audit and search."""
+
+    __tablename__ = "authorization_decision_audit"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        index=True,
+    )
+    path: Mapped[str] = mapped_column(String(512), nullable=False)
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    resource_scope: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    actor_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    actor_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    target_tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    required_permissions: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    matched_permissions: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    missing_permissions: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    constrained_permissions: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    constraint_failures: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    tenant_scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    authentication_mode: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    access_policy_version: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    access_policy_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    oidc_issuer: Mapped[str | None] = mapped_column(String(256), default=None)
+    oidc_subject: Mapped[str | None] = mapped_column(String(256), default=None)
+
+
 class PluginGovernanceOverrideORM(Base):
     """Persisted operator-managed quarantine/revocation/approval state per plugin."""
 
@@ -1111,6 +1160,21 @@ Index(
     "ix_scrape_candidates_item_created", ScrapeCandidateORM.item_id, ScrapeCandidateORM.created_at
 )
 Index("ix_streams_media_item_created", StreamORM.media_item_id, StreamORM.created_at)
+Index(
+    "ix_authorization_decision_audit_tenant_occurred",
+    AuthorizationDecisionAuditORM.tenant_id,
+    AuthorizationDecisionAuditORM.occurred_at,
+)
+Index(
+    "ix_authorization_decision_audit_actor_occurred",
+    AuthorizationDecisionAuditORM.actor_id,
+    AuthorizationDecisionAuditORM.occurred_at,
+)
+Index(
+    "ix_authorization_decision_audit_allowed_occurred",
+    AuthorizationDecisionAuditORM.allowed,
+    AuthorizationDecisionAuditORM.occurred_at,
+)
 Index(
     "ix_stream_blacklist_media_item_created",
     StreamBlacklistRelationORM.media_item_id,

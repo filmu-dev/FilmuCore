@@ -14,6 +14,7 @@ from filmu_py.authz import (
     describe_tenant_scope,
     effective_permissions,
     evaluate_permissions,
+    permission_constraints_from_mapping,
 )
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
@@ -132,7 +133,25 @@ def _resolve_access_policy_snapshot(request: Request) -> AccessPolicySnapshot:
     return snapshot_from_settings(resources.settings.access_policy)
 
 
-def _audit_authorization_decision(
+def _resource_scope_for_path(path: str) -> str:
+    """Return a stable policy/audit resource scope for one API path."""
+
+    if path.startswith("/api/v1/auth/policy"):
+        return "access_policy"
+    if path.startswith("/api/v1/plugins/governance"):
+        return "plugin_governance"
+    if path.startswith("/api/v1/operations"):
+        return "operations"
+    if path.startswith("/api/v1/settings"):
+        return "settings"
+    if path.startswith("/api/v1/items"):
+        return "items"
+    if path.startswith("/api/v1/stream"):
+        return "stream"
+    return "route"
+
+
+async def _audit_authorization_decision(
     request: Request,
     *,
     auth_context: AuthContext,
@@ -143,11 +162,53 @@ def _audit_authorization_decision(
     policy = _resolve_access_policy_snapshot(request)
     if not policy.audit_decisions:
         return
+    path = request.url.path
+    resource_scope = _resource_scope_for_path(path)
+    audit_service = get_resources(request).authorization_audit_service
+    if audit_service is not None:
+        try:
+            await audit_service.record_decision(
+                path=path,
+                method=request.method,
+                resource_scope=resource_scope,
+                actor_id=auth_context.actor_id,
+                actor_type=auth_context.actor_type,
+                tenant_id=auth_context.tenant_id,
+                target_tenant_id=target_tenant_id,
+                required_permissions=required_permissions,
+                matched_permissions=decision.matched_permissions,
+                missing_permissions=decision.missing_permissions,
+                constrained_permissions=getattr(decision, "constrained_permissions", ()),
+                constraint_failures=getattr(decision, "constraint_failures", ()),
+                allowed=decision.allowed,
+                reason=decision.reason,
+                tenant_scope=decision.tenant_scope,
+                authentication_mode=auth_context.authentication_mode,
+                access_policy_version=policy.version,
+                access_policy_source=policy.source,
+                oidc_issuer=auth_context.oidc_issuer,
+                oidc_subject=auth_context.oidc_subject,
+            )
+        except Exception:
+            logger.exception(
+                "auth.permission_decision_audit_failed",
+                path=path,
+                method=request.method,
+                actor_id=auth_context.actor_id,
+                tenant_id=auth_context.tenant_id,
+                target_tenant_id=target_tenant_id,
+                required_permissions=list(required_permissions),
+                allowed=decision.allowed,
+                reason=decision.reason,
+                access_policy_version=policy.version,
+                access_policy_source=policy.source,
+            )
     log_method = logger.info if decision.allowed else logger.warning
     log_method(
         "auth.permission_decision",
-        path=request.url.path,
+        path=path,
         method=request.method,
+        resource_scope=resource_scope,
         actor_id=auth_context.actor_id,
         actor_type=auth_context.actor_type,
         tenant_id=auth_context.tenant_id,
@@ -155,6 +216,8 @@ def _audit_authorization_decision(
         required_permissions=list(required_permissions),
         matched_permissions=list(decision.matched_permissions),
         missing_permissions=list(decision.missing_permissions),
+        constrained_permissions=list(getattr(decision, "constrained_permissions", ())),
+        constraint_failures=list(getattr(decision, "constraint_failures", ())),
         allowed=decision.allowed,
         reason=decision.reason,
         tenant_scope=decision.tenant_scope,
@@ -324,8 +387,14 @@ def require_permissions(
             actor_tenant_id=auth_context.tenant_id,
             target_tenant_id=auth_context.tenant_id,
             authorized_tenant_ids=auth_context.authorized_tenant_ids,
+            actor_type=auth_context.actor_type,
+            authentication_mode=auth_context.authentication_mode,
+            request_path=request.url.path,
+            permission_constraints=permission_constraints_from_mapping(
+                _resolve_access_policy_snapshot(request).permission_constraints
+            ),
         )
-        _audit_authorization_decision(
+        await _audit_authorization_decision(
             request,
             auth_context=auth_context,
             required_permissions=normalized_permissions,

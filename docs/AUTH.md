@@ -81,10 +81,12 @@ The control plane is also stricter than the earlier baseline:
 - API-key authentication no longer implies admin privileges automatically
 - the backend now computes `effective_permissions` from roles, scopes, and settings-backed role grants and exposes them on [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py)
 - the backend now also evaluates tenant-aware authorization decisions through [`evaluate_permissions()`](../filmu_py/authz.py) instead of only checking whether a permission string exists
-- [`GET /api/v1/auth/policy`](../filmu_py/api/routes/default.py) exposes standard authorization probes, matched and missing permissions, tenant-scope classification, OIDC validation state, access-policy version/source, role grants, warnings, and remaining policy gaps for the current actor
+- [`GET /api/v1/auth/policy`](../filmu_py/api/routes/default.py) exposes standard authorization probes, matched/missing permissions, route-context constraint failures, tenant-scope classification, OIDC validation and rollout state, access-policy version/source, role grants, permission constraints, audit mode, warnings, and remaining policy gaps for the current actor
 - startup now bootstraps a persisted access-policy revision through [`AccessPolicyService`](../filmu_py/services/access_policy.py), and settings saves refresh the active revision instead of leaving policy inventory purely process-local
-- operators can now inspect and manage persisted access-policy revisions through [`GET /api/v1/auth/policy/revisions`](../filmu_py/api/routes/default.py), [`POST /api/v1/auth/policy/revisions`](../filmu_py/api/routes/default.py), and [`POST /api/v1/auth/policy/revisions/{version}/activate`](../filmu_py/api/routes/default.py)
-- privileged authorization checks now emit allow/deny audit events when policy decision auditing is enabled, so policy evaluation is observable rather than only implicit in HTTP results
+- operators can now inspect and manage persisted access-policy revisions through [`GET /api/v1/auth/policy/revisions`](../filmu_py/api/routes/default.py), [`POST /api/v1/auth/policy/revisions`](../filmu_py/api/routes/default.py), [`POST /api/v1/auth/policy/revisions/{version}/approve`](../filmu_py/api/routes/default.py), [`POST /api/v1/auth/policy/revisions/{version}/reject`](../filmu_py/api/routes/default.py), and [`POST /api/v1/auth/policy/revisions/{version}/activate`](../filmu_py/api/routes/default.py)
+- persisted access-policy revisions now carry explicit approval state (`draft`, `approved`, `rejected`, `bootstrap`), and non-bootstrap revisions must be approved before activation
+- operators can query durable bounded access-policy decision history through [`GET /api/v1/auth/policy/audit`](../filmu_py/api/routes/default.py), including actor, tenant, target tenant, permission, reason, allowed/denied, path-prefix, and repeated-denial alert candidates
+- privileged authorization checks now emit allow/deny audit events into both structured logs and the persisted authorization-decision ledger when policy decision auditing is enabled, so policy evaluation is observable rather than only implicit in HTTP results
 - tenant-aware intake paths now persist the resolved `tenant_id` on created `media_items` and `item_requests`
 - tenant-scoped reads now also reach item detail/listing, calendar, and stats surfaces instead of stopping at write-time persistence
 
@@ -95,7 +97,7 @@ The request identity surface now also carries delegated tenant scope and OIDC id
 - validated OIDC tokens can derive actor id, tenant id, authorized tenants, roles, and scopes from configured claims
 - [`GET /api/v1/auth/context`](../filmu_py/api/routes/default.py) now returns `authorized_tenant_ids`, `authorization_tenant_scope`, `oidc_issuer`, `oidc_subject`, `oidc_token_validated`, `access_policy_version`, and `quota_policy_version` alongside `effective_permissions`
 
-Remaining identity gaps: OIDC/SSO is now real but still rollout-gated; persisted policy revision CRUD/version workflows now exist but still need broader approval/search/audit retention depth; ABAC is still mostly permission plus tenant-scope based; frontend session-to-backend subject mapping still needs product-specific rollout.
+Remaining identity gaps: OIDC/SSO is now real and rollout-diagnosable but still environment-gated; persisted policy revision CRUD/approval plus durable decision retention/search now exist, but environment alerting and production rollout discipline still need promotion; ABAC now supports route-context constraints, but item/stream/plugin ownership policy is still incomplete; frontend session-to-backend subject mapping still needs product-specific rollout.
 
 ---
 
@@ -155,8 +157,8 @@ The current API-key model is acceptable for the present BFF architecture, but th
 - stronger service-to-service auth
 - scoped machine credentials above the new persisted `ServiceAccountORM` baseline
 - internal admin/service roles
-- broader RBAC/ABAC policy evaluation above the current `effective_permissions`, persisted policy revision, and tenant-aware authorization baseline
+- broader RBAC/ABAC policy evaluation above the current `effective_permissions`, persisted policy revision, route-context constraints, and tenant-aware authorization baseline
 - plugin/service capability boundaries
-- eventual user-aware audit trails, real OIDC/SSO integration, and tenant-scoped authorization beyond the current delegated-tenant compatibility headers
+- eventual user-aware audit trails, full environment-owned OIDC/SSO rollout, and tenant-scoped resource ownership beyond the current delegated-tenant compatibility headers
 
 That evolution should not break the current principle that frontend sessions and backend execution auth are separate concerns unless there is a clear product reason to merge them.

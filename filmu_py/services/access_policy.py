@@ -22,6 +22,7 @@ class AccessPolicySnapshot:
     principal_roles: dict[str, list[str]]
     principal_scopes: dict[str, list[str]]
     principal_tenant_grants: dict[str, list[str]]
+    permission_constraints: dict[str, dict[str, list[str]]]
     audit_decisions: bool
 
 
@@ -44,6 +45,7 @@ class AccessPolicyRevisionRecord:
     principal_roles: dict[str, list[str]]
     principal_scopes: dict[str, list[str]]
     principal_tenant_grants: dict[str, list[str]]
+    permission_constraints: dict[str, dict[str, list[str]]]
     audit_decisions: bool
 
     def to_snapshot(self) -> AccessPolicySnapshot:
@@ -56,6 +58,7 @@ class AccessPolicyRevisionRecord:
             principal_roles=self.principal_roles,
             principal_scopes=self.principal_scopes,
             principal_tenant_grants=self.principal_tenant_grants,
+            permission_constraints=self.permission_constraints,
             audit_decisions=self.audit_decisions,
         )
 
@@ -172,6 +175,7 @@ class AccessPolicyService:
         principal_roles: dict[str, list[str]],
         principal_scopes: dict[str, list[str]],
         principal_tenant_grants: dict[str, list[str]],
+        permission_constraints: dict[str, dict[str, list[str]]],
         audit_decisions: bool,
         proposed_by: str | None = None,
         approval_notes: str | None = None,
@@ -189,6 +193,7 @@ class AccessPolicyService:
             "principal_roles": principal_roles,
             "principal_scopes": principal_scopes,
             "principal_tenant_grants": principal_tenant_grants,
+            "permission_constraints": permission_constraints,
             "audit_decisions": audit_decisions,
         }
         now = datetime.now(UTC)
@@ -394,6 +399,14 @@ def _policy_payload(policy: AccessPolicySettings) -> dict[str, object]:
             principal: list(values)
             for principal, values in sorted(policy.principal_tenant_grants.items())
         },
+        "permission_constraints": {
+            permission: {
+                field: list(values)
+                for field, values in sorted(constraints.items())
+                if isinstance(values, list)
+            }
+            for permission, constraints in sorted(policy.permission_constraints.items())
+        },
         "audit_decisions": bool(policy.audit_decisions),
     }
 
@@ -411,6 +424,7 @@ def _snapshot_from_payload(
         principal_roles=_coerce_mapping(payload.get("principal_roles")),
         principal_scopes=_coerce_mapping(payload.get("principal_scopes")),
         principal_tenant_grants=_coerce_mapping(payload.get("principal_tenant_grants")),
+        permission_constraints=_coerce_nested_mapping(payload.get("permission_constraints")),
         audit_decisions=bool(payload.get("audit_decisions", True)),
     )
 
@@ -426,6 +440,27 @@ def _coerce_mapping(raw: object) -> dict[str, list[str]]:
             normalized[key] = [item for item in value if isinstance(item, str) and item]
         else:
             normalized[key] = []
+    return normalized
+
+
+def _coerce_nested_mapping(raw: object) -> dict[str, dict[str, list[str]]]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, dict[str, list[str]]] = {}
+    for permission, value in raw.items():
+        if not isinstance(permission, str) or not isinstance(value, dict):
+            continue
+        fields: dict[str, list[str]] = {}
+        for field_name, field_value in value.items():
+            if not isinstance(field_name, str):
+                continue
+            if isinstance(field_value, list):
+                fields[field_name] = [
+                    item for item in field_value if isinstance(item, str) and item
+                ]
+            else:
+                fields[field_name] = []
+        normalized[permission] = fields
     return normalized
 
 
@@ -454,5 +489,6 @@ def _record_from_orm(revision: AccessPolicyRevisionORM) -> AccessPolicyRevisionR
         principal_roles=_coerce_mapping(payload.get("principal_roles")),
         principal_scopes=_coerce_mapping(payload.get("principal_scopes")),
         principal_tenant_grants=_coerce_mapping(payload.get("principal_tenant_grants")),
+        permission_constraints=_coerce_nested_mapping(payload.get("permission_constraints")),
         audit_decisions=bool(payload.get("audit_decisions", True)),
     )

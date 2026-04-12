@@ -291,6 +291,7 @@ class DummyAccessPolicyService:
         record.principal_roles = snapshot.principal_roles
         record.principal_scopes = snapshot.principal_scopes
         record.principal_tenant_grants = snapshot.principal_tenant_grants
+        record.permission_constraints = snapshot.permission_constraints
         record.audit_decisions = snapshot.audit_decisions
         record.to_snapshot = lambda snapshot=snapshot: snapshot
         return record
@@ -307,6 +308,7 @@ class DummyAccessPolicyService:
         principal_roles: dict[str, list[str]],
         principal_scopes: dict[str, list[str]],
         principal_tenant_grants: dict[str, list[str]],
+        permission_constraints: dict[str, dict[str, list[str]]],
         audit_decisions: bool,
         proposed_by: str | None = None,
         approval_notes: str | None = None,
@@ -326,6 +328,7 @@ class DummyAccessPolicyService:
             principal_roles=principal_roles,
             principal_scopes=principal_scopes,
             principal_tenant_grants=principal_tenant_grants,
+            permission_constraints=permission_constraints,
             audit_decisions=audit_decisions,
         )
         record = self._build_revision_record(snapshot, now, activate)
@@ -432,6 +435,67 @@ class DummyControlPlaneService:
         return list(self.records)
 
 
+class DummyAuthorizationAuditService:
+    """In-memory authorization-decision ledger used by route tests."""
+
+    def __init__(self) -> None:
+        self.records: list[Any] = []
+
+    async def record_decision(self, **payload: Any) -> None:
+        record = type("AuthorizationDecisionAuditRecord", (), {})()
+        record.occurred_at = payload.get(
+            "occurred_at", datetime(2026, 4, 12, 10, 0, tzinfo=UTC)
+        )
+        for key, value in payload.items():
+            setattr(record, key, value)
+        self.records.insert(0, record)
+
+    async def search(
+        self,
+        *,
+        limit: int = 20,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+        target_tenant_id: str | None = None,
+        permission: str | None = None,
+        allowed: bool | None = None,
+        reason: str | None = None,
+        path_prefix: str | None = None,
+    ) -> Any:
+        records = list(self.records)
+        if actor_id is not None:
+            records = [record for record in records if record.actor_id == actor_id]
+        if tenant_id is not None:
+            records = [record for record in records if record.tenant_id == tenant_id]
+        if target_tenant_id is not None:
+            records = [
+                record for record in records if record.target_tenant_id == target_tenant_id
+            ]
+        if permission is not None:
+            records = [
+                record for record in records if permission in tuple(record.required_permissions)
+            ]
+        if allowed is not None:
+            records = [record for record in records if record.allowed is allowed]
+        if reason is not None:
+            records = [record for record in records if record.reason == reason]
+        if path_prefix is not None:
+            records = [record for record in records if record.path.startswith(path_prefix)]
+        return type(
+            "AuthorizationDecisionAuditSearchResult",
+            (),
+            {"total_matches": len(records), "records": tuple(records[:limit])},
+        )()
+
+
+class FailingAuthorizationAuditService:
+    """Audit service double that simulates temporary ledger persistence failure."""
+
+    async def record_decision(self, **payload: Any) -> None:
+        _ = payload
+        raise RuntimeError("audit store unavailable")
+
+
 def _build_settings(
     *,
     arq_enabled: bool = False,
@@ -487,6 +551,7 @@ def _build_client(
     plugin_registry: PluginRegistry | None = None,
     plugin_load_report: Any | None = None,
     security_identity_service: Any | None = None,
+    authorization_audit_service: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
@@ -513,6 +578,11 @@ def _build_client(
         security_identity_service=security_identity_service,
         access_policy_service=DummyAccessPolicyService(settings),
         access_policy_snapshot=snapshot_from_settings(settings.access_policy),
+        authorization_audit_service=(
+            DummyAuthorizationAuditService()
+            if authorization_audit_service is None
+            else authorization_audit_service
+        ),
         control_plane_service=DummyControlPlaneService(),
         plugin_governance_service=DummyPluginGovernanceService(),
     )
@@ -1063,29 +1133,124 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["permissions_model"] == "role_scope_effective_permissions_with_tenant_scope"
+    assert (
+        body["permissions_model"]
+        == "role_scope_effective_permissions_with_route_constraints_and_tenant_scope"
+    )
     assert body["policy_source"] == "settings"
     assert body["access_policy_version"] == "default-v1"
     assert body["quota_policy_version"] is None
     assert body["authorization_tenant_scope"] == "self"
     assert body["oidc_claims_present"] is True
     assert body["oidc_token_validated"] is False
+    assert body["oidc_rollout_status"] == "blocked"
+    assert body["oidc_configuration_complete"] is False
+    assert body["oidc_allow_api_key_fallback"] is True
+    assert body["audit_mode"] == "persisted_decision_ledger"
     assert body["warnings"] == [
         "authentication is still API-key anchored",
         "oidc claims were supplied by headers and were not token-validated",
     ]
     assert body["role_grants"]["platform:admin"] == ["*"]
+    assert "security:apikey.rotate" in body["permission_constraints"]
     decisions = {decision["name"]: decision for decision in body["decisions"]}
     assert decisions["library_read"]["allowed"] is True
     assert decisions["playback_operate"]["allowed"] is True
     assert decisions["settings_write"]["allowed"] is False
     assert decisions["settings_write"]["missing_permissions"] == ["settings:write"]
     assert decisions["api_key_rotate"]["allowed"] is False
+    assert decisions["api_key_rotate"]["reason"] == "missing_permissions"
     assert body["remaining_gaps"] == [
-        "OIDC/SSO validation is active only when FILMU_PY_OIDC enables it",
-        "ABAC policy is limited to permission and tenant-scope checks",
-        "policy approval/version workflows now exist, but broader ABAC resource policies still need rollout",
+        "OIDC/SSO validation is disabled for this environment",
+        "ABAC policy now supports route-context constraints, but broader resource ownership rollout is still incomplete",
+        "policy approval/version workflows now exist, but alert automation and environment SSO promotion still need rollout",
     ]
+
+
+def test_generate_apikey_route_enforces_route_context_constraint() -> None:
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/generateapikey",
+        headers={
+            **_headers(),
+            "x-actor-type": "user",
+            "x-actor-scopes": "security:apikey.rotate",
+        },
+    )
+
+    assert response.status_code == 403
+    assert "permission_constrained" in response.json()["detail"]
+
+    audit_response = client.get(
+        "/api/v1/auth/policy/audit",
+        headers=_headers(),
+        params={"reason": "permission_constrained"},
+    )
+    assert audit_response.status_code == 200
+    body = audit_response.json()
+    assert body["total_matches"] == 1
+    assert body["records"][0]["path"] == "/api/v1/generateapikey"
+    assert body["records"][0]["constrained_permissions"] == ["security:apikey.rotate"]
+    assert body["records"][0]["constraint_failures"] == ["security:apikey.rotate:actor_type"]
+
+
+def test_auth_policy_route_uses_real_policy_approval_probe_path() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_ACCESS_POLICY": {
+                "role_grants": {"platform:admin": ["*"]},
+                "permission_constraints": {
+                    "security:policy.approve": {
+                        "route_prefixes": ["/api/v1/auth/policy/revisions/probe-version/approve"],
+                        "tenant_scopes": ["self", "delegated", "all"],
+                    }
+                },
+            }
+        }
+    )
+
+    response = client.get(
+        "/api/v1/auth/policy",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "security:policy.approve",
+        },
+    )
+
+    assert response.status_code == 200
+    decisions = {decision["name"]: decision for decision in response.json()["decisions"]}
+    assert decisions["policy_approve"]["allowed"] is True
+    assert decisions["policy_approve"]["reason"] == "allowed"
+
+
+def test_authorization_audit_failures_do_not_break_allowed_requests() -> None:
+    client = _build_client(
+        authorization_audit_service=FailingAuthorizationAuditService()
+    )
+
+    response = client.get("/api/v1/stats", headers=_headers())
+
+    assert response.status_code == 200
+
+
+def test_authorization_audit_failures_do_not_mask_denied_requests() -> None:
+    client = _build_client(
+        authorization_audit_service=FailingAuthorizationAuditService()
+    )
+
+    response = client.post(
+        "/api/v1/generateapikey",
+        headers={
+            **_headers(),
+            "x-actor-type": "user",
+            "x-actor-scopes": "security:apikey.rotate",
+        },
+    )
+
+    assert response.status_code == 403
+    assert "permission_constrained" in response.json()["detail"]
 
 
 def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow() -> None:
@@ -1095,6 +1260,7 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
 
     assert list_response.status_code == 200
     assert list_response.json()["active_version"] == "default-v1"
+    assert "permission_constraints" in list_response.json()["revisions"][0]
 
     write_response = client.post(
         "/api/v1/auth/policy/revisions",
@@ -1107,6 +1273,9 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
             "principal_roles": {"user-1": ["tenant:analyst"]},
             "principal_scopes": {"user-1": ["library:read"]},
             "principal_tenant_grants": {"user-1": ["tenant-analytics"]},
+            "permission_constraints": {
+                "library:read": {"route_prefixes": ["/api/v1/items", "/api/v1/stats"]}
+            },
             "audit_decisions": True,
         },
     )
@@ -1117,6 +1286,10 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
     assert body["is_active"] is True
     assert body["approval_status"] == "approved"
     assert body["role_grants"] == {"tenant:analyst": ["library:read"]}
+    assert body["permission_constraints"]["library:read"]["route_prefixes"] == [
+        "/api/v1/items",
+        "/api/v1/stats",
+    ]
 
     activate_response = client.post(
         "/api/v1/auth/policy/revisions/operator-v2/activate",
@@ -1156,6 +1329,7 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
     audit_response = client.get("/api/v1/auth/policy/audit", headers=_headers())
     assert audit_response.status_code == 200
     assert "entries" in audit_response.json()
+    assert "records" in audit_response.json()
 
 
 def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
@@ -1189,9 +1363,12 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "proof:playback:gate:enterprise package entrypoint exists" in body[
         "playback_gate"
     ]["evidence"]
-    assert body["identity_authz"]["status"] == "partial"
+    assert body["identity_authz"]["status"] == "blocked"
     assert "authentication_mode=api_key" in body["identity_authz"]["evidence"]
     assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
+    assert "permission_constraint_count=2" in body["identity_authz"]["evidence"]
+    assert "authorization_decision_audit_persistence=True" in body["identity_authz"]["evidence"]
+    assert "oidc_rollout_status=blocked" in body["identity_authz"]["evidence"]
     assert body["tenant_boundary"]["status"] == "partial"
     assert "request_tenant_id=tenant-main" in body["tenant_boundary"]["evidence"]
     assert body["vfs_data_plane"]["status"] == "partial"

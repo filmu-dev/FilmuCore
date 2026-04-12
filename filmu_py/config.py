@@ -176,6 +176,22 @@ def build_default_ranking_profile() -> RankingProfile:
     return RankingProfile.from_settings_dict(_build_default_ranking_settings())
 
 
+def _build_default_access_policy_permission_constraints() -> dict[str, dict[str, list[str]]]:
+    """Return the default context-aware authorization constraints for sensitive routes."""
+
+    return {
+        "security:apikey.rotate": {
+            "actor_types": ["service"],
+            "route_prefixes": ["/api/v1/generateapikey"],
+            "tenant_scopes": ["self", "all"],
+        },
+        "security:policy.approve": {
+            "route_prefixes": ["/api/v1/auth/policy"],
+            "tenant_scopes": ["self", "delegated", "all"],
+        },
+    }
+
+
 class CompatibilityModel(BaseModel):
     """Base model for compatibility-backed nested settings blocks."""
 
@@ -569,6 +585,9 @@ class AccessPolicySettings(CompatibilityModel):
     principal_roles: dict[str, list[str]] = Field(default_factory=dict)
     principal_scopes: dict[str, list[str]] = Field(default_factory=dict)
     principal_tenant_grants: dict[str, list[str]] = Field(default_factory=dict)
+    permission_constraints: dict[str, dict[str, list[str]]] = Field(
+        default_factory=_build_default_access_policy_permission_constraints
+    )
     audit_decisions: bool = True
 
 
