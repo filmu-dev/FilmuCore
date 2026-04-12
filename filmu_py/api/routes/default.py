@@ -19,7 +19,6 @@ from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
-from .stream import _vfs_runtime_governance_snapshot
 from ..models import (
     AccessPolicyAuditResponse,
     AccessPolicyRevisionApprovalRequest,
@@ -54,6 +53,7 @@ from ..models import (
     StatsResponse,
     TenantQuotaPolicyResponse,
 )
+from .stream import _vfs_runtime_governance_snapshot
 
 router = APIRouter(tags=["default"])
 _MAX_API_KEY_ID_LENGTH = 128
@@ -502,7 +502,7 @@ async def _enterprise_operations_governance(
     else:
         log_required_actions.append("configure_otlp_trace_export")
 
-    vfs_data_plane_status = "partial"
+    vfs_data_plane_status: Literal["ready", "partial", "blocked", "not_ready"] = "partial"
     vfs_required_actions = [
         "repeat_multi_environment_soak_and_backpressure_runs",
         "promote_rollout_readiness_thresholds_into_merge_policy",
