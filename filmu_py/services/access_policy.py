@@ -24,6 +24,9 @@ class AccessPolicySnapshot:
     principal_tenant_grants: dict[str, list[str]]
     permission_constraints: dict[str, dict[str, list[str]]]
     audit_decisions: bool
+    alerting_enabled: bool
+    repeated_denial_warning_threshold: int
+    repeated_denial_critical_threshold: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +50,9 @@ class AccessPolicyRevisionRecord:
     principal_tenant_grants: dict[str, list[str]]
     permission_constraints: dict[str, dict[str, list[str]]]
     audit_decisions: bool
+    alerting_enabled: bool
+    repeated_denial_warning_threshold: int
+    repeated_denial_critical_threshold: int
 
     def to_snapshot(self) -> AccessPolicySnapshot:
         """Return the request-time snapshot projection for this revision."""
@@ -60,6 +66,9 @@ class AccessPolicyRevisionRecord:
             principal_tenant_grants=self.principal_tenant_grants,
             permission_constraints=self.permission_constraints,
             audit_decisions=self.audit_decisions,
+            alerting_enabled=self.alerting_enabled,
+            repeated_denial_warning_threshold=self.repeated_denial_warning_threshold,
+            repeated_denial_critical_threshold=self.repeated_denial_critical_threshold,
         )
 
 
@@ -177,6 +186,9 @@ class AccessPolicyService:
         principal_tenant_grants: dict[str, list[str]],
         permission_constraints: dict[str, dict[str, list[str]]],
         audit_decisions: bool,
+        alerting_enabled: bool,
+        repeated_denial_warning_threshold: int,
+        repeated_denial_critical_threshold: int,
         proposed_by: str | None = None,
         approval_notes: str | None = None,
         auto_approve: bool = False,
@@ -195,6 +207,9 @@ class AccessPolicyService:
             "principal_tenant_grants": principal_tenant_grants,
             "permission_constraints": permission_constraints,
             "audit_decisions": audit_decisions,
+            "alerting_enabled": alerting_enabled,
+            "repeated_denial_warning_threshold": repeated_denial_warning_threshold,
+            "repeated_denial_critical_threshold": repeated_denial_critical_threshold,
         }
         now = datetime.now(UTC)
         approval_status = "approved" if auto_approve else "draft"
@@ -408,6 +423,9 @@ def _policy_payload(policy: AccessPolicySettings) -> dict[str, object]:
             for permission, constraints in sorted(policy.permission_constraints.items())
         },
         "audit_decisions": bool(policy.audit_decisions),
+        "alerting_enabled": bool(policy.alerting_enabled),
+        "repeated_denial_warning_threshold": int(policy.repeated_denial_warning_threshold),
+        "repeated_denial_critical_threshold": int(policy.repeated_denial_critical_threshold),
     }
 
 
@@ -426,6 +444,17 @@ def _snapshot_from_payload(
         principal_tenant_grants=_coerce_mapping(payload.get("principal_tenant_grants")),
         permission_constraints=_coerce_nested_mapping(payload.get("permission_constraints")),
         audit_decisions=bool(payload.get("audit_decisions", True)),
+        alerting_enabled=bool(payload.get("alerting_enabled", True)),
+        repeated_denial_warning_threshold=_coerce_int(
+            payload.get("repeated_denial_warning_threshold"),
+            default=3,
+            minimum=1,
+        ),
+        repeated_denial_critical_threshold=_coerce_int(
+            payload.get("repeated_denial_critical_threshold"),
+            default=5,
+            minimum=1,
+        ),
     )
 
 
@@ -471,6 +500,14 @@ def _normalized_optional(value: str | None) -> str | None:
     return normalized or None
 
 
+def _coerce_int(raw: object, *, default: int, minimum: int = 1) -> int:
+    if isinstance(raw, bool):
+        return max(default, minimum)
+    if isinstance(raw, int):
+        return max(raw, minimum)
+    return max(default, minimum)
+
+
 def _record_from_orm(revision: AccessPolicyRevisionORM) -> AccessPolicyRevisionRecord:
     payload = revision.policy_data if isinstance(revision.policy_data, dict) else {}
     return AccessPolicyRevisionRecord(
@@ -491,4 +528,15 @@ def _record_from_orm(revision: AccessPolicyRevisionORM) -> AccessPolicyRevisionR
         principal_tenant_grants=_coerce_mapping(payload.get("principal_tenant_grants")),
         permission_constraints=_coerce_nested_mapping(payload.get("permission_constraints")),
         audit_decisions=bool(payload.get("audit_decisions", True)),
+        alerting_enabled=bool(payload.get("alerting_enabled", True)),
+        repeated_denial_warning_threshold=_coerce_int(
+            payload.get("repeated_denial_warning_threshold"),
+            default=3,
+            minimum=1,
+        ),
+        repeated_denial_critical_threshold=_coerce_int(
+            payload.get("repeated_denial_critical_threshold"),
+            default=5,
+            minimum=1,
+        ),
     )

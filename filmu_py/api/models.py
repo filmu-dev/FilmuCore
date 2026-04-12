@@ -5,7 +5,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class MessageResponse(BaseModel):
@@ -100,6 +100,9 @@ class AuthPolicyResponse(BaseModel):
     oidc_claims_present: bool
     oidc_token_validated: bool
     oidc_allow_api_key_fallback: bool
+    oidc_rollout_stage: Literal["disabled", "shadow", "enforced"]
+    oidc_rollout_evidence_refs: list[str] = []
+    oidc_subject_mapping_ready: bool
     oidc_rollout_status: Literal["ready", "partial", "blocked"]
     oidc_configuration_complete: bool
     access_policy_version: str
@@ -109,6 +112,9 @@ class AuthPolicyResponse(BaseModel):
     role_grants: dict[str, list[str]]
     permission_constraints: dict[str, dict[str, list[str]]] = {}
     audit_mode: str
+    policy_alerting_enabled: bool
+    repeated_denial_warning_threshold: int
+    repeated_denial_critical_threshold: int
     decisions: list[AuthPolicyDecisionResponse]
     warnings: list[str] = []
     remaining_gaps: list[str] = []
@@ -134,6 +140,9 @@ class AccessPolicyRevisionResponse(BaseModel):
     principal_tenant_grants: dict[str, list[str]]
     permission_constraints: dict[str, dict[str, list[str]]] = {}
     audit_decisions: bool
+    alerting_enabled: bool
+    repeated_denial_warning_threshold: int
+    repeated_denial_critical_threshold: int
 
 
 class AccessPolicyRevisionListResponse(BaseModel):
@@ -156,6 +165,9 @@ class AccessPolicyRevisionWriteRequest(BaseModel):
     principal_tenant_grants: dict[str, list[str]] = {}
     permission_constraints: dict[str, dict[str, list[str]]] = {}
     audit_decisions: bool = True
+    alerting_enabled: bool = True
+    repeated_denial_warning_threshold: int = Field(default=3, ge=1)
+    repeated_denial_critical_threshold: int = Field(default=5, ge=1)
 
 
 class AccessPolicyRevisionApprovalRequest(BaseModel):
