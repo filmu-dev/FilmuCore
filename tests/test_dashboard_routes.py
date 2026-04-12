@@ -1549,6 +1549,7 @@ def test_operations_governance_route_blocks_queued_refresh_without_runtime_queue
                 "heavy_stage_isolation": {
                     "executor_mode": "thread_pool_only",
                     "max_workers": 3,
+                    "max_tasks_per_child": 0,
                     "proof_refs": ["ops/wave3/heavy-stage-failure-injection.md"],
                 },
             },
@@ -1565,8 +1566,52 @@ def test_operations_governance_route_blocks_queued_refresh_without_runtime_queue
     assert "stream_refresh_queue_ready=0" in heavy_stage["evidence"]
     assert "heavy_stage_executor_mode=thread_pool_only" in heavy_stage["evidence"]
     assert "heavy_stage_max_workers=3" in heavy_stage["evidence"]
+    assert "heavy_stage_max_tasks_per_child=0" in heavy_stage["evidence"]
+    assert "heavy_stage_process_isolation_required=0" in heavy_stage["evidence"]
     assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_exit_ready=0" in heavy_stage["evidence"]
+
+
+def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satisfied() -> None:
+    client = _build_client(
+        arq_enabled=True,
+        settings_overrides={
+            "FILMU_PY_STREAM": {"refresh_dispatch_mode": "queued"},
+            "FILMU_PY_ORCHESTRATION": {
+                "queued_refresh_proof_refs": ["ops/wave3/queued-refresh-soak.md"],
+                "heavy_stage_isolation": {
+                    "executor_mode": "process_pool_required",
+                    "max_workers": 2,
+                    "max_tasks_per_child": 25,
+                    "proof_refs": ["ops/wave3/heavy-stage-failure-injection.md"],
+                },
+            },
+        },
+    )
+    resources = cast(Any, client.app.state.resources)
+    resources.arq_redis = resources.redis
+    resources.queued_direct_playback_refresh_controller = object()
+    resources.queued_hls_failed_lease_refresh_controller = object()
+    resources.queued_hls_restricted_fallback_refresh_controller = object()
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    heavy_stage = body["heavy_stage_workload_isolation"]
+    assert heavy_stage["status"] == "ready"
+    assert heavy_stage["required_actions"] == []
+    assert heavy_stage["remaining_gaps"] == []
+    assert "stream_refresh_dispatch_mode=queued" in heavy_stage["evidence"]
+    assert "stream_refresh_queue_ready=1" in heavy_stage["evidence"]
+    assert "heavy_stage_executor_mode=process_pool_required" in heavy_stage["evidence"]
+    assert "heavy_stage_max_workers=2" in heavy_stage["evidence"]
+    assert "heavy_stage_max_tasks_per_child=25" in heavy_stage["evidence"]
+    assert "heavy_stage_process_isolation_required=1" in heavy_stage["evidence"]
+    assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_exit_ready=1" in heavy_stage["evidence"]
     assert "resource_scope_constraint_coverage=True" in body["identity_authz"]["evidence"]
 
 

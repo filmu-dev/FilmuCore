@@ -568,8 +568,13 @@ class ServingGovernanceResponse(BaseModel):
     stream_refresh_queue_enabled: int
     stream_refresh_queue_ready: int
     stream_refresh_proof_ref_count: int
-    heavy_stage_executor_mode: Literal["process_pool_preferred", "thread_pool_only"]
+    heavy_stage_executor_mode: Literal[
+        "process_pool_preferred", "process_pool_required", "thread_pool_only"
+    ]
     heavy_stage_max_workers: int
+    heavy_stage_max_tasks_per_child: int
+    heavy_stage_process_isolation_required: int
+    heavy_stage_exit_ready: int
     heavy_stage_index_timeout_seconds: float
     heavy_stage_parse_timeout_seconds: float
     heavy_stage_rank_timeout_seconds: float

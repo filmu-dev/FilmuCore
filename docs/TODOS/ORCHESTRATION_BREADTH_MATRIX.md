@@ -283,7 +283,7 @@ Priority 3 should be considered meaningfully advanced when:
 Current checkpoint:
 
 - Reached for the core scrape -> parse -> rank -> debrid -> finalize pipeline and baseline recovery.
-- Remaining gap is no longer missing worker-graph breadth inside the repo. The open work is environment proof, queue-pressure soak, and stricter sandbox/process ceilings above the now-implemented lifecycle, index, idempotency, queued-refresh, and heavy-stage policy baseline.
+- Wave 3 is now fully closed in-repo. The lifecycle, index, idempotency, queued-refresh, and process-isolated heavy-stage policy baseline all have explicit exit gates; recurring queue-pressure soak evidence now belongs to steady-state operations rather than this backlog.
 
 ## Serving-core update (March 2026)
 

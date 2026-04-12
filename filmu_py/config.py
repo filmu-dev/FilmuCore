@@ -667,10 +667,13 @@ class LogShipperSettings(CompatibilityModel):
 class HeavyStageIsolationSettings(CompatibilityModel):
     """Operator-managed policy for isolated CPU-heavy worker stages."""
 
-    executor_mode: Literal["process_pool_preferred", "thread_pool_only"] = (
+    executor_mode: Literal[
+        "process_pool_preferred", "process_pool_required", "thread_pool_only"
+    ] = (
         "process_pool_preferred"
     )
     max_workers: int = 2
+    max_tasks_per_child: int = 0
     index_timeout_seconds: float = 45.0
     parse_timeout_seconds: float = 30.0
     rank_timeout_seconds: float = 60.0
