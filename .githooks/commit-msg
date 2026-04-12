@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+if [[ -z "${repo_root:-}" ]]; then
+  echo "commit-msg: could not resolve repository root" >&2
+  exit 1
+fi
+
+ps_exe=""
+if command -v pwsh >/dev/null 2>&1; then
+  ps_exe="pwsh"
+elif command -v powershell.exe >/dev/null 2>&1; then
+  ps_exe="powershell.exe"
+else
+  echo "commit-msg: pwsh or powershell.exe is required to normalize commit messages" >&2
+  exit 1
+fi
+
+message_file="${1:-}"
+if [[ -z "${message_file}" ]]; then
+  echo "commit-msg: expected commit message file path" >&2
+  exit 1
+fi
+
+"${ps_exe}" -NoProfile -File "${repo_root}/scripts/normalize_commit_message.ps1" -MessageFile "${message_file}"
+
