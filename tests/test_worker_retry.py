@@ -27,15 +27,17 @@ class FakeRedis:
 
 
 class FailingMediaService:
-    """Media service stub that always fails transition calls."""
+    """Minimal indexed-item media service stub for scrape-stage retry tests."""
 
     async def get_item(self, item_id: str) -> Any:
         from types import SimpleNamespace
-        return SimpleNamespace(id=item_id, external_ref="tmdb:123", attributes={"tmdb_id": "123", "item_type": "movie"}, state=ItemState.INDEXED)
 
-    async def transition_item(self, **kwargs: Any) -> None:
-        _ = kwargs
-        raise RuntimeError("transition failed")
+        return SimpleNamespace(
+            id=item_id,
+            external_ref="tmdb:123",
+            attributes={"tmdb_id": "123", "item_type": "movie"},
+            state=ItemState.INDEXED,
+        )
 
 
 def test_retry_policy_backoff_is_bounded() -> None:
@@ -97,10 +99,15 @@ def test_scrape_item_raises_retry_before_dead_letter(monkeypatch: pytest.MonkeyP
     async def fake_settings(*args: Any, **kwargs: Any) -> Any:
         return object()
 
+    async def fake_resolve_plugin_registry(*args: Any, **kwargs: Any) -> Any:
+        _ = (args, kwargs)
+        raise RuntimeError("scrape dependency failed")
+
     monkeypatch.setattr(tasks, "_resolve_runtime_settings", fake_settings)
     monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: object())
     monkeypatch.setattr(tasks, "_acquire_worker_rate_limit", no_rate_limit)
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: FailingMediaService())
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_resolve_plugin_registry)
 
     redis = FakeRedis()
     ctx: dict[str, object] = {"job_try": 1, "redis": redis, "queue_name": "q"}
@@ -129,11 +136,17 @@ def test_scrape_item_routes_dead_letter_on_terminal_attempt(
     monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: object())
     monkeypatch.setattr(tasks, "_acquire_worker_rate_limit", no_rate_limit)
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: FailingMediaService())
+    
+    async def fake_resolve_plugin_registry(*args: Any, **kwargs: Any) -> Any:
+        _ = (args, kwargs)
+        raise RuntimeError("scrape dependency failed")
+
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_resolve_plugin_registry)
 
     redis = FakeRedis()
     ctx: dict[str, object] = {"job_try": 4, "redis": redis, "queue_name": "q"}
 
-    with pytest.raises(RuntimeError, match="transition failed"):
+    with pytest.raises(RuntimeError, match="scrape dependency failed"):
         asyncio.run(tasks.scrape_item(ctx, "item-2"))
 
     assert len(redis.entries) == 1

@@ -1098,9 +1098,13 @@ def _is_dubbed_candidate(stream: StreamORM) -> bool:
 
 
 async def _worker_log_context(media_service: MediaService, *, item_id: str) -> dict[str, object]:
+    get_latest_item_request_id = getattr(media_service, "get_latest_item_request_id", None)
+    item_request_id: object = None
+    if callable(get_latest_item_request_id):
+        item_request_id = await get_latest_item_request_id(media_item_id=item_id)
     return {
         "item_id": item_id,
-        "item_request_id": await media_service.get_latest_item_request_id(media_item_id=item_id),
+        "item_request_id": item_request_id,
     }
 
 
