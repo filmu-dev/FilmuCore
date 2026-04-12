@@ -762,12 +762,16 @@ async def enqueue_parse_scrape_results(
             kwargs["partial_seasons"] = partial_seasons
         if normalized_episode_scope is not None:
             kwargs["partial_episodes"] = normalized_episode_scope
-        job = await redis.enqueue_job(
-            "parse_scrape_results",
-            item_id,
-            _job_id=parse_scrape_results_job_id(item_id),
-            _queue_name=queue_name,
-            **kwargs,
+        job = cast(
+            Job | None,
+            await _enqueue_arq_job(
+                redis,
+                "parse_scrape_results",
+                item_id,
+                _job_id=parse_scrape_results_job_id(item_id),
+                _queue_name=queue_name,
+                **kwargs,
+            ),
         )
     return job is not None
 

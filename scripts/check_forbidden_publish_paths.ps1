@@ -29,7 +29,13 @@ function Invoke-GitCapture {
 $forbiddenPatterns = @(
     'logs/**',
     'ci-artifacts/**',
-    'playback-proof-artifacts/**'
+    'playback-proof-artifacts/**',
+    'README.md',
+    'CHANGELOG.md',
+    'QUICK_START.md',
+    'WINDOWS_README.md',
+    'LINUX_UNIX_README.md',
+    'login_page.html'
 )
 
 if ($LocalRef -notlike 'refs/heads/*') {
