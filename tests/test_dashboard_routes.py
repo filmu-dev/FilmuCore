@@ -488,6 +488,14 @@ class DummyAuthorizationAuditService:
         )()
 
 
+class FailingAuthorizationAuditService:
+    """Audit service double that simulates temporary ledger persistence failure."""
+
+    async def record_decision(self, **payload: Any) -> None:
+        _ = payload
+        raise RuntimeError("audit store unavailable")
+
+
 def _build_settings(
     *,
     arq_enabled: bool = False,
@@ -543,6 +551,7 @@ def _build_client(
     plugin_registry: PluginRegistry | None = None,
     plugin_load_report: Any | None = None,
     security_identity_service: Any | None = None,
+    authorization_audit_service: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
@@ -569,7 +578,11 @@ def _build_client(
         security_identity_service=security_identity_service,
         access_policy_service=DummyAccessPolicyService(settings),
         access_policy_snapshot=snapshot_from_settings(settings.access_policy),
-        authorization_audit_service=DummyAuthorizationAuditService(),
+        authorization_audit_service=(
+            DummyAuthorizationAuditService()
+            if authorization_audit_service is None
+            else authorization_audit_service
+        ),
         control_plane_service=DummyControlPlaneService(),
         plugin_governance_service=DummyPluginGovernanceService(),
     )
@@ -1180,6 +1193,64 @@ def test_generate_apikey_route_enforces_route_context_constraint() -> None:
     assert body["records"][0]["path"] == "/api/v1/generateapikey"
     assert body["records"][0]["constrained_permissions"] == ["security:apikey.rotate"]
     assert body["records"][0]["constraint_failures"] == ["security:apikey.rotate:actor_type"]
+
+
+def test_auth_policy_route_uses_real_policy_approval_probe_path() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_ACCESS_POLICY": {
+                "role_grants": {"platform:admin": ["*"]},
+                "permission_constraints": {
+                    "security:policy.approve": {
+                        "route_prefixes": ["/api/v1/auth/policy/revisions/probe-version/approve"],
+                        "tenant_scopes": ["self", "delegated", "all"],
+                    }
+                },
+            }
+        }
+    )
+
+    response = client.get(
+        "/api/v1/auth/policy",
+        headers={
+            **_headers(),
+            "x-actor-roles": "",
+            "x-actor-scopes": "security:policy.approve",
+        },
+    )
+
+    assert response.status_code == 200
+    decisions = {decision["name"]: decision for decision in response.json()["decisions"]}
+    assert decisions["policy_approve"]["allowed"] is True
+    assert decisions["policy_approve"]["reason"] == "allowed"
+
+
+def test_authorization_audit_failures_do_not_break_allowed_requests() -> None:
+    client = _build_client(
+        authorization_audit_service=FailingAuthorizationAuditService()
+    )
+
+    response = client.get("/api/v1/stats", headers=_headers())
+
+    assert response.status_code == 200
+
+
+def test_authorization_audit_failures_do_not_mask_denied_requests() -> None:
+    client = _build_client(
+        authorization_audit_service=FailingAuthorizationAuditService()
+    )
+
+    response = client.post(
+        "/api/v1/generateapikey",
+        headers={
+            **_headers(),
+            "x-actor-type": "user",
+            "x-actor-scopes": "security:apikey.rotate",
+        },
+    )
+
+    assert response.status_code == 403
+    assert "permission_constrained" in response.json()["detail"]
 
 
 def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow() -> None:

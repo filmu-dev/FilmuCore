@@ -79,7 +79,7 @@ _AUTH_POLICY_PROBE_PATHS: dict[str, str] = {
     "playback_operate": "/api/v1/stream",
     "settings_write": "/api/v1/settings",
     "policy_write": "/api/v1/auth/policy/revisions",
-    "policy_approve": "/api/v1/auth/policy/revisions/review",
+    "policy_approve": "/api/v1/auth/policy/revisions/probe-version/approve",
     "api_key_rotate": "/api/v1/generateapikey",
 }
 
