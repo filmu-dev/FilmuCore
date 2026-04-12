@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/filmu-dev/FilmuCore/compare/v0.11.0...v0.12.0) (2026-04-12)
+
+
+### Features
+
+* complete wave 2 identity exit gates ([#35](https://github.com/filmu-dev/FilmuCore/issues/35)) ([641bbbd](https://github.com/filmu-dev/FilmuCore/commit/641bbbd5bba63f77efe4b81d09a74c662d1072e6))
+
 ## [0.11.0](https://github.com/filmu-dev/FilmuCore/compare/v0.10.0...v0.11.0) (2026-04-12)
 
 
