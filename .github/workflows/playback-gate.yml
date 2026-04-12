@@ -57,7 +57,7 @@ jobs:
       FILMU_PY_DEBRIDLINK_API_TOKEN: ${{ secrets.FILMU_PY_DEBRIDLINK_API_TOKEN }}
       DEBRID_LINK_API_KEY: ${{ secrets.DEBRID_LINK_API_KEY }}
       FILMU_FRONTEND_CONTEXT: ${{ vars.FILMU_FRONTEND_CONTEXT != '' && vars.FILMU_FRONTEND_CONTEXT || format('{0}/Triven_frontend', github.workspace) }}
-      FILMU_FRONTEND_REPOSITORY: ${{ vars.FILMU_FRONTEND_REPOSITORY != '' && vars.FILMU_FRONTEND_REPOSITORY || 'S0lidByte/CineFlow-frontend' }}
+      FILMU_FRONTEND_REPOSITORY: ${{ vars.FILMU_FRONTEND_REPOSITORY }}
       FILMU_FRONTEND_REF: ${{ vars.FILMU_FRONTEND_REF }}
       FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE: ${{ vars.FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE }}
       FILMU_FRONTEND_USERNAME: ${{ vars.FILMU_FRONTEND_USERNAME }}
@@ -77,6 +77,7 @@ jobs:
 
       - name: Checkout frontend repo
         if: ${{ env.FILMU_FRONTEND_REPOSITORY != '' }}
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: ${{ env.FILMU_FRONTEND_REPOSITORY }}
@@ -117,7 +118,6 @@ jobs:
           fi
 
       - name: Validate runner readiness
-        continue-on-error: ${{ env.FILMU_PLAYBACK_DRY_RUN == '1' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -132,10 +132,14 @@ jobs:
             [string] $env:DEBRID_LINK_API_KEY
           ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
           $hasDebrid = @($debridKeys).Count -gt 0
-          if (-not $hasTmdb -or -not $hasDebrid) {
+          $hasFrontendContext = -not [string]::IsNullOrWhiteSpace([string] $env:FILMU_FRONTEND_CONTEXT) -and (Test-Path -LiteralPath $env:FILMU_FRONTEND_CONTEXT)
+          $hasBrowser = -not [string]::IsNullOrWhiteSpace([string] $env:FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE) -and (Test-Path -LiteralPath $env:FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE)
+          if (-not $hasTmdb -or -not $hasDebrid -or -not $hasFrontendContext -or -not $hasBrowser) {
             $checks = [System.Collections.Generic.List[object]]::new()
             $checks.Add([pscustomobject]@{ name = 'tmdb_api_key'; required = $true; ok = $hasTmdb; details = 'TMDB_API_KEY is required.' })
             $checks.Add([pscustomobject]@{ name = 'debrid_provider_token'; required = $true; ok = $hasDebrid; details = 'At least one debrid provider token/key is required.' })
+            $checks.Add([pscustomobject]@{ name = 'frontend_context'; required = $true; ok = $hasFrontendContext; details = 'FILMU_FRONTEND_CONTEXT must point to a readable frontend checkout.' })
+            $checks.Add([pscustomobject]@{ name = 'browser_executable'; required = $true; ok = $hasBrowser; details = 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE must point to an executable browser.' })
             [pscustomobject]@{
               timestamp = (Get-Date).ToString('o')
               require_provider_gate = ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1')
@@ -148,6 +152,12 @@ jobs:
             }
             if (-not $hasDebrid) {
               Write-Host '::warning title=playback gate dry-run fallback::debrid_provider_token - At least one debrid provider token/key is required.'
+            }
+            if (-not $hasFrontendContext) {
+              Write-Host '::warning title=playback gate dry-run fallback::frontend_context - FILMU_FRONTEND_CONTEXT must point to a readable frontend checkout.'
+            }
+            if (-not $hasBrowser) {
+              Write-Host '::warning title=playback gate dry-run fallback::browser_executable - FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE must point to an executable browser.'
             }
             return
           }

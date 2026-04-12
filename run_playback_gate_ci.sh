@@ -59,37 +59,34 @@ export FILMU_PLAYBACK_REQUIRED_CHECK_NAME="${FILMU_PLAYBACK_REQUIRED_CHECK_NAME:
 export FILMU_PLAYBACK_DRY_RUN="${FILMU_PLAYBACK_DRY_RUN:-0}"
 export FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE="${FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE:-}"
 
-require_nonempty_env FILMU_FRONTEND_CONTEXT
-
 if [[ -z "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
   FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE="$(resolve_browser_executable || true)"
   export FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE
 fi
 
-require_nonempty_env FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE
-
 if [[ "$FILMU_PLAYBACK_DRY_RUN" != "1" ]]; then
+  require_nonempty_env FILMU_FRONTEND_CONTEXT
+  require_nonempty_env FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE
   require_nonempty_env TMDB_API_KEY
-fi
+  if [[ ! -d "$FILMU_FRONTEND_CONTEXT" ]]; then
+    echo "[playback-gate-ci] frontend source path not found: $FILMU_FRONTEND_CONTEXT" >&2
+    exit 1
+  fi
 
-if [[ ! -d "$FILMU_FRONTEND_CONTEXT" ]]; then
-  echo "[playback-gate-ci] frontend source path not found: $FILMU_FRONTEND_CONTEXT" >&2
-  exit 1
-fi
+  if [[ ! -x "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
+    echo "[playback-gate-ci] browser executable not found or not executable: $FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" >&2
+    exit 1
+  fi
 
-if [[ ! -x "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
-  echo "[playback-gate-ci] browser executable not found or not executable: $FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" >&2
-  exit 1
-fi
+  if [[ -z "${FILMU_PY_REALDEBRID_API_TOKEN:-}${REAL_DEBRID_API_KEY:-}${FILMU_PY_ALLDEBRID_API_TOKEN:-}${ALL_DEBRID_API_KEY:-}${FILMU_PY_DEBRIDLINK_API_TOKEN:-}${DEBRID_LINK_API_KEY:-}" ]]; then
+    echo "[playback-gate-ci] at least one debrid provider token is required for the playback gate" >&2
+    exit 1
+  fi
 
-if [[ "$FILMU_PLAYBACK_DRY_RUN" != "1" && -z "${FILMU_PY_REALDEBRID_API_TOKEN:-}${REAL_DEBRID_API_KEY:-}${FILMU_PY_ALLDEBRID_API_TOKEN:-}${ALL_DEBRID_API_KEY:-}${FILMU_PY_DEBRIDLINK_API_TOKEN:-}${DEBRID_LINK_API_KEY:-}" ]]; then
-  echo "[playback-gate-ci] at least one debrid provider token is required for the playback gate" >&2
-  exit 1
-fi
-
-if [[ "$FILMU_PLAYBACK_DRY_RUN" != "1" && ! -e /dev/fuse ]]; then
-  echo "[playback-gate-ci] /dev/fuse is required on the Linux playback runner" >&2
-  exit 1
+  if [[ ! -e /dev/fuse ]]; then
+    echo "[playback-gate-ci] /dev/fuse is required on the Linux playback runner" >&2
+    exit 1
+  fi
 fi
 
 readiness_args=(-NoProfile -File ./scripts/check_playback_gate_runner.ps1)
