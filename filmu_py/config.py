@@ -180,13 +180,41 @@ def _build_default_access_policy_permission_constraints() -> dict[str, dict[str,
     """Return the default context-aware authorization constraints for sensitive routes."""
 
     return {
+        "library:write": {
+            "route_prefixes": ["/api/v1/items"],
+            "resource_scopes": ["items"],
+            "tenant_scopes": ["self", "all"],
+        },
+        "playback:operate": {
+            "route_prefixes": ["/api/v1/stream"],
+            "resource_scopes": ["stream"],
+            "tenant_scopes": ["self", "all"],
+        },
+        "settings:write": {
+            "route_prefixes": [
+                "/api/v1/settings",
+                "/api/v1/auth/policy/revisions",
+                "/api/v1/auth/policy/audit",
+                "/api/v1/plugins/governance",
+                "/api/v1/operations/control-plane/subscribers",
+            ],
+            "resource_scopes": [
+                "settings",
+                "access_policy",
+                "plugin_governance",
+                "operations",
+            ],
+            "tenant_scopes": ["self", "delegated", "all"],
+        },
         "security:apikey.rotate": {
             "actor_types": ["service"],
             "route_prefixes": ["/api/v1/generateapikey"],
+            "resource_scopes": ["settings"],
             "tenant_scopes": ["self", "all"],
         },
         "security:policy.approve": {
-            "route_prefixes": ["/api/v1/auth/policy"],
+            "route_prefixes": ["/api/v1/auth/policy/revisions/"],
+            "resource_scopes": ["access_policy"],
             "tenant_scopes": ["self", "delegated", "all"],
         },
     }
@@ -555,6 +583,9 @@ class OidcSettings(CompatibilityModel):
     """OIDC/SSO token-validation settings for enterprise deployments."""
 
     enabled: bool = False
+    rollout_stage: Literal["disabled", "shadow", "enforced"] = "disabled"
+    rollout_evidence_refs: list[str] = Field(default_factory=list)
+    subject_mapping_ready: bool = False
     issuer: str | None = None
     audience: str | None = None
     jwks_url: str | None = None
@@ -589,6 +620,9 @@ class AccessPolicySettings(CompatibilityModel):
         default_factory=_build_default_access_policy_permission_constraints
     )
     audit_decisions: bool = True
+    alerting_enabled: bool = True
+    repeated_denial_warning_threshold: int = 3
+    repeated_denial_critical_threshold: int = 5
 
 
 class TenantQuotaLimitSettings(CompatibilityModel):

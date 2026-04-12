@@ -34,6 +34,7 @@ class PermissionConstraint:
     actor_types: tuple[str, ...] = ()
     authentication_modes: tuple[str, ...] = ()
     route_prefixes: tuple[str, ...] = ()
+    resource_scopes: tuple[str, ...] = ()
     tenant_scopes: tuple[str, ...] = ()
 
 
@@ -93,6 +94,15 @@ def permission_constraints_from_mapping(
                     {
                         value.strip()
                         for value in payload.get("route_prefixes", ())
+                        if isinstance(value, str) and value.strip()
+                    }
+                )
+            ),
+            resource_scopes=tuple(
+                sorted(
+                    {
+                        value.strip().lower()
+                        for value in payload.get("resource_scopes", ())
                         if isinstance(value, str) and value.strip()
                     }
                 )
@@ -197,6 +207,7 @@ def evaluate_permissions(
     actor_type: str | None = None,
     authentication_mode: str | None = None,
     request_path: str | None = None,
+    resource_scope: str | None = None,
     permission_constraints: Mapping[str, PermissionConstraint] | None = None,
 ) -> AuthorizationDecision:
     """Return a stable authz decision for one tenant-scoped request."""
@@ -261,6 +272,7 @@ def evaluate_permissions(
     normalized_authentication_mode = (
         authentication_mode.strip().lower() if authentication_mode is not None else ""
     )
+    normalized_resource_scope = resource_scope.strip().lower() if resource_scope is not None else ""
     resolved_constraints = permission_constraints or {}
     constrained_permissions: list[str] = []
     constraint_failures: list[str] = []
@@ -285,6 +297,10 @@ def evaluate_permissions(
         ):
             constrained_permissions.append(permission)
             constraint_failures.append(f"{permission}:route_prefix")
+            continue
+        if constraint.resource_scopes and normalized_resource_scope not in constraint.resource_scopes:
+            constrained_permissions.append(permission)
+            constraint_failures.append(f"{permission}:resource_scope")
             continue
         if constraint.tenant_scopes and tenant_scope.lower() not in constraint.tenant_scopes:
             constrained_permissions.append(permission)

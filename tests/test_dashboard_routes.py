@@ -293,6 +293,9 @@ class DummyAccessPolicyService:
         record.principal_tenant_grants = snapshot.principal_tenant_grants
         record.permission_constraints = snapshot.permission_constraints
         record.audit_decisions = snapshot.audit_decisions
+        record.alerting_enabled = snapshot.alerting_enabled
+        record.repeated_denial_warning_threshold = snapshot.repeated_denial_warning_threshold
+        record.repeated_denial_critical_threshold = snapshot.repeated_denial_critical_threshold
         record.to_snapshot = lambda snapshot=snapshot: snapshot
         return record
 
@@ -310,6 +313,9 @@ class DummyAccessPolicyService:
         principal_tenant_grants: dict[str, list[str]],
         permission_constraints: dict[str, dict[str, list[str]]],
         audit_decisions: bool,
+        alerting_enabled: bool,
+        repeated_denial_warning_threshold: int,
+        repeated_denial_critical_threshold: int,
         proposed_by: str | None = None,
         approval_notes: str | None = None,
         auto_approve: bool = False,
@@ -330,6 +336,9 @@ class DummyAccessPolicyService:
             principal_tenant_grants=principal_tenant_grants,
             permission_constraints=permission_constraints,
             audit_decisions=audit_decisions,
+            alerting_enabled=alerting_enabled,
+            repeated_denial_warning_threshold=repeated_denial_warning_threshold,
+            repeated_denial_critical_threshold=repeated_denial_critical_threshold,
         )
         record = self._build_revision_record(snapshot, now, activate)
         record.approval_status = "approved" if auto_approve else "draft"
@@ -1135,7 +1144,7 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     body = response.json()
     assert (
         body["permissions_model"]
-        == "role_scope_effective_permissions_with_route_constraints_and_tenant_scope"
+        == "role_scope_effective_permissions_with_route_and_resource_scope_constraints_and_tenant_scope"
     )
     assert body["policy_source"] == "settings"
     assert body["access_policy_version"] == "default-v1"
@@ -1143,10 +1152,16 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     assert body["authorization_tenant_scope"] == "self"
     assert body["oidc_claims_present"] is True
     assert body["oidc_token_validated"] is False
+    assert body["oidc_rollout_stage"] == "disabled"
+    assert body["oidc_rollout_evidence_refs"] == []
+    assert body["oidc_subject_mapping_ready"] is False
     assert body["oidc_rollout_status"] == "blocked"
     assert body["oidc_configuration_complete"] is False
     assert body["oidc_allow_api_key_fallback"] is True
     assert body["audit_mode"] == "persisted_decision_ledger"
+    assert body["policy_alerting_enabled"] is True
+    assert body["repeated_denial_warning_threshold"] == 3
+    assert body["repeated_denial_critical_threshold"] == 5
     assert body["warnings"] == [
         "authentication is still API-key anchored",
         "oidc claims were supplied by headers and were not token-validated",
@@ -1155,15 +1170,17 @@ def test_auth_policy_route_returns_authorization_posture() -> None:
     assert "security:apikey.rotate" in body["permission_constraints"]
     decisions = {decision["name"]: decision for decision in body["decisions"]}
     assert decisions["library_read"]["allowed"] is True
+    assert decisions["item_write"]["allowed"] is False
+    assert decisions["item_write"]["missing_permissions"] == ["library:write"]
     assert decisions["playback_operate"]["allowed"] is True
     assert decisions["settings_write"]["allowed"] is False
     assert decisions["settings_write"]["missing_permissions"] == ["settings:write"]
+    assert decisions["plugin_governance_write"]["allowed"] is False
+    assert decisions["plugin_governance_write"]["missing_permissions"] == ["settings:write"]
     assert decisions["api_key_rotate"]["allowed"] is False
     assert decisions["api_key_rotate"]["reason"] == "missing_permissions"
     assert body["remaining_gaps"] == [
         "OIDC/SSO validation is disabled for this environment",
-        "ABAC policy now supports route-context constraints, but broader resource ownership rollout is still incomplete",
-        "policy approval/version workflows now exist, but alert automation and environment SSO promotion still need rollout",
     ]
 
 
@@ -1225,6 +1242,58 @@ def test_auth_policy_route_uses_real_policy_approval_probe_path() -> None:
     assert decisions["policy_approve"]["reason"] == "allowed"
 
 
+def test_auth_policy_route_reports_wave2_ready_oidc_rollout() -> None:
+    token = jwt.encode(
+        {"alg": "HS256", "kid": "test"},
+        {
+            "iss": "https://issuer.example.test",
+            "sub": "user-456",
+            "aud": "filmu-api",
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+            "tenant_id": "tenant-main",
+            "roles": [],
+            "scope": "library:write playback:operate settings:write security:policy.approve",
+        },
+        {"kty": "oct", "k": "c2VjcmV0", "kid": "test"},
+    )
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "rollout_stage": "enforced",
+                "rollout_evidence_refs": ["ops://oidc/staging-smoke-2026-04-12"],
+                "subject_mapping_ready": True,
+                "issuer": "https://issuer.example.test",
+                "audience": "filmu-api",
+                "jwks_json": {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "test"}]},
+                "allowed_algorithms": ["HS256"],
+                "allow_api_key_fallback": False,
+            }
+        }
+    )
+
+    token_value = token.decode("utf-8") if isinstance(token, bytes) else token
+    response = client.get(
+        "/api/v1/auth/policy",
+        headers={"authorization": f"Bearer {token_value}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["oidc_rollout_status"] == "ready"
+    assert body["oidc_rollout_stage"] == "enforced"
+    assert body["oidc_subject_mapping_ready"] is True
+    assert body["oidc_rollout_evidence_refs"] == ["ops://oidc/staging-smoke-2026-04-12"]
+    assert body["remaining_gaps"] == []
+    decisions = {decision["name"]: decision for decision in body["decisions"]}
+    assert decisions["item_write"]["allowed"] is True
+    assert decisions["playback_operate"]["allowed"] is True
+    assert decisions["settings_write"]["allowed"] is True
+    assert decisions["plugin_governance_write"]["allowed"] is True
+    assert decisions["policy_approve"]["allowed"] is True
+
+
 def test_authorization_audit_failures_do_not_break_allowed_requests() -> None:
     client = _build_client(
         authorization_audit_service=FailingAuthorizationAuditService()
@@ -1253,6 +1322,29 @@ def test_authorization_audit_failures_do_not_mask_denied_requests() -> None:
     assert "permission_constrained" in response.json()["detail"]
 
 
+def test_auth_policy_audit_surfaces_privileged_api_key_usage_alert() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_ACCESS_POLICY": {
+                "alerting_enabled": True,
+                "repeated_denial_warning_threshold": 2,
+                "repeated_denial_critical_threshold": 4,
+            }
+        }
+    )
+
+    for _ in range(2):
+        response = client.get("/api/v1/auth/policy/revisions", headers=_headers())
+        assert response.status_code == 200
+
+    audit_response = client.get("/api/v1/auth/policy/audit", headers=_headers())
+
+    assert audit_response.status_code == 200
+    alerts = {alert["code"]: alert for alert in audit_response.json()["alerts"]}
+    assert alerts["privileged_api_key_usage"]["severity"] == "warning"
+    assert alerts["privileged_api_key_usage"]["count"] == 3
+
+
 def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow() -> None:
     client = _build_client()
 
@@ -1261,6 +1353,7 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
     assert list_response.status_code == 200
     assert list_response.json()["active_version"] == "default-v1"
     assert "permission_constraints" in list_response.json()["revisions"][0]
+    assert list_response.json()["revisions"][0]["alerting_enabled"] is True
 
     write_response = client.post(
         "/api/v1/auth/policy/revisions",
@@ -1277,6 +1370,9 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
                 "library:read": {"route_prefixes": ["/api/v1/items", "/api/v1/stats"]}
             },
             "audit_decisions": True,
+            "alerting_enabled": True,
+            "repeated_denial_warning_threshold": 2,
+            "repeated_denial_critical_threshold": 4,
         },
     )
 
@@ -1290,6 +1386,9 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
         "/api/v1/items",
         "/api/v1/stats",
     ]
+    assert body["alerting_enabled"] is True
+    assert body["repeated_denial_warning_threshold"] == 2
+    assert body["repeated_denial_critical_threshold"] == 4
 
     activate_response = client.post(
         "/api/v1/auth/policy/revisions/operator-v2/activate",
@@ -1366,8 +1465,10 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert body["identity_authz"]["status"] == "blocked"
     assert "authentication_mode=api_key" in body["identity_authz"]["evidence"]
     assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
-    assert "permission_constraint_count=2" in body["identity_authz"]["evidence"]
+    assert "permission_constraint_count=5" in body["identity_authz"]["evidence"]
     assert "authorization_decision_audit_persistence=True" in body["identity_authz"]["evidence"]
+    assert "policy_alerting_enabled=True" in body["identity_authz"]["evidence"]
+    assert "resource_scope_constraint_coverage=True" in body["identity_authz"]["evidence"]
     assert "oidc_rollout_status=blocked" in body["identity_authz"]["evidence"]
     assert body["tenant_boundary"]["status"] == "partial"
     assert "request_tenant_id=tenant-main" in body["tenant_boundary"]["evidence"]
@@ -1381,6 +1482,51 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert body["plugin_runtime_isolation"]["status"] == "partial"
     assert body["heavy_stage_workload_isolation"]["status"] == "partial"
     assert body["release_metadata_performance"]["status"] == "partial"
+
+
+def test_operations_governance_route_marks_identity_ready_when_wave2_exit_gates_are_satisfied() -> None:
+    token = jwt.encode(
+        {"alg": "HS256", "kid": "test"},
+        {
+            "iss": "https://issuer.example.test",
+            "sub": "user-789",
+            "aud": "filmu-api",
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+            "tenant_id": "tenant-main",
+            "roles": [],
+            "scope": "library:write playback:operate settings:write security:policy.approve",
+        },
+        {"kty": "oct", "k": "c2VjcmV0", "kid": "test"},
+    )
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "rollout_stage": "enforced",
+                "rollout_evidence_refs": ["ops://oidc/prod-smoke-2026-04-12"],
+                "subject_mapping_ready": True,
+                "issuer": "https://issuer.example.test",
+                "audience": "filmu-api",
+                "jwks_json": {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "test"}]},
+                "allowed_algorithms": ["HS256"],
+                "allow_api_key_fallback": False,
+            }
+        },
+    )
+
+    token_value = token.decode("utf-8") if isinstance(token, bytes) else token
+    response = client.get(
+        "/api/v1/operations/governance",
+        headers={"authorization": f"Bearer {token_value}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["identity_authz"]["status"] == "ready"
+    assert body["identity_authz"]["remaining_gaps"] == []
+    assert "oidc_rollout_status=ready" in body["identity_authz"]["evidence"]
+    assert "resource_scope_constraint_coverage=True" in body["identity_authz"]["evidence"]
 
 
 def test_operations_governance_route_surfaces_live_vfs_rollout_posture(

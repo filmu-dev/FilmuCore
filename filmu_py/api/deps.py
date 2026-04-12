@@ -144,6 +144,8 @@ def _resource_scope_for_path(path: str) -> str:
         return "operations"
     if path.startswith("/api/v1/settings"):
         return "settings"
+    if path.startswith("/api/v1/generateapikey"):
+        return "settings"
     if path.startswith("/api/v1/items"):
         return "items"
     if path.startswith("/api/v1/stream"):
@@ -390,6 +392,7 @@ def require_permissions(
             actor_type=auth_context.actor_type,
             authentication_mode=auth_context.authentication_mode,
             request_path=request.url.path,
+            resource_scope=_resource_scope_for_path(request.url.path),
             permission_constraints=permission_constraints_from_mapping(
                 _resolve_access_policy_snapshot(request).permission_constraints
             ),
