@@ -1006,6 +1006,10 @@ class Settings(BaseSettings):
             if "poll_interval_minutes" in mdblist:
                 mdblist["update_interval"] = int(mdblist.pop("poll_interval_minutes")) * 60
 
+        stream = _compat_dump(self._stream_model())
+        if stream.get("refresh_dispatch_mode") == "in_process":
+            stream.pop("refresh_dispatch_mode", None)
+
         return {
             "version": self.version,
             "api_key": self.api_key.get_secret_value(),
@@ -1027,7 +1031,7 @@ class Settings(BaseSettings):
             "notifications": _compat_dump(self._notifications_model()),
             "post_processing": _compat_dump(self._post_processing_model()),
             "logging": self._compat_logging_payload(),
-            "stream": _compat_dump(self._stream_model()),
+            "stream": stream,
         }
 
     @classmethod

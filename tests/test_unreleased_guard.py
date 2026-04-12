@@ -194,7 +194,7 @@ def test_poll_unreleased_items_requeues_when_release_date_passed(monkeypatch: An
         _ = (redis, queue_name, tenant_id)
         enqueue_calls.append(item_id)
 
-    monkeypatch.setattr(tasks, "enqueue_scrape_item", fake_enqueue)
+    monkeypatch.setattr(tasks, "enqueue_index_item", fake_enqueue)
     monkeypatch.setattr(tasks, "_try_transition", fake_try_transition)
 
     ctx: dict[str, object] = {"db": _MockDB(), "arq_redis": {"mock": True}, "queue_name": "q"}
