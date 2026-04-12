@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -25,12 +26,14 @@ def _build_settings() -> Settings:
 
 def test_prowlarr_show_episode_uses_tvsearch_with_season_and_episode() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        assert "type=tvsearch" in url
-        assert "categories=5000" in url
-        assert "season=1" in url or "seasonNumber=1" in url
-        assert "episode=2" in url or "episodeNumber=2" in url
-        assert "query=Show+Title+S01E02" in url
+        parsed = urlparse(str(request.url))
+        params = parse_qs(parsed.query)
+        assert parsed.path == "/api/v1/search"
+        assert params["type"] == ["tvsearch"]
+        assert params["categories"] == ["5000"]
+        assert params["season"] == ["1"]
+        assert params["episode"] == ["2"]
+        assert params["query"] == ["Show Title"]
         return httpx.Response(200, json=[])
 
     scraper = ProwlarrScraper(transport=httpx.MockTransport(handler))
@@ -54,12 +57,14 @@ def test_prowlarr_show_episode_uses_tvsearch_with_season_and_episode() -> None:
 
 def test_prowlarr_show_season_only_uses_tvsearch_with_season_only() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        assert "type=tvsearch" in url
-        assert "categories=5000" in url
-        assert "season=3" in url or "seasonNumber=3" in url
-        assert "episode=" not in url and "episodeNumber=" not in url
-        assert "query=Show+Title+S03" in url
+        parsed = urlparse(str(request.url))
+        params = parse_qs(parsed.query)
+        assert parsed.path == "/api/v1/search"
+        assert params["type"] == ["tvsearch"]
+        assert params["categories"] == ["5000"]
+        assert params["season"] == ["3"]
+        assert "episode" not in params
+        assert params["query"] == ["Show Title"]
         return httpx.Response(200, json=[])
 
     scraper = ProwlarrScraper(transport=httpx.MockTransport(handler))
@@ -83,12 +88,15 @@ def test_prowlarr_show_season_only_uses_tvsearch_with_season_only() -> None:
 
 def test_prowlarr_movie_uses_general_search_without_season_episode() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        assert "type=search" in url
-        assert "categories=2000" in url
-        assert "season=" not in url
-        assert "episode=" not in url
-        assert "query=Movie+Title" in url
+        parsed = urlparse(str(request.url))
+        params = parse_qs(parsed.query)
+        assert parsed.path == "/api/v1/search"
+        assert params["type"] == ["movie"]
+        assert params["categories"] == ["2000"]
+        assert "season" not in params
+        assert "episode" not in params
+        assert params["query"] == ["Movie Title"]
+        assert params["imdbId"] == ["tt1234567"]
         return httpx.Response(200, json=[])
 
     scraper = ProwlarrScraper(transport=httpx.MockTransport(handler))

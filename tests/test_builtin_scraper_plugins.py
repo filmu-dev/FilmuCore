@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -82,10 +83,18 @@ def test_builtin_stub_plugins_warn_when_not_configured() -> None:
 
 def test_prowlarr_scraper_parses_search_results() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        assert (
-            str(request.url)
-            == "https://prowlarr.example/api/v1/search?query=The+Matrix&type=search&limit=50&categories=2000"
-        )
+        parsed = urlparse(str(request.url))
+        params = parse_qs(parsed.query)
+        assert parsed.scheme == "https"
+        assert parsed.netloc == "prowlarr.example"
+        assert parsed.path == "/api/v1/search"
+        assert params == {
+            "query": ["The Matrix"],
+            "limit": ["50"],
+            "categories": ["2000"],
+            "type": ["movie"],
+            "imdbId": ["tt0133093"],
+        }
         assert request.headers["X-Api-Key"] == "prowlarr-key"
         return httpx.Response(
             200,
