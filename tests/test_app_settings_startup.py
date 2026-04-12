@@ -400,11 +400,13 @@ def test_startup_attaches_plugin_registry_and_capability_context_provider(monkey
     assert load_calls[0]["register_capabilities"] is False
     assert load_calls[0]["trust_store_path"] is None
     assert load_calls[0]["strict_signatures"] is False
+    assert load_calls[0]["runtime_policy"].enforcement_mode == "report_only"
     assert load_calls[0].get("context_provider") is None
     assert load_calls[1]["register_graphql"] is False
     assert load_calls[1]["register_capabilities"] is True
     assert load_calls[1]["trust_store_path"] is None
     assert load_calls[1]["strict_signatures"] is False
+    assert load_calls[1]["runtime_policy"].enforcement_mode == "report_only"
     assert load_calls[1]["context_provider"] is not None
 
 

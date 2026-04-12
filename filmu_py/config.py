@@ -664,6 +664,73 @@ class LogShipperSettings(CompatibilityModel):
     healthcheck_url: str | None = None
 
 
+class PluginRuntimeSettings(CompatibilityModel):
+    """Operator-managed runtime isolation policy for non-builtin plugins."""
+
+    enforcement_mode: Literal[
+        "report_only", "deny_non_builtin", "isolated_runtime_required"
+    ] = "report_only"
+    health_rollup_enabled: bool = True
+    require_strict_signatures: bool = False
+    require_source_digest: bool = False
+    allowed_non_builtin_sandbox_profiles: list[str] = Field(
+        default_factory=lambda: ["isolated"]
+    )
+    allowed_non_builtin_tenancy_modes: list[str] = Field(
+        default_factory=lambda: ["shared", "tenant"]
+    )
+    proof_refs: list[str] = Field(default_factory=list)
+
+
+class ObservabilityConvergenceSettings(CompatibilityModel):
+    """Cross-process log/search and trace convergence policy."""
+
+    environment_shipping_enabled: bool = False
+    search_backend: Literal["none", "opensearch", "elasticsearch", "loki"] = "none"
+    alerting_enabled: bool = False
+    rust_trace_correlation_enabled: bool = False
+    required_correlation_fields: list[str] = Field(
+        default_factory=lambda: [
+            "request.id",
+            "item.id",
+            "item.request_id",
+            "tenant.id",
+            "auth.actor.id",
+            "worker.stage",
+            "worker.job_id",
+            "plugin.name",
+            "trace.id",
+            "span.id",
+        ]
+    )
+    proof_refs: list[str] = Field(default_factory=list)
+
+
+class HeavyStageIsolationSettings(CompatibilityModel):
+    """Operator-managed policy for isolated CPU-heavy worker stages."""
+
+    executor_mode: Literal[
+        "process_pool_preferred", "process_pool_required", "thread_pool_only"
+    ] = (
+        "process_pool_preferred"
+    )
+    max_workers: int = 2
+    max_tasks_per_child: int = 0
+    index_timeout_seconds: float = 45.0
+    parse_timeout_seconds: float = 30.0
+    rank_timeout_seconds: float = 60.0
+    proof_refs: list[str] = Field(default_factory=list)
+
+
+class OrchestrationSettings(CompatibilityModel):
+    """Operational settings for queue and heavy-stage orchestration posture."""
+
+    heavy_stage_isolation: HeavyStageIsolationSettings = Field(
+        default_factory=HeavyStageIsolationSettings
+    )
+    queued_refresh_proof_refs: list[str] = Field(default_factory=list)
+
+
 class StreamSettings(CompatibilityModel):
     """Streaming compatibility block."""
 
@@ -671,6 +738,7 @@ class StreamSettings(CompatibilityModel):
     connect_timeout_seconds: int = 30
     chunk_wait_timeout_seconds: int = 300
     activity_timeout_seconds: int = 360
+    refresh_dispatch_mode: Literal["in_process", "queued"] = "in_process"
 
 
 class Settings(BaseSettings):
@@ -768,6 +836,18 @@ class Settings(BaseSettings):
     log_shipper: LogShipperSettings = Field(
         default_factory=LogShipperSettings,
         alias="FILMU_PY_LOG_SHIPPER",
+    )
+    plugin_runtime: PluginRuntimeSettings = Field(
+        default_factory=PluginRuntimeSettings,
+        alias="FILMU_PY_PLUGIN_RUNTIME",
+    )
+    observability: ObservabilityConvergenceSettings = Field(
+        default_factory=ObservabilityConvergenceSettings,
+        alias="FILMU_PY_OBSERVABILITY",
+    )
+    orchestration: OrchestrationSettings = Field(
+        default_factory=OrchestrationSettings,
+        alias="FILMU_PY_ORCHESTRATION",
     )
     grpc_bind_address: str = Field(
         default="127.0.0.1:50051",
@@ -1005,6 +1085,10 @@ class Settings(BaseSettings):
             if "poll_interval_minutes" in mdblist:
                 mdblist["update_interval"] = int(mdblist.pop("poll_interval_minutes")) * 60
 
+        stream = _compat_dump(self._stream_model())
+        if stream.get("refresh_dispatch_mode") == "in_process":
+            stream.pop("refresh_dispatch_mode", None)
+
         return {
             "version": self.version,
             "api_key": self.api_key.get_secret_value(),
@@ -1026,7 +1110,7 @@ class Settings(BaseSettings):
             "notifications": _compat_dump(self._notifications_model()),
             "post_processing": _compat_dump(self._post_processing_model()),
             "logging": self._compat_logging_payload(),
-            "stream": _compat_dump(self._stream_model()),
+            "stream": stream,
         }
 
     @classmethod

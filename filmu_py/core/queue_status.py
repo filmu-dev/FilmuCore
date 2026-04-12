@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterable, Awaitable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
@@ -62,6 +62,7 @@ class QueueStatusHistoryPoint:
     oldest_ready_age_seconds: float | None
     next_scheduled_in_seconds: float | None
     alert_level: AlertLevel
+    dead_letter_reason_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,7 @@ class QueueStatusSnapshot:
     next_scheduled_in_seconds: float | None
     alert_level: AlertLevel
     alerts: tuple[QueueAlert, ...]
+    dead_letter_reason_counts: dict[str, int] = field(default_factory=dict)
 
 
 class QueueStatusReader:
@@ -174,11 +176,33 @@ class QueueStatusReader:
                 "oldest_ready_age_seconds": snapshot.oldest_ready_age_seconds,
                 "next_scheduled_in_seconds": snapshot.next_scheduled_in_seconds,
                 "alert_level": snapshot.alert_level,
+                "dead_letter_reason_counts": snapshot.dead_letter_reason_counts,
             },
             separators=(",", ":"),
         )
         await self._await_maybe(lpush(history_key, payload))
         await self._await_maybe(ltrim(history_key, 0, max(0, self.history_limit - 1)))
+
+    async def _dead_letter_reason_counts(self, *, limit: int = 50) -> dict[str, int]:
+        lrange = getattr(self.redis, "lrange", None)
+        if lrange is None:
+            return {}
+
+        rows = await self._await_maybe(
+            lrange(f"{_DEAD_LETTER_KEY_PREFIX}{self.queue_name}", 0, max(0, limit - 1))
+        )
+        counts: dict[str, int] = {}
+        for row in cast(list[object], rows):
+            raw = row.decode("utf-8") if isinstance(row, bytes) else str(row)
+            try:
+                payload = cast(dict[str, Any], json.loads(raw))
+            except Exception:
+                continue
+            reason_code = payload.get("reason_code")
+            if not isinstance(reason_code, str) or not reason_code:
+                continue
+            counts[reason_code] = counts.get(reason_code, 0) + 1
+        return counts
 
     @staticmethod
     def _coerce_int(value: object, *, default: int = 0) -> int:
@@ -347,6 +371,10 @@ class QueueStatusReader:
                         payload.get("next_scheduled_in_seconds")
                     ),
                     alert_level=self._coerce_alert_level(payload.get("alert_level")),
+                    dead_letter_reason_counts=cast(
+                        dict[str, int],
+                        payload.get("dead_letter_reason_counts", {}) or {},
+                    ),
                 )
             )
         return history
@@ -396,6 +424,7 @@ class QueueStatusReader:
                 cast(Any, self.redis).llen(f"{_DEAD_LETTER_KEY_PREFIX}{self.queue_name}")
             )
         )
+        dead_letter_reason_counts = await self._dead_letter_reason_counts()
         alert_level, alerts = self._classify_alerts(
             ready_jobs=ready_jobs,
             retry_jobs=retry_jobs,
@@ -416,6 +445,7 @@ class QueueStatusReader:
             next_scheduled_in_seconds=next_scheduled_in_seconds,
             alert_level=alert_level,
             alerts=alerts,
+            dead_letter_reason_counts=dead_letter_reason_counts,
         )
         self._publish_metrics(snapshot)
         await self._persist_history(snapshot)

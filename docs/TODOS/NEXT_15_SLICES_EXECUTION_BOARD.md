@@ -48,8 +48,15 @@ Current incremental note:
 - `Slice K` is implemented: access-policy revisions now carry route and resource-scope permission constraints, `/api/v1/auth/policy` exposes constrained authorization probes for items, stream operations, plugin governance, and policy approvals, and `require_permissions()` enforces the same route/resource-scope policy at request time.
 - `Slice L` is implemented: `/api/v1/auth/policy` and `/api/v1/operations/governance` now expose OIDC rollout stage, rollout evidence references, subject-mapping readiness, configuration completeness, and API-key-fallback posture so OIDC readiness is proof-shaped instead of just enabled/disabled.
 - `Slice M` is implemented: authorization decisions now persist into `authorization_decision_audit`, `/api/v1/auth/policy/audit` supports bounded actor/tenant/permission/reason/path search, and configurable repeated-denial plus privileged-API-key alerts are surfaced from the result set.
+- `Slice N` is implemented: the app now carries an explicit runtime lifecycle graph for bootstrap, plugin registration, steady state, degraded startup, and shutdown, and `/api/v1/operations/runtime` plus `/api/v1/operations/governance` expose the same bounded transition history.
+- `Slice O` is implemented: `index_item` is now a first-class worker stage, item intake and recovery enter through that stage, and `requested -> indexed -> scraped` is no longer collapsed into `scrape_item`.
+- `Slice P` is implemented: worker stages now publish explicit stage idempotency outcomes, dead-letter payloads carry stable `reason_code` and `idempotency_key` metadata, and queue snapshots/history expose DLQ reason taxonomy for operator replay triage.
+- `Slice Q` is implemented: `index_item`, `parse_scrape_results`, and `rank_streams` now run under explicit isolated stage budgets with bounded executors and timeouts rather than keeping all parse/rank pressure inline on the worker event loop.
+- `Slice R` is implemented: stream-link refresh can now run through an optional queued dispatch path (`stream.refresh_dispatch_mode=queued`), and the route/resource layer can hand off direct-play plus HLS refresh pressure to ARQ instead of forcing in-process refresh scheduling.
 - `Wave 1` is now code-complete in local `main`: the remaining requirement is to keep the external proof artifacts and protected-branch policy green in real environments, not to land more application code for slices `G` through `J`.
 - `Wave 2` is now implementation-complete in local `main`: the repo now encodes route/resource-scope ABAC coverage, OIDC rollout-proof gates, and policy-alert thresholds. Remaining work is environment activation and operator evidence, not missing backend capability.
+- `Wave 3` is now fully closed in local `main`: the repo now encodes the lifecycle graph, dedicated index stage, DLQ/idempotency taxonomy, process-required heavy-stage isolation exit gates, and operator-visible queued stream-link refresh readiness/proof state. Ongoing soak evidence is steady-state operations work, not an open Wave 3 implementation gap.
+- `Wave 4` is now fully closed in local `main`: the repo now encodes plugin health rollups, enforceable non-builtin runtime-isolation policy, cross-process log/search/trace convergence exit gates, and enterprise governance `ready` paths for both plugin isolation and the durable operator log pipeline. Recurring shipper/search rollout and alert tuning are steady-state operations work, not an open Wave 4 implementation gap.
 
 ---
 
@@ -153,6 +160,11 @@ Exit gate:
 
 - plugin health and isolation are enforceable
 - cross-process log and trace convergence exists outside the local reference stack
+
+Current checkpoint:
+
+- Fully closed in-repo: plugin health and isolation are now enforceable through explicit non-builtin runtime policy, and the operator log pipeline has explicit shipping, alerting, and cross-process trace-correlation exit gates.
+- Remaining work is steady-state operations execution of the configured rollout, not missing Wave 4 application code.
 
 ---
 

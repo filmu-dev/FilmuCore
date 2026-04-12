@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from time import monotonic, perf_counter
-from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 from urllib.parse import quote
 
 from fastapi import HTTPException, status
@@ -259,7 +259,7 @@ AppScopedDirectPlaybackRefreshTriggerOutcome = Literal[
     "triggered",
 ]
 PlaybackRefreshDeferredReason = Literal["refresh_rate_limited", "provider_circuit_open"]
-HlsFailedLeaseRefreshOutcome = Literal["no_action", "completed", "run_later"]
+HlsFailedLeaseRefreshOutcome = Literal["no_action", "scheduled", "completed", "run_later"]
 HlsFailedLeaseRefreshControlPlaneOutcome = Literal[
     "no_action",
     "scheduled",
@@ -269,7 +269,7 @@ AppScopedHlsFailedLeaseRefreshTriggerOutcome = Literal[
     "controller_unavailable",
     "triggered",
 ]
-HlsRestrictedFallbackRefreshOutcome = Literal["no_action", "completed", "run_later"]
+HlsRestrictedFallbackRefreshOutcome = Literal["no_action", "scheduled", "completed", "run_later"]
 HlsRestrictedFallbackRefreshControlPlaneOutcome = Literal[
     "no_action",
     "scheduled",
@@ -541,6 +541,219 @@ class AppScopedHlsRestrictedFallbackRefreshTriggerResult:
     outcome: AppScopedHlsRestrictedFallbackRefreshTriggerOutcome
     controller_attached: bool
     control_plane_result: HlsRestrictedFallbackRefreshControlPlaneTriggerResult | None = None
+
+
+class QueuedDirectPlaybackRefreshController:
+    """Queue-backed dispatcher for direct-play refresh work."""
+
+    def __init__(self, arq_redis: object, *, queue_name: str) -> None:
+        self._arq_redis = arq_redis
+        self._queue_name = queue_name
+        self._last_results_by_item_identifier: dict[str, DirectPlaybackRefreshSchedulingResult] = {}
+        self._pending_deadline_by_item_identifier: dict[str, float] = {}
+
+    @staticmethod
+    def _pending_deadline_seconds() -> float:
+        """Return the bounded duplicate-suppression window for queued work."""
+
+        return 300.0
+
+    def has_pending(self, item_identifier: str) -> bool:
+        deadline = self._pending_deadline_by_item_identifier.get(item_identifier)
+        if deadline is None:
+            return False
+        if monotonic() >= deadline:
+            self._pending_deadline_by_item_identifier.pop(item_identifier, None)
+            return False
+        return True
+
+    def get_last_result(self, item_identifier: str) -> DirectPlaybackRefreshSchedulingResult | None:
+        return self._last_results_by_item_identifier.get(item_identifier)
+
+    async def shutdown(self) -> None:
+        self._pending_deadline_by_item_identifier.clear()
+        return None
+
+    async def trigger(
+        self,
+        item_identifier: str,
+        *,
+        at: datetime | None = None,
+    ) -> DirectPlaybackRefreshControlPlaneTriggerResult:
+        _ = at
+        from filmu_py.workers.tasks import enqueue_refresh_direct_playback_link
+
+        enqueued = await enqueue_refresh_direct_playback_link(
+            cast(Any, self._arq_redis),
+            item_id=item_identifier,
+            queue_name=self._queue_name,
+        )
+        existing_result = self._last_results_by_item_identifier.get(item_identifier)
+        still_pending = self.has_pending(item_identifier) and existing_result is not None
+        if enqueued:
+            scheduling_result = DirectPlaybackRefreshSchedulingResult(outcome="scheduled")
+        elif still_pending:
+            assert existing_result is not None
+            scheduling_result = existing_result
+        else:
+            scheduling_result = DirectPlaybackRefreshSchedulingResult(outcome="no_action")
+        self._last_results_by_item_identifier[item_identifier] = scheduling_result
+        if enqueued:
+            self._pending_deadline_by_item_identifier[item_identifier] = (
+                monotonic() + self._pending_deadline_seconds()
+            )
+        return DirectPlaybackRefreshControlPlaneTriggerResult(
+            item_identifier=item_identifier,
+            outcome="scheduled" if enqueued else ("already_pending" if still_pending else "no_action"),
+            scheduling_result=scheduling_result,
+        )
+
+
+class QueuedHlsFailedLeaseRefreshController:
+    """Queue-backed dispatcher for selected-HLS failed-lease refresh work."""
+
+    def __init__(self, arq_redis: object, *, queue_name: str) -> None:
+        self._arq_redis = arq_redis
+        self._queue_name = queue_name
+        self._last_results_by_item_identifier: dict[str, HlsFailedLeaseRefreshResult] = {}
+        self._pending_deadline_by_item_identifier: dict[str, float] = {}
+
+    @staticmethod
+    def _pending_deadline_seconds() -> float:
+        """Return the bounded duplicate-suppression window for queued work."""
+
+        return 300.0
+
+    def has_pending(self, item_identifier: str) -> bool:
+        deadline = self._pending_deadline_by_item_identifier.get(item_identifier)
+        if deadline is None:
+            return False
+        if monotonic() >= deadline:
+            self._pending_deadline_by_item_identifier.pop(item_identifier, None)
+            return False
+        return True
+
+    def get_last_result(self, item_identifier: str) -> HlsFailedLeaseRefreshResult | None:
+        return self._last_results_by_item_identifier.get(item_identifier)
+
+    async def shutdown(self) -> None:
+        self._pending_deadline_by_item_identifier.clear()
+        return None
+
+    async def trigger(
+        self,
+        item_identifier: str,
+        *,
+        at: datetime | None = None,
+    ) -> HlsFailedLeaseRefreshControlPlaneTriggerResult:
+        _ = at
+        from filmu_py.workers.tasks import enqueue_refresh_selected_hls_failed_lease
+
+        enqueued = await enqueue_refresh_selected_hls_failed_lease(
+            cast(Any, self._arq_redis),
+            item_id=item_identifier,
+            queue_name=self._queue_name,
+        )
+        existing_result = self._last_results_by_item_identifier.get(item_identifier)
+        still_pending = self.has_pending(item_identifier) and existing_result is not None
+        if enqueued:
+            refresh_result = HlsFailedLeaseRefreshResult(
+                item_identifier=item_identifier,
+                outcome="scheduled",
+            )
+        elif still_pending:
+            assert existing_result is not None
+            refresh_result = existing_result
+        else:
+            refresh_result = HlsFailedLeaseRefreshResult(
+                item_identifier=item_identifier,
+                outcome="no_action",
+            )
+        self._last_results_by_item_identifier[item_identifier] = refresh_result
+        if enqueued:
+            self._pending_deadline_by_item_identifier[item_identifier] = (
+                monotonic() + self._pending_deadline_seconds()
+            )
+        return HlsFailedLeaseRefreshControlPlaneTriggerResult(
+            item_identifier=item_identifier,
+            outcome="scheduled" if enqueued else ("already_pending" if still_pending else "no_action"),
+            refresh_result=refresh_result,
+        )
+
+
+class QueuedHlsRestrictedFallbackRefreshController:
+    """Queue-backed dispatcher for selected-HLS restricted-fallback refresh work."""
+
+    def __init__(self, arq_redis: object, *, queue_name: str) -> None:
+        self._arq_redis = arq_redis
+        self._queue_name = queue_name
+        self._last_results_by_item_identifier: dict[str, HlsRestrictedFallbackRefreshResult] = {}
+        self._pending_deadline_by_item_identifier: dict[str, float] = {}
+
+    @staticmethod
+    def _pending_deadline_seconds() -> float:
+        """Return the bounded duplicate-suppression window for queued work."""
+
+        return 300.0
+
+    def has_pending(self, item_identifier: str) -> bool:
+        deadline = self._pending_deadline_by_item_identifier.get(item_identifier)
+        if deadline is None:
+            return False
+        if monotonic() >= deadline:
+            self._pending_deadline_by_item_identifier.pop(item_identifier, None)
+            return False
+        return True
+
+    def get_last_result(
+        self,
+        item_identifier: str,
+    ) -> HlsRestrictedFallbackRefreshResult | None:
+        return self._last_results_by_item_identifier.get(item_identifier)
+
+    async def shutdown(self) -> None:
+        self._pending_deadline_by_item_identifier.clear()
+        return None
+
+    async def trigger(
+        self,
+        item_identifier: str,
+        *,
+        at: datetime | None = None,
+    ) -> HlsRestrictedFallbackRefreshControlPlaneTriggerResult:
+        _ = at
+        from filmu_py.workers.tasks import enqueue_refresh_selected_hls_restricted_fallback
+
+        enqueued = await enqueue_refresh_selected_hls_restricted_fallback(
+            cast(Any, self._arq_redis),
+            item_id=item_identifier,
+            queue_name=self._queue_name,
+        )
+        existing_result = self._last_results_by_item_identifier.get(item_identifier)
+        still_pending = self.has_pending(item_identifier) and existing_result is not None
+        if enqueued:
+            refresh_result = HlsRestrictedFallbackRefreshResult(
+                item_identifier=item_identifier,
+                outcome="scheduled",
+            )
+        elif still_pending:
+            assert existing_result is not None
+            refresh_result = existing_result
+        else:
+            refresh_result = HlsRestrictedFallbackRefreshResult(
+                item_identifier=item_identifier,
+                outcome="no_action",
+            )
+        self._last_results_by_item_identifier[item_identifier] = refresh_result
+        if enqueued:
+            self._pending_deadline_by_item_identifier[item_identifier] = (
+                monotonic() + self._pending_deadline_seconds()
+            )
+        return HlsRestrictedFallbackRefreshControlPlaneTriggerResult(
+            item_identifier=item_identifier,
+            outcome="scheduled" if enqueued else ("already_pending" if still_pending else "no_action"),
+            refresh_result=refresh_result,
+        )
 
 
 @runtime_checkable
@@ -4837,7 +5050,9 @@ async def trigger_direct_playback_refresh_from_resources(
 ) -> AppScopedDirectPlaybackRefreshTriggerResult:
     """Trigger direct-play refresh work through the app-scoped controller when configured."""
 
-    controller = resources.playback_refresh_controller
+    controller = (
+        resources.queued_direct_playback_refresh_controller or resources.playback_refresh_controller
+    )
     if controller is None:
         return AppScopedDirectPlaybackRefreshTriggerResult(
             item_identifier=item_identifier,
@@ -4862,7 +5077,10 @@ async def trigger_hls_failed_lease_refresh_from_resources(
 ) -> AppScopedHlsFailedLeaseRefreshTriggerResult:
     """Trigger selected-HLS failed-lease refresh work through the app-scoped controller when configured."""
 
-    controller = resources.hls_failed_lease_refresh_controller
+    controller = (
+        resources.queued_hls_failed_lease_refresh_controller
+        or resources.hls_failed_lease_refresh_controller
+    )
     if controller is None:
         return AppScopedHlsFailedLeaseRefreshTriggerResult(
             item_identifier=item_identifier,
@@ -4887,7 +5105,10 @@ async def trigger_hls_restricted_fallback_refresh_from_resources(
 ) -> AppScopedHlsRestrictedFallbackRefreshTriggerResult:
     """Trigger selected-HLS restricted-fallback refresh work through the app-scoped controller when configured."""
 
-    controller = resources.hls_restricted_fallback_refresh_controller
+    controller = (
+        resources.queued_hls_restricted_fallback_refresh_controller
+        or resources.hls_restricted_fallback_refresh_controller
+    )
     if controller is None:
         return AppScopedHlsRestrictedFallbackRefreshTriggerResult(
             item_identifier=item_identifier,

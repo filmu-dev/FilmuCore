@@ -48,10 +48,10 @@ What this baseline is good at:
 
 What it does **not** yet provide:
 
-- cryptographic signature verification/trust-store governance beyond the new provenance metadata and digest-validation baseline
 - richer external-author packaging/distribution guidance
 - durable/queue-backed hook execution if operational pressure eventually requires it
-- deeper runtime sandboxing/revocation and broader plugin health/status rollups beyond the new baseline telemetry
+- stronger environment/runtime evidence for the now-enforced non-builtin isolation policy
+- pluginized parity for Seerr/Listrr intake, Comet scraping, Plex post-download hooks, and TMDB/TVDB index-provider plugins
 
 StremThru DownloaderPlugin is now a real implementation (Slice E): `add_magnet()`, `get_status()`, and `get_download_links()` now talk to the StremThru v0 API with token-based auth, `httpx.AsyncClient`, and downloader-plugin DTO normalization. With that change, all three built-in plugin stubs called out in the earlier Slice D update are now real implementations.
 
@@ -63,6 +63,7 @@ April 2026 policy update:
 - [`../../filmu_py/plugins/manifest.py`](../../filmu_py/plugins/manifest.py) now also validates `source_sha256`, `signature`, `signing_key_id`, `sandbox_profile`, and quarantine fields, while [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) now rejects quarantined plugins and filesystem/source digest mismatches before registration.
 - [`../../filmu_py/plugins/trust.py`](../../filmu_py/plugins/trust.py) now loads an operator-managed JSON trust store, verifies HMAC-SHA256 plugin signatures, supports revocation lists for key IDs and signatures, and lets startup enforce strict signature policy for non-builtin plugins through `FILMU_PY_PLUGIN_TRUST_STORE_PATH` and `FILMU_PY_PLUGIN_STRICT_SIGNATURES`.
 - [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py) now surfaces `signature_verified`, `signature_verification_reason`, `trust_policy_decision`, and `trust_store_source` on `GET /api/v1/plugins`, so operators can distinguish unsigned, untrusted, revoked, and verified plugins without reading logs.
+- persisted operator overrides now sit above manifest defaults through [`../../filmu_py/services/plugin_governance.py`](../../filmu_py/services/plugin_governance.py), and operators can manage approved/quarantined/revoked state through `GET /api/v1/plugins/governance`, `GET /api/v1/plugins/governance/overrides`, and `POST /api/v1/plugins/governance/{plugin_name}`.
 
 ---
 
@@ -80,6 +81,9 @@ Confirmed TS capabilities include:
 - queue-backed plugin workers
 - GraphQL context composition using plugin datasources/settings
 - plugin validation lifecycle during bootstrap
+- current workspace inventory that includes `plugin-comet`, `plugin-listrr`, `plugin-mdblist`, `plugin-notifications`, `plugin-plex`, `plugin-seerr`, `plugin-stremthru`, `plugin-tmdb`, `plugin-torrentio`, and `plugin-tvdb`
+- verified hook wiring for TMDB indexing, Seerr request intake, Plex post-download actions, and notifications
+- typed event taxonomy breadth beyond the older scrape/download story, including provider-list, cache-check, and stream-link request families
 
 Representative TS references:
 
@@ -107,6 +111,7 @@ Representative TS references:
 | **Publishable-event governance**              | Implemented baseline             | TS tracks publishable event set explicitly                                                                       | Needed to prevent event/queue sprawl and undefined fan-out                                                   | Done baseline          |
 | **Plugin telemetry and health visibility**    | Improved baseline                | TS logs/telemetry are more embedded in bootstrap/runtime                                                         | Needed for operability and safer growth                                                                      | **P1**                 |
 | **Plugin isolation model**                    | Startup + hook isolation + policy baseline | TS also isolates validation/runtime registration more deeply                                                    | Needed to keep bad plugins from degrading the platform                                                       | **P1**                 |
+| **Operator governance overrides**             | Implemented baseline (`approved` / `quarantined` / `revoked`) | TS has broader ecosystem policy and package lifecycle management                                                | Needed for day-2 operability and quarantine/revocation without code changes                                 | Done baseline / deepen |
 
 ---
 
@@ -209,8 +214,8 @@ This is how Python can beat the TS model: not just matching breadth, but making 
 
 1. Strengthen plugin compatibility/version policy and manifest/schema validation.
 2. Harden external-author packaging/distribution guidance around the now-implemented discovery paths.
-3. Deepen plugin telemetry/health summaries and runtime isolation above the now-landed policy/permission baseline.
-4. Deepen the new trust-store/signature baseline into stronger publisher lifecycle controls, artifact provenance, and stronger runtime isolation for non-builtin plugins.
+3. Keep plugin telemetry/health summaries and runtime isolation green after the now-landed Wave 4 exit gates.
+4. Keep the trust-store/signature baseline green in operator workflows after the stronger non-builtin runtime policy landed.
 5. Only add durable queue-backed hook execution if operational evidence shows the in-process executor is insufficient.
 
 This sequence keeps the platform safe before it becomes broad.
@@ -227,6 +232,11 @@ Priority 4 should be considered meaningfully advanced when:
 - the host can observe which plugin capabilities are active and which events are publishable
 - failure isolation remains strong as plugin power increases
 
+Current checkpoint:
+
+- Fully closed in-repo for discovery/runtime/governance, including trust-store verification, operator override controls, plugin health rollups, and enforceable non-builtin runtime isolation policy.
+- Remaining work is recurring external-author/runtime evidence and broader plugin breadth, not missing Wave 4 isolation or health-rollup primitives.
+
 ## Recent TS audit correction (March-April 2026)
 
 - The current TS backend already provides `PluginSettings`, datasource construction, optional plugin runtime context injection, validator retries, queue-backed hook workers, and publishable-event gating.
@@ -236,6 +246,9 @@ Priority 4 should be considered meaningfully advanced when:
 - Filmu should use that distinction as one of the clearest ways to exceed `riven-ts` while preserving stricter capability boundaries, and should aim to replicate MDBList, StremThru, and Webhook Notification capabilities explicitly as built-in plugins or entry-point extensions.
 - Filmu should therefore benchmark against the newer TS baseline as a **monorepo plugin/platform ecosystem**, not just a backend app that happens to load a few plugins.
 - **Slice D/E update:** MDBList list-sync, Webhook Notifications, and StremThru are now full implementations. `MDBListContentService` polls the MDBList API and returns `ContentRequest` objects consumed by the `poll_content_services` ARQ cron. `WebhookNotificationPlugin` sends real Discord embeds and generic JSON webhooks and is dual-registered as both a `NotificationPlugin` and a `PluginEventHookWorker`, receiving `item.state.changed` events through the `PluginHookWorkerExecutor` fan-out added in Slice B. `StremThruDownloaderPlugin` now talks to the StremThru v0 API with token-authenticated downloader operations. The `poll_content_services` ARQ cron (every 30 min) now provides the first scheduled content-service intake path through the plugin platform.
+- Current Filmu built-in plugin breadth is narrower and more explicit: `TorrentioScraper`, `ProwlarrScraper`, `RarbgScraper`, `MDBListContentService`, `StremThruDownloaderPlugin`, and `WebhookNotificationPlugin` are source-verified; this is a real baseline, but it is not yet the same breadth as the TS packaged ecosystem.
+- TMDB and TVDB are currently host services in Filmu, not pluginized index-provider equivalents.
+- There is still no current built-in Filmu equivalent to Seerr intake, Plex post-download hook plugins, Comet scraping, or Listrr intake.
 
 ## Serving-control note (March 2026)
 

@@ -16,6 +16,7 @@ from filmu_py.audit import audit_action
 from filmu_py.authz import evaluate_permissions, permission_constraints_from_mapping
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.queue_status import QueueStatusReader
+from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
 
@@ -51,6 +52,8 @@ from ..models import (
     QueueStatusHistoryResponse,
     QueueStatusHistorySummaryResponse,
     QueueStatusResponse,
+    RuntimeLifecycleResponse,
+    RuntimeLifecycleTransitionResponse,
     StatsMediaYearRelease,
     StatsResponse,
     TenantQuotaPolicyResponse,
@@ -188,12 +191,19 @@ def _plugin_recommended_actions(
 
 def _plugin_governance_summary(
     plugins: list[PluginCapabilityStatusResponse],
+    *,
+    runtime_policy: Any,
 ) -> PluginGovernanceSummaryResponse:
     """Return a bounded plugin trust/isolation rollup for operators."""
 
     sandbox_profile_counts: dict[str, int] = {}
     tenancy_mode_counts: dict[str, int] = {}
     recommended_actions: set[str] = set()
+    non_builtin_plugins = [
+        plugin
+        for plugin in plugins
+        if plugin.release_channel != "builtin" and plugin.source != "builtin"
+    ]
     for plugin in plugins:
         sandbox_profile = plugin.sandbox_profile or "unspecified"
         sandbox_profile_counts[sandbox_profile] = sandbox_profile_counts.get(sandbox_profile, 0) + 1
@@ -201,12 +211,41 @@ def _plugin_governance_summary(
         tenancy_mode_counts[tenancy_mode] = tenancy_mode_counts.get(tenancy_mode, 0) + 1
         recommended_actions.update(_plugin_recommended_actions(plugin))
 
+    runtime_isolation_ready = (
+        runtime_policy.health_rollup_enabled
+        and runtime_policy.enforcement_mode == "isolated_runtime_required"
+        and runtime_policy.require_strict_signatures
+        and runtime_policy.require_source_digest
+        and bool(runtime_policy.proof_refs)
+        and all(plugin.ready for plugin in plugins)
+        and not any(plugin.quarantined or plugin.quarantine_recommended for plugin in plugins)
+        and not any(plugin.status == "load_failed" for plugin in plugins)
+        and not any(
+            plugin.publisher_policy_decision in {"rejected", "untrusted"}
+            or plugin.trust_policy_decision in {"rejected", "untrusted"}
+            for plugin in plugins
+        )
+        and all(
+            (plugin.sandbox_profile in runtime_policy.allowed_non_builtin_sandbox_profiles)
+            and (plugin.tenancy_mode in runtime_policy.allowed_non_builtin_tenancy_modes)
+            and (not runtime_policy.require_source_digest or bool(plugin.source_sha256))
+            and (not runtime_policy.require_strict_signatures or plugin.signature_verified)
+            for plugin in non_builtin_plugins
+        )
+    )
+
     return PluginGovernanceSummaryResponse(
         total_plugins=len(plugins),
         loaded_plugins=sum(1 for plugin in plugins if plugin.status == "loaded"),
         load_failed_plugins=sum(1 for plugin in plugins if plugin.status == "load_failed"),
         ready_plugins=sum(1 for plugin in plugins if plugin.ready),
         unready_plugins=sum(1 for plugin in plugins if not plugin.ready),
+        healthy_plugins=sum(1 for plugin in plugins if plugin.ready and not plugin.warnings),
+        degraded_plugins=sum(1 for plugin in plugins if (not plugin.ready) or bool(plugin.warnings)),
+        non_builtin_plugins=len(non_builtin_plugins),
+        isolated_non_builtin_plugins=sum(
+            1 for plugin in non_builtin_plugins if plugin.sandbox_profile == "isolated"
+        ),
         quarantined_plugins=sum(1 for plugin in plugins if plugin.quarantined),
         quarantine_recommended_plugins=sum(1 for plugin in plugins if plugin.quarantine_recommended),
         unsigned_external_plugins=sum(
@@ -229,12 +268,18 @@ def _plugin_governance_summary(
         ),
         sandbox_profile_counts=dict(sorted(sandbox_profile_counts.items())),
         tenancy_mode_counts=dict(sorted(tenancy_mode_counts.items())),
+        runtime_policy_mode=runtime_policy.enforcement_mode,
+        runtime_isolation_ready=runtime_isolation_ready,
         recommended_actions=sorted(recommended_actions),
-        remaining_gaps=[
-            "runtime sandbox isolation is still in-process",
-            "operator quarantine/revocation still needs sandbox-enforced execution boundaries",
-            "external plugin artifact provenance is not yet SBOM/signing-policy complete",
-        ],
+        remaining_gaps=(
+            []
+            if runtime_isolation_ready
+            else [
+                "non-builtin plugin runtime isolation exit gates are not fully satisfied",
+                "operator quarantine/revocation still depends on runtime policy enforcement",
+                "external plugin artifact provenance or signature verification is still incomplete",
+            ]
+        ),
     )
 
 
@@ -281,6 +326,31 @@ def _summarize_queue_history(
             ),
             default=None,
         ),
+        latest_dead_letter_reason_counts=(
+            dict(history[0].dead_letter_reason_counts) if history else {}
+        ),
+    )
+
+
+def _runtime_lifecycle_response(request: Request) -> RuntimeLifecycleResponse:
+    """Return the explicit runtime lifecycle state and bounded transition history."""
+
+    resources = request.app.state.resources
+    snapshot = resources.runtime_lifecycle.snapshot()
+    return RuntimeLifecycleResponse(
+        phase=snapshot.phase,
+        health=snapshot.health,
+        detail=snapshot.detail,
+        updated_at=snapshot.updated_at.isoformat(),
+        transitions=[
+            RuntimeLifecycleTransitionResponse(
+                phase=transition.phase,
+                health=transition.health,
+                detail=transition.detail,
+                at=transition.at.isoformat(),
+            )
+            for transition in snapshot.transitions
+        ],
     )
 
 
@@ -687,6 +757,26 @@ async def _enterprise_operations_governance(
     vfs_runtime_governance = _vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
     )
+    runtime_snapshot = resources.runtime_lifecycle.snapshot()
+    queued_refresh_ready = (
+        settings.stream.refresh_dispatch_mode != "queued"
+        or (
+            resources.arq_redis is not None
+            and resources.queued_direct_playback_refresh_controller is not None
+            and resources.queued_hls_failed_lease_refresh_controller is not None
+            and resources.queued_hls_restricted_fallback_refresh_controller is not None
+        )
+    )
+    heavy_stage_policy = settings.orchestration.heavy_stage_isolation
+    heavy_stage_exit_ready = (
+        settings.arq_enabled
+        and settings.stream.refresh_dispatch_mode == "queued"
+        and queued_refresh_ready
+        and heavy_stage_policy.executor_mode == "process_pool_required"
+        and heavy_stage_policy.max_tasks_per_child > 0
+        and bool(heavy_stage_policy.proof_refs)
+        and bool(settings.orchestration.queued_refresh_proof_refs)
+    )
     oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(settings)
     )
@@ -734,18 +824,25 @@ async def _enterprise_operations_governance(
 
     normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
     structured_log_path = f"{normalized_log_dir}/{settings.logging.structured_filename}"
-    log_required_actions = [
-        "configure_log_shipper_for_structured_ndjson"
-        if not settings.log_shipper.enabled
-        else "monitor_log_shipper_health",
-        "define_search_index_mapping_and_retention_policy"
-        if not settings.log_shipper.target
-        else "validate_search_index_contract",
-    ]
-    if settings.otel_enabled and settings.otel_exporter_otlp_endpoint:
-        log_required_actions.append("verify_trace_export_in_collector")
-    else:
-        log_required_actions.append("configure_otlp_trace_export")
+    observability_policy = settings.observability
+    operator_log_pipeline_ready = (
+        settings.logging.enabled
+        and settings.log_shipper.enabled
+        and bool(settings.log_shipper.target)
+        and bool(settings.log_shipper.healthcheck_url)
+        and settings.otel_enabled
+        and bool(settings.otel_exporter_otlp_endpoint)
+        and observability_policy.environment_shipping_enabled
+        and observability_policy.alerting_enabled
+        and observability_policy.rust_trace_correlation_enabled
+        and observability_policy.search_backend != "none"
+        and bool(observability_policy.required_correlation_fields)
+        and bool(observability_policy.proof_refs)
+    )
+    plugin_governance_summary = _plugin_governance_summary(
+        plugins,
+        runtime_policy=settings.plugin_runtime,
+    )
 
     vfs_data_plane_status: Literal["ready", "partial", "blocked", "not_ready"] = "partial"
     vfs_required_actions = [
@@ -984,6 +1081,41 @@ async def _enterprise_operations_governance(
                 "node coordination and failover promotion are not fully automated",
             ],
         ),
+        runtime_lifecycle=EnterpriseOperationsSliceResponse(
+            name="Formal Runtime Lifecycle Graph",
+            status=(
+                "ready"
+                if runtime_snapshot.phase is RuntimeLifecyclePhase.STEADY_STATE
+                and runtime_snapshot.health is RuntimeLifecycleHealth.HEALTHY
+                else (
+                    "partial"
+                    if runtime_snapshot.phase is RuntimeLifecyclePhase.STEADY_STATE
+                    else "blocked"
+                )
+            ),
+            evidence=[
+                f"runtime_phase={runtime_snapshot.phase}",
+                f"runtime_health={runtime_snapshot.health}",
+                f"runtime_detail={runtime_snapshot.detail}",
+                f"runtime_transition_count={len(runtime_snapshot.transitions)}",
+                "GET /api/v1/operations/runtime exposes bounded lifecycle transition history",
+            ],
+            required_actions=(
+                ["resolve_runtime_degraded_state"]
+                if runtime_snapshot.health is RuntimeLifecycleHealth.DEGRADED
+                else ["keep_runtime_transition_history_visible"]
+            ),
+            remaining_gaps=(
+                []
+                if runtime_snapshot.phase is RuntimeLifecyclePhase.STEADY_STATE
+                and runtime_snapshot.health is RuntimeLifecycleHealth.HEALTHY
+                else [
+                    "runtime has not yet reached a healthy steady-state phase"
+                    if runtime_snapshot.phase is not RuntimeLifecyclePhase.STEADY_STATE
+                    else f"runtime steady state is degraded: {runtime_snapshot.detail}"
+                ]
+            ),
+        ),
         sre_program=EnterpriseOperationsSliceResponse(
             name="SRE / Production Operations Program",
             status="partial",
@@ -1006,7 +1138,11 @@ async def _enterprise_operations_governance(
         ),
         operator_log_pipeline=EnterpriseOperationsSliceResponse(
             name="Durable Operator Log Pipeline",
-            status="partial" if settings.logging.enabled else "blocked",
+            status=(
+                "ready"
+                if operator_log_pipeline_ready
+                else ("partial" if settings.logging.enabled else "blocked")
+            ),
             evidence=[
                 f"structured_logging_enabled={settings.logging.enabled}",
                 f"structured_log_path={structured_log_path}",
@@ -1016,24 +1152,76 @@ async def _enterprise_operations_governance(
                 f"log_shipper_enabled={settings.log_shipper.enabled}",
                 f"log_shipper_type={settings.log_shipper.type}",
                 f"log_shipper_target_configured={bool(settings.log_shipper.target)}",
+                f"log_shipper_healthcheck_configured={bool(settings.log_shipper.healthcheck_url)}",
                 f"log_field_mapping_version={settings.log_shipper.field_mapping_version}",
+                f"log_search_backend={observability_policy.search_backend}",
+                f"observability_environment_shipping_enabled={observability_policy.environment_shipping_enabled}",
+                f"observability_alerting_enabled={observability_policy.alerting_enabled}",
+                f"rust_trace_correlation_enabled={observability_policy.rust_trace_correlation_enabled}",
+                (
+                    "correlation_fields="
+                    + ",".join(observability_policy.required_correlation_fields)
+                ),
+                f"observability_proof_ref_count={len(observability_policy.proof_refs)}",
                 "docs/OPERATOR_LOG_PIPELINE.md defines shipping/search/replay taxonomy",
             ],
-            required_actions=log_required_actions,
-            remaining_gaps=[
-                "shipper/search backend still requires environment provisioning even though repo config is present",
-                "trace/span coverage is still partial",
-                "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
-            ],
+            required_actions=(
+                []
+                if operator_log_pipeline_ready
+                else [
+                    "configure_log_shipper_for_structured_ndjson"
+                    if not settings.log_shipper.enabled
+                    else "monitor_log_shipper_health",
+                    "define_search_index_mapping_and_retention_policy"
+                    if not settings.log_shipper.target
+                    or observability_policy.search_backend == "none"
+                    else "validate_search_index_contract",
+                    "configure_otlp_trace_export"
+                    if not (settings.otel_enabled and settings.otel_exporter_otlp_endpoint)
+                    else "verify_trace_export_in_collector",
+                    "enable_environment_log_shipping"
+                    if not observability_policy.environment_shipping_enabled
+                    else "review_environment_log_shipping_rollout",
+                    "enable_alerting_for_log_search_and_trace_pipeline"
+                    if not observability_policy.alerting_enabled
+                    else "review_log_pipeline_alert_thresholds",
+                    "wire_rust_trace_correlation_fields"
+                    if not observability_policy.rust_trace_correlation_enabled
+                    else "review_cross_process_trace_correlation",
+                    "record_log_pipeline_rollout_evidence"
+                    if not observability_policy.proof_refs
+                    else "review_log_pipeline_rollout_evidence",
+                ]
+            ),
+            remaining_gaps=(
+                []
+                if operator_log_pipeline_ready
+                else [
+                    "shipper/search backend still requires environment provisioning even though repo config is present",
+                    "cross-process trace correlation is not fully enforced",
+                    "replay taxonomy now has Redis Streams baseline but needs end-to-end operations rollout",
+                ]
+            ),
         ),
         plugin_runtime_isolation=EnterpriseOperationsSliceResponse(
             name="Plugin Trust / Runtime Isolation",
-            status="partial",
+            status="ready" if plugin_governance_summary.runtime_isolation_ready else "partial",
             evidence=[
                 f"plugin_total={len(plugins)}",
+                f"plugin_non_builtin={plugin_governance_summary.non_builtin_plugins}",
+                f"plugin_healthy={plugin_governance_summary.healthy_plugins}",
+                f"plugin_degraded={plugin_governance_summary.degraded_plugins}",
                 (
                     "plugin_sandbox_profiles="
                     + ",".join(sorted({plugin.sandbox_profile or 'unspecified' for plugin in plugins}))
+                ),
+                (
+                    "plugin_allowed_non_builtin_sandbox_profiles="
+                    + ",".join(settings.plugin_runtime.allowed_non_builtin_sandbox_profiles)
+                ),
+                (
+                    "plugin_allowed_non_builtin_tenancy_modes="
+                    + ",".join(settings.plugin_runtime.allowed_non_builtin_tenancy_modes)
                 ),
                 f"plugin_quarantined={sum(1 for plugin in plugins if plugin.quarantined)}",
                 (
@@ -1041,40 +1229,116 @@ async def _enterprise_operations_governance(
                     f"{sum(1 for plugin in plugins if plugin.quarantine_recommended)}"
                 ),
                 f"plugin_operator_overrides={plugin_override_count}",
+                f"plugin_runtime_enforcement_mode={settings.plugin_runtime.enforcement_mode}",
+                f"plugin_runtime_health_rollup_enabled={settings.plugin_runtime.health_rollup_enabled}",
+                f"plugin_runtime_require_strict_signatures={settings.plugin_runtime.require_strict_signatures}",
+                f"plugin_runtime_require_source_digest={settings.plugin_runtime.require_source_digest}",
+                f"plugin_runtime_proof_ref_count={len(settings.plugin_runtime.proof_refs)}",
+                f"plugin_runtime_exit_ready={int(plugin_governance_summary.runtime_isolation_ready)}",
                 "GET /api/v1/plugins/governance summarizes signature, publisher-policy, and tenancy posture",
             ],
-            required_actions=[
-                "promote_plugin_quarantine_and_revocation_into_persisted_operator_workflows",
-                "move_runtime_plugin_execution_into_real_sandbox_boundaries",
-                "require_external_plugin_artifact_provenance_and_signing_policy",
-            ],
-            remaining_gaps=[
-                "plugin runtime isolation remains process-local rather than sandboxed execution",
-                "quarantine and revocation are persisted but still enforced inside the host process",
-                "external plugin artifact provenance is not yet SBOM/signing-policy complete",
-            ],
+            required_actions=(
+                []
+                if plugin_governance_summary.runtime_isolation_ready
+                else [
+                    "enable_non_builtin_plugin_runtime_enforcement"
+                    if settings.plugin_runtime.enforcement_mode == "report_only"
+                    else "review_non_builtin_plugin_runtime_enforcement",
+                    "require_isolated_non_builtin_plugin_sandbox_profiles"
+                    if settings.plugin_runtime.enforcement_mode != "isolated_runtime_required"
+                    else "review_non_builtin_plugin_health_rollups",
+                    "record_plugin_runtime_isolation_evidence"
+                    if not settings.plugin_runtime.proof_refs
+                    else "review_plugin_runtime_isolation_evidence",
+                ]
+            ),
+            remaining_gaps=plugin_governance_summary.remaining_gaps,
         ),
         heavy_stage_workload_isolation=EnterpriseOperationsSliceResponse(
             name="Heavy-Stage Workload Isolation",
-            status="partial" if settings.arq_enabled else "not_ready",
+            status=(
+                "ready"
+                if heavy_stage_exit_ready
+                else (
+                    "partial"
+                    if settings.arq_enabled and queued_refresh_ready
+                    else (
+                        "blocked"
+                        if settings.stream.refresh_dispatch_mode == "queued"
+                        else "not_ready"
+                    )
+                )
+            ),
             evidence=[
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
-                "worker stages include scrape_item, parse_scrape_results, rank_streams, debrid_item, and finalize_item",
+                (
+                    "worker stages include index_item, scrape_item, parse_scrape_results, "
+                    "rank_streams, debrid_item, finalize_item, and queued playback refresh jobs"
+                ),
                 "tenant worker enqueue quotas can deny downstream stage fan-out",
-                "rank_streams now executes RTN ranking/sorting in a bounded isolated executor",
+                "index_item, parse_scrape_results, and rank_streams execute inside bounded isolated stage budgets",
+                f"stream_refresh_dispatch_mode={settings.stream.refresh_dispatch_mode}",
+                f"stream_refresh_queue_ready={int(queued_refresh_ready)}",
+                f"heavy_stage_executor_mode={heavy_stage_policy.executor_mode}",
+                f"heavy_stage_max_workers={heavy_stage_policy.max_workers}",
+                f"heavy_stage_max_tasks_per_child={heavy_stage_policy.max_tasks_per_child}",
+                f"heavy_stage_process_isolation_required={int(heavy_stage_policy.executor_mode == 'process_pool_required')}",
+                (
+                    "heavy_stage_timeouts="
+                    "index_item:"
+                    f"{heavy_stage_policy.index_timeout_seconds},"
+                    "parse_scrape_results:"
+                    f"{heavy_stage_policy.parse_timeout_seconds},"
+                    "rank_streams:"
+                    f"{heavy_stage_policy.rank_timeout_seconds}"
+                ),
+                f"heavy_stage_proof_ref_count={len(heavy_stage_policy.proof_refs)}",
+                f"queued_refresh_proof_ref_count={len(settings.orchestration.queued_refresh_proof_refs)}",
+                f"heavy_stage_exit_ready={int(heavy_stage_exit_ready)}",
                 "GET /api/v1/workers/queue and /api/v1/workers/queue/history expose queue pressure",
             ],
-            required_actions=[
-                "split_parse_map_validate_index_stages_into_isolated_workers_or_sandboxes",
-                "define_per_stage_cpu_memory_and_timeout_budgets",
-                "add_crash_containment_and_retry_policy_for_heavy_jobs",
-            ],
-            remaining_gaps=[
-                "parse/map/validate stages still need the same isolation treatment as rank_streams",
-                "no per-stage memory ceiling is enforced yet",
-                "crash containment exists for ranking but not every heavy stage",
-            ],
+            required_actions=(
+                []
+                if heavy_stage_exit_ready
+                else [
+                    "enable_queued_stream_link_refresh_dispatch"
+                    if settings.stream.refresh_dispatch_mode != "queued"
+                    else "promote_per_stage_cpu_memory_and_timeout_budgets_into_environment policy",
+                    "attach_queued_refresh_runtime_controllers"
+                    if settings.stream.refresh_dispatch_mode == "queued" and not queued_refresh_ready
+                    else (
+                        "record_queued_refresh_soak_evidence"
+                        if not settings.orchestration.queued_refresh_proof_refs
+                        else "review_queued_refresh_soak_evidence"
+                    ),
+                    "require_process_backed_heavy_stage_isolation"
+                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    else (
+                        "set_heavy_stage_process_recycle_budget"
+                        if heavy_stage_policy.max_tasks_per_child <= 0
+                        else (
+                            "record_heavy_stage_failure_injection_or_soak_evidence"
+                            if not heavy_stage_policy.proof_refs
+                            else "review_heavy_stage_isolation_evidence"
+                        )
+                    ),
+                ]
+            ),
+            remaining_gaps=(
+                []
+                if heavy_stage_exit_ready
+                else [
+                    "queued stream-link refresh dispatch is not fully configured"
+                    if settings.stream.refresh_dispatch_mode != "queued" or not queued_refresh_ready
+                    else "queued stream-link refresh soak evidence has not been recorded",
+                    "heavy stages are not yet forced into process-backed isolation"
+                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    else "heavy-stage worker recycle limits are not configured"
+                    if heavy_stage_policy.max_tasks_per_child <= 0
+                    else "heavy-stage isolation evidence has not been recorded",
+                ]
+            ),
         ),
         release_metadata_performance=EnterpriseOperationsSliceResponse(
             name="Release Engineering / Metadata Governance / Performance Discipline",
@@ -1128,6 +1392,17 @@ async def health(request: Request) -> HealthResponse:
         status=status,
         checks=checks,
     )
+
+
+@router.get(
+    "/operations/runtime",
+    operation_id="default.operations_runtime",
+    response_model=RuntimeLifecycleResponse,
+)
+async def get_runtime_lifecycle(request: Request) -> RuntimeLifecycleResponse:
+    """Return the explicit runtime lifecycle graph and bounded transition history."""
+
+    return _runtime_lifecycle_response(request)
 
 
 @router.get(
@@ -1656,6 +1931,7 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
         ],
         oldest_ready_age_seconds=snapshot.oldest_ready_age_seconds,
         next_scheduled_in_seconds=snapshot.next_scheduled_in_seconds,
+        dead_letter_reason_counts=dict(snapshot.dead_letter_reason_counts),
     )
 
 
@@ -1686,6 +1962,7 @@ async def get_worker_queue_history(
             oldest_ready_age_seconds=item.oldest_ready_age_seconds,
             next_scheduled_in_seconds=item.next_scheduled_in_seconds,
             alert_level=item.alert_level,
+            dead_letter_reason_counts=dict(item.dead_letter_reason_counts),
         )
         for item in history
     ]
@@ -1867,8 +2144,12 @@ async def get_plugin_governance(request: Request) -> PluginGovernanceResponse:
     """Return plugin trust, quarantine, and isolation posture for operators."""
 
     plugins = await get_plugins(request)
+    resources = request.app.state.resources
     return PluginGovernanceResponse(
-        summary=_plugin_governance_summary(plugins),
+        summary=_plugin_governance_summary(
+            plugins,
+            runtime_policy=resources.settings.plugin_runtime,
+        ),
         plugins=plugins,
     )
 

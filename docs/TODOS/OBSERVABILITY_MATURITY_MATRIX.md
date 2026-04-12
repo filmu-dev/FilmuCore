@@ -34,6 +34,7 @@ Already present in the Python backend:
 - latency histograms for reads, resolutions, and ffmpeg generation
 - abort and request-shape (range/seek/EOF) counters
 - session-level read amplification proxies
+- enterprise governance consumption of live mounted-runtime rollout posture, so the higher-level operator slice now reflects `vfs_runtime_rollout_readiness`, rollout reasons, cache/fallback/prefetch ratios, and pressure incidents rather than only static VFS capability posture
 - logs/history SSE compatibility path
 - bounded in-memory log broker for `/api/v1/logs`, SSE logging, and GraphQL `logStream`
 
@@ -59,6 +60,13 @@ What it does **not** yet provide sufficiently:
 - mounted Rust data-plane telemetry and cross-process traceability
 - deeper queue replay-taxonomy visibility and longer-lived backlog history beyond the now-landed alert/history baseline
 - durable event/control-plane observability
+- GraphQL-first cache/data-layer observability comparable to the TS Apollo response-cache + Redis + dataloader stack
+
+### Current status summary
+
+- Done now: route, worker, queue, plugin, and local log/search baselines are real and operator-visible.
+- Partial only: VFS mounted telemetry depth and replay/control-plane observability.
+- Still missing: fuller distributed-control-plane/HA observability and deeper mounted/VFS operator summaries; the Wave 4 log/search/trace convergence baseline is now repo-closed.
 
 To check progressively and update as we go.
 
@@ -83,9 +91,9 @@ To check progressively and update as we go.
 | **Route-level compatibility metrics** | Implemented baseline           | Deeper failure taxonomy, auth/contract drift breakdown, and broader surface coverage                                           | Needed to know which `/api/v1/*` surfaces are unstable or incomplete | **P1**   |
 | **Worker correlation**                | Implemented baseline           | Broader multi-stage lifecycle correlation across API -> queue -> worker -> playback/VFS paths                                   | Needed for reliable debugging of orchestration failures              | **P1**   |
 | **Retry/DLQ visibility**              | Improved baseline              | richer replay-taxonomy rollups, DLQ age/reason trend breakdown, and broader queue-graph history                                 | Needed for D1 and future D2 maturity                                 | **P1**   |
-| **Plugin load telemetry**             | Implemented baseline           | richer startup health rollups and longer-lived plugin health summaries                                                         | Needed as plugin platform grows beyond GraphQL                       | **P1**   |
-| **Plugin runtime telemetry**          | Implemented in-process baseline | per-plugin error/timeout health rollups, and queue lag only if/when hook execution becomes durable/queued                     | Needed for safe extensibility                                        | **P1**   |
-| **Structured log pipeline**           | Implemented baseline            | shipper/search workflow, environment-specific shipping policy, and stronger end-to-end trace/span adoption                       | Current `riven-ts` now has a materially stronger operator log pipeline | **P1**   |
+| **Plugin load telemetry**             | Wave 4 repo-closed            | recurring operator evidence and broader queued-hook/runtime pressure evidence                                                   | Needed as plugin platform grows beyond GraphQL                       | **P1**   |
+| **Plugin runtime telemetry**          | Wave 4 repo-closed            | recurring per-plugin runtime evidence and queue lag only if/when hook execution becomes durable/queued                         | Needed for safe extensibility                                        | **P1**   |
+| **Structured log pipeline**           | Wave 4 repo-closed            | recurring environment rollout, shipper operations, and alert tuning                                                            | Filmu now has repo-owned shipping/search/trace exit gates            | **P1**   |
 | **GraphQL observability**             | Implemented baseline           | richer error taxonomy, schema diff governance, and subscription/control-plane visibility                                        | Needed for strategic parity and regression detection                 | **P1**   |
 | **Cache observability**               | Implemented baseline           | hit/miss split by layer, richer invalidation reasons, and longer-lived stale-serve ratios                                      | Needed for correctness and provider safety                           | **P1**   |
 | **Rate limiter observability**        | Implemented baseline           | provider-refresh/control-plane correlation and alerting thresholds                                                              | Needed for provider safety and FilmuVFS control-plane tuning         | **P1**   |
@@ -192,13 +200,21 @@ Current upstream `riven-ts` logging is materially broader than the current Filmu
 - Sentry trace/span enrichment via `sentry-meta.format.ts`
 - source-tagged console output with `riven.log.source` and `riven.worker.id`
 - local Elastic/Filebeat/Kibana stack under `elastic-local/`
+- Apollo response caching via `KeyvAdapter`
+- Redis-backed cache transport via `@keyv/redis`
+- dataloader-enabled ORM access patterns in the GraphQL/data layer
+- BullMQ worker creation with queue/worker identity and Sentry tagging patterns
+- sandboxed worker bootstrap surfaces for heavier parse/map/validate stages
 
 Filmu currently has:
 
 - stdlib logging + `structlog` JSON rendering in [`../../filmu_py/logging.py`](../../filmu_py/logging.py)
 - compatibility-oriented bounded in-memory log history and live fan-out in [`../../filmu_py/core/log_stream.py`](../../filmu_py/core/log_stream.py)
+- repo-owned Vector tailing config in [`../../ops/vector/filmu-ndjson-vector.toml`](../../ops/vector/filmu-ndjson-vector.toml)
+- a local OpenSearch + Vector reference stack in [`../../ops/log-pipeline/docker-compose.yml`](../../ops/log-pipeline/docker-compose.yml)
+- a checked-in OpenSearch field template in [`../../ops/opensearch/filmu-index-template.json`](../../ops/opensearch/filmu-index-template.json)
 
-That means Filmu still needs a real operator log pipeline, not just a compatibility log surface.
+That means Filmu now has a real local operator-log-pipeline baseline, not just a compatibility log surface. The remaining gap is environment-owned rollout, alert wiring, and broader trace/span convergence.
 
 Minimum bar for closing that gap:
 
@@ -306,7 +322,7 @@ Priority 6 should be considered meaningfully advanced when:
 - The backend now also exposes `upstream_manifest_invalid` in that HLS route taxonomy, so malformed remote playlists have a dedicated operator-facing classification instead of being hidden inside generic upstream failures.
 - The backend now also records explicit timeout/error upstream open outcomes for remote proxy playback and maps remote-HLS playlist fetch / segment proxy transport failures to explicit `504` / `502` responses, which makes that transport layer more observable and predictable.
 - The backend now also exposes remote-HLS retry/cooldown counters through [`/api/v1/stream/status`](../../filmu_py/api/routes/stream.py), including retry attempts, cooldown starts, cooldown hits, and currently active cooldown windows.
-- This is a stronger baseline than the original serving-only status view, and the Rust sidecar now also emits mounted-read cache/pattern/prefetch/refresh metrics plus cache-layer backend/memory/disk breakdown from live WinFSP/ProjFS reads. It is still below the fuller stream/VFS observability model described in this matrix because provider-pressure rollups, prefetch-depth visibility, and true end-to-end amplification summaries still remain.
+- This is a stronger baseline than the original serving-only status view, and the Rust sidecar now also emits mounted-read cache/pattern/prefetch/refresh metrics plus cache-layer backend/memory/disk breakdown from live WinFSP/ProjFS reads. It is still below the fuller observability model described in this matrix because provider-pressure rollups, prefetch-depth visibility, app-level query/control-plane observability, and true end-to-end amplification summaries still remain.
 
 
 

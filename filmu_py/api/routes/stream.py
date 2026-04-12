@@ -1753,7 +1753,10 @@ def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    controller = resources.hls_failed_lease_refresh_controller
+    controller = (
+        resources.queued_hls_failed_lease_refresh_controller
+        or resources.hls_failed_lease_refresh_controller
+    )
     if controller is None:
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1789,7 +1792,10 @@ def _start_hls_restricted_fallback_refresh_trigger(
         _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    controller = resources.hls_restricted_fallback_refresh_controller
+    controller = (
+        resources.queued_hls_restricted_fallback_refresh_controller
+        or resources.hls_restricted_fallback_refresh_controller
+    )
     if controller is None:
         _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1826,7 +1832,10 @@ def _start_direct_playback_refresh_trigger(*, request: Request, item_identifier:
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
 
-    controller = resources.playback_refresh_controller
+    controller = (
+        resources.queued_direct_playback_refresh_controller
+        or resources.playback_refresh_controller
+    )
     if controller is None:
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -2343,6 +2352,24 @@ async def get_stream_status(
         )
         for path in byte_streaming.get_active_path_snapshot()
     ]
+    queued_refresh_controllers_attached = int(
+        resources.queued_direct_playback_refresh_controller is not None
+        and resources.queued_hls_failed_lease_refresh_controller is not None
+        and resources.queued_hls_restricted_fallback_refresh_controller is not None
+    )
+    heavy_stage_policy = resources.settings.orchestration.heavy_stage_isolation
+    heavy_stage_exit_ready = int(
+        resources.settings.arq_enabled
+        and resources.settings.stream.refresh_dispatch_mode == "queued"
+        and (
+            resources.settings.stream.refresh_dispatch_mode != "queued"
+            or (resources.arq_redis is not None and queued_refresh_controllers_attached)
+        )
+        and heavy_stage_policy.executor_mode == "process_pool_required"
+        and heavy_stage_policy.max_tasks_per_child > 0
+        and bool(heavy_stage_policy.proof_refs)
+        and bool(resources.settings.orchestration.queued_refresh_proof_refs)
+    )
     return ServingStatusResponse(
         sessions=sessions,
         handles=handles,
@@ -2359,6 +2386,28 @@ async def get_stream_status(
                 **vfs_governance,
                 **vfs_runtime_governance,
                 **playback_gate_governance,
+                "stream_refresh_dispatch_mode": resources.settings.stream.refresh_dispatch_mode,
+                "stream_refresh_queue_enabled": int(
+                    resources.settings.stream.refresh_dispatch_mode == "queued"
+                ),
+                "stream_refresh_queue_ready": int(
+                    resources.settings.stream.refresh_dispatch_mode != "queued"
+                    or (resources.arq_redis is not None and queued_refresh_controllers_attached)
+                ),
+                "stream_refresh_proof_ref_count": len(
+                    resources.settings.orchestration.queued_refresh_proof_refs
+                ),
+                "heavy_stage_executor_mode": heavy_stage_policy.executor_mode,
+                "heavy_stage_max_workers": heavy_stage_policy.max_workers,
+                "heavy_stage_max_tasks_per_child": heavy_stage_policy.max_tasks_per_child,
+                "heavy_stage_process_isolation_required": int(
+                    heavy_stage_policy.executor_mode == "process_pool_required"
+                ),
+                "heavy_stage_exit_ready": heavy_stage_exit_ready,
+                "heavy_stage_index_timeout_seconds": heavy_stage_policy.index_timeout_seconds,
+                "heavy_stage_parse_timeout_seconds": heavy_stage_policy.parse_timeout_seconds,
+                "heavy_stage_rank_timeout_seconds": heavy_stage_policy.rank_timeout_seconds,
+                "heavy_stage_proof_ref_count": len(heavy_stage_policy.proof_refs),
                 "serving_active_session_summaries": [
                     f"{session.session_id}:{session.category}:{session.resource}"
                     for session in sessions[:10]

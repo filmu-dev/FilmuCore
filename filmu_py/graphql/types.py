@@ -32,6 +32,7 @@ class GQLRecoveryTargetStage(StrEnum):
     """Pipeline stage targeted by automatic recovery."""
 
     NONE = "none"
+    INDEX = "index"
     SCRAPE = "scrape"
     PARSE = "parse"
     FINALIZE = "finalize"

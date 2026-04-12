@@ -448,11 +448,12 @@ def test_poll_ongoing_shows_enqueues_scrape_for_newly_released_unsatisfied_episo
 def test_finalize_show_item_requeues_all_missing_seasons_not_just_first(
     monkeypatch: Any,
 ) -> None:
-    """Fix 1: finalize_item must re-enqueue scrape_item with ALL still-missing seasons.
+    """Fix 1: finalize_item must re-enqueue index_item with ALL still-missing seasons.
 
     Before the fix, only ``all_missing[0]`` was passed, causing a stall loop
-    when the first missing season was unavailable.  Now the full sorted list is
-    passed so the scraper can search for every outstanding season in one pass.
+    when the first missing season was unavailable.  Wave 3 now re-enters through
+    ``index_item`` instead of jumping directly to scrape, but the full sorted
+    season set still needs to be preserved.
     """
     item = MediaItemRecord(
         id="show-partial",
@@ -520,10 +521,10 @@ def test_finalize_show_item_requeues_all_missing_seasons_not_just_first(
     assert result == item.id
     assert transitions == [(ItemEvent.PARTIAL_COMPLETE, "missing_episodes")]
 
-    # Verify that scrape_item was enqueued with missing_seasons=[2, 3] (full set).
-    scrape_calls = [call for call in redis.calls if call[0] == "scrape_item"]
-    assert len(scrape_calls) == 1, f"expected 1 scrape_item enqueue call, got {scrape_calls}"
-    enqueued_kwargs = scrape_calls[0][2]
+    # Verify that index_item was enqueued with missing_seasons=[2, 3] (full set).
+    index_calls = [call for call in redis.calls if call[0] == "index_item"]
+    assert len(index_calls) == 1, f"expected 1 index_item enqueue call, got {index_calls}"
+    enqueued_kwargs = index_calls[0][2]
     assert enqueued_kwargs.get("missing_seasons") == [2, 3], (
         f"expected missing_seasons=[2, 3], got {enqueued_kwargs.get('missing_seasons')!r} — "
         "only the first missing season should NOT be passed (Fix 1 regression)"
@@ -533,7 +534,7 @@ def test_finalize_show_item_requeues_all_missing_seasons_not_just_first(
 def test_finalize_show_item_requeues_single_missing_season(
     monkeypatch: Any,
 ) -> None:
-    """Fix 1 (single-season case): missing_seasons=[N] for a single missing season."""
+    """Fix 1 (single-season case): missing_seasons=[N] survives re-entry through index_item."""
     item = MediaItemRecord(
         id="show-one-missing",
         external_ref="tvdb:one-missing",
@@ -588,9 +589,9 @@ def test_finalize_show_item_requeues_single_missing_season(
         tasks.finalize_item({"settings": _build_settings(), "queue_name": "filmu-py"}, item.id)
     )
 
-    scrape_calls = [call for call in redis.calls if call[0] == "scrape_item"]
-    assert len(scrape_calls) == 1
-    assert scrape_calls[0][2].get("missing_seasons") == [5]
+    index_calls = [call for call in redis.calls if call[0] == "index_item"]
+    assert len(index_calls) == 1
+    assert index_calls[0][2].get("missing_seasons") == [5]
 
 
 def test_evaluate_show_completion_does_not_self_satisfy_full_show_from_single_episode_pack() -> None:

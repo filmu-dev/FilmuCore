@@ -435,11 +435,20 @@ def _build_recovery_plan_record(
     )
     is_in_cooldown = _is_retry_cooldown_active(effective_next_retry_at)
 
-    if state in {ItemState.REQUESTED, ItemState.INDEXED}:
+    if state is ItemState.REQUESTED:
+        return RecoveryPlanRecord(
+            mechanism=RecoveryMechanism.ORPHAN_RECOVERY,
+            target_stage=RecoveryTargetStage.INDEX,
+            reason="orphaned_requested_item",
+            next_retry_at=None,
+            recovery_attempt_count=recovery_attempt_count,
+            is_in_cooldown=False,
+        )
+    if state is ItemState.INDEXED:
         return RecoveryPlanRecord(
             mechanism=RecoveryMechanism.ORPHAN_RECOVERY,
             target_stage=RecoveryTargetStage.SCRAPE,
-            reason="orphaned_pre_scrape_item",
+            reason="orphaned_indexed_item",
             next_retry_at=None,
             recovery_attempt_count=recovery_attempt_count,
             is_in_cooldown=False,
@@ -1318,6 +1327,7 @@ class RecoveryTargetStage(enum.StrEnum):
     """Pipeline stage that should run next when automatic recovery applies."""
 
     NONE = "none"
+    INDEX = "index"
     SCRAPE = "scrape"
     PARSE = "parse"
     FINALIZE = "finalize"

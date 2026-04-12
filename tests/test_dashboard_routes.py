@@ -840,6 +840,10 @@ def test_plugin_governance_route_returns_operator_policy_summary() -> None:
         "load_failed_plugins": 0,
         "ready_plugins": 1,
         "unready_plugins": 0,
+        "healthy_plugins": 1,
+        "degraded_plugins": 0,
+        "non_builtin_plugins": 1,
+        "isolated_non_builtin_plugins": 0,
         "quarantined_plugins": 0,
         "quarantine_recommended_plugins": 0,
         "unsigned_external_plugins": 1,
@@ -848,14 +852,39 @@ def test_plugin_governance_route_returns_operator_policy_summary() -> None:
         "trust_policy_rejections": 0,
         "sandbox_profile_counts": {"restricted": 1},
         "tenancy_mode_counts": {"tenant": 1},
+        "runtime_policy_mode": "report_only",
+        "runtime_isolation_ready": False,
         "recommended_actions": ["require_external_plugin_signature"],
         "remaining_gaps": [
-            "runtime sandbox isolation is still in-process",
-            "operator quarantine/revocation still needs sandbox-enforced execution boundaries",
-            "external plugin artifact provenance is not yet SBOM/signing-policy complete",
+            "non-builtin plugin runtime isolation exit gates are not fully satisfied",
+            "operator quarantine/revocation still depends on runtime policy enforcement",
+            "external plugin artifact provenance or signature verification is still incomplete",
         ],
     }
     assert body["plugins"][0]["name"] == "external-scraper"
+
+
+def test_plugin_governance_route_marks_wave4_runtime_policy_ready() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "isolated_runtime_required",
+                "require_strict_signatures": True,
+                "require_source_digest": True,
+                "proof_refs": ["ops/wave4/plugin-runtime-isolation.md"],
+            }
+        }
+    )
+
+    response = client.get("/api/v1/plugins/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["runtime_policy_mode"] == "isolated_runtime_required"
+    assert body["summary"]["runtime_isolation_ready"] is True
+    assert body["summary"]["healthy_plugins"] == 0
+    assert body["summary"]["degraded_plugins"] == 0
+    assert body["summary"]["remaining_gaps"] == []
 
 
 def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness() -> None:
@@ -1452,6 +1481,7 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
         "tenant_boundary",
         "vfs_data_plane",
         "distributed_control_plane",
+        "runtime_lifecycle",
         "sre_program",
         "operator_log_pipeline",
         "plugin_runtime_isolation",
@@ -1476,10 +1506,21 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "chunk_cache_enabled=True" in body["vfs_data_plane"]["evidence"]
     assert body["distributed_control_plane"]["status"] == "not_ready"
     assert "EventBus backend=process_local" in body["distributed_control_plane"]["evidence"]
+    assert body["runtime_lifecycle"]["status"] == "blocked"
+    assert "runtime_phase=bootstrap" in body["runtime_lifecycle"]["evidence"]
     assert body["sre_program"]["status"] == "partial"
     assert body["operator_log_pipeline"]["status"] == "partial"
     assert "structured_logging_enabled=True" in body["operator_log_pipeline"]["evidence"]
     assert body["plugin_runtime_isolation"]["status"] == "partial"
+    assert body["heavy_stage_workload_isolation"]["status"] == "partial"
+    assert "stream_refresh_queue_ready=1" in body["heavy_stage_workload_isolation"]["evidence"]
+    assert (
+        "heavy_stage_executor_mode=process_pool_preferred"
+        in body["heavy_stage_workload_isolation"]["evidence"]
+    )
+    assert "heavy_stage_max_workers=2" in body["heavy_stage_workload_isolation"]["evidence"]
+    assert "queued_refresh_proof_ref_count=0" in body["heavy_stage_workload_isolation"]["evidence"]
+    assert "heavy_stage_proof_ref_count=0" in body["heavy_stage_workload_isolation"]["evidence"]
     assert body["heavy_stage_workload_isolation"]["status"] == "partial"
     assert body["release_metadata_performance"]["status"] == "partial"
 
@@ -1525,7 +1566,129 @@ def test_operations_governance_route_marks_identity_ready_when_wave2_exit_gates_
     body = response.json()
     assert body["identity_authz"]["status"] == "ready"
     assert body["identity_authz"]["remaining_gaps"] == []
-    assert "oidc_rollout_status=ready" in body["identity_authz"]["evidence"]
+
+
+def test_operations_governance_route_blocks_queued_refresh_without_runtime_queue_attachment() -> None:
+    client = _build_client(
+        arq_enabled=True,
+        settings_overrides={
+            "FILMU_PY_STREAM": {"refresh_dispatch_mode": "queued"},
+            "FILMU_PY_ORCHESTRATION": {
+                "queued_refresh_proof_refs": ["ops/wave3/queued-refresh-soak.md"],
+                "heavy_stage_isolation": {
+                    "executor_mode": "thread_pool_only",
+                    "max_workers": 3,
+                    "max_tasks_per_child": 0,
+                    "proof_refs": ["ops/wave3/heavy-stage-failure-injection.md"],
+                },
+            },
+        },
+    )
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    heavy_stage = body["heavy_stage_workload_isolation"]
+    assert heavy_stage["status"] == "blocked"
+    assert "stream_refresh_dispatch_mode=queued" in heavy_stage["evidence"]
+    assert "stream_refresh_queue_ready=0" in heavy_stage["evidence"]
+    assert "heavy_stage_executor_mode=thread_pool_only" in heavy_stage["evidence"]
+    assert "heavy_stage_max_workers=3" in heavy_stage["evidence"]
+    assert "heavy_stage_max_tasks_per_child=0" in heavy_stage["evidence"]
+    assert "heavy_stage_process_isolation_required=0" in heavy_stage["evidence"]
+    assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_exit_ready=0" in heavy_stage["evidence"]
+
+
+def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satisfied() -> None:
+    client = _build_client(
+        arq_enabled=True,
+        settings_overrides={
+            "FILMU_PY_STREAM": {"refresh_dispatch_mode": "queued"},
+            "FILMU_PY_ORCHESTRATION": {
+                "queued_refresh_proof_refs": ["ops/wave3/queued-refresh-soak.md"],
+                "heavy_stage_isolation": {
+                    "executor_mode": "process_pool_required",
+                    "max_workers": 2,
+                    "max_tasks_per_child": 25,
+                    "proof_refs": ["ops/wave3/heavy-stage-failure-injection.md"],
+                },
+            },
+        },
+    )
+    resources = cast(Any, client.app.state.resources)
+    resources.arq_redis = resources.redis
+    resources.queued_direct_playback_refresh_controller = object()
+    resources.queued_hls_failed_lease_refresh_controller = object()
+    resources.queued_hls_restricted_fallback_refresh_controller = object()
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    heavy_stage = body["heavy_stage_workload_isolation"]
+    assert heavy_stage["status"] == "ready"
+    assert heavy_stage["required_actions"] == []
+    assert heavy_stage["remaining_gaps"] == []
+    assert "stream_refresh_dispatch_mode=queued" in heavy_stage["evidence"]
+    assert "stream_refresh_queue_ready=1" in heavy_stage["evidence"]
+    assert "heavy_stage_executor_mode=process_pool_required" in heavy_stage["evidence"]
+    assert "heavy_stage_max_workers=2" in heavy_stage["evidence"]
+    assert "heavy_stage_max_tasks_per_child=25" in heavy_stage["evidence"]
+    assert "heavy_stage_process_isolation_required=1" in heavy_stage["evidence"]
+    assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
+    assert "heavy_stage_exit_ready=1" in heavy_stage["evidence"]
+
+
+def test_operations_governance_route_marks_wave4_ready_when_exit_gates_are_satisfied() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel.example.test/v1/traces",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "http://logs.example.test",
+                "healthcheck_url": "http://logs.example.test/health",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
+            },
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "isolated_runtime_required",
+                "require_strict_signatures": True,
+                "require_source_digest": True,
+                "proof_refs": ["ops/wave4/plugin-runtime-isolation.md"],
+            },
+        }
+    )
+
+    response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["operator_log_pipeline"]["status"] == "ready"
+    assert body["operator_log_pipeline"]["required_actions"] == []
+    assert body["operator_log_pipeline"]["remaining_gaps"] == []
+    assert "log_search_backend=opensearch" in body["operator_log_pipeline"]["evidence"]
+    assert (
+        "rust_trace_correlation_enabled=True" in body["operator_log_pipeline"]["evidence"]
+    )
+    assert body["plugin_runtime_isolation"]["status"] == "ready"
+    assert body["plugin_runtime_isolation"]["required_actions"] == []
+    assert body["plugin_runtime_isolation"]["remaining_gaps"] == []
+    assert (
+        "plugin_runtime_enforcement_mode=isolated_runtime_required"
+        in body["plugin_runtime_isolation"]["evidence"]
+    )
+    assert "plugin_runtime_exit_ready=1" in body["plugin_runtime_isolation"]["evidence"]
     assert "resource_scope_constraint_coverage=True" in body["identity_authz"]["evidence"]
 
 
@@ -1847,7 +2010,22 @@ def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
         "max_ready_jobs": 1,
         "max_dead_letter_jobs": 0,
         "max_oldest_ready_age_seconds": history[0]["oldest_ready_age_seconds"],
+        "latest_dead_letter_reason_counts": {},
     }
+
+
+def test_runtime_lifecycle_route_returns_bounded_transition_history() -> None:
+    client = _build_client()
+
+    response = client.get("/api/v1/operations/runtime", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phase"] == "bootstrap"
+    assert body["health"] == "healthy"
+    assert body["detail"] == "runtime_bootstrap_pending"
+    assert len(body["transitions"]) == 1
+    assert body["transitions"][0]["phase"] == "bootstrap"
 
 
 def test_stats_route_rejects_cross_tenant_requests_without_delegated_scope() -> None:

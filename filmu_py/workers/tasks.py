@@ -38,7 +38,7 @@ from filmu_py.plugins import ExternalIdentifiers, ScraperSearchInput
 from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.context import HostPluginDatasource, PluginContextProvider
 from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
-from filmu_py.plugins.loader import load_plugins
+from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.rtn import RTN, ParsedData, RankedTorrent, RankingProfile
 from filmu_py.services.debrid import (
@@ -61,6 +61,9 @@ from filmu_py.services.media import (
     _parse_calendar_datetime,
 )
 from filmu_py.services.media_server import MediaServerNotifier
+from filmu_py.services.playback import (
+    PlaybackSourceService,
+)
 from filmu_py.services.settings_service import load_settings
 from filmu_py.state.item import InvalidItemTransition, ItemEvent, ItemState
 from filmu_py.workers.retry import (
@@ -72,6 +75,7 @@ from filmu_py.workers.retry import (
 )
 
 logger = logging.getLogger(__name__)
+INDEX_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
 PARSE_RESULTS_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
 RANK_STREAMS_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
@@ -94,13 +98,18 @@ WORKER_CLEANUP_TOTAL = Counter(
     "Cleanup actions taken before replaying or deduplicating worker stages",
     ["stage", "action"],
 )
+WORKER_STAGE_IDEMPOTENCY_TOTAL = Counter(
+    "filmu_py_worker_stage_idempotency_total",
+    "Observed stage idempotency and replay outcomes by stage",
+    ["stage", "outcome"],
+)
 WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
     "filmu_py_worker_enqueue_defer_seconds",
     "Deferred worker enqueue delays in seconds",
     ["stage"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
 )
-_HEAVY_STAGE_EXECUTOR: Executor | None = None
+_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int], Executor] = {}
 
 
 class _RankBatchInput(TypedDict):
@@ -124,24 +133,66 @@ class _RankBatchRecord(TypedDict):
     rejection_reason: str | None
 
 
-def _heavy_stage_executor() -> Executor:
-    """Return the bounded executor used for CPU-heavy ranking isolation."""
+def _heavy_stage_executor(stage_name: str) -> Executor:
+    """Return the bounded executor used for one CPU-heavy worker stage."""
 
-    global _HEAVY_STAGE_EXECUTOR
-    if _HEAVY_STAGE_EXECUTOR is None:
-        if "PYTEST_CURRENT_TEST" in os.environ:
-            _HEAVY_STAGE_EXECUTOR = ThreadPoolExecutor(max_workers=2)
-        elif multiprocessing.get_start_method(allow_none=True) == "fork":
-            _HEAVY_STAGE_EXECUTOR = ProcessPoolExecutor(max_workers=2)
-        else:
-            try:
-                _HEAVY_STAGE_EXECUTOR = ProcessPoolExecutor(
-                    max_workers=2,
-                    mp_context=multiprocessing.get_context("spawn"),
+    settings = get_settings()
+    policy = settings.orchestration.heavy_stage_isolation
+    executor_key = (
+        stage_name,
+        policy.executor_mode,
+        policy.max_workers,
+        policy.max_tasks_per_child,
+    )
+    stale_keys = [key for key in _HEAVY_STAGE_EXECUTORS if key[1:] != executor_key[1:]]
+    for stale_key in stale_keys:
+        stale_executor = _HEAVY_STAGE_EXECUTORS.pop(stale_key)
+        stale_executor.shutdown(wait=False, cancel_futures=True)
+    executor = _HEAVY_STAGE_EXECUTORS.get(executor_key)
+    if executor is not None:
+        return executor
+    if policy.executor_mode == "thread_pool_only" or (
+        policy.executor_mode != "process_pool_required"
+        and "PYTEST_CURRENT_TEST" in os.environ
+    ):
+        executor = ThreadPoolExecutor(max_workers=policy.max_workers)
+    else:
+        max_tasks_per_child = (
+            policy.max_tasks_per_child if policy.max_tasks_per_child > 0 else None
+        )
+        try:
+            if multiprocessing.get_start_method(allow_none=True) == "fork":
+                executor = ProcessPoolExecutor(
+                    max_workers=policy.max_workers,
+                    max_tasks_per_child=max_tasks_per_child,
                 )
-            except (ValueError, RuntimeError):
-                _HEAVY_STAGE_EXECUTOR = ThreadPoolExecutor(max_workers=2)
-    return _HEAVY_STAGE_EXECUTOR
+            else:
+                executor = ProcessPoolExecutor(
+                    max_workers=policy.max_workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    max_tasks_per_child=max_tasks_per_child,
+                )
+        except (ValueError, RuntimeError):
+            if policy.executor_mode == "process_pool_required":
+                raise RuntimeError(
+                    f"process-backed heavy-stage isolation is required for {stage_name}"
+                ) from None
+            executor = ThreadPoolExecutor(max_workers=policy.max_workers)
+    _HEAVY_STAGE_EXECUTORS[executor_key] = executor
+    return executor
+
+
+def _heavy_stage_timeout_seconds(stage_name: str) -> float:
+    """Return the configured timeout budget for one isolated heavy stage."""
+
+    policy = get_settings().orchestration.heavy_stage_isolation
+    if stage_name == "index_item":
+        return policy.index_timeout_seconds
+    if stage_name == "parse_scrape_results":
+        return policy.parse_timeout_seconds
+    if stage_name == "rank_streams":
+        return policy.rank_timeout_seconds
+    return max(policy.parse_timeout_seconds, 30.0)
 
 
 def _rank_stream_batch(
@@ -426,6 +477,42 @@ async def _try_transition(
         return None
 
 
+def worker_stage_idempotency_key(
+    stage_name: str,
+    item_id: str,
+    *,
+    discriminator: str | None = None,
+) -> str:
+    """Return a stable idempotency key for one stage/item combination."""
+
+    if discriminator is None or discriminator == "":
+        return f"{stage_name}:{item_id}"
+    return f"{stage_name}:{item_id}:{discriminator}"
+
+
+def index_item_job_id(item_id: str) -> str:
+    """Return a stable ARQ job identifier for index-stage processing."""
+
+    return f"index-item:{item_id}"
+
+
+def index_item_followup_job_id(
+    item_id: str,
+    *,
+    discriminator: str | None = None,
+    missing_seasons: list[int] | None = None,
+) -> str:
+    """Return a stable follow-up index job id for delayed polling or inventory rechecks."""
+
+    suffix_parts: list[str] = ["followup"]
+    if discriminator:
+        suffix_parts.append(discriminator)
+    if missing_seasons:
+        normalized = "-".join(str(season) for season in sorted(set(missing_seasons)))
+        suffix_parts.append(f"missing:{normalized}")
+    return ":".join([index_item_job_id(item_id), *suffix_parts])
+
+
 def parse_scrape_results_job_id(item_id: str) -> str:
     """Return a stable ARQ job identifier for parse-scrape-results processing."""
 
@@ -471,6 +558,24 @@ def finalize_item_job_id(item_id: str) -> str:
     return f"finalize-item:{item_id}"
 
 
+def refresh_direct_playback_link_job_id(item_id: str) -> str:
+    """Return a stable ARQ job identifier for queued direct-play refresh work."""
+
+    return f"refresh-direct-playback:{item_id}"
+
+
+def refresh_selected_hls_failed_lease_job_id(item_id: str) -> str:
+    """Return a stable ARQ job identifier for queued failed-HLS refresh work."""
+
+    return f"refresh-selected-hls-failed-lease:{item_id}"
+
+
+def refresh_selected_hls_restricted_fallback_job_id(item_id: str) -> str:
+    """Return a stable ARQ job identifier for queued restricted-fallback refresh work."""
+
+    return f"refresh-selected-hls-restricted-fallback:{item_id}"
+
+
 def _job_status_name(status: JobStatus) -> str:
     return getattr(status, "value", str(status))
 
@@ -489,6 +594,10 @@ def _record_job_status(stage_name: str, status: JobStatus) -> None:
 
 def _record_cleanup_action(stage_name: str, action: str) -> None:
     WORKER_CLEANUP_TOTAL.labels(stage=stage_name, action=action).inc()
+
+
+def _record_stage_idempotency(stage_name: str, outcome: str) -> None:
+    WORKER_STAGE_IDEMPOTENCY_TOTAL.labels(stage=stage_name, outcome=outcome).inc()
 
 
 async def _clear_stale_downstream_job(
@@ -576,6 +685,7 @@ def _log_downstream_enqueue_result(
 ) -> None:
     worker_logger = _worker_stage_logger()
     if enqueued:
+        _record_stage_idempotency(stage_name, "scheduled")
         _record_enqueue_decision(stage_name, "enqueued")
         worker_logger.info(
             "downstream stage enqueued",
@@ -584,6 +694,7 @@ def _log_downstream_enqueue_result(
             job_id=job_id,
         )
     else:
+        _record_stage_idempotency(stage_name, "suppressed")
         _record_enqueue_decision(stage_name, "suppressed")
         worker_logger.warning(
             "downstream stage enqueue suppressed",
@@ -650,6 +761,46 @@ async def enqueue_process_scraped_item(
         queue_name=queue_name,
         tenant_id=tenant_id,
     )
+
+
+async def enqueue_index_item(
+    redis: ArqRedis,
+    *,
+    item_id: str,
+    queue_name: str,
+    tenant_id: str | None = None,
+    defer_by_seconds: int | None = None,
+    job_id: str | None = None,
+    missing_seasons: list[int] | None = None,
+) -> bool:
+    """Enqueue the index stage with a unique job id for idempotency."""
+
+    settings = get_settings()
+    if not await _enforce_tenant_worker_enqueue_quota(
+        redis,
+        settings=settings,
+        tenant_id=tenant_id,
+        stage_name="index_item",
+    ):
+        return False
+    resolved_job_id = job_id or index_item_job_id(item_id)
+    await _clear_stale_downstream_job(
+        redis,
+        item_id=item_id,
+        stage_name="index_item",
+        job_id=resolved_job_id,
+    )
+    kwargs: dict[str, object] = {
+        "_job_id": resolved_job_id,
+        "_queue_name": queue_name,
+    }
+    if defer_by_seconds is not None and defer_by_seconds > 0:
+        WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="index_item").observe(float(defer_by_seconds))
+        kwargs["_defer_by"] = timedelta(seconds=defer_by_seconds)
+    if missing_seasons:
+        kwargs["missing_seasons"] = missing_seasons
+    job = await _enqueue_arq_job(redis, "index_item", item_id, **kwargs)
+    return job is not None
 
 
 async def enqueue_scrape_item(
@@ -721,6 +872,60 @@ async def enqueue_scrape_item(
     return job is not None
 
 
+async def enqueue_refresh_direct_playback_link(
+    redis: ArqRedis,
+    *,
+    item_id: str,
+    queue_name: str,
+) -> bool:
+    """Enqueue queued direct-play refresh work."""
+
+    job = await _enqueue_arq_job(
+        redis,
+        "refresh_direct_playback_link",
+        item_id,
+        _job_id=refresh_direct_playback_link_job_id(item_id),
+        _queue_name=queue_name,
+    )
+    return job is not None
+
+
+async def enqueue_refresh_selected_hls_failed_lease(
+    redis: ArqRedis,
+    *,
+    item_id: str,
+    queue_name: str,
+) -> bool:
+    """Enqueue queued selected-HLS failed-lease refresh work."""
+
+    job = await _enqueue_arq_job(
+        redis,
+        "refresh_selected_hls_failed_lease",
+        item_id,
+        _job_id=refresh_selected_hls_failed_lease_job_id(item_id),
+        _queue_name=queue_name,
+    )
+    return job is not None
+
+
+async def enqueue_refresh_selected_hls_restricted_fallback(
+    redis: ArqRedis,
+    *,
+    item_id: str,
+    queue_name: str,
+) -> bool:
+    """Enqueue queued selected-HLS restricted-fallback refresh work."""
+
+    job = await _enqueue_arq_job(
+        redis,
+        "refresh_selected_hls_restricted_fallback",
+        item_id,
+        _job_id=refresh_selected_hls_restricted_fallback_job_id(item_id),
+        _queue_name=queue_name,
+    )
+    return job is not None
+
+
 async def enqueue_rank_streams(
     redis: ArqRedis,
     *,
@@ -786,6 +991,12 @@ def _show_completion_retry_delay_seconds(settings: Settings, *, event: ItemEvent
     if event is ItemEvent.PARTIAL_COMPLETE:
         return 0
     return _ongoing_show_poll_interval_hours(settings) * 3600
+
+
+def _show_inventory_retry_delay_seconds(settings: Settings) -> int:
+    """Return a bounded retry delay when released show inventory is still empty."""
+
+    return min(_ongoing_show_poll_interval_hours(settings) * 3600, 300)
 
 
 _PARTIAL_SCOPE_SEASON_COVERAGE_BONUS = 10_000
@@ -882,6 +1093,14 @@ async def is_rank_streams_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
+async def is_index_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
+    """Return whether the index-item stage job is already queued or running."""
+
+    status = await Job(index_item_job_id(item_id), redis=redis).status()
+    _record_job_status("index_item", status)
+    return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
+
+
 async def is_scrape_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     """Return whether the scrape-item stage job is already queued or running."""
 
@@ -937,9 +1156,13 @@ def _is_dubbed_candidate(stream: StreamORM) -> bool:
 
 
 async def _worker_log_context(media_service: MediaService, *, item_id: str) -> dict[str, object]:
+    get_latest_item_request_id = getattr(media_service, "get_latest_item_request_id", None)
+    item_request_id: object = None
+    if callable(get_latest_item_request_id):
+        item_request_id = await get_latest_item_request_id(media_item_id=item_id)
     return {
         "item_id": item_id,
-        "item_request_id": await media_service.get_latest_item_request_id(media_item_id=item_id),
+        "item_request_id": item_request_id,
     }
 
 
@@ -1187,6 +1410,25 @@ async def _maybe_enqueue_parse_stage(
     )
 
 
+def _build_unparsed_candidate_batches(
+    raw_candidates: list[tuple[str, str]],
+    existing_streams: list[tuple[str, str, bool]],
+) -> dict[str, list[str]]:
+    """Group raw scrape candidates that still need parse/validate work."""
+
+    existing_by_key = {
+        (infohash.strip().lower(), raw_title.casefold()): parsed
+        for infohash, raw_title, parsed in existing_streams
+    }
+    batches: dict[str, list[str]] = {}
+    for infohash, raw_title in raw_candidates:
+        stream_key = (infohash.strip().lower(), raw_title.casefold())
+        if existing_by_key.get(stream_key):
+            continue
+        batches.setdefault(infohash, []).append(raw_title)
+    return batches
+
+
 async def _persist_unparsed_stream_candidates(
     *,
     media_service: MediaService,
@@ -1202,16 +1444,21 @@ async def _persist_unparsed_stream_candidates(
         if existing_streams is not None
         else await media_service.get_stream_candidates(media_item_id=item_id)
     )
-    existing_by_key = {
-        (stream.infohash.strip().lower(), stream.raw_title.casefold()): stream for stream in streams
-    }
-    unparsed_by_infohash: dict[str, list[str]] = {}
-    for candidate in raw_candidates:
-        stream_key = (candidate.info_hash.strip().lower(), candidate.raw_title.casefold())
-        existing = existing_by_key.get(stream_key)
-        if existing is not None and existing.parsed_title:
-            continue
-        unparsed_by_infohash.setdefault(candidate.info_hash, []).append(candidate.raw_title)
+    loop = asyncio.get_running_loop()
+    unparsed_by_infohash = await asyncio.wait_for(
+        loop.run_in_executor(
+            _heavy_stage_executor("parse_scrape_results"),
+            functools.partial(
+                _build_unparsed_candidate_batches,
+                [(candidate.info_hash, candidate.raw_title) for candidate in raw_candidates],
+                [
+                    (stream.infohash, stream.raw_title, bool(stream.parsed_title))
+                    for stream in streams
+                ],
+            ),
+        ),
+        timeout=_heavy_stage_timeout_seconds("parse_scrape_results"),
+    )
 
     parsed_count = 0
     for infohash, raw_titles in unparsed_by_infohash.items():
@@ -1386,6 +1633,96 @@ def _retry_after_seconds_from_http_status_error(exc: httpx.HTTPStatusError) -> f
     except ValueError:
         return None
     return retry_after if retry_after >= 0 else None
+
+
+@timed_stage("index_item")
+async def index_item(
+    ctx: dict[str, object],
+    item_id: str,
+    *,
+    missing_seasons: list[int] | None = None,
+) -> str:
+    """Enrich metadata in its own stage and enqueue scrape once the item is indexed."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(ctx=mutable_ctx, stage="index_item", item_id=item_id)
+    media_service = _resolve_media_service(mutable_ctx)
+
+    try:
+        item = await media_service.get_item(item_id)
+        if item is None:
+            raise ValueError(f"Unknown item_id={item_id}")
+        bind_worker_contextvars(
+            ctx=mutable_ctx,
+            stage="index_item",
+            item_id=item_id,
+            tenant_id=getattr(item, "tenant_id", None),
+        )
+        partial_seasons = _normalize_requested_seasons(missing_seasons)
+        if item.state in {ItemState.DOWNLOADED, ItemState.COMPLETED, ItemState.SCRAPED}:
+            if item.state is ItemState.SCRAPED:
+                await _maybe_enqueue_parse_stage(
+                    mutable_ctx,
+                    item_id=item_id,
+                    partial_seasons=partial_seasons,
+                )
+            return item_id
+
+        if item.state in {
+            ItemState.REQUESTED,
+            ItemState.PARTIALLY_COMPLETED,
+            ItemState.ONGOING,
+            ItemState.UNRELEASED,
+        }:
+            await _try_transition(
+                media_service=media_service,
+                item_id=item_id,
+                event=ItemEvent.INDEX,
+                message="index stage started",
+            )
+
+        refreshed_item = await media_service.get_item(item_id)
+        if refreshed_item is None or refreshed_item.state is not ItemState.INDEXED:
+            return item_id
+
+        enrichment = await asyncio.wait_for(
+            media_service.enrich_item_metadata(item_id=item_id),
+            timeout=_heavy_stage_timeout_seconds("index_item"),
+        )
+        _worker_stage_logger().info(
+            "index_item completed",
+            item_id=item_id,
+            enrichment_source=enrichment.enrichment.source,
+            has_tmdb_id=enrichment.enrichment.has_tmdb_id,
+            has_imdb_id=enrichment.enrichment.has_imdb_id,
+            warnings=enrichment.enrichment.warnings,
+        )
+        await _maybe_enqueue_next_stage(
+            mutable_ctx,
+            enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_scrape_item(
+                redis,
+                item_id=item_id,
+                queue_name=queue_name,
+                missing_seasons=partial_seasons,
+                tenant_id=tenant_id,
+            ),
+            item_id=item_id,
+            stage_name="scrape_item",
+            job_id=scrape_item_job_id(item_id),
+            cleanup_stage_job_ids=(("scrape_item", scrape_item_job_id(item_id)),),
+        )
+        return item_id
+    except Exception as exc:
+        attempt = task_try_count(mutable_ctx)
+        if INDEX_RETRY_POLICY.should_dead_letter(attempt):
+            await route_dead_letter(
+                ctx=mutable_ctx,
+                task_name="index_item",
+                item_id=item_id,
+                reason=str(exc),
+            )
+            raise
+        raise Retry(defer=INDEX_RETRY_POLICY.next_delay_seconds(attempt)) from exc
 
 
 async def process_scraped_item(ctx: dict[str, object], item_id: str) -> str:
@@ -1637,7 +1974,7 @@ async def rank_streams(
             loop = asyncio.get_running_loop()
             ranked_batch_records = await asyncio.wait_for(
                 loop.run_in_executor(
-                    _heavy_stage_executor(),
+                    _heavy_stage_executor("rank_streams"),
                     functools.partial(
                         _rank_stream_batch,
                         item_title=item.title,
@@ -1647,7 +1984,7 @@ async def rank_streams(
                         stream_inputs=rank_batch_inputs,
                     ),
                 ),
-                timeout=60.0,
+                timeout=_heavy_stage_timeout_seconds("rank_streams"),
             )
         else:
             ranked_batch_records = []
@@ -1884,7 +2221,25 @@ async def retry_library(ctx: dict[str, object]) -> int:
         for item in items:
             log_context = {"item_id": item.id}
             recovery_plan = _build_recovery_plan_record(state=item.state)
-            if recovery_plan.target_stage is RecoveryTargetStage.SCRAPE:
+            if recovery_plan.target_stage is RecoveryTargetStage.INDEX:
+                if await is_index_item_job_active(arq_redis, item_id=item.id):
+                    logger.info(
+                        "retry_library skipped already-queued item",
+                        extra={**log_context, "stage": "index_item"},
+                    )
+                    continue
+                if await enqueue_index_item(
+                    arq_redis,
+                    item_id=item.id,
+                    queue_name=queue_name,
+                    tenant_id=item.tenant_id,
+                ):
+                    logger.info(
+                        "retry_library re-enqueued item",
+                        extra={**log_context, "stage": "index_item"},
+                    )
+                    re_enqueued += 1
+            elif recovery_plan.target_stage is RecoveryTargetStage.SCRAPE:
                 if await is_scrape_item_job_active(arq_redis, item_id=item.id):
                     logger.info(
                         "retry_library skipped already-queued item",
@@ -2112,11 +2467,28 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
         if item.state in {
             ItemState.DOWNLOADED,
             ItemState.COMPLETED,
-            # NOTE: FAILED is intentionally excluded here so that Request More
-            # from a FAILED show can re-enter the scrape pipeline (transition to
-            # INDEXED happens below at line ~1685).
             ItemState.UNRELEASED,
         }:
+            return item_id
+        if item.state in {ItemState.REQUESTED, ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING}:
+            await _maybe_enqueue_next_stage(
+                mutable_ctx,
+                enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_index_item(
+                    redis,
+                    item_id=item_id,
+                    queue_name=queue_name,
+                    tenant_id=tenant_id,
+                ),
+                item_id=item_id,
+                stage_name="index_item",
+                job_id=index_item_job_id(item_id),
+                cleanup_stage_job_ids=(("index_item", index_item_job_id(item_id)),),
+            )
+            _worker_stage_logger().warning(
+                "scrape_item requeued upstream index stage for pre-index item",
+                item_id=item_id,
+                state=item.state.value,
+            )
             return item_id
         if item.state is ItemState.SCRAPED:
             await _maybe_enqueue_parse_stage(
@@ -2130,13 +2502,8 @@ async def scrape_item(ctx: dict[str, object], item_id: str, *, missing_seasons: 
                 partial_seasons=partial_seasons,
             )
             return item_id
-
-        await _try_transition(
-            media_service=media_service,
-            item_id=item_id,
-            event=ItemEvent.INDEX,
-            message="indexed before scrape",
-        )
+        if item.state is not ItemState.INDEXED:
+            return item_id
         log_context = await _worker_log_context(media_service, item_id=item_id)
         plugin_registry = await _resolve_plugin_registry(mutable_ctx)
         scrape_candidates, provider_summaries = await _scrape_with_plugins(
@@ -2494,7 +2861,7 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
         completion_result: dict[str, object] | None = None
         event = ItemEvent.COMPLETE
         message = "finalize done"
-        missing_season_numbers: list[int] = []  # populated inside show-block if any_satisfied
+        missing_season_numbers: list[int] = []
 
         if _resolve_item_type(item) == "show":
             result = await _evaluate_show_completion(item, media_service._db, settings)
@@ -2513,22 +2880,24 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
             elif result.any_satisfied:
                 event = ItemEvent.PARTIAL_COMPLETE
                 message = "missing_episodes"
-                # searched sequentially (lowest first).
-                all_missing = sorted({s for s, _e in result.missing_released})
-                missing_season_numbers = all_missing  # retry all still-missing seasons together
+                missing_season_numbers = sorted({s for s, _e in result.missing_released})
             else:
                 arq_redis = await _resolve_arq_redis(mutable_ctx)
                 # Add a minimum defer so the pipeline doesn't tight-loop when
                 # show inventory/metadata hasn't stabilised yet.
-                no_inventory_defer = _show_completion_retry_delay_seconds(
-                    settings, event=ItemEvent.PARTIAL_COMPLETE
-                )
-                await enqueue_scrape_item(
+                no_inventory_defer = _show_inventory_retry_delay_seconds(settings)
+                await enqueue_index_item(
                     arq_redis,
                     item_id=item.id,
                     queue_name=_queue_name(settings),
-                    defer_by_seconds=no_inventory_defer,
                     tenant_id=item.tenant_id,
+                    defer_by_seconds=no_inventory_defer,
+                    job_id=index_item_followup_job_id(
+                        item.id,
+                        discriminator="inventory-recheck",
+                        missing_seasons=sorted({s for s, _e in result.missing_released}),
+                    ),
+                    missing_seasons=sorted({s for s, _e in result.missing_released}),
                 )
                 logger.info(
                     "finalize stage re-queued show without satisfied released episodes",
@@ -2592,18 +2961,21 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                 )
         elif event in {ItemEvent.PARTIAL_COMPLETE, ItemEvent.MARK_ONGOING}:
             arq_redis = await _resolve_arq_redis(mutable_ctx)
-            followup_scrape_job_id = scrape_item_followup_job_id(
-                item.id,
-                missing_seasons=missing_season_numbers or None,
-            )
-            await enqueue_scrape_item(
+            followup_defer = _show_completion_retry_delay_seconds(settings, event=event)
+            await enqueue_index_item(
                 arq_redis,
                 item_id=item.id,
                 queue_name=_queue_name(settings),
-                defer_by_seconds=_show_completion_retry_delay_seconds(settings, event=event),
-                job_id=followup_scrape_job_id,
-                missing_seasons=missing_season_numbers or None,
                 tenant_id=item.tenant_id,
+                defer_by_seconds=followup_defer if followup_defer > 0 else None,
+                job_id=index_item_followup_job_id(
+                    item.id,
+                    discriminator=(
+                        "ongoing-poll" if event is ItemEvent.MARK_ONGOING else "partial-followup"
+                    ),
+                    missing_seasons=missing_season_numbers or None,
+                ),
+                missing_seasons=missing_season_numbers or None,
             )
 
         logger.info(
@@ -2630,6 +3002,63 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
             )
             raise
         raise Retry(defer=FINALIZE_RETRY_POLICY.next_delay_seconds(attempt)) from exc
+
+
+@timed_stage("refresh_direct_playback_link")
+async def refresh_direct_playback_link(ctx: dict[str, object], item_id: str) -> str:
+    """Run queued direct-play refresh work outside the route request path."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(ctx=mutable_ctx, stage="refresh_direct_playback_link", item_id=item_id)
+    playback_service = await _resolve_playback_service(mutable_ctx)
+    request = await playback_service.prepare_direct_playback_refresh_schedule_request(
+        item_id,
+        at=datetime.now(UTC),
+    )
+    if request is None:
+        return item_id
+    await playback_service.execute_scheduled_direct_playback_refresh_with_providers(
+        request,
+        scheduler=None,
+        at=datetime.now(UTC),
+    )
+    return item_id
+
+
+@timed_stage("refresh_selected_hls_failed_lease")
+async def refresh_selected_hls_failed_lease(ctx: dict[str, object], item_id: str) -> str:
+    """Run queued selected-HLS failed-lease refresh work."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(
+        ctx=mutable_ctx, stage="refresh_selected_hls_failed_lease", item_id=item_id
+    )
+    playback_service = await _resolve_playback_service(mutable_ctx)
+    await playback_service.execute_selected_hls_failed_lease_refresh_with_providers(
+        item_id,
+        at=datetime.now(UTC),
+    )
+    return item_id
+
+
+@timed_stage("refresh_selected_hls_restricted_fallback")
+async def refresh_selected_hls_restricted_fallback(
+    ctx: dict[str, object], item_id: str
+) -> str:
+    """Run queued selected-HLS restricted-fallback refresh work."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(
+        ctx=mutable_ctx,
+        stage="refresh_selected_hls_restricted_fallback",
+        item_id=item_id,
+    )
+    playback_service = await _resolve_playback_service(mutable_ctx)
+    await playback_service.execute_selected_hls_restricted_fallback_refresh_with_providers(
+        item_id,
+        at=datetime.now(UTC),
+    )
+    return item_id
 
 
 def _queue_name(settings: Settings) -> str:
@@ -2687,6 +3116,28 @@ def _resolve_media_service(ctx: dict[str, Any]) -> MediaService:
     resolved = MediaService(db=db, event_bus=event_bus, rate_limiter=_resolve_limiter(ctx))
     ctx["media_service"] = resolved
     return resolved
+
+
+async def _resolve_playback_service(ctx: dict[str, Any]) -> PlaybackSourceService:
+    """Resolve playback refresh service from worker context or construct a fallback runtime."""
+
+    service = ctx.get("playback_service")
+    if isinstance(service, PlaybackSourceService):
+        return service
+
+    settings = await _resolve_runtime_settings(ctx)
+    db = ctx.get("db")
+    if not isinstance(db, DatabaseRuntime):
+        db = DatabaseRuntime(settings.postgres_dsn, echo=False)
+        ctx["db"] = db
+
+    service = PlaybackSourceService(
+        db,
+        settings=settings,
+        rate_limiter=_resolve_limiter(ctx),
+    )
+    ctx["playback_service"] = service
+    return service
 
 
 def _resolve_worker_cache(ctx: dict[str, Any]) -> CacheManager:
@@ -2775,7 +3226,21 @@ async def _resolve_plugin_registry(ctx: dict[str, Any]) -> PluginRegistry:
         context_provider=context_provider,
         host_version=settings.version,
         trust_store_path=settings.plugin_trust_store_path,
-        strict_signatures=settings.plugin_strict_signatures,
+        strict_signatures=(
+            settings.plugin_strict_signatures
+            or settings.plugin_runtime.require_strict_signatures
+        ),
+        runtime_policy=PluginRuntimePolicy(
+            enforcement_mode=settings.plugin_runtime.enforcement_mode,
+            require_strict_signatures=settings.plugin_runtime.require_strict_signatures,
+            require_source_digest=settings.plugin_runtime.require_source_digest,
+            allowed_non_builtin_sandbox_profiles=tuple(
+                settings.plugin_runtime.allowed_non_builtin_sandbox_profiles
+            ),
+            allowed_non_builtin_tenancy_modes=tuple(
+                settings.plugin_runtime.allowed_non_builtin_tenancy_modes
+            ),
+        ),
         register_graphql=False,
         register_capabilities=True,
     )
@@ -3233,11 +3698,15 @@ async def poll_unreleased_items(ctx: dict[str, object]) -> dict[str, int]:
                 event=ItemEvent.INDEX,
                 message="unreleased item now available",
             )
-            await enqueue_scrape_item(
+            await enqueue_index_item(
                 arq_redis,
                 item_id=str(item.id),
                 queue_name=queue_name,
                 tenant_id=item.tenant_id,
+                job_id=index_item_followup_job_id(
+                    str(item.id),
+                    discriminator="release-poll",
+                ),
             )
             transitioned_count += 1
 
@@ -3283,6 +3752,10 @@ async def on_shutdown(ctx: dict[str, Any]) -> None:
     if isinstance(arq_redis, ArqRedis):
         await arq_redis.aclose()
 
+    for executor in _HEAVY_STAGE_EXECUTORS.values():
+        executor.shutdown(wait=False, cancel_futures=True)
+    _HEAVY_STAGE_EXECUTORS.clear()
+
 
 def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
     """Create ARQ worker settings object consumable by ``arq.worker.run_worker``."""
@@ -3294,11 +3767,15 @@ def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
 
     return {
         "functions": [
+            index_item,
             scrape_item,
             parse_scrape_results,
             rank_streams,
             debrid_item,
             finalize_item,
+            refresh_direct_playback_link,
+            refresh_selected_hls_failed_lease,
+            refresh_selected_hls_restricted_fallback,
             backfill_imdb_ids,
             poll_content_services,
             recover_incomplete_library,

@@ -44,6 +44,7 @@ from .loader import (
     PluginLoadFailure,
     PluginLoadReport,
     PluginLoadSuccess,
+    PluginRuntimePolicy,
     load_graphql_plugins,
     load_plugins,
 )
@@ -90,6 +91,7 @@ __all__ = [
     "PluginLoadSuccess",
     "PluginManifest",
     "PluginRegistry",
+    "PluginRuntimePolicy",
     "PluginSettingsRegistry",
     "ProwlarrScraper",
     "RarbgScraper",

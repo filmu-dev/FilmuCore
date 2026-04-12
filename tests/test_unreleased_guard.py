@@ -183,18 +183,19 @@ def test_poll_unreleased_items_requeues_when_release_date_passed(monkeypatch: An
     svc = FakeMediaService()
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: svc)
 
-    enqueue_calls: list[str] = []
+    enqueue_calls: list[tuple[str, dict[str, Any]]] = []
 
     async def fake_enqueue(
         redis: Any,
         item_id: str,
         queue_name: str,
         tenant_id: str | None = None,
+        **kwargs: Any,
     ) -> None:
         _ = (redis, queue_name, tenant_id)
-        enqueue_calls.append(item_id)
+        enqueue_calls.append((item_id, kwargs))
 
-    monkeypatch.setattr(tasks, "enqueue_scrape_item", fake_enqueue)
+    monkeypatch.setattr(tasks, "enqueue_index_item", fake_enqueue)
     monkeypatch.setattr(tasks, "_try_transition", fake_try_transition)
 
     ctx: dict[str, object] = {"db": _MockDB(), "arq_redis": {"mock": True}, "queue_name": "q"}
@@ -213,4 +214,8 @@ def test_poll_unreleased_items_requeues_when_release_date_passed(monkeypatch: An
     assert result["transitioned"] == 1
     assert len(svc.transition_calls) == 1
     assert svc.transition_calls[0] == ItemEvent.INDEX
-    assert enqueue_calls == ["item-4"]
+    assert [item_id for item_id, _kwargs in enqueue_calls] == ["item-4"]
+    assert enqueue_calls[0][1]["job_id"] == tasks.index_item_followup_job_id(
+        "item-4",
+        discriminator="release-poll",
+    )

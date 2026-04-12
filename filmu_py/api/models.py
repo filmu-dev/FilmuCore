@@ -239,6 +239,10 @@ class PluginGovernanceSummaryResponse(BaseModel):
     load_failed_plugins: int
     ready_plugins: int
     unready_plugins: int
+    healthy_plugins: int
+    degraded_plugins: int
+    non_builtin_plugins: int
+    isolated_non_builtin_plugins: int
     quarantined_plugins: int
     quarantine_recommended_plugins: int
     unsigned_external_plugins: int
@@ -247,6 +251,10 @@ class PluginGovernanceSummaryResponse(BaseModel):
     trust_policy_rejections: int
     sandbox_profile_counts: dict[str, int]
     tenancy_mode_counts: dict[str, int]
+    runtime_policy_mode: Literal[
+        "report_only", "deny_non_builtin", "isolated_runtime_required"
+    ]
+    runtime_isolation_ready: bool
     recommended_actions: list[str]
     remaining_gaps: list[str]
 
@@ -307,6 +315,37 @@ class EnterpriseOperationsSliceResponse(BaseModel):
     remaining_gaps: list[str]
 
 
+class RuntimeLifecycleTransitionResponse(BaseModel):
+    """One observable runtime lifecycle transition."""
+
+    phase: Literal[
+        "bootstrap",
+        "plugin_registration",
+        "steady_state",
+        "degraded",
+        "shutting_down",
+    ]
+    health: Literal["healthy", "degraded"]
+    detail: str
+    at: str
+
+
+class RuntimeLifecycleResponse(BaseModel):
+    """Current runtime lifecycle state plus bounded history."""
+
+    phase: Literal[
+        "bootstrap",
+        "plugin_registration",
+        "steady_state",
+        "degraded",
+        "shutting_down",
+    ]
+    health: Literal["healthy", "degraded"]
+    detail: str
+    updated_at: str
+    transitions: list[RuntimeLifecycleTransitionResponse]
+
+
 class EnterpriseOperationsGovernanceResponse(BaseModel):
     """Machine-readable posture for the current enterprise operations slices."""
 
@@ -316,6 +355,7 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
     tenant_boundary: EnterpriseOperationsSliceResponse
     vfs_data_plane: EnterpriseOperationsSliceResponse
     distributed_control_plane: EnterpriseOperationsSliceResponse
+    runtime_lifecycle: EnterpriseOperationsSliceResponse
     sre_program: EnterpriseOperationsSliceResponse
     operator_log_pipeline: EnterpriseOperationsSliceResponse
     plugin_runtime_isolation: EnterpriseOperationsSliceResponse
@@ -354,6 +394,7 @@ class QueueStatusResponse(BaseModel):
     alerts: list["QueueAlertResponse"] = []
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
+    dead_letter_reason_counts: dict[str, int] = {}
 
 
 class QueueAlertResponse(BaseModel):
@@ -377,6 +418,7 @@ class QueueStatusHistoryPointResponse(BaseModel):
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
     alert_level: Literal["ok", "warning", "critical"] = "ok"
+    dead_letter_reason_counts: dict[str, int] = {}
 
 
 class QueueStatusHistorySummaryResponse(BaseModel):
@@ -389,6 +431,7 @@ class QueueStatusHistorySummaryResponse(BaseModel):
     max_ready_jobs: int
     max_dead_letter_jobs: int
     max_oldest_ready_age_seconds: float | None = None
+    latest_dead_letter_reason_counts: dict[str, int] = {}
 
 
 class QueueStatusHistoryResponse(BaseModel):
@@ -529,6 +572,21 @@ class ServingGovernanceResponse(BaseModel):
     hls_restricted_fallback_refresh_trigger_backoff_pending: int
     hls_restricted_fallback_refresh_trigger_failures: int
     hls_restricted_fallback_refresh_trigger_tasks_active: int
+    stream_refresh_dispatch_mode: Literal["in_process", "queued"]
+    stream_refresh_queue_enabled: int
+    stream_refresh_queue_ready: int
+    stream_refresh_proof_ref_count: int
+    heavy_stage_executor_mode: Literal[
+        "process_pool_preferred", "process_pool_required", "thread_pool_only"
+    ]
+    heavy_stage_max_workers: int
+    heavy_stage_max_tasks_per_child: int
+    heavy_stage_process_isolation_required: int
+    heavy_stage_exit_ready: int
+    heavy_stage_index_timeout_seconds: float
+    heavy_stage_parse_timeout_seconds: float
+    heavy_stage_rank_timeout_seconds: float
+    heavy_stage_proof_ref_count: int
     stream_abort_events: int
     local_stream_abort_events: int
     remote_stream_abort_events: int
