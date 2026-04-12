@@ -11,10 +11,15 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ## Git workflow
 - The active local development branch is `main`.
-- Push changes directly to `origin/main`.
+- Local `main` is the only active Codex development branch for this repository.
 - Do not create local feature branches, detached publish branches, or extra worktrees for normal Codex work in this repository.
-- If local `main` is behind `origin/main`, update `main` first and continue work there instead of branching around it.
-- If a branch is created accidentally, move the intended changes back onto `main`, push `main`, and delete the accidental branch before continuing.
+- Do not push local `main` directly to `origin/main` for feature work.
+- Before every publish or PR update, sync local `main` to current `origin/main` first.
+- Publish work by pushing local `main` to a remote review branch with `git push origin HEAD:refs/heads/<remote-branch-name>`.
+- Use a fresh single-use remote review branch name for every new PR after the previous PR was merged or closed.
+- It is valid to keep pushing to the same remote review branch only while that PR is still open.
+- After a PR is squash-merged or closed, do not reuse that remote branch name again. Create a new remote branch name from the updated local `main`.
+- If a local branch is created accidentally, move the intended changes back onto `main`, delete the accidental local branch, and continue from local `main`.
 - Use conventional commit tags automatically. Pick the narrowest accurate prefix from `feat`, `fix`, `docs`, `build`, `test`, `refactor`, or `chore` instead of free-form commit subjects.
 
 ## Common commands

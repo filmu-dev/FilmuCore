@@ -34,6 +34,32 @@ If a PR was opened from a reused branch, the recovery path is:
 2. cherry-pick or reapply only the intended commits
 3. open a replacement PR from that fresh branch name
 
+## Codex Local-Main Workflow
+
+This repository does not use local feature branches for normal Codex work.
+
+- local `main` is the active DEV branch
+- GitHub `main` is the protected integration branch
+- new work is done on local `main`
+- review happens from a fresh remote branch pushed from local `main`
+
+The required flow is:
+
+1. fetch and sync local `main` to current `origin/main`
+2. do the work on local `main`
+3. push local `main` to a fresh remote review branch with `git push origin HEAD:refs/heads/<remote-branch-name>`
+4. open or update the PR from that remote branch to GitHub `main`
+
+Rules:
+
+- never create a local feature branch for normal Codex work
+- never push local `main` directly to `origin/main` for feature work
+- never reuse a remote review branch name after its PR was merged or closed
+- only reuse the same remote review branch while that PR is still open
+- if GitHub `main` moved, sync local `main` first before pushing the review branch again
+
+This rule exists because a squash-merged PR leaves the old review branch on a different history line than `main`. Reusing that old remote branch name is what causes repeated `PR Branch Hygiene` failures, merge conflicts on already-touched files, and duplicated PR history.
+
 The repository now enforces this with [`../.github/workflows/pr-branch-hygiene.yml`](../.github/workflows/pr-branch-hygiene.yml).
 
 The earlier local-preflight path is now:
