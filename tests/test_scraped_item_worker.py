@@ -465,6 +465,10 @@ def _build_worker_settings() -> Settings:
 @pytest.fixture(autouse=True)
 def _worker_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+    async def _no_persisted_settings(_db: Any) -> None:
+        return None
+
+    monkeypatch.setattr(tasks, "load_settings", _no_persisted_settings)
 
 
 class _FakeDebridClient:
