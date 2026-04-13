@@ -47,6 +47,7 @@ from filmu_py.services.playback import (
 )
 from filmu_py.services.vfs_server import build_empty_vfs_catalog_governance_snapshot
 
+from . import runtime_refresh_governance
 from .runtime_governance import (
     empty_playback_gate_governance_snapshot,
     playback_gate_governance_snapshot,
@@ -66,24 +67,23 @@ from .runtime_hls_governance import (
     validate_upstream_hls_playlist,
 )
 from .runtime_refresh_governance import (
-    DIRECT_PLAYBACK_TRIGGER_GOVERNANCE as _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE,
-)
-from .runtime_refresh_governance import (
-    HLS_FAILED_LEASE_TRIGGER_GOVERNANCE as _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE,
-)
-from .runtime_refresh_governance import (
-    HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE as _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE,
-)
-from .runtime_refresh_governance import (
-    STREAM_REFRESH_POLICY_GOVERNANCE as _STREAM_REFRESH_POLICY_GOVERNANCE,
-)
-from .runtime_refresh_governance import (
     direct_playback_trigger_governance_snapshot,
     hls_failed_lease_trigger_governance_snapshot,
     hls_restricted_fallback_trigger_governance_snapshot,
     record_route_refresh_trigger_pending,
+    select_refresh_dispatch_preference,
     stream_refresh_policy_governance_snapshot,
 )
+
+_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE = runtime_refresh_governance.DIRECT_PLAYBACK_TRIGGER_GOVERNANCE
+_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE = (
+    runtime_refresh_governance.HLS_FAILED_LEASE_TRIGGER_GOVERNANCE
+)
+_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE = (
+    runtime_refresh_governance.HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE
+)
+# Backward-compatible module symbol for existing route-policy tests.
+_STREAM_REFRESH_POLICY_GOVERNANCE = runtime_refresh_governance.STREAM_REFRESH_POLICY_GOVERNANCE
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -598,23 +598,12 @@ def _select_refresh_dispatch_preference(
 ) -> bool:
     """Return whether route-adjacent refresh work should prefer queued dispatch."""
 
-    if resources.settings.stream.refresh_dispatch_mode == "queued":
-        if queued_controller_available:
-            return True
-        _STREAM_REFRESH_POLICY_GOVERNANCE["fallback_in_process"] += 1
-        return False
-
-    runtime_governance = _vfs_runtime_governance_snapshot()
-    requires_queue, latency_slo_breached = _runtime_pressure_requires_queued_dispatch(runtime_governance)
-    if latency_slo_breached:
-        _STREAM_REFRESH_POLICY_GOVERNANCE["latency_slo_breaches"] += 1
-    if requires_queue and queued_controller_available:
-        _STREAM_REFRESH_POLICY_GOVERNANCE["forced_queued"] += 1
-        return True
-    _STREAM_REFRESH_POLICY_GOVERNANCE["forced_in_process"] += 1
-    if requires_queue and not queued_controller_available:
-        _STREAM_REFRESH_POLICY_GOVERNANCE["fallback_in_process"] += 1
-    return False
+    return select_refresh_dispatch_preference(
+        refresh_dispatch_mode=resources.settings.stream.refresh_dispatch_mode,
+        queued_controller_available=queued_controller_available,
+        runtime_governance_provider=_vfs_runtime_governance_snapshot,
+        runtime_pressure_evaluator=_runtime_pressure_requires_queued_dispatch,
+    )
 
 
 async def _run_direct_playback_refresh_trigger(

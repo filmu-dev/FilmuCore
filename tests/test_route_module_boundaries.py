@@ -71,8 +71,15 @@ def test_stream_route_imports_refresh_runtime_governance_module() -> None:
     tree = ast.parse(source)
 
     imported: set[str] = set()
+    imported_modules: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+            continue
         if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level == 1 and node.module is None:
+            imported_modules.update(alias.name for alias in node.names)
             continue
         if node.level != 1:
             continue
@@ -80,9 +87,14 @@ def test_stream_route_imports_refresh_runtime_governance_module() -> None:
             continue
         imported.update(alias.name for alias in node.names)
 
-    assert "DIRECT_PLAYBACK_TRIGGER_GOVERNANCE" in imported
-    assert "STREAM_REFRESH_POLICY_GOVERNANCE" in imported
+    assert "runtime_refresh_governance" in imported_modules or (
+        "DIRECT_PLAYBACK_TRIGGER_GOVERNANCE" in imported
+    )
+    assert "runtime_refresh_governance" in imported_modules or (
+        "STREAM_REFRESH_POLICY_GOVERNANCE" in imported
+    )
     assert "record_route_refresh_trigger_pending" in imported
+    assert "select_refresh_dispatch_preference" in imported
 
 
 def test_runtime_refresh_governance_module_exports_contract() -> None:
@@ -91,3 +103,4 @@ def test_runtime_refresh_governance_module_exports_contract() -> None:
     assert callable(runtime_refresh_governance.hls_restricted_fallback_trigger_governance_snapshot)
     assert callable(runtime_refresh_governance.stream_refresh_policy_governance_snapshot)
     assert callable(runtime_refresh_governance.record_route_refresh_trigger_pending)
+    assert callable(runtime_refresh_governance.select_refresh_dispatch_preference)
