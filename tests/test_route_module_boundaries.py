@@ -3,7 +3,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from filmu_py.api.routes import runtime_governance, runtime_hls_governance
+from filmu_py.api.routes import (
+    runtime_governance,
+    runtime_hls_governance,
+    runtime_refresh_governance,
+)
 
 
 def _project_file(*parts: str) -> Path:
@@ -60,3 +64,30 @@ def test_runtime_hls_governance_module_exports_contract() -> None:
     assert callable(runtime_hls_governance.record_inline_remote_hls_refresh)
     assert callable(runtime_hls_governance.run_remote_hls_with_retry)
     assert callable(runtime_hls_governance.validate_upstream_hls_playlist)
+
+
+def test_stream_route_imports_refresh_runtime_governance_module() -> None:
+    source = _project_file("filmu_py", "api", "routes", "stream.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level != 1:
+            continue
+        if node.module != "runtime_refresh_governance":
+            continue
+        imported.update(alias.name for alias in node.names)
+
+    assert "DIRECT_PLAYBACK_TRIGGER_GOVERNANCE" in imported
+    assert "STREAM_REFRESH_POLICY_GOVERNANCE" in imported
+    assert "record_route_refresh_trigger_pending" in imported
+
+
+def test_runtime_refresh_governance_module_exports_contract() -> None:
+    assert callable(runtime_refresh_governance.direct_playback_trigger_governance_snapshot)
+    assert callable(runtime_refresh_governance.hls_failed_lease_trigger_governance_snapshot)
+    assert callable(runtime_refresh_governance.hls_restricted_fallback_trigger_governance_snapshot)
+    assert callable(runtime_refresh_governance.stream_refresh_policy_governance_snapshot)
+    assert callable(runtime_refresh_governance.record_route_refresh_trigger_pending)
