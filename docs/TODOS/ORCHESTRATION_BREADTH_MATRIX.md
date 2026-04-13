@@ -51,7 +51,7 @@ Today the Python backend has:
 
 - queue-backed link-resolver dedup for VFS beyond the new mount-side inline refresh dedup baseline
 - broader queue-lag/operator visibility and stronger enqueue-dedup/idempotency boundaries across the widened worker graph
-- deeper process/sandbox isolation beyond the current spawn-required heavy-stage worker-ceiling/recycle baseline
+- deeper process/sandbox isolation beyond the current bounded heavy-stage executor budgets
 
 ---
 
@@ -93,13 +93,13 @@ This is the reference breadth the Python roadmap should explicitly account for.
 | **Ranking stage**                    | ✅ `rank_streams` ARQ stage with RTN-compatible Levenshtein + multi-axis scoring, fetch-check filtering, configurable `RankingModel`, and partial-scope coverage bonus | Separate TS step (`rank-streams.processor`)            | Needed for repeatable selection logic and configurable quality policy      | ✅ Done / deepen       |
 | **Download fan-out / orchestration** | ✅ `debrid_item` calls enabled provider download-pipeline client, persists `MediaEntryORM` rows | TS has broader fan-out behavior                        | Supports partial success and richer downloader selection                   | ✅ Done (single-provider) |
 | **Retry-library recovery**           | ✅ Scheduled `recover_incomplete_library` cron (15 min), stage-aware re-entry, deduplication | TS has explicit actor/flow                             | Crucial for restart recovery and incomplete-library progression           | ✅ Done                |
-| **Scheduled reindex / reconciliation** | `index_item` now has a first-class scheduled reconciliation cron (`scheduled_metadata_reindex_reconciliation`) that re-enqueues index follow-ups for `partially_completed` / `ongoing` items, runs metadata refresh reconciliation for `completed` items, repairs identifier gaps on repairable `failed` items with immediate `index_item` re-entry, and exposes bounded operator rollups on `/api/v1/workers/metadata-reindex` plus `/api/v1/workers/metadata-reindex/history` | TS `schedule-reindex` actor exists                     | Keeps metadata fresh without relying only on ad hoc item-triggered indexing | ✅ Done baseline / deepen |
+| **Scheduled reindex / reconciliation** | `index_item` exists, but there is no first-class scheduled reindex program or operator-facing reconciliation surface yet | TS `schedule-reindex` actor exists                     | Keeps metadata fresh without relying only on ad hoc item-triggered indexing | 🔶 Partial             |
 | **Queue-backed stream-link resolution** | Mount-side inline stale-link refresh and dedup still exist in Rust, and the Python control plane now has an optional queued refresh dispatch path for direct-play and HLS refresh work | TS VFS `open` publishes `stream-link-requested` and dedups at queue level | Matters if link resolution pressure needs to be separated from read/open latency | ✅ Done baseline / deepen |
 | **Plugin hook workers**              | Implemented baseline (in-process typed hook dispatch with timeout isolation) | TS has queue-backed plugin hook workers                | Required for plugin platform parity beyond capability-protocol contributions | Done baseline / deepen |
 | **Publishable-event governance**     | Implemented baseline                                  | TS tracks publishable events explicitly                | Prevents queue buildup and undefined plugin-event fan-out                 | Done baseline          |
 | **Transactional outbox**             | ✅ `OutboxEventORM` + scheduled `publish_outbox_events` cron (30 sec) | Not identical in TS, but needed for Python correctness | Needed for publish consistency and replay-safe growth                     | ✅ Done                |
-| **Idempotency boundaries**           | Stable job ids, stage-idempotency counters, DLQ reason codes, queue-history DLQ taxonomy, dead-letter oldest-age visibility, and bounded queue-history replay filters now exist across the widened worker graph | Needed regardless of TS                                | Required for safe retries, replays, and recovery                          | ✅ Done baseline / deepen |
-| **Heavy-stage isolation**            | `index_item`, `parse_scrape_results`, and `rank_streams` now run under bounded isolated stage budgets and explicit timeouts, with spawn-required process pools, worker-ceiling enforcement, recycle-budget validation, and operator-visible policy violations | TS keeps sandboxed heavy jobs on disk for parse/map/validate work | Needed for crash containment, bounded CPU pressure, and enterprise workload isolation | ✅ Done baseline / deepen |
+| **Idempotency boundaries**           | Stable job ids, stage-idempotency counters, DLQ reason codes, and queue-history DLQ taxonomy now exist across the widened worker graph | Needed regardless of TS                                | Required for safe retries, replays, and recovery                          | ✅ Done baseline / deepen |
+| **Heavy-stage isolation**            | `index_item`, `parse_scrape_results`, and `rank_streams` now run under bounded isolated stage budgets and explicit timeouts | TS keeps sandboxed heavy jobs on disk for parse/map/validate work | Needed for crash containment, bounded CPU pressure, and enterprise workload isolation | ✅ Done baseline / deepen |
 
 ---
 
@@ -283,8 +283,7 @@ Priority 3 should be considered meaningfully advanced when:
 Current checkpoint:
 
 - Reached for the core scrape -> parse -> rank -> debrid -> finalize pipeline and baseline recovery.
-- Wave 3 is materially deeper than the original baseline, and the first-class scheduled reindex/reconciliation program is now landed.
-- Remaining orchestration gap above this baseline is broader multi-container/provider fan-out breadth, wider metadata/provider coverage beyond the now-landed scheduled baseline, and sandboxed heavy-job families beyond the stricter spawn-required baseline.
+- Wave 3 is materially deeper than the original baseline, but the closed-PR audit shows one meaningful orchestration gap remains above the landed repo surface: Filmu still needs a first-class scheduled reindex/reconciliation program instead of relying only on item-triggered indexing plus ad hoc governance reminders.
 
 ## Serving-core update (March 2026)
 
