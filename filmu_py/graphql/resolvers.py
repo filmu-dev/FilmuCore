@@ -113,6 +113,7 @@ def _media_kind(media_type: str) -> MediaKind:
 
 
 def _build_calendar_entry(record: CalendarProjectionRecord) -> GQLCalendarEntry:
+    specialization = record.specialization
     return GQLCalendarEntry(
         item_id=strawberry.ID(record.item_id),
         show_title=record.title,
@@ -123,6 +124,17 @@ def _build_calendar_entry(record: CalendarProjectionRecord) -> GQLCalendarEntry:
         episode=record.episode_number,
         tmdb_id=_to_optional_int(record.tmdb_id),
         tvdb_id=_to_optional_int(record.tvdb_id),
+        imdb_id=(specialization.imdb_id if specialization is not None else None),
+        parent_tmdb_id=(
+            _to_optional_int(specialization.parent_ids.tmdb_id)
+            if specialization is not None and specialization.parent_ids is not None
+            else None
+        ),
+        parent_tvdb_id=(
+            _to_optional_int(specialization.parent_ids.tvdb_id)
+            if specialization is not None and specialization.parent_ids is not None
+            else None
+        ),
         release_data=_serialize_release_data(record),
     )
 

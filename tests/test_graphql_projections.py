@@ -250,6 +250,16 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
                     air_date="2026-03-15T10:00:00+00:00",
                     last_state="Completed",
                     release_data=CalendarReleaseDataRecord(next_aired="2026-03-16T10:00:00+00:00"),
+                    specialization=MediaItemSpecializationRecord(
+                        item_type="episode",
+                        tmdb_id="789",
+                        tvdb_id="654",
+                        imdb_id="tt1234567",
+                        parent_ids=ParentIdsRecord(tmdb_id="999", tvdb_id="555"),
+                        show_title="Example Show",
+                        season_number=1,
+                        episode_number=2,
+                    ),
                 )
             ]
         )
@@ -258,7 +268,7 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
     response = client.post(
         "/graphql",
         json={
-            "query": "query { calendarEntries { itemId showTitle itemType airedAt lastState season episode tmdbId tvdbId releaseData } }"
+            "query": "query { calendarEntries { itemId showTitle itemType airedAt lastState season episode tmdbId tvdbId imdbId parentTmdbId parentTvdbId releaseData } }"
         },
     )
 
@@ -275,6 +285,9 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
             "episode": 2,
             "tmdbId": 123,
             "tvdbId": 456,
+            "imdbId": "tt1234567",
+            "parentTmdbId": 999,
+            "parentTvdbId": 555,
             "releaseData": '{"next_aired": "2026-03-16T10:00:00+00:00", "nextAired": null, "last_aired": null, "lastAired": null}',
         }
     ]
