@@ -13,7 +13,7 @@ import pytest
 from arq import Retry
 from arq.jobs import JobStatus
 
-from filmu_py.config import Settings
+from filmu_py.config import Settings, reset_runtime_settings
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.db.models import (
@@ -482,11 +482,20 @@ def _build_worker_settings() -> Settings:
 
 @pytest.fixture(autouse=True)
 def _worker_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FILMU_PY_API_KEY", "a" * 32)
+    monkeypatch.setenv(
+        "FILMU_PY_POSTGRES_DSN", "postgresql+asyncpg://postgres:postgres@localhost:5432/filmu"
+    )
+    monkeypatch.setenv("FILMU_PY_REDIS_URL", "redis://localhost:6379/0")
+    reset_runtime_settings()
     monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+
     async def _no_persisted_settings(_db: Any) -> None:
         return None
 
     monkeypatch.setattr(tasks, "load_settings", _no_persisted_settings)
+    yield
+    reset_runtime_settings()
 
 
 def _pin_worker_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
