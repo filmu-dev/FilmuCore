@@ -219,7 +219,7 @@ class _InProcessControllerBase:
             task = self._tasks_by_item_identifier.get(item_identifier)
             if task is None:
                 return
-            await task
+            _ = await task
             current = self._tasks_by_item_identifier.get(item_identifier)
             if current is task and task.done():
                 self._tasks_by_item_identifier.pop(item_identifier, None)
