@@ -220,11 +220,9 @@ class RedisReplayEventBackplane:
                 if isinstance(claim_result, dict):
                     claim_outcome = claim_result.get("outcome")
                     claim_owner = claim_result.get("owner_node_id", node_id or "unknown")
-                    claim_reason = claim_result.get("fence_reason") or "consumer_fenced"
                 else:
                     claim_outcome = getattr(claim_result, "outcome", None)
                     claim_owner = getattr(claim_result, "owner_node_id", node_id or "unknown")
-                    claim_reason = getattr(claim_result, "fence_reason", None) or "consumer_fenced"
                 if claim_outcome == "fenced":
                     raise ReplayConsumerFencedError(
                         f"consumer {consumer_name} fenced by active owner {claim_owner}"
