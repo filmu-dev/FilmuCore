@@ -65,6 +65,25 @@ from .runtime_hls_governance import (
     start_remote_hls_cooldown,
     validate_upstream_hls_playlist,
 )
+from .runtime_refresh_governance import (
+    DIRECT_PLAYBACK_TRIGGER_GOVERNANCE as _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE,
+)
+from .runtime_refresh_governance import (
+    HLS_FAILED_LEASE_TRIGGER_GOVERNANCE as _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE,
+)
+from .runtime_refresh_governance import (
+    HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE as _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE,
+)
+from .runtime_refresh_governance import (
+    STREAM_REFRESH_POLICY_GOVERNANCE as _STREAM_REFRESH_POLICY_GOVERNANCE,
+)
+from .runtime_refresh_governance import (
+    direct_playback_trigger_governance_snapshot,
+    hls_failed_lease_trigger_governance_snapshot,
+    hls_restricted_fallback_trigger_governance_snapshot,
+    record_route_refresh_trigger_pending,
+    stream_refresh_policy_governance_snapshot,
+)
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -77,36 +96,6 @@ _PLAYBACK_PROOF_ARTIFACTS_ROOT = Path(__file__).resolve().parents[3] / "playback
 _MANAGED_WINDOWS_VFS_STATE_PATH = (
     _PLAYBACK_PROOF_ARTIFACTS_ROOT / "windows-native-stack" / "filmuvfs-windows-state.json"
 )
-_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE = {
-    "starts": 0,
-    "no_action": 0,
-    "controller_unavailable": 0,
-    "already_pending": 0,
-    "backoff_pending": 0,
-    "failures": 0,
-}
-_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE = {
-    "starts": 0,
-    "no_action": 0,
-    "controller_unavailable": 0,
-    "already_pending": 0,
-    "backoff_pending": 0,
-    "failures": 0,
-}
-_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE = {
-    "starts": 0,
-    "no_action": 0,
-    "controller_unavailable": 0,
-    "already_pending": 0,
-    "backoff_pending": 0,
-    "failures": 0,
-}
-_STREAM_REFRESH_POLICY_GOVERNANCE = {
-    "forced_queued": 0,
-    "forced_in_process": 0,
-    "fallback_in_process": 0,
-    "latency_slo_breaches": 0,
-}
 _STREAM_REFRESH_LATENCY_SLO_MS = 250
 _BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
 _HLS_FAILED_LEASE_BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
@@ -293,41 +282,15 @@ def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
     """Return additive governance counters for route-adjacent direct-play refresh triggering."""
 
     active_tasks = sum(1 for task in _BACKGROUND_ROUTE_TASKS if not task.done())
-    return {
-        "direct_playback_refresh_trigger_starts": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["starts"],
-        "direct_playback_refresh_trigger_no_action": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "no_action"
-        ],
-        "direct_playback_refresh_trigger_controller_unavailable": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "controller_unavailable"
-        ],
-        "direct_playback_refresh_trigger_already_pending": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "already_pending"
-        ],
-        "direct_playback_refresh_trigger_backoff_pending": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "backoff_pending"
-        ],
-        "direct_playback_refresh_trigger_failures": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["failures"],
-        "direct_playback_refresh_trigger_tasks_active": active_tasks,
-    }
+    return direct_playback_trigger_governance_snapshot(active_tasks=active_tasks)
 
 
 def _stream_refresh_policy_governance_snapshot() -> dict[str, int]:
     """Return route-adjacent stream refresh dispatch policy counters."""
 
-    return {
-        "stream_refresh_latency_slo_ms": _STREAM_REFRESH_LATENCY_SLO_MS,
-        "stream_refresh_policy_forced_queued": _STREAM_REFRESH_POLICY_GOVERNANCE["forced_queued"],
-        "stream_refresh_policy_forced_in_process": _STREAM_REFRESH_POLICY_GOVERNANCE[
-            "forced_in_process"
-        ],
-        "stream_refresh_policy_fallback_in_process": _STREAM_REFRESH_POLICY_GOVERNANCE[
-            "fallback_in_process"
-        ],
-        "stream_refresh_policy_latency_slo_breaches": _STREAM_REFRESH_POLICY_GOVERNANCE[
-            "latency_slo_breaches"
-        ],
-    }
+    return stream_refresh_policy_governance_snapshot(
+        stream_refresh_latency_slo_ms=_STREAM_REFRESH_LATENCY_SLO_MS
+    )
 
 
 def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
@@ -369,25 +332,7 @@ def _hls_failed_lease_trigger_governance_snapshot() -> dict[str, int]:
     """Return additive governance counters for route-adjacent HLS failed-lease refresh triggering."""
 
     active_tasks = sum(1 for task in _HLS_FAILED_LEASE_BACKGROUND_ROUTE_TASKS if not task.done())
-    return {
-        "hls_failed_lease_refresh_trigger_starts": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["starts"],
-        "hls_failed_lease_refresh_trigger_no_action": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "no_action"
-        ],
-        "hls_failed_lease_refresh_trigger_controller_unavailable": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "controller_unavailable"
-        ],
-        "hls_failed_lease_refresh_trigger_already_pending": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "already_pending"
-        ],
-        "hls_failed_lease_refresh_trigger_backoff_pending": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "backoff_pending"
-        ],
-        "hls_failed_lease_refresh_trigger_failures": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "failures"
-        ],
-        "hls_failed_lease_refresh_trigger_tasks_active": active_tasks,
-    }
+    return hls_failed_lease_trigger_governance_snapshot(active_tasks=active_tasks)
 
 
 def _hls_restricted_fallback_trigger_governance_snapshot() -> dict[str, int]:
@@ -396,27 +341,7 @@ def _hls_restricted_fallback_trigger_governance_snapshot() -> dict[str, int]:
     active_tasks = sum(
         1 for task in _HLS_RESTRICTED_FALLBACK_BACKGROUND_ROUTE_TASKS if not task.done()
     )
-    return {
-        "hls_restricted_fallback_refresh_trigger_starts": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "starts"
-        ],
-        "hls_restricted_fallback_refresh_trigger_no_action": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "no_action"
-        ],
-        "hls_restricted_fallback_refresh_trigger_controller_unavailable": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "controller_unavailable"
-        ],
-        "hls_restricted_fallback_refresh_trigger_already_pending": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "already_pending"
-        ],
-        "hls_restricted_fallback_refresh_trigger_backoff_pending": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "backoff_pending"
-        ],
-        "hls_restricted_fallback_refresh_trigger_failures": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "failures"
-        ],
-        "hls_restricted_fallback_refresh_trigger_tasks_active": active_tasks,
-    }
+    return hls_restricted_fallback_trigger_governance_snapshot(active_tasks=active_tasks)
 
 
 def _is_retryable_remote_hls_error(exc: HTTPException) -> bool:
@@ -613,14 +538,11 @@ def _record_route_refresh_trigger_pending(
 ) -> bool:
     """Record duplicate-trigger/backoff governance when route-adjacent work is already pending."""
 
-    if not controller.has_pending(item_identifier):
-        return False
-
-    governance["already_pending"] += 1
-    last_result = controller.get_last_result(item_identifier)
-    if last_result is not None and last_result.retry_after_seconds is not None:
-        governance["backoff_pending"] += 1
-    return True
+    return record_route_refresh_trigger_pending(
+        governance=governance,
+        item_identifier=item_identifier,
+        controller=controller,
+    )
 
 
 async def _run_app_scoped_refresh_trigger(
