@@ -66,7 +66,7 @@ Current strengths of this baseline:
 Remaining limitations of this baseline:
 
 - Domain model gaps are now closed across 20 migrations. All planned entity types are persisted.
-- Remaining evolution is read-model deepening for VFS-facing surfaces and the remaining compatibility consumers beyond the now-landed graph-first specialization adoption in calendar, detail, and item-list projections.
+- Remaining evolution is read-model deepening for the remaining compatibility consumers beyond the now-landed graph/VFS-first specialization adoption in calendar, detail, item-list, and mounted catalog path projections.
 
 ### Current status summary
 
@@ -115,7 +115,7 @@ That richer model supports:
 | **Service registry/status projection**                                | Needed for `/api/v1/services` and future operational/admin visibility                               | dashboard, health/service reporting                                                                | ✅ Done — real `/api/v1/services` from runtime `DownloadersSettings` |
 | **Calendar projection**                                               | Calendar should not depend on ad hoc item shaping; it needs a stable projection/query path          | `/api/v1/calendar`                                                                                 | ✅ Done — `MediaService.get_calendar()` backed by `EpisodeORM` + season relations |
 | **Stats projection**                                                  | Stats should be produced from clear aggregates, not improvised route logic only                     | `/api/v1/stats`, dashboard                                                                         | ✅ Done — `MediaService.get_stats()` backed by ORM + specialization rows |
-| **Stream/VFS lease/control projection**                               | Useful for FilmuVFS and direct stream control-plane state                                           | FilmuVFS, stream refresh, control-plane events, hybrid backplane evolution                         | 🔶 Partial — persisted lease state, active-stream relations, and mount-worker boundary exist; VFS-facing read models still evolving |
+| **Stream/VFS lease/control projection**                               | Useful for FilmuVFS and direct stream control-plane state                                           | FilmuVFS, stream refresh, control-plane events, hybrid backplane evolution                         | 🔶 Partial — persisted lease state, active-stream relations, mount-worker boundary, and specialization-backed VFS catalog pathing now exist; remaining work is broader control/read-model breadth |
 
 ---
 
@@ -151,7 +151,7 @@ Current update:
 
 - A first additive persistence layer now exists via [`MovieORM`](../../filmu_py/db/models.py), [`ShowORM`](../../filmu_py/db/models.py), [`SeasonORM`](../../filmu_py/db/models.py), and [`EpisodeORM`](../../filmu_py/db/models.py).
 - Those rows are created or updated from [`request_item()`](../../filmu_py/services/media.py) without changing the current route contracts, which means the backend no longer relies only on `MediaItemORM.attributes` to remember the requested media shape.
-- The remaining gap is read-model adoption: the shared service layer and richer GraphQL detail/calendar/item-list consumers now consume those specialization rows deliberately, but VFS pathing and the remaining compatibility consumers still need the same treatment.
+- The remaining gap is read-model adoption in the remaining compatibility-tail consumers: the shared service layer, richer GraphQL detail/calendar/item-list consumers, and the FilmuVFS catalog supplier now consume those specialization rows deliberately.
 
 ### 3. Stream + file attachment layer
 
@@ -221,7 +221,7 @@ Current update:
 - [`MediaService.get_calendar()`](../../filmu_py/services/media.py) now exposes a first episode-air-date projection backed by [`EpisodeORM`](../../filmu_py/db/models.py) and the season relationship, ordered deterministically by air date.
 - [`/api/v1/stats`](../../filmu_py/api/routes/default.py) and [`/api/v1/calendar`](../../filmu_py/api/routes/default.py) now consume those projection methods directly, so the remaining gap is no longer first query-model extraction for those two surfaces.
 - The richer GraphQL surface now also consumes the same service-layer projections, and `mediaItem` detail additionally exposes specialization lineage (`imdbId`, parent ids, show/season/episode fields) from that shared domain seam instead of recomputing those values from metadata blobs.
-- The next Priority 2 gap after this slice is broader read-model adoption across the remaining compatibility consumers and VFS-facing surfaces.
+- The next Priority 2 gap after this slice is broader read-model adoption across the remaining compatibility consumers; graph and VFS-first specialization adoption is now landed.
 
 ## Relationship model to add deliberately
 
@@ -304,7 +304,7 @@ Priority 2 should be considered meaningfully advanced when:
 Current checkpoint:
 
 - Reached for the entity layer.
-- Not fully closed for read-model depth, especially VFS-facing projections and the remaining compatibility consumers beyond the now-landed graph-first specialization reads.
+- Not fully closed for read-model depth, especially the remaining compatibility consumers beyond the now-landed graph/VFS-first specialization reads.
 
 ## Serving-session note (March 2026)
 
