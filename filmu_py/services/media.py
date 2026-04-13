@@ -2099,7 +2099,6 @@ class CalendarProjectionRecord:
 
 
 ShowCompletionResult = _media_show_completion.ShowCompletionResult
-_SeasonEpisodeInventory = _media_show_completion.SeasonEpisodeInventory
 _extract_tmdb_episode_inventory = _media_show_completion.extract_tmdb_episode_inventory
 _evaluate_show_completion = _media_show_completion.evaluate_show_completion
 ParsedStreamCandidateRecord = _media_stream_candidates.ParsedStreamCandidateRecord
