@@ -8,6 +8,7 @@
 * enforce tenant-safe mounted runtime telemetry rollups and pressure-policy queued refresh dispatch
 * add Redis Streams consumer claim/fencing baseline for control-plane replay ownership transfer
 * add mount-vs-HTTP chunk parity harness with Python/Rust contract coverage and CI gate integration
+* decompose worker task internals with extracted stage observability and stable stage/job-id helper modules
 
 ### Documentation
 
