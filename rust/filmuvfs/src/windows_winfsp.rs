@@ -1639,6 +1639,16 @@ impl MountRuntime {
                     create_status as u32
                 )));
             }
+            if file_system.is_null() {
+                unsafe {
+                    drop(Box::from_raw(context_ptr));
+                    drop(Box::from_raw(interface));
+                }
+                return Err(Error::other(format!(
+                    "failed to create raw WinFSP filesystem at {}: WinFSP returned null filesystem pointer",
+                    mount_path.display()
+                )));
+            }
 
             unsafe {
                 (*file_system).UserContext = context_ptr.cast();

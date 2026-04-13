@@ -20,6 +20,9 @@ concurrency:
   group: platform-stack-validation-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   validate-platform-stack:
     name: Validate Platform Stack

@@ -117,7 +117,7 @@ def test_get_active_provider_info_api_failure(monkeypatch: Any) -> None:
 
     result = asyncio.run(DownloaderAccountService(settings).get_active_provider_info())
 
-    assert result == {"provider": "real_debrid", "error": "boom"}
+    assert result == {"provider": "real_debrid", "error": "provider_request_failed"}
 
 
 def test_get_active_provider_info_no_provider() -> None:
