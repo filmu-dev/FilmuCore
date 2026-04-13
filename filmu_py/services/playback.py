@@ -35,6 +35,11 @@ from filmu_py.config import Settings, get_settings
 from filmu_py.core.rate_limiter import RateLimitDecision
 from filmu_py.db.models import ActiveStreamORM, MediaEntryORM, MediaItemORM, PlaybackAttachmentORM
 from filmu_py.db.runtime import DatabaseRuntime
+from filmu_py.services.playback_deferral_governance import (
+    playback_refresh_deferral_governance_snapshot,
+    record_direct_playback_refresh_deferral,
+    record_selected_hls_refresh_deferral,
+)
 
 if TYPE_CHECKING:
     from filmu_py.resources import AppResources
@@ -85,16 +90,6 @@ _MEDIA_ENTRY_REFRESH_STATES = _ATTACHMENT_REFRESH_STATES
 _DEBRID_PROVIDER_KEYS: frozenset[str] = frozenset({"realdebrid", "alldebrid", "debridlink"})
 _PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3
 _PROVIDER_CIRCUIT_BREAKER_RESET_TIMEOUT_SECONDS = 30.0
-_SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE: dict[str, int] = {
-    "hls_failed_lease_refresh_rate_limited": 0,
-    "hls_failed_lease_refresh_provider_circuit_open": 0,
-    "hls_restricted_fallback_refresh_rate_limited": 0,
-    "hls_restricted_fallback_refresh_provider_circuit_open": 0,
-}
-_DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE: dict[str, int] = {
-    "direct_playback_refresh_rate_limited": 0,
-    "direct_playback_refresh_provider_circuit_open": 0,
-}
 
 
 @dataclass(frozen=True)
@@ -2874,24 +2869,7 @@ class PlaybackSourceService:
             "selected_hls_streams_needing_refresh": 0,
             "selected_direct_streams_failed": 0,
             "selected_hls_streams_failed": 0,
-            "direct_playback_refresh_rate_limited": _DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE[
-                "direct_playback_refresh_rate_limited"
-            ],
-            "direct_playback_refresh_provider_circuit_open": _DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE[
-                "direct_playback_refresh_provider_circuit_open"
-            ],
-            "hls_failed_lease_refresh_rate_limited": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
-                "hls_failed_lease_refresh_rate_limited"
-            ],
-            "hls_failed_lease_refresh_provider_circuit_open": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
-                "hls_failed_lease_refresh_provider_circuit_open"
-            ],
-            "hls_restricted_fallback_refresh_rate_limited": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
-                "hls_restricted_fallback_refresh_rate_limited"
-            ],
-            "hls_restricted_fallback_refresh_provider_circuit_open": _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[
-                "hls_restricted_fallback_refresh_provider_circuit_open"
-            ],
+            **playback_refresh_deferral_governance_snapshot(),
         }
 
         for item in items:
@@ -4073,9 +4051,7 @@ class PlaybackSourceService:
         """Record one selected-HLS background refresh deferral for status and metrics."""
 
         SELECTED_HLS_REFRESH_DEFERRALS.labels(trigger=trigger, reason=reason).inc()
-        key_reason = "rate_limited" if reason == "refresh_rate_limited" else reason
-        key = f"hls_{trigger}_refresh_{key_reason}"
-        _SELECTED_HLS_REFRESH_DEFERRAL_GOVERNANCE[key] += 1
+        record_selected_hls_refresh_deferral(trigger=trigger, reason=reason)
 
     @staticmethod
     def _record_direct_playback_refresh_deferral(
@@ -4084,9 +4060,7 @@ class PlaybackSourceService:
     ) -> None:
         """Record one direct-play background refresh deferral for status visibility."""
 
-        key_reason = "rate_limited" if reason == "refresh_rate_limited" else reason
-        key = f"direct_playback_refresh_{key_reason}"
-        _DIRECT_PLAYBACK_REFRESH_DEFERRAL_GOVERNANCE[key] += 1
+        record_direct_playback_refresh_deferral(reason=reason)
 
     async def _execute_selected_hls_media_entry_refresh_with_providers(
         self,
