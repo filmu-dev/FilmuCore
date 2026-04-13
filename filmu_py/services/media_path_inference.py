@@ -32,6 +32,7 @@ def infer_season_number_from_path(path: str | None) -> int | None:
             try:
                 return int(match.group(1))
             except (ValueError, IndexError):
+                # Best-effort inference: malformed captures should not stop other patterns.
                 pass
     return None
 
@@ -49,6 +50,7 @@ def infer_season_range_from_path(path: str | None) -> list[int]:
                 if start <= end and (end - start) < _MAX_SEASON_RANGE:
                     return list(range(start, end + 1))
             except (ValueError, IndexError):
+                # Best-effort inference: ignore malformed captures and keep trying patterns.
                 pass
     single = infer_season_number_from_path(path)
     if single is not None:
@@ -67,5 +69,6 @@ def infer_episode_number_from_path(path: str | None) -> int | None:
             try:
                 return int(match.group(1))
             except (ValueError, IndexError):
+                # Best-effort inference: malformed captures should not stop other patterns.
                 pass
     return None

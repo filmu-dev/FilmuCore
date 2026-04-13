@@ -78,8 +78,6 @@ _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE = (
 _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE = (
     runtime_refresh_governance.HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE
 )
-# Backward-compatible module symbol for existing route-policy tests.
-_STREAM_REFRESH_POLICY_GOVERNANCE = runtime_refresh_governance.STREAM_REFRESH_POLICY_GOVERNANCE
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
