@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import fnmatch
 import json
+from types import SimpleNamespace
 from typing import Any, cast
 
 from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
@@ -49,6 +50,7 @@ from filmu_py.services.playback import (
     HlsRestrictedFallbackRefreshControlPlaneTriggerResult,
     HlsRestrictedFallbackRefreshResult,
     MediaEntryLeaseRefreshExecution,
+    PersistedMediaEntryControlMutationResult,
 )
 from filmu_py.services.vfs_catalog import (
     VfsCatalogCorrelationKeys,
@@ -340,6 +342,8 @@ class FakePlaybackTriggerController:
 class FakePlaybackService:
     stale_result: bool = True
     stale_item_ids: list[str] = field(default_factory=list)
+    persist_result: PersistedMediaEntryControlMutationResult | None = None
+    persist_calls: list[dict[str, object]] = field(default_factory=list)
 
     async def mark_selected_hls_media_entry_stale(
         self,
@@ -350,6 +354,36 @@ class FakePlaybackService:
         _ = at
         self.stale_item_ids.append(item_identifier)
         return self.stale_result
+
+    async def persist_media_entry_control_state(
+        self,
+        item_identifier: str,
+        media_entry_id: str,
+        *,
+        active_role: str | None = None,
+        local_path: str | None = None,
+        download_url: str | None = None,
+        unrestricted_url: str | None = None,
+        refresh_state: str | None = None,
+        last_refresh_error: str | None = None,
+        expires_at: datetime | None = None,
+        at: datetime | None = None,
+    ) -> PersistedMediaEntryControlMutationResult | None:
+        _ = at
+        self.persist_calls.append(
+            {
+                "item_identifier": item_identifier,
+                "media_entry_id": media_entry_id,
+                "active_role": active_role,
+                "local_path": local_path,
+                "download_url": download_url,
+                "unrestricted_url": unrestricted_url,
+                "refresh_state": refresh_state,
+                "last_refresh_error": last_refresh_error,
+                "expires_at": expires_at,
+            }
+        )
+        return self.persist_result
 
 
 def _build_settings() -> Settings:
@@ -1437,4 +1471,149 @@ def test_graphql_mark_selected_hls_media_entry_stale_reports_unavailable_service
         "itemId": "item-1",
         "success": False,
         "error": "playback_service_unavailable",
+    }
+
+
+def test_graphql_persist_media_entry_control_state_uses_shared_playback_service() -> None:
+    persisted_item = SimpleNamespace(
+        id="item-1",
+        active_streams=[
+            SimpleNamespace(role="direct", media_entry_id="entry-1"),
+        ],
+    )
+    persisted_entry = SimpleNamespace(
+        id="entry-1",
+        entry_type="media",
+        kind="remote-direct",
+        original_filename="Example.Movie.mkv",
+        local_path=None,
+        download_url="https://api.example.com/direct-fresh",
+        unrestricted_url="https://cdn.example.com/direct-fresh",
+        provider="realdebrid",
+        provider_download_id="download-1",
+        provider_file_id="file-1",
+        provider_file_path="/downloads/Example.Movie.mkv",
+        size_bytes=123456789,
+        created_at=datetime(2026, 4, 13, 12, 20, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 13, 12, 25, tzinfo=UTC),
+        refresh_state="ready",
+        expires_at=datetime(2026, 4, 13, 13, 0, tzinfo=UTC),
+        last_refreshed_at=None,
+        last_refresh_error=None,
+    )
+    playback_service = FakePlaybackService(
+        persist_result=PersistedMediaEntryControlMutationResult(
+            item_identifier="item-1",
+            media_entry_id="entry-1",
+            item=persisted_item,
+            media_entry=persisted_entry,
+            applied_role="direct",
+        )
+    )
+    client = _build_client(FakeMediaService(), playback_service=playback_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistMediaEntryControlInput!) {
+                  persistMediaEntryControlState(input: $input) {
+                    itemId
+                    mediaEntryId
+                    success
+                    error
+                    appliedRole
+                    mediaEntry {
+                      entryType
+                      kind
+                      downloadUrl
+                      unrestrictedUrl
+                      refreshState
+                      providerFileId
+                      activeForDirect
+                      activeForHls
+                      isActiveStream
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "mediaEntryId": "entry-1",
+                    "activeRole": "DIRECT",
+                    "downloadUrl": "https://api.example.com/direct-fresh",
+                    "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+                    "refreshState": "ready",
+                    "expiresAt": "2026-04-13T13:00:00Z",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistMediaEntryControlState"] == {
+        "itemId": "item-1",
+        "mediaEntryId": "entry-1",
+        "success": True,
+        "error": None,
+        "appliedRole": "direct",
+        "mediaEntry": {
+            "entryType": "media",
+            "kind": "remote-direct",
+            "downloadUrl": "https://api.example.com/direct-fresh",
+            "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+            "refreshState": "ready",
+            "providerFileId": "file-1",
+            "activeForDirect": True,
+            "activeForHls": False,
+            "isActiveStream": True,
+        },
+    }
+    assert playback_service.persist_calls == [
+        {
+            "item_identifier": "item-1",
+            "media_entry_id": "entry-1",
+            "active_role": "direct",
+            "local_path": None,
+            "download_url": "https://api.example.com/direct-fresh",
+            "unrestricted_url": "https://cdn.example.com/direct-fresh",
+            "refresh_state": "ready",
+            "last_refresh_error": None,
+            "expires_at": datetime(2026, 4, 13, 13, 0, tzinfo=UTC),
+        }
+    ]
+
+
+def test_graphql_persist_media_entry_control_state_rejects_empty_mutation() -> None:
+    client = _build_client(FakeMediaService(), playback_service=FakePlaybackService())
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistMediaEntryControlInput!) {
+                  persistMediaEntryControlState(input: $input) {
+                    itemId
+                    mediaEntryId
+                    success
+                    error
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "mediaEntryId": "entry-1",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistMediaEntryControlState"] == {
+        "itemId": "item-1",
+        "mediaEntryId": "entry-1",
+        "success": False,
+        "error": "no_changes_requested",
     }

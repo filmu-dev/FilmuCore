@@ -11258,6 +11258,93 @@ def test_local_hls_playlist_route_marks_the_returned_variant_playlist_path(
     assert touched == [playlist_path]
 
 
+def test_playback_source_service_persist_media_entry_control_state_updates_projection_and_active_role() -> None:
+    item = _build_item(item_id="item-persist-media-entry-control-state")
+    attachment = _build_playback_attachment(
+        attachment_id="attachment-persist-media-entry-control-state",
+        item_id=item.id,
+        kind="remote-direct",
+        locator="https://cdn.example.com/direct-stale",
+        restricted_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-media-entry-control-state",
+    )
+    target_entry = _build_media_entry(
+        media_entry_id="media-entry-persist-media-entry-control-state-target",
+        item_id=item.id,
+        source_attachment_id=attachment.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-media-entry-control-state",
+    )
+    target_entry.source_attachment = attachment
+    previous_active_entry = _build_media_entry(
+        media_entry_id="media-entry-persist-media-entry-control-state-previous",
+        item_id=item.id,
+        kind="remote-direct",
+        unrestricted_url="https://cdn.example.com/direct-previous",
+        refresh_state="ready",
+        provider="realdebrid",
+        provider_download_id="download-persist-media-entry-control-state-previous",
+    )
+    item.playback_attachments = [attachment]
+    item.media_entries = [target_entry, previous_active_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=previous_active_entry.id, role="direct")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    service = PlaybackSourceService(database)
+
+    result = asyncio.run(
+        service.persist_media_entry_control_state(
+            item.id,
+            target_entry.id,
+            active_role="direct",
+            download_url="https://api.example.com/direct-fresh",
+            unrestricted_url="https://cdn.example.com/direct-fresh",
+            refresh_state="ready",
+            expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result is not None
+    assert result.item_identifier == item.id
+    assert result.media_entry_id == target_entry.id
+    assert result.applied_role == "direct"
+
+    persisted_item = asyncio.run(PlaybackSourceService(database)._list_items())[0]
+    persisted_target_entry = next(
+        entry for entry in persisted_item.media_entries if entry.id == target_entry.id
+    )
+    persisted_attachment = persisted_item.playback_attachments[0]
+    persisted_direct_stream = next(
+        active_stream for active_stream in persisted_item.active_streams if active_stream.role == "direct"
+    )
+
+    assert persisted_direct_stream.media_entry_id == target_entry.id
+    assert persisted_target_entry.download_url == "https://api.example.com/direct-fresh"
+    assert (
+        persisted_target_entry.unrestricted_url
+        == "https://cdn.example.com/direct-fresh"
+    )
+    assert persisted_target_entry.refresh_state == "ready"
+    assert persisted_target_entry.last_refresh_error is None
+    assert persisted_target_entry.expires_at == datetime(2099, 3, 14, 0, 0, tzinfo=UTC)
+    assert persisted_attachment.restricted_url == "https://api.example.com/direct-fresh"
+    assert (
+        persisted_attachment.unrestricted_url
+        == "https://cdn.example.com/direct-fresh"
+    )
+    assert persisted_attachment.locator == "https://cdn.example.com/direct-fresh"
+    assert persisted_attachment.refresh_state == "ready"
+
+
 
 
 

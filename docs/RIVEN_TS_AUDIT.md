@@ -102,7 +102,7 @@ Current local baseline details that matter for Filmu planning:
 - plugin trust, publisher, quarantine, and tenancy governance
 - enterprise posture surface on `/api/v1/operations/governance`
 - broader REST and SSE compatibility surface
-- graph-first specialization-backed calendar/detail/list lineage on the shared media-domain service seam, including additive GraphQL calendar identity fields, GraphQL VFS-backed directory/stat/snapshot/blocked-item queries over the shared catalog supplier snapshot, GraphQL runtime lifecycle plus queue/metadata operator history over the existing lifecycle and Redis-backed stores, richer graph item-detail playback/media-entry ownership projections, graph-first playback refresh/stale-mark mutations over the shared playback controllers/service, specialization-backed mounted catalog path shaping on the FilmuVFS supplier boundary, specialization-backed REST detail season coverage, specialization-normalized compatibility metadata, and additive calendar identity projection
+- graph-first specialization-backed calendar/detail/list lineage on the shared media-domain service seam, including additive GraphQL calendar identity fields, GraphQL VFS-backed directory/stat/snapshot/blocked-item queries over the shared catalog supplier snapshot, GraphQL runtime lifecycle plus queue/metadata operator history over the existing lifecycle and Redis-backed stores, richer graph item-detail playback/media-entry ownership projections, graph-first playback refresh/stale-mark mutations over the shared playback controllers/service, a persisted graph `mediaEntry` control-state mutation over the shared playback-service write seam, specialization-backed mounted catalog path shaping on the FilmuVFS supplier boundary, specialization-backed REST detail season coverage, specialization-normalized compatibility metadata, and additive calendar identity projection
 
 ## Where FilmuCore still trails
 
@@ -114,7 +114,7 @@ Current local baseline details that matter for Filmu planning:
 - broader queue-backed stream-link orchestration breadth beyond Filmu's current optional queued refresh path
 - broader plugin and integration ecosystem breadth, including Seerr/Listrr intake, Comet scraping, Plex post-download hooks, and pluginized TMDB/TVDB indexing
 - GraphQL-first cached control-plane breadth with Redis-backed response caching and dataloader-shaped ORM access
-- GraphQL VFS/control-plane mutation breadth is now partially closed by playback refresh/stale-mark triggers; the remaining gap is persisted stream-url/state mutation on top of the now-landed VFS-backed directory/stat/snapshot/operator queries
+- GraphQL VFS/control-plane mutation breadth is now partially closed by playback refresh/stale-mark triggers plus persisted media-entry control writes; the remaining gap is broader active-stream/stream-url mutation breadth on top of the now-landed VFS-backed directory/stat/snapshot/operator queries
 - broader compatibility-tail read-model adoption beyond the now-landed graph/VFS/detail-first specialization projections, compatibility-metadata normalization, and additive calendar identity projection
 - database seed/factory tooling in the main app
 - environment-owned searchable log and trace infrastructure
@@ -132,7 +132,7 @@ What current `riven-ts` still has that Filmu does not yet match:
 - queue-backed stream-link request handling directly on the VFS open path rather than Filmu's current optional queued control-plane dispatch
 - broader verified integration inventory: `seerr`, `listrr`, `comet`, `plex`, pluginized `tmdb`, pluginized `tvdb`, `torrentio`, `stremthru`, `mdblist`, notifications
 - GraphQL-first Redis-cached control-plane composition with dataloader-oriented ORM access
-- persisted stream-url/state mutation and broader cached control-plane composition on the GraphQL VFS/control-plane surface
+- broader active-stream/stream-url mutation breadth and broader cached control-plane composition on the GraphQL VFS/control-plane surface
 - DB seeds/factories for repeatable local and test-state setup
 
 What Filmu already does better:

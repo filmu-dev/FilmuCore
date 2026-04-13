@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import cast
 
 import strawberry
@@ -21,6 +22,7 @@ from filmu_py.db.models import StreamORM
 from filmu_py.graphql.deps import GraphQLContext
 from filmu_py.graphql.types import (
     GQLActiveStream,
+    GQLActiveStreamRole,
     GQLActiveStreamOwner,
     GQLCalendarEntry,
     GQLFilmuSettings,
@@ -34,6 +36,7 @@ from filmu_py.graphql.types import (
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
     GQLPlaybackAttachment,
+    GQLPersistMediaEntryControlResult,
     GQLPlaybackRefreshTriggerResult,
     GQLQueueAlert,
     GQLRecoveryMechanism,
@@ -57,6 +60,7 @@ from filmu_py.graphql.types import (
     ItemActionInput,
     ItemStateChangedEvent,
     MediaKind,
+    PersistMediaEntryControlInput,
     RequestItemInput,
     RequestItemResult,
     ResetItemResult,
@@ -79,6 +83,7 @@ from filmu_py.services.playback import (
     AppScopedDirectPlaybackRefreshTriggerResult,
     AppScopedHlsFailedLeaseRefreshTriggerResult,
     AppScopedHlsRestrictedFallbackRefreshTriggerResult,
+    PersistedMediaEntryControlMutationResult,
     trigger_direct_playback_refresh_from_resources,
     trigger_hls_failed_lease_refresh_from_resources,
     trigger_hls_restricted_fallback_refresh_from_resources,
@@ -673,6 +678,14 @@ def _serialize_trigger_datetime(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _parse_graphql_datetime(value: str) -> datetime:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
 def _build_direct_playback_refresh_trigger_result(
     result: AppScopedDirectPlaybackRefreshTriggerResult,
 ) -> GQLPlaybackRefreshTriggerResult:
@@ -754,6 +767,55 @@ def _build_selected_hls_refresh_trigger_result(
         deferred_reason=(refresh_result.deferred_reason if refresh_result is not None else None),
         scheduled_requested_at=None,
         scheduled_not_before=None,
+    )
+
+
+def _build_persisted_media_entry_control_result(
+    result: PersistedMediaEntryControlMutationResult,
+) -> GQLPersistMediaEntryControlResult:
+    roles = {
+        str(getattr(active_stream, "role"))
+        for active_stream in getattr(result.item, "active_streams", [])
+        if str(getattr(active_stream, "media_entry_id", "")) == result.media_entry.id
+    }
+    media_entry_projection = SimpleNamespace(
+        entry_type=result.media_entry.entry_type,
+        kind=result.media_entry.kind,
+        original_filename=result.media_entry.original_filename,
+        url=(
+            result.media_entry.unrestricted_url
+            or result.media_entry.download_url
+            or result.media_entry.local_path
+        ),
+        local_path=result.media_entry.local_path,
+        download_url=result.media_entry.download_url,
+        unrestricted_url=result.media_entry.unrestricted_url,
+        provider=result.media_entry.provider,
+        provider_download_id=result.media_entry.provider_download_id,
+        provider_file_id=result.media_entry.provider_file_id,
+        provider_file_path=result.media_entry.provider_file_path,
+        size=result.media_entry.size_bytes,
+        created=result.media_entry.created_at.isoformat()
+        if result.media_entry.created_at is not None
+        else None,
+        modified=result.media_entry.updated_at.isoformat()
+        if result.media_entry.updated_at is not None
+        else None,
+        refresh_state=result.media_entry.refresh_state,
+        expires_at=_serialize_trigger_datetime(result.media_entry.expires_at),
+        last_refreshed_at=_serialize_trigger_datetime(result.media_entry.last_refreshed_at),
+        last_refresh_error=result.media_entry.last_refresh_error,
+        active_for_direct="direct" in roles,
+        active_for_hls="hls" in roles,
+        is_active_stream=bool(roles),
+    )
+    return GQLPersistMediaEntryControlResult(
+        item_id=result.item.id,
+        media_entry_id=result.media_entry.id,
+        success=True,
+        error=None,
+        applied_role=result.applied_role,
+        media_entry=_build_media_entry(media_entry_projection),
     )
 
 
@@ -1180,6 +1242,97 @@ class CoreMutationResolver:
             success=success,
             error=None if success else "selected_hls_media_entry_not_marked",
         )
+
+    @strawberry.mutation(
+        description="Persist bounded media-entry URL/state changes and optional active-role rebinding through the shared playback service"
+    )
+    async def persist_media_entry_control_state(
+        self,
+        info: Info[GraphQLContext, object],
+        input: PersistMediaEntryControlInput,
+    ) -> GQLPersistMediaEntryControlResult:
+        playback_service = info.context.resources.playback_service
+        if playback_service is None:
+            return GQLPersistMediaEntryControlResult(
+                item_id=str(input.item_id),
+                media_entry_id=str(input.media_entry_id),
+                success=False,
+                error="playback_service_unavailable",
+                applied_role=None,
+                media_entry=None,
+            )
+
+        if (
+            input.active_role is None
+            and input.local_path is None
+            and input.download_url is None
+            and input.unrestricted_url is None
+            and input.refresh_state is None
+            and input.last_refresh_error is None
+            and input.expires_at is None
+        ):
+            return GQLPersistMediaEntryControlResult(
+                item_id=str(input.item_id),
+                media_entry_id=str(input.media_entry_id),
+                success=False,
+                error="no_changes_requested",
+                applied_role=None,
+                media_entry=None,
+            )
+
+        try:
+            expires_at = (
+                _parse_graphql_datetime(input.expires_at)
+                if input.expires_at is not None
+                else None
+            )
+        except ValueError:
+            return GQLPersistMediaEntryControlResult(
+                item_id=str(input.item_id),
+                media_entry_id=str(input.media_entry_id),
+                success=False,
+                error="invalid_expires_at",
+                applied_role=None,
+                media_entry=None,
+            )
+
+        try:
+            result = await playback_service.persist_media_entry_control_state(
+                str(input.item_id),
+                str(input.media_entry_id),
+                active_role=(
+                    cast(GQLActiveStreamRole, input.active_role).value
+                    if input.active_role is not None
+                    else None
+                ),
+                local_path=input.local_path,
+                download_url=input.download_url,
+                unrestricted_url=input.unrestricted_url,
+                refresh_state=input.refresh_state,
+                last_refresh_error=input.last_refresh_error,
+                expires_at=expires_at,
+            )
+        except ValueError as exc:
+            return GQLPersistMediaEntryControlResult(
+                item_id=str(input.item_id),
+                media_entry_id=str(input.media_entry_id),
+                success=False,
+                error=str(exc),
+                applied_role=None,
+                media_entry=None,
+            )
+
+        if result is None:
+            return GQLPersistMediaEntryControlResult(
+                item_id=str(input.item_id),
+                media_entry_id=str(input.media_entry_id),
+                success=False,
+                error="media_entry_not_found",
+                applied_role=None,
+                media_entry=None,
+            )
+
+        return _build_persisted_media_entry_control_result(result)
 
     @strawberry.mutation(description="Update one compatibility settings path")
     async def update_setting(
