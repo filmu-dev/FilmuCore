@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import PurePosixPath
 from typing import cast
 
 import strawberry
@@ -27,6 +28,12 @@ from filmu_py.graphql.types import (
     GQLRecoveryPlan,
     GQLRecoveryTargetStage,
     GQLStreamCandidate,
+    GQLVfsCatalogEntry,
+    GQLVfsCatalogStats,
+    GQLVfsCorrelationKeys,
+    GQLVfsDirectoryDetail,
+    GQLVfsDirectoryListing,
+    GQLVfsFileDetail,
     ItemActionInput,
     ItemStateChangedEvent,
     MediaKind,
@@ -48,6 +55,7 @@ from filmu_py.services.media import (
     _canonical_item_type_name,
     _infer_request_media_type,
 )
+from filmu_py.services.vfs_catalog import VfsCatalogEntry, VfsCatalogSnapshot
 
 
 def _resolve_service_version() -> str:
@@ -137,6 +145,114 @@ def _build_calendar_entry(record: CalendarProjectionRecord) -> GQLCalendarEntry:
         ),
         release_data=_serialize_release_data(record),
     )
+
+
+def _format_optional_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _build_vfs_correlation_keys(record: VfsCatalogEntry) -> GQLVfsCorrelationKeys:
+    correlation = record.correlation
+    return GQLVfsCorrelationKeys(
+        item_id=correlation.item_id,
+        media_entry_id=correlation.media_entry_id,
+        source_attachment_id=correlation.source_attachment_id,
+        provider=correlation.provider,
+        provider_download_id=correlation.provider_download_id,
+        provider_file_id=correlation.provider_file_id,
+        provider_file_path=correlation.provider_file_path,
+        session_id=correlation.session_id,
+        handle_key=correlation.handle_key,
+    )
+
+
+def _build_vfs_catalog_entry(record: VfsCatalogEntry) -> GQLVfsCatalogEntry:
+    file_payload = record.file
+    directory_payload = record.directory
+    return GQLVfsCatalogEntry(
+        entry_id=record.entry_id,
+        parent_entry_id=record.parent_entry_id,
+        path=record.path,
+        name=record.name,
+        kind=record.kind,
+        correlation=_build_vfs_correlation_keys(record),
+        directory=(
+            GQLVfsDirectoryDetail(path=directory_payload.path)
+            if directory_payload is not None
+            else None
+        ),
+        file=(
+            GQLVfsFileDetail(
+                item_id=file_payload.item_id,
+                item_title=file_payload.item_title,
+                item_external_ref=file_payload.item_external_ref,
+                media_entry_id=file_payload.media_entry_id,
+                source_attachment_id=file_payload.source_attachment_id,
+                media_type=file_payload.media_type,
+                transport=file_payload.transport,
+                locator=file_payload.locator,
+                local_path=file_payload.local_path,
+                restricted_url=file_payload.restricted_url,
+                unrestricted_url=file_payload.unrestricted_url,
+                original_filename=file_payload.original_filename,
+                size_bytes=file_payload.size_bytes,
+                lease_state=file_payload.lease_state,
+                expires_at=_format_optional_datetime(file_payload.expires_at),
+                last_refreshed_at=_format_optional_datetime(file_payload.last_refreshed_at),
+                last_refresh_error=file_payload.last_refresh_error,
+                provider=file_payload.provider,
+                provider_download_id=file_payload.provider_download_id,
+                provider_file_id=file_payload.provider_file_id,
+                provider_file_path=file_payload.provider_file_path,
+                active_roles=list(file_payload.active_roles),
+                source_key=file_payload.source_key,
+                query_strategy=file_payload.query_strategy,
+                provider_family=file_payload.provider_family,
+                locator_source=file_payload.locator_source,
+                match_basis=file_payload.match_basis,
+                restricted_fallback=file_payload.restricted_fallback,
+            )
+            if file_payload is not None
+            else None
+        ),
+    )
+
+
+def _build_vfs_catalog_stats(snapshot: VfsCatalogSnapshot) -> GQLVfsCatalogStats:
+    return GQLVfsCatalogStats(
+        directory_count=snapshot.stats.directory_count,
+        file_count=snapshot.stats.file_count,
+        blocked_item_count=snapshot.stats.blocked_item_count,
+    )
+
+
+def _normalize_vfs_path(path: str) -> str:
+    stripped = path.strip()
+    if not stripped or stripped == "/":
+        return "/"
+    normalized = PurePosixPath(f"/{stripped.lstrip('/')}").as_posix()
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+async def _resolve_vfs_snapshot(
+    info: Info[GraphQLContext, object],
+    generation_id: str | None,
+) -> VfsCatalogSnapshot | None:
+    supplier = info.context.resources.vfs_catalog_supplier
+    if supplier is None:
+        return None
+    if generation_id is None:
+        return await supplier.build_snapshot()
+    if not generation_id.isdigit():
+        return None
+    return await supplier.snapshot_for_generation(int(generation_id))
+
+
+def _find_vfs_entry(snapshot: VfsCatalogSnapshot, path: str) -> VfsCatalogEntry | None:
+    normalized_path = _normalize_vfs_path(path)
+    return next((entry for entry in snapshot.entries if entry.path == normalized_path), None)
 
 
 def _build_media_item_summary(record: MediaItemSummaryRecord) -> GQLMediaItem:
@@ -331,6 +447,57 @@ class CoreQueryResolver:
             end_date=end_date,
         )
         return [_build_calendar_entry(entry) for entry in entries]
+
+    @strawberry.field(description="Stat one mounted VFS catalog node by normalized catalog path")
+    async def vfs_catalog_entry(
+        self,
+        info: Info[GraphQLContext, object],
+        path: str,
+        generation_id: str | None = None,
+    ) -> GQLVfsCatalogEntry | None:
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
+            return None
+        entry = _find_vfs_entry(snapshot, path)
+        if entry is None:
+            return None
+        return _build_vfs_catalog_entry(entry)
+
+    @strawberry.field(
+        description="List one mounted VFS directory directly from the current or requested catalog generation"
+    )
+    async def vfs_directory(
+        self,
+        info: Info[GraphQLContext, object],
+        path: str = "/",
+        generation_id: str | None = None,
+    ) -> GQLVfsDirectoryListing | None:
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
+            return None
+        entry = _find_vfs_entry(snapshot, path)
+        if entry is None or entry.kind != "directory":
+            return None
+        children = sorted(
+            (candidate for candidate in snapshot.entries if candidate.parent_entry_id == entry.entry_id),
+            key=lambda candidate: (candidate.kind != "directory", candidate.path),
+        )
+        directories = [
+            _build_vfs_catalog_entry(candidate)
+            for candidate in children
+            if candidate.kind == "directory"
+        ]
+        files = [
+            _build_vfs_catalog_entry(candidate) for candidate in children if candidate.kind == "file"
+        ]
+        return GQLVfsDirectoryListing(
+            generation_id=snapshot.generation_id,
+            path=entry.path,
+            entry=_build_vfs_catalog_entry(entry),
+            stats=_build_vfs_catalog_stats(snapshot),
+            directories=directories,
+            files=files,
+        )
 
     @strawberry.field(description="Intentional GraphQL library stats projection")
     async def library_stats(self, info: Info[GraphQLContext, object]) -> GQLLibraryStats:

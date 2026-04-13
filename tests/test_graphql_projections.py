@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -27,6 +28,14 @@ from filmu_py.services.media import (
     RecoveryPlanRecord,
     RecoveryTargetStage,
     StatsProjection,
+)
+from filmu_py.services.vfs_catalog import (
+    VfsCatalogCorrelationKeys,
+    VfsCatalogDirectoryEntry,
+    VfsCatalogEntry,
+    VfsCatalogFileEntry,
+    VfsCatalogSnapshot,
+    VfsCatalogStats,
 )
 from filmu_py.state.item import ItemState
 
@@ -205,6 +214,20 @@ class FakeMediaService:
         return next((record for record in self.item_records if record.id == item_id), None)
 
 
+@dataclass
+class FakeVfsCatalogSupplier:
+    snapshot: VfsCatalogSnapshot | None = None
+    snapshots_by_generation: dict[int, VfsCatalogSnapshot] = field(default_factory=dict)
+
+    async def build_snapshot(self) -> VfsCatalogSnapshot:
+        if self.snapshot is None:
+            raise AssertionError("test did not configure a VFS snapshot")
+        return self.snapshot
+
+    async def snapshot_for_generation(self, generation_id: int) -> VfsCatalogSnapshot | None:
+        return self.snapshots_by_generation.get(generation_id)
+
+
 def _build_settings() -> Settings:
     return Settings(
         FILMU_PY_API_KEY=SecretStr("a" * 32),
@@ -216,7 +239,11 @@ def _build_settings() -> Settings:
     )
 
 
-def _build_client(media_service: FakeMediaService) -> TestClient:
+def _build_client(
+    media_service: FakeMediaService,
+    *,
+    vfs_catalog_supplier: FakeVfsCatalogSupplier | None = None,
+) -> TestClient:
     settings = _build_settings()
     redis = DummyRedis()
     app = FastAPI()
@@ -229,6 +256,7 @@ def _build_client(media_service: FakeMediaService) -> TestClient:
         db=DummyDatabaseRuntime(),  # type: ignore[arg-type]
         media_service=media_service,  # type: ignore[arg-type]
         graphql_plugin_registry=GraphQLPluginRegistry(),
+        vfs_catalog_supplier=vfs_catalog_supplier,  # type: ignore[arg-type]
     )
     app.state.resources = resources
     app.include_router(create_graphql_router(resources.graphql_plugin_registry), prefix="/graphql")
@@ -456,3 +484,205 @@ def test_graphql_items_exposes_media_type_and_media_kind() -> None:
             "posterPath": "/poster.jpg",
         }
     ]
+
+
+def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
+    snapshot = VfsCatalogSnapshot(
+        generation_id="7",
+        published_at=datetime(2026, 4, 13, 12, 0, tzinfo=UTC),
+        entries=(
+            VfsCatalogEntry(
+                entry_id="dir:/",
+                parent_entry_id=None,
+                path="/",
+                name="/",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/"),
+            ),
+            VfsCatalogEntry(
+                entry_id="dir:/Shows",
+                parent_entry_id="dir:/",
+                path="/Shows",
+                name="Shows",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/Shows"),
+            ),
+            VfsCatalogEntry(
+                entry_id="dir:/Shows/Example Show (2024)",
+                parent_entry_id="dir:/Shows",
+                path="/Shows/Example Show (2024)",
+                name="Example Show (2024)",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/Shows/Example Show (2024)"),
+            ),
+            VfsCatalogEntry(
+                entry_id="dir:/Shows/Example Show (2024)/Season 01",
+                parent_entry_id="dir:/Shows/Example Show (2024)",
+                path="/Shows/Example Show (2024)/Season 01",
+                name="Season 01",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/Shows/Example Show (2024)/Season 01"),
+            ),
+            VfsCatalogEntry(
+                entry_id="file:entry-1",
+                parent_entry_id="dir:/Shows/Example Show (2024)/Season 01",
+                path="/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                name="Example Show S01E01.mkv",
+                kind="file",
+                correlation=VfsCatalogCorrelationKeys(
+                    item_id="item-1",
+                    media_entry_id="entry-1",
+                    provider="realdebrid",
+                    provider_download_id="torrent-123",
+                    provider_file_path="/downloads/Example.Show.S01E01.mkv",
+                ),
+                file=VfsCatalogFileEntry(
+                    item_id="item-1",
+                    item_title="Example Show",
+                    item_external_ref="tvdb:555",
+                    media_entry_id="entry-1",
+                    source_attachment_id="attachment-1",
+                    media_type="episode",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/stream/entry-1",
+                    unrestricted_url="https://cdn.example.com/stream/entry-1",
+                    original_filename="Example Show S01E01.mkv",
+                    size_bytes=987654321,
+                    lease_state="ready",
+                    last_refreshed_at=datetime(2026, 4, 13, 11, 55, tzinfo=UTC),
+                    provider="realdebrid",
+                    provider_download_id="torrent-123",
+                    provider_file_path="/downloads/Example.Show.S01E01.mkv",
+                    active_roles=("direct",),
+                    source_key="persisted",
+                    query_strategy="persisted_media_entries",
+                    provider_family="debrid",
+                    locator_source="unrestricted_url",
+                    match_basis="provider_identity",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=4, file_count=1, blocked_item_count=0),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(
+            snapshot=snapshot,
+            snapshots_by_generation={7: snapshot},
+        ),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsDirectory(path: "/Shows/Example Show (2024)/Season 01", generationId: "7") {
+                    generationId
+                    path
+                    entry { entryId kind path }
+                    stats { directoryCount fileCount blockedItemCount }
+                    directories { path name kind }
+                    files {
+                      path
+                      name
+                      kind
+                      correlation { itemId mediaEntryId provider providerDownloadId providerFilePath }
+                      file {
+                        itemId
+                        itemTitle
+                        itemExternalRef
+                        mediaEntryId
+                        mediaType
+                        transport
+                        locator
+                        unrestrictedUrl
+                        originalFilename
+                        sizeBytes
+                        leaseState
+                        lastRefreshedAt
+                        activeRoles
+                        sourceKey
+                        queryStrategy
+                        providerFamily
+                        locatorSource
+                        matchBasis
+                      }
+                    }
+                  }
+                  vfsCatalogEntry(path: "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv", generationId: "7") {
+                    path
+                    kind
+                    correlation { itemId mediaEntryId providerDownloadId }
+                    file { mediaEntryId providerDownloadId restrictedFallback }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["vfsDirectory"] == {
+        "generationId": "7",
+        "path": "/Shows/Example Show (2024)/Season 01",
+        "entry": {
+            "entryId": "dir:/Shows/Example Show (2024)/Season 01",
+            "kind": "directory",
+            "path": "/Shows/Example Show (2024)/Season 01",
+        },
+        "stats": {
+            "directoryCount": 4,
+            "fileCount": 1,
+            "blockedItemCount": 0,
+        },
+        "directories": [],
+        "files": [
+            {
+                "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                "name": "Example Show S01E01.mkv",
+                "kind": "file",
+                "correlation": {
+                    "itemId": "item-1",
+                    "mediaEntryId": "entry-1",
+                    "provider": "realdebrid",
+                    "providerDownloadId": "torrent-123",
+                    "providerFilePath": "/downloads/Example.Show.S01E01.mkv",
+                },
+                "file": {
+                    "itemId": "item-1",
+                    "itemTitle": "Example Show",
+                    "itemExternalRef": "tvdb:555",
+                    "mediaEntryId": "entry-1",
+                    "mediaType": "episode",
+                    "transport": "remote-direct",
+                    "locator": "https://cdn.example.com/stream/entry-1",
+                    "unrestrictedUrl": "https://cdn.example.com/stream/entry-1",
+                    "originalFilename": "Example Show S01E01.mkv",
+                    "sizeBytes": 987654321,
+                    "leaseState": "ready",
+                    "lastRefreshedAt": "2026-04-13T11:55:00+00:00",
+                    "activeRoles": ["direct"],
+                    "sourceKey": "persisted",
+                    "queryStrategy": "persisted_media_entries",
+                    "providerFamily": "debrid",
+                    "locatorSource": "unrestricted_url",
+                    "matchBasis": "provider_identity",
+                },
+            }
+        ],
+    }
+    assert payload["vfsCatalogEntry"] == {
+        "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+        "kind": "file",
+        "correlation": {
+            "itemId": "item-1",
+            "mediaEntryId": "entry-1",
+            "providerDownloadId": "torrent-123",
+        },
+        "file": {
+            "mediaEntryId": "entry-1",
+            "providerDownloadId": "torrent-123",
+            "restrictedFallback": False,
+        },
+    }

@@ -88,6 +88,97 @@ class GQLCalendarEntry:
 
 
 @strawberry.type
+class GQLVfsCorrelationKeys:
+    """Correlation identifiers for one VFS catalog node."""
+
+    item_id: str | None = strawberry.field(name="itemId", default=None)
+    media_entry_id: str | None = strawberry.field(name="mediaEntryId", default=None)
+    source_attachment_id: str | None = strawberry.field(name="sourceAttachmentId", default=None)
+    provider: str | None = None
+    provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
+    provider_file_id: str | None = strawberry.field(name="providerFileId", default=None)
+    provider_file_path: str | None = strawberry.field(name="providerFilePath", default=None)
+    session_id: str | None = strawberry.field(name="sessionId", default=None)
+    handle_key: str | None = strawberry.field(name="handleKey", default=None)
+
+
+@strawberry.type
+class GQLVfsDirectoryDetail:
+    """Directory metadata for one VFS catalog node."""
+
+    path: str
+
+
+@strawberry.type
+class GQLVfsFileDetail:
+    """File metadata for one VFS catalog node."""
+
+    item_id: str = strawberry.field(name="itemId")
+    item_title: str = strawberry.field(name="itemTitle")
+    item_external_ref: str = strawberry.field(name="itemExternalRef")
+    media_entry_id: str = strawberry.field(name="mediaEntryId")
+    source_attachment_id: str | None = strawberry.field(name="sourceAttachmentId", default=None)
+    media_type: str = strawberry.field(name="mediaType")
+    transport: str
+    locator: str
+    local_path: str | None = strawberry.field(name="localPath", default=None)
+    restricted_url: str | None = strawberry.field(name="restrictedUrl", default=None)
+    unrestricted_url: str | None = strawberry.field(name="unrestrictedUrl", default=None)
+    original_filename: str | None = strawberry.field(name="originalFilename", default=None)
+    size_bytes: int | None = strawberry.field(name="sizeBytes", default=None)
+    lease_state: str = strawberry.field(name="leaseState")
+    expires_at: str | None = strawberry.field(name="expiresAt", default=None)
+    last_refreshed_at: str | None = strawberry.field(name="lastRefreshedAt", default=None)
+    last_refresh_error: str | None = strawberry.field(name="lastRefreshError", default=None)
+    provider: str | None = None
+    provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
+    provider_file_id: str | None = strawberry.field(name="providerFileId", default=None)
+    provider_file_path: str | None = strawberry.field(name="providerFilePath", default=None)
+    active_roles: list[str] = strawberry.field(name="activeRoles")
+    source_key: str | None = strawberry.field(name="sourceKey", default=None)
+    query_strategy: str | None = strawberry.field(name="queryStrategy", default=None)
+    provider_family: str = strawberry.field(name="providerFamily")
+    locator_source: str = strawberry.field(name="locatorSource")
+    match_basis: str | None = strawberry.field(name="matchBasis", default=None)
+    restricted_fallback: bool = strawberry.field(name="restrictedFallback")
+
+
+@strawberry.type
+class GQLVfsCatalogEntry:
+    """One mounted catalog node exposed intentionally through GraphQL."""
+
+    entry_id: str = strawberry.field(name="entryId")
+    parent_entry_id: str | None = strawberry.field(name="parentEntryId", default=None)
+    path: str
+    name: str
+    kind: str
+    correlation: GQLVfsCorrelationKeys
+    directory: GQLVfsDirectoryDetail | None = None
+    file: GQLVfsFileDetail | None = None
+
+
+@strawberry.type
+class GQLVfsCatalogStats:
+    """Aggregate counts for one mounted catalog snapshot."""
+
+    directory_count: int = strawberry.field(name="directoryCount")
+    file_count: int = strawberry.field(name="fileCount")
+    blocked_item_count: int = strawberry.field(name="blockedItemCount")
+
+
+@strawberry.type
+class GQLVfsDirectoryListing:
+    """Immediate directory listing backed by the mounted VFS catalog snapshot."""
+
+    generation_id: str = strawberry.field(name="generationId")
+    path: str
+    entry: GQLVfsCatalogEntry
+    stats: GQLVfsCatalogStats
+    directories: list[GQLVfsCatalogEntry]
+    files: list[GQLVfsCatalogEntry]
+
+
+@strawberry.type
 class GQLLibraryStats:
     """Intentional GraphQL stats type above the compatibility REST contract."""
 

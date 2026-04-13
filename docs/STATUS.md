@@ -811,6 +811,10 @@ Current local testing status:
   - [`../filmu_py/graphql/types.py`](../filmu_py/graphql/types.py) and [`../filmu_py/graphql/resolvers.py`](../filmu_py/graphql/resolvers.py) now expose additive `imdbId` plus parent TMDB/TVDB ids on `calendarEntries`.
   - that means GraphQL calendar consumers now retain the same specialization-backed identity context already present in the shared calendar projection instead of dropping it at the graph boundary.
   - focused coverage in [`../tests/test_graphql_projections.py`](../tests/test_graphql_projections.py) now verifies `calendarEntries` returns those identity fields.
+- Deepened GraphQL VFS/control-plane breadth on that same graph-first seam:
+  - [`../filmu_py/graphql/types.py`](../filmu_py/graphql/types.py) and [`../filmu_py/graphql/resolvers.py`](../filmu_py/graphql/resolvers.py) now expose `vfsDirectory` and `vfsCatalogEntry` queries backed directly by the shared `vfs_catalog_supplier` snapshot instead of introducing a GraphQL-only browse model.
+  - that gives the graph surface real mounted directory/stat visibility over generation-aware catalog entries, file lease/control fields, and correlation keys while keeping REST unchanged as the compatibility surface.
+  - focused coverage in [`../tests/test_graphql_projections.py`](../tests/test_graphql_projections.py) now verifies the graph queries return mounted directory listings plus file/correlation detail from the supplier snapshot.
 - Deepened the VFS-facing catalog supplier onto that same specialization-backed seam:
   - [`../filmu_py/services/vfs_catalog.py`](../filmu_py/services/vfs_catalog.py) now eager-loads the same specialization hierarchy used by the shared media-domain service and prefers specialization-backed media type, show title, and season/episode lineage when shaping mounted catalog paths.
   - mounted path shaping now falls back to flat metadata and filename/provider-path inference only when specialization rows are absent, so stale `MediaItemORM.attributes` values no longer win over persisted show/season/episode hierarchy during catalog projection.
@@ -829,7 +833,7 @@ Current local testing status:
   - focused coverage in [`../tests/test_projection_queries_domain.py`](../tests/test_projection_queries_domain.py) and [`../tests/test_calendar_routes.py`](../tests/test_calendar_routes.py) now verifies the snapshot and HTTP compatibility payload retain specialization-backed identity context.
 - Graph-first delivery rule is now explicit for upcoming slices:
   - new domain/read-model depth should land on GraphQL-first or shared service-layer seams first, with REST only receiving minimal compatibility-preserving additive changes where the current frontend still depends on them.
-  - avoid broad new REST surface expansion while the remaining graph/control-plane breadth still trails the shared domain model.
+  - avoid broad new REST surface expansion while the remaining graph/control-plane breadth still trails the shared domain model, especially around mutation-side VFS control-plane actions and broader cached control-plane composition.
 - Added the standalone RTN compatibility package above the current persisted parse/rank seams:
   - [`../filmu_py/rtn/schemas.py`](../filmu_py/rtn/schemas.py), [`../filmu_py/rtn/defaults.py`](../filmu_py/rtn/defaults.py), [`../filmu_py/rtn/parser.py`](../filmu_py/rtn/parser.py), [`../filmu_py/rtn/ranker.py`](../filmu_py/rtn/ranker.py), [`../filmu_py/rtn/rtn.py`](../filmu_py/rtn/rtn.py), and [`../filmu_py/rtn/exceptions.py`](../filmu_py/rtn/exceptions.py) now provide a self-contained RTN-compatible parser/ranker/facade layer that deserializes the original snake_case `settings.json` ranking block directly.
   - The standalone package now respects `use_custom_rank`, carries `enable_fetch_speed_mode` as a stored-but-unused compatibility field, rejects disabled profiles explicitly, and keeps `bucket_limit` outside the ranking profile itself as a call-time sort parameter.
