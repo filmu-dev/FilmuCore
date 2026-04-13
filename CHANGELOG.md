@@ -6,6 +6,14 @@
 ### Bug Fixes
 
 * GitHub flow audit 20260413 ([#48](https://github.com/filmu-dev/FilmuCore/issues/48)) ([5dc4874](https://github.com/filmu-dev/FilmuCore/commit/5dc48747206432caa37f3ed732834a3152885f49))
+* sync: apply local non-doc changes onto origin/main ([#50](https://github.com/filmu-dev/FilmuCore/issues/50)) ([acf043f](https://github.com/filmu-dev/FilmuCore/commit/acf043f7d6430ce46a091977f45202cc1bb75f22))
+
+## [0.16.1](https://github.com/filmu-dev/FilmuCore/compare/v0.16.0...v0.16.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* GitHub flow audit 20260413 ([#48](https://github.com/filmu-dev/FilmuCore/issues/48)) ([5dc4874](https://github.com/filmu-dev/FilmuCore/commit/5dc48747206432caa37f3ed732834a3152885f49))
 
 ## [0.16.0](https://github.com/filmu-dev/FilmuCore/compare/v0.15.0...v0.16.0) (2026-04-13)
 
