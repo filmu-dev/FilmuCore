@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 
@@ -45,6 +46,9 @@ STREAM_REFRESH_POLICY_GOVERNANCE = {
     "fallback_in_process": 0,
     "latency_slo_breaches": 0,
 }
+RuntimeGovernanceSnapshot = dict[str, int | float | str | list[str]]
+RuntimePressureEvaluator = Callable[[RuntimeGovernanceSnapshot], tuple[bool, bool]]
+RuntimeGovernanceProvider = Callable[[], RuntimeGovernanceSnapshot]
 
 
 def direct_playback_trigger_governance_snapshot(*, active_tasks: int) -> dict[str, int]:
@@ -138,6 +142,34 @@ def stream_refresh_policy_governance_snapshot(
             "latency_slo_breaches"
         ],
     }
+
+
+def select_refresh_dispatch_preference(
+    *,
+    refresh_dispatch_mode: str,
+    queued_controller_available: bool,
+    runtime_governance_provider: RuntimeGovernanceProvider,
+    runtime_pressure_evaluator: RuntimePressureEvaluator,
+) -> bool:
+    """Return whether route-adjacent refresh work should prefer queued dispatch."""
+
+    if refresh_dispatch_mode == "queued":
+        if queued_controller_available:
+            return True
+        STREAM_REFRESH_POLICY_GOVERNANCE["fallback_in_process"] += 1
+        return False
+
+    runtime_governance = runtime_governance_provider()
+    requires_queue, latency_slo_breached = runtime_pressure_evaluator(runtime_governance)
+    if latency_slo_breached:
+        STREAM_REFRESH_POLICY_GOVERNANCE["latency_slo_breaches"] += 1
+    if requires_queue and queued_controller_available:
+        STREAM_REFRESH_POLICY_GOVERNANCE["forced_queued"] += 1
+        return True
+    STREAM_REFRESH_POLICY_GOVERNANCE["forced_in_process"] += 1
+    if requires_queue and not queued_controller_available:
+        STREAM_REFRESH_POLICY_GOVERNANCE["fallback_in_process"] += 1
+    return False
 
 
 def record_route_refresh_trigger_pending(
