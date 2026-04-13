@@ -7,6 +7,7 @@ from pathlib import Path
 from filmu_py.services import (
     media_path_inference,
     media_show_completion,
+    media_stream_candidates,
     playback_refresh_controllers,
     playback_refresh_dispatch,
 )
@@ -61,6 +62,18 @@ def test_media_service_imports_show_completion_boundary_module() -> None:
     )
     assert "ShowCompletionResult = _media_show_completion.ShowCompletionResult" in source
     assert "_evaluate_show_completion = _media_show_completion.evaluate_show_completion" in source
+
+
+def test_media_service_imports_stream_candidate_boundary_module() -> None:
+    media_path = _project_file("filmu_py", "services", "media.py")
+    source = media_path.read_text(encoding="utf-8")
+    _assert_file_imports_module(
+        media_path,
+        "filmu_py.services.media_stream_candidates",
+        "_media_stream_candidates",
+    )
+    assert "ParsedStreamCandidateRecord = _media_stream_candidates.ParsedStreamCandidateRecord" in source
+    assert "rank_persisted_streams_for_item = _media_stream_candidates.rank_persisted_streams_for_item" in source
 
 
 def test_playback_service_imports_refresh_dispatch_boundary_module() -> None:
@@ -132,6 +145,15 @@ def test_media_show_completion_module_exports_contract() -> None:
     ).all_satisfied is False
 
 
+def test_media_stream_candidates_module_exports_contract() -> None:
+    parsed = media_stream_candidates.parse_stream_candidate_title(
+        "Example.Show.S02E05.1080p.WEB-DL.x265-GROUP.mkv"
+    )
+    assert parsed.resolution == "1080p"
+    assert callable(media_stream_candidates.validate_parsed_stream_candidate)
+    assert media_stream_candidates.RankingModel().remove_ranks_under == -10000
+
+
 def test_playback_refresh_controllers_module_exports_contract() -> None:
     assert hasattr(playback_refresh_controllers, "QueuedDirectPlaybackRefreshController")
     assert hasattr(playback_refresh_controllers, "InProcessDirectPlaybackRefreshController")
@@ -139,7 +161,7 @@ def test_playback_refresh_controllers_module_exports_contract() -> None:
 
 def test_large_file_decomposition_size_budget_contract() -> None:
     budgets = {
-        _project_file("filmu_py", "services", "media.py"): 5800,
+        _project_file("filmu_py", "services", "media.py"): 5300,
         _project_file("filmu_py", "services", "playback.py"): 4900,
         _project_file("filmu_py", "workers", "tasks.py"): 3800,
         _project_file("filmu_py", "api", "routes", "stream.py"): 1600,

@@ -10,6 +10,7 @@ def test_operator_log_pipeline_rollout_tracks_green_streak() -> None:
 
     assert 'green_streak' in script
     assert 'history_record_count' in script
+    assert 'contract_path' in script
 
 
 
@@ -21,3 +22,22 @@ def test_enterprise_rollout_continuity_requires_program_summary_and_operator_str
     assert 'program_summary_present' in script
     assert 'program_environment_count' in script
     assert 'rollout_green_streak' in script
+    assert 'program_contract_path_match' in script
+    assert 'rollout_contract_path_match' in script
+
+
+def test_rollout_contract_manifests_exist_and_define_expected_keys() -> None:
+    windows_contract = REPO_ROOT / 'ops' / 'rollout' / 'windows-vfs-soak-program.contract.json'
+    operator_contract = REPO_ROOT / 'ops' / 'rollout' / 'operator-log-pipeline.contract.json'
+
+    assert windows_contract.is_file()
+    assert operator_contract.is_file()
+
+    windows_text = windows_contract.read_text(encoding='utf-8')
+    operator_text = operator_contract.read_text(encoding='utf-8')
+
+    assert 'minimum_environment_count' in windows_text
+    assert 'required_profiles' in windows_text
+    assert 'require_runtime_capture' in windows_text
+    assert 'required_fields' in operator_text
+    assert 'minimum_green_streak' in operator_text

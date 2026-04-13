@@ -10,6 +10,7 @@ param(
     [int] $MaxFatalErrorIncidents = 0,
     [string] $ArtifactsRoot = '',
     [string] $HistoryRoot = '',
+    [string] $ContractPath = '',
     [switch] $AllowTrendBootstrap,
     [switch] $FailFast
 )
@@ -26,6 +27,47 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
 }
 $ArtifactsRoot = [System.IO.Path]::GetFullPath($ArtifactsRoot)
 New-Item -ItemType Directory -Force -Path $ArtifactsRoot | Out-Null
+
+if ([string]::IsNullOrWhiteSpace($ContractPath)) {
+    $ContractPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'ops\rollout\windows-vfs-soak-program.contract.json'
+}
+$contract = $null
+if (Test-Path -LiteralPath $ContractPath) {
+    $ContractPath = [System.IO.Path]::GetFullPath($ContractPath)
+    $contract = Get-Content -LiteralPath $ContractPath -Raw | ConvertFrom-Json
+    if ($null -ne $contract) {
+        if (
+            @($EnvironmentClasses).Count -eq 0 -and
+            ($contract.PSObject.Properties.Name -contains 'required_environment_classes')
+        ) {
+            $EnvironmentClasses = @($contract.required_environment_classes)
+        }
+        if ($contract.PSObject.Properties.Name -contains 'required_profiles') {
+            $Profiles = @($contract.required_profiles)
+        }
+        if ($contract.PSObject.Properties.Name -contains 'repeat_count') {
+            $RepeatCount = [int]$contract.repeat_count
+        }
+        if ($contract.PSObject.Properties.Name -contains 'minimum_environment_count') {
+            $MinimumEnvironmentCount = [int]$contract.minimum_environment_count
+        }
+        if ($contract.PSObject.Properties.Name -contains 'require_runtime_capture') {
+            $RequireRuntimeCapture = [bool]$contract.require_runtime_capture
+        }
+        if ($contract.PSObject.Properties.Name -contains 'require_backend_status_capture') {
+            $RequireBackendStatusCapture = [bool]$contract.require_backend_status_capture
+        }
+        if ($contract.PSObject.Properties.Name -contains 'max_reconnect_incidents') {
+            $MaxReconnectIncidents = [int]$contract.max_reconnect_incidents
+        }
+        if ($contract.PSObject.Properties.Name -contains 'max_provider_pressure_incidents') {
+            $MaxProviderPressureIncidents = [int]$contract.max_provider_pressure_incidents
+        }
+        if ($contract.PSObject.Properties.Name -contains 'max_fatal_error_incidents') {
+            $MaxFatalErrorIncidents = [int]$contract.max_fatal_error_incidents
+        }
+    }
+}
 
 if ($EnvironmentClasses.Count -eq 0) {
     $fromEnv = [string]::Join(',', @([string]$env:FILMU_VFS_ENVIRONMENT_CLASSES))
@@ -117,6 +159,7 @@ if ($summaryPaths.Count -eq 0) {
     -ArtifactsRoot $ArtifactsRoot `
     -SummaryPaths @($summaryPaths) `
     -MinimumEnvironmentCount $MinimumEnvironmentCount `
+    -ContractPath $ContractPath `
     -RequireRuntimeCapture:$RequireRuntimeCapture `
     -RequireBackendStatusCapture:$RequireBackendStatusCapture
 $multiEnvironmentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
@@ -149,9 +192,11 @@ $programSummaryPath = Join-Path $ArtifactsRoot ("soak-program-summary-{0}.json" 
 [ordered]@{
     timestamp = (Get-Date).ToString('o')
     status = 'passed'
+    contract_path = if ($null -ne $contract) { $ContractPath } else { $null }
     environment_classes = $EnvironmentClasses
     environment_count = @($EnvironmentClasses).Count
-    profiles = $Profiles
+    profiles = @($Profiles)
+    required_profiles = @($Profiles)
     repeat_count = $RepeatCount
     minimum_environment_count = $MinimumEnvironmentCount
     require_runtime_capture = [bool]$RequireRuntimeCapture

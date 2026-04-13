@@ -1,0 +1,16 @@
+{
+  "required_fields": [
+    "@timestamp",
+    "log.level",
+    "message",
+    "service.name",
+    "trace.id",
+    "span.id",
+    "labels.tenant_id"
+  ],
+  "max_health_latency_ms": 5000,
+  "max_search_latency_ms": 5000,
+  "max_alert_latency_ms": 5000,
+  "max_active_alerts": -1,
+  "minimum_green_streak": 3
+}

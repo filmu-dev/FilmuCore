@@ -5,7 +5,8 @@ param(
     [string[]] $RequiredEnvironmentClasses = @(),
     [int] $MinimumEnvironmentCount = 2,
     [switch] $RequireRuntimeCapture,
-    [switch] $RequireBackendStatusCapture
+    [switch] $RequireBackendStatusCapture,
+    [string] $ContractPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,6 +49,35 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
     $ArtifactsRoot = Get-DefaultArtifactsRoot
 }
 $ArtifactsRoot = [System.IO.Path]::GetFullPath($ArtifactsRoot)
+
+if ([string]::IsNullOrWhiteSpace($ContractPath)) {
+    $ContractPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'ops\rollout\windows-vfs-soak-program.contract.json'
+}
+$contract = $null
+if (Test-Path -LiteralPath $ContractPath) {
+    $ContractPath = [System.IO.Path]::GetFullPath($ContractPath)
+    $contract = Get-Content -LiteralPath $ContractPath -Raw | ConvertFrom-Json
+    if ($null -ne $contract) {
+        if ($contract.PSObject.Properties.Name -contains 'required_profiles') {
+            $RequiredProfiles = @($contract.required_profiles)
+        }
+        if (
+            @($RequiredEnvironmentClasses).Count -eq 0 -and
+            ($contract.PSObject.Properties.Name -contains 'required_environment_classes')
+        ) {
+            $RequiredEnvironmentClasses = @($contract.required_environment_classes)
+        }
+        if ($contract.PSObject.Properties.Name -contains 'minimum_environment_count') {
+            $MinimumEnvironmentCount = [int]$contract.minimum_environment_count
+        }
+        if ($contract.PSObject.Properties.Name -contains 'require_runtime_capture') {
+            $RequireRuntimeCapture = [bool]$contract.require_runtime_capture
+        }
+        if ($contract.PSObject.Properties.Name -contains 'require_backend_status_capture') {
+            $RequireBackendStatusCapture = [bool]$contract.require_backend_status_capture
+        }
+    }
+}
 
 $RequiredProfiles = @(Get-NormalizedStringList -Values $RequiredProfiles -Lowercase)
 $RequiredEnvironmentClasses = @(Get-NormalizedStringList -Values $RequiredEnvironmentClasses)
@@ -196,6 +226,7 @@ $summaryPath = Join-Path $ArtifactsRoot ("multi-environment-vfs-summary-{0}.json
 $summary = [ordered]@{
     timestamp = (Get-Date).ToString('o')
     artifacts_root = $ArtifactsRoot
+    contract_path = if ($null -ne $contract) { $ContractPath } else { $null }
     minimum_environment_count = $MinimumEnvironmentCount
     required_profiles = $RequiredProfiles
     required_environment_classes = $RequiredEnvironmentClasses
