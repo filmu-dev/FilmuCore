@@ -2727,11 +2727,13 @@ class CalendarItemRecord:
     """Calendar item record for current frontend compatibility."""
 
     item_id: str
-    tvdb_id: str | None
-    tmdb_id: str | None
     show_title: str
     item_type: str
     aired_at: str
+    tvdb_id: str | None = None
+    tmdb_id: str | None = None
+    imdb_id: str | None = None
+    parent_ids: ParentIdsRecord | None = None
     season: int | None = None
     episode: int | None = None
     last_state: str | None = None
@@ -5302,6 +5304,10 @@ class MediaService:
                 item_id=item.item_id,
                 tvdb_id=item.tvdb_id,
                 tmdb_id=item.tmdb_id,
+                imdb_id=(item.specialization.imdb_id if item.specialization is not None else None),
+                parent_ids=(
+                    item.specialization.parent_ids if item.specialization is not None else None
+                ),
                 show_title=item.title,
                 item_type=item.item_type,
                 aired_at=item.air_date,
