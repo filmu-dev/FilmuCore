@@ -70,6 +70,7 @@ The first implementation slice for this plan is now in the repository.
 - [x] Windows-native VFS soak/regression runner implemented in [../../scripts/run_windows_vfs_soak.ps1](../../scripts/run_windows_vfs_soak.ps1)
 - [x] package entrypoints added in [../../package.json](../../package.json) as proof:windows:vfs:soak and proof:windows:vfs:gate
 - [x] Rust mounted-read telemetry now emits read-duration, chunk-cache, read-pattern, prefetch, inline-refresh, and chunk-cache-size metrics from the live sidecar path
+- [x] playback deferral-governance counters are now isolated in [`../../filmu_py/services/playback_deferral_governance.py`](../../filmu_py/services/playback_deferral_governance.py), and [`../../filmu_py/services/playback.py`](../../filmu_py/services/playback.py) consumes that shared module without changing playback risk/refresh behavior
 
 #### Still open
 
