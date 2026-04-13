@@ -311,6 +311,21 @@ def _plugin_governance_summary(
     )
 
 
+def _has_unresolved_fence(record: Any) -> bool:
+    """Return whether one subscriber row still reflects an unresolved fence state."""
+
+    if getattr(record, "status", "") == "fenced":
+        return True
+    if "consumer_fenced" not in str(getattr(record, "last_error", "") or ""):
+        return False
+
+    last_heartbeat_at = getattr(record, "last_heartbeat_at", None)
+    updated_at = getattr(record, "updated_at", None)
+    if last_heartbeat_at is None or updated_at is None:
+        return False
+    return bool(last_heartbeat_at <= updated_at)
+
+
 def _next_api_key_id(auth_context: Any) -> str:
     """Return a non-secret service-account key identifier for rotations."""
 
@@ -976,12 +991,7 @@ async def _enterprise_operations_governance(
         1 for record in control_plane_subscribers if record.status == "stale"
     )
     control_plane_fenced_subscriber_count = sum(
-        1
-        for record in control_plane_subscribers
-        if (
-            record.status == "fenced"
-            or "consumer_fenced" in str(getattr(record, "last_error", "") or "")
-        )
+        1 for record in control_plane_subscribers if _has_unresolved_fence(record)
     )
 
     tenant_required_actions = [
