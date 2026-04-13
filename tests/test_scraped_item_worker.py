@@ -3314,6 +3314,35 @@ def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) ->
         tasks._HEAVY_STAGE_EXECUTORS.update(original_cache)
 
 
+def test_heavy_stage_executor_rejects_policy_violations(monkeypatch: Any) -> None:
+    settings = _build_worker_settings()
+    invalid_settings = settings.model_copy(
+        update={
+            "orchestration": settings.orchestration.model_copy(
+                update={
+                    "heavy_stage_isolation": settings.orchestration.heavy_stage_isolation.model_copy(
+                        update={
+                            "executor_mode": "process_pool_required",
+                            "max_workers": 3,
+                            "max_worker_ceiling": 2,
+                            "max_tasks_per_child": 0,
+                        }
+                    )
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(tasks, "get_settings", lambda: invalid_settings)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        tasks._heavy_stage_executor("index_item")
+
+    assert str(exc_info.value) == (
+        "invalid heavy-stage isolation policy for "
+        "index_item: process_recycle_unbounded,worker_ceiling_exceeded"
+    )
+
+
 def test_evaluate_show_missing_specialization() -> None:
     item_id = str(uuid.uuid4())
     item = _build_item_orm(item_id=item_id, state=ItemState.DOWNLOADED)

@@ -714,12 +714,52 @@ class HeavyStageIsolationSettings(CompatibilityModel):
     ] = (
         "process_pool_preferred"
     )
-    max_workers: int = 2
-    max_tasks_per_child: int = 0
-    index_timeout_seconds: float = 45.0
-    parse_timeout_seconds: float = 30.0
-    rank_timeout_seconds: float = 60.0
+    max_workers: int = Field(default=2, ge=1)
+    max_tasks_per_child: int = Field(default=0, ge=0)
+    require_spawn_context: bool = True
+    max_worker_ceiling: int = Field(default=2, ge=1)
+    index_timeout_seconds: float = Field(default=45.0, gt=0)
+    parse_timeout_seconds: float = Field(default=30.0, gt=0)
+    rank_timeout_seconds: float = Field(default=60.0, gt=0)
     proof_refs: list[str] = Field(default_factory=list)
+
+    def process_isolation_required(self) -> bool:
+        """Return whether this policy requires process-backed heavy-stage execution."""
+
+        return self.executor_mode == "process_pool_required"
+
+    def policy_violations(self) -> list[str]:
+        """Return stable policy violations for operator and worker enforcement."""
+
+        violations: list[str] = []
+        if self.max_workers > self.max_worker_ceiling:
+            violations.append("worker_ceiling_exceeded")
+        if self.process_isolation_required():
+            if self.max_tasks_per_child <= 0:
+                violations.append("process_recycle_unbounded")
+            if not self.require_spawn_context:
+                violations.append("spawn_context_not_required")
+        return violations
+
+    def exit_ready(
+        self,
+        *,
+        arq_enabled: bool,
+        refresh_dispatch_mode: str,
+        queued_refresh_ready: bool,
+        queued_refresh_proof_refs: list[str],
+    ) -> bool:
+        """Return whether enterprise heavy-stage exit gates are fully satisfied."""
+
+        return (
+            arq_enabled
+            and refresh_dispatch_mode == "queued"
+            and queued_refresh_ready
+            and self.process_isolation_required()
+            and not self.policy_violations()
+            and bool(self.proof_refs)
+            and bool(queued_refresh_proof_refs)
+        )
 
 
 class OrchestrationSettings(CompatibilityModel):

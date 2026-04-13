@@ -901,14 +901,12 @@ async def _enterprise_operations_governance(
         )
     )
     heavy_stage_policy = settings.orchestration.heavy_stage_isolation
-    heavy_stage_exit_ready = (
-        settings.arq_enabled
-        and settings.stream.refresh_dispatch_mode == "queued"
-        and queued_refresh_ready
-        and heavy_stage_policy.executor_mode == "process_pool_required"
-        and heavy_stage_policy.max_tasks_per_child > 0
-        and bool(heavy_stage_policy.proof_refs)
-        and bool(settings.orchestration.queued_refresh_proof_refs)
+    heavy_stage_policy_violations = heavy_stage_policy.policy_violations()
+    heavy_stage_exit_ready = heavy_stage_policy.exit_ready(
+        arq_enabled=settings.arq_enabled,
+        refresh_dispatch_mode=settings.stream.refresh_dispatch_mode,
+        queued_refresh_ready=queued_refresh_ready,
+        queued_refresh_proof_refs=settings.orchestration.queued_refresh_proof_refs,
     )
     oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(settings)
@@ -1417,7 +1415,10 @@ async def _enterprise_operations_governance(
                 f"heavy_stage_executor_mode={heavy_stage_policy.executor_mode}",
                 f"heavy_stage_max_workers={heavy_stage_policy.max_workers}",
                 f"heavy_stage_max_tasks_per_child={heavy_stage_policy.max_tasks_per_child}",
-                f"heavy_stage_process_isolation_required={int(heavy_stage_policy.executor_mode == 'process_pool_required')}",
+                f"heavy_stage_spawn_context_required={int(heavy_stage_policy.require_spawn_context)}",
+                f"heavy_stage_max_worker_ceiling={heavy_stage_policy.max_worker_ceiling}",
+                f"heavy_stage_policy_violations={','.join(heavy_stage_policy_violations) or 'none'}",
+                f"heavy_stage_process_isolation_required={int(heavy_stage_policy.process_isolation_required())}",
                 (
                     "heavy_stage_timeouts="
                     "index_item:"
@@ -1447,14 +1448,22 @@ async def _enterprise_operations_governance(
                         else "review_queued_refresh_soak_evidence"
                     ),
                     "require_process_backed_heavy_stage_isolation"
-                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    if not heavy_stage_policy.process_isolation_required()
                     else (
-                        "set_heavy_stage_process_recycle_budget"
-                        if heavy_stage_policy.max_tasks_per_child <= 0
+                        "require_spawn_context_for_heavy_stage_processes"
+                        if "spawn_context_not_required" in heavy_stage_policy_violations
                         else (
-                            "record_heavy_stage_failure_injection_or_soak_evidence"
-                            if not heavy_stage_policy.proof_refs
-                            else "review_heavy_stage_isolation_evidence"
+                            "reduce_heavy_stage_worker_ceiling"
+                            if "worker_ceiling_exceeded" in heavy_stage_policy_violations
+                            else (
+                                "set_heavy_stage_process_recycle_budget"
+                                if "process_recycle_unbounded" in heavy_stage_policy_violations
+                                else (
+                                    "record_heavy_stage_failure_injection_or_soak_evidence"
+                                    if not heavy_stage_policy.proof_refs
+                                    else "review_heavy_stage_isolation_evidence"
+                                )
+                            )
                         )
                     ),
                 ]
@@ -1467,9 +1476,13 @@ async def _enterprise_operations_governance(
                     if settings.stream.refresh_dispatch_mode != "queued" or not queued_refresh_ready
                     else "queued stream-link refresh soak evidence has not been recorded",
                     "heavy stages are not yet forced into process-backed isolation"
-                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    if not heavy_stage_policy.process_isolation_required()
+                    else "heavy-stage process workers are not forced onto spawn context"
+                    if "spawn_context_not_required" in heavy_stage_policy_violations
+                    else "heavy-stage worker ceiling exceeds the enterprise policy cap"
+                    if "worker_ceiling_exceeded" in heavy_stage_policy_violations
                     else "heavy-stage worker recycle limits are not configured"
-                    if heavy_stage_policy.max_tasks_per_child <= 0
+                    if "process_recycle_unbounded" in heavy_stage_policy_violations
                     else "heavy-stage isolation evidence has not been recorded",
                 ]
             ),

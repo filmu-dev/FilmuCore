@@ -674,6 +674,10 @@ class ServingGovernanceResponse(BaseModel):
     ]
     heavy_stage_max_workers: int
     heavy_stage_max_tasks_per_child: int
+    heavy_stage_spawn_context_required: int
+    heavy_stage_max_worker_ceiling: int
+    heavy_stage_policy_violation_count: int
+    heavy_stage_policy_violations: list[str]
     heavy_stage_process_isolation_required: int
     heavy_stage_exit_ready: int
     heavy_stage_index_timeout_seconds: float
