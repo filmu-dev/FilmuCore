@@ -27,11 +27,11 @@ if TYPE_CHECKING:
     from .services.authorization_audit import AuthorizationDecisionAuditService
     from .services.control_plane import ControlPlaneService
     from .services.identity import SecurityIdentityService
-    from .services.playback import (
+    from .services.playback import PlaybackSourceService
+    from .services.playback_refresh_controllers import (
         InProcessDirectPlaybackRefreshController,
         InProcessHlsFailedLeaseRefreshController,
         InProcessHlsRestrictedFallbackRefreshController,
-        PlaybackSourceService,
     )
     from .services.plugin_governance import PluginGovernanceService
     from .services.vfs_catalog import FilmuVfsCatalogSupplier

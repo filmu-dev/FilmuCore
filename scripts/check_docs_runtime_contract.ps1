@@ -61,9 +61,10 @@ function Invoke-GitCapture {
 function Get-TrackedDocChanges {
     $changed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $candidates = @(
+        @('diff', '--name-only', 'HEAD~1...HEAD'),
         @('diff', '--name-only', 'origin/main...HEAD'),
         @('diff', '--name-only', 'main...HEAD'),
-        @('diff', '--name-only', 'HEAD~1...HEAD')
+        @('diff', '--name-only', 'HEAD')
     )
 
     foreach ($arguments in $candidates) {
@@ -110,6 +111,16 @@ $docContractTargets = @(
     'docs/WINDOWS_README.md',
     'docs/QUICK_START.md'
 )
+$statusRelative = 'docs/STATUS.md'
+$docsTouched = $false
+if ($null -ne $trackedDocChanges) {
+    foreach ($path in @($docContractTargets + @($statusRelative))) {
+        if ($trackedDocChanges.Contains($path)) {
+            $docsTouched = $true
+            break
+        }
+    }
+}
 $forbiddenClaims = @(
     'auto\s+.*resolves\s+to\s+[`'']?projfs',
     'projfs\s+remains\s+the\s+policy/default'
@@ -119,38 +130,43 @@ $requiredClaims = @(
     '(windows\s+default|default\s+windows).*winfsp|winfsp.*(windows\s+default|default\s+windows)'
 )
 
-foreach ($relative in $docContractTargets) {
-    if ($null -ne $trackedDocChanges -and -not $trackedDocChanges.Contains($relative)) {
-        continue
-    }
+if ($docsTouched) {
+    foreach ($relative in $docContractTargets) {
+        if ($null -ne $trackedDocChanges -and -not $trackedDocChanges.Contains($relative)) {
+            continue
+        }
 
-    $path = Join-Path $RepoRoot $relative
-    if (-not (Test-Path -LiteralPath $path)) {
+        $path = Join-Path $RepoRoot $relative
+        if (-not (Test-Path -LiteralPath $path)) {
+            Add-Check -Checks $checks -Name ("docs.exists::{0}" -f $relative) `
+                -Passed:$false -Observed:$false -Expected:$true
+            continue
+        }
+
+        $raw = Get-Content -LiteralPath $path -Raw
         Add-Check -Checks $checks -Name ("docs.exists::{0}" -f $relative) `
-            -Passed:$false -Observed:$false -Expected:$true
-        continue
-    }
+            -Passed:$true -Observed:$true -Expected:$true
 
-    $raw = Get-Content -LiteralPath $path -Raw
-    Add-Check -Checks $checks -Name ("docs.exists::{0}" -f $relative) `
-        -Passed:$true -Observed:$true -Expected:$true
+        foreach ($pattern in $forbiddenClaims) {
+            $containsForbidden = Test-Regex -Content $raw -Pattern $pattern
+            Add-Check -Checks $checks -Name ("docs.no_forbidden_claim::{0}::{1}" -f $relative, $pattern) `
+                -Passed:(-not $containsForbidden) -Observed:$containsForbidden -Expected:$false
+        }
 
-    foreach ($pattern in $forbiddenClaims) {
-        $containsForbidden = Test-Regex -Content $raw -Pattern $pattern
-        Add-Check -Checks $checks -Name ("docs.no_forbidden_claim::{0}::{1}" -f $relative, $pattern) `
-            -Passed:(-not $containsForbidden) -Observed:$containsForbidden -Expected:$false
+        foreach ($pattern in $requiredClaims) {
+            $containsRequired = Test-Regex -Content $raw -Pattern $pattern
+            Add-Check -Checks $checks -Name ("docs.contains_runtime_claim::{0}::{1}" -f $relative, $pattern) `
+                -Passed:$containsRequired -Observed:$containsRequired -Expected:$true
+        }
     }
-
-    foreach ($pattern in $requiredClaims) {
-        $containsRequired = Test-Regex -Content $raw -Pattern $pattern
-        Add-Check -Checks $checks -Name ("docs.contains_runtime_claim::{0}::{1}" -f $relative, $pattern) `
-            -Passed:$containsRequired -Observed:$containsRequired -Expected:$true
-    }
+}
+else {
+    Add-Check -Checks $checks -Name 'docs.contract_claims_skipped_no_doc_delta' `
+        -Passed:$true -Observed:$false -Expected:$false
 }
 
 $statusPath = Join-Path $RepoRoot 'docs\STATUS.md'
-$statusRelative = 'docs/STATUS.md'
-$statusChanged = $null -eq $trackedDocChanges -or $trackedDocChanges.Contains($statusRelative)
+$statusChanged = $docsTouched -and ($null -eq $trackedDocChanges -or $trackedDocChanges.Contains($statusRelative))
 $statusRaw = if ($statusChanged -and (Test-Path -LiteralPath $statusPath)) {
     Get-Content -LiteralPath $statusPath -Raw
 } else {
