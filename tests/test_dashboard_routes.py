@@ -1506,6 +1506,10 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "chunk_cache_enabled=True" in body["vfs_data_plane"]["evidence"]
     assert body["distributed_control_plane"]["status"] == "not_ready"
     assert "EventBus backend=process_local" in body["distributed_control_plane"]["evidence"]
+    assert (
+        "GET /api/v1/workers/queue/history exposes dead-letter age/reason rollups and bounded replay filters"
+        in body["distributed_control_plane"]["evidence"]
+    )
     assert body["runtime_lifecycle"]["status"] == "blocked"
     assert "runtime_phase=bootstrap" in body["runtime_lifecycle"]["evidence"]
     assert body["sre_program"]["status"] == "partial"
@@ -1975,7 +1979,16 @@ def test_worker_queue_route_returns_control_plane_snapshot() -> None:
     redis.values["arq:in-progress:job-ready"] = b"active"
     redis.values["arq:retry:job-ready"] = b"retry"
     redis.values["arq:result:job-done"] = b"done"
-    redis.lists["arq:dead-letter:filmu-py"] = [b"dlq"]
+    redis.lists["arq:dead-letter:filmu-py"] = [
+        json.dumps(
+            {
+                "task": "scrape_item",
+                "reason": "timeout",
+                "reason_code": "timeout",
+                "queued_at": "2026-04-12T12:00:00+00:00",
+            }
+        ).encode("utf-8")
+    ]
 
     response = client.get("/api/v1/workers/queue", headers=_headers())
 
@@ -1993,6 +2006,8 @@ def test_worker_queue_route_returns_control_plane_snapshot() -> None:
     assert body["dead_letter_jobs"] == 1
     assert body["alert_level"] == "critical"
     assert body["alerts"][0]["code"] == "dead_letter_backlog"
+    assert body["dead_letter_oldest_age_seconds"] is not None
+    assert body["dead_letter_reason_counts"] == {"timeout": 1}
     assert 0.5 <= body["oldest_ready_age_seconds"] <= 3.0
     assert 0.0 <= body["next_scheduled_in_seconds"] <= 5.0
 
@@ -2014,15 +2029,96 @@ def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
     assert history[0]["total_jobs"] == 1
     assert history[0]["ready_jobs"] == 1
     assert history[0]["alert_level"] == "ok"
+    assert body["applied_filters"] == {
+        "alert_level": None,
+        "min_dead_letter_jobs": 0,
+        "reason_code": None,
+    }
     assert body["summary"] == {
         "points": 1,
         "latest_alert_level": "ok",
         "critical_points": 0,
         "warning_points": 0,
+        "dead_letter_points": 0,
         "max_ready_jobs": 1,
         "max_dead_letter_jobs": 0,
         "max_oldest_ready_age_seconds": history[0]["oldest_ready_age_seconds"],
+        "latest_dead_letter_oldest_age_seconds": None,
+        "max_dead_letter_oldest_age_seconds": None,
+        "latest_dead_letter_reason": None,
         "latest_dead_letter_reason_counts": {},
+        "total_dead_letter_reason_counts": {},
+        "dead_letter_reason_points": {},
+    }
+
+
+def test_worker_queue_history_route_supports_dead_letter_filters_and_reason_rollups() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    redis.lists["arq:queue-status-history:filmu-py"] = [
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T01:05:00Z",
+                "total_jobs": 4,
+                "ready_jobs": 1,
+                "deferred_jobs": 0,
+                "in_progress_jobs": 1,
+                "retry_jobs": 0,
+                "dead_letter_jobs": 2,
+                "oldest_ready_age_seconds": 12.0,
+                "next_scheduled_in_seconds": None,
+                "alert_level": "critical",
+                "dead_letter_oldest_age_seconds": 240.0,
+                "dead_letter_reason_counts": {"timeout": 2, "rate_limited": 1},
+            }
+        ).encode("utf-8"),
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T01:00:00Z",
+                "total_jobs": 2,
+                "ready_jobs": 0,
+                "deferred_jobs": 1,
+                "in_progress_jobs": 0,
+                "retry_jobs": 1,
+                "dead_letter_jobs": 1,
+                "oldest_ready_age_seconds": None,
+                "next_scheduled_in_seconds": 30.0,
+                "alert_level": "warning",
+                "dead_letter_oldest_age_seconds": 180.0,
+                "dead_letter_reason_counts": {"timeout": 1},
+            }
+        ).encode("utf-8"),
+    ]
+
+    response = client.get(
+        "/api/v1/workers/queue/history",
+        params={"alert_level": "critical", "reason_code": "timeout", "min_dead_letter_jobs": 2},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["history"]) == 1
+    assert body["applied_filters"] == {
+        "alert_level": "critical",
+        "min_dead_letter_jobs": 2,
+        "reason_code": "timeout",
+    }
+    assert body["summary"] == {
+        "points": 1,
+        "latest_alert_level": "critical",
+        "critical_points": 1,
+        "warning_points": 0,
+        "dead_letter_points": 1,
+        "max_ready_jobs": 1,
+        "max_dead_letter_jobs": 2,
+        "max_oldest_ready_age_seconds": 12.0,
+        "latest_dead_letter_oldest_age_seconds": 240.0,
+        "max_dead_letter_oldest_age_seconds": 240.0,
+        "latest_dead_letter_reason": "timeout",
+        "latest_dead_letter_reason_counts": {"timeout": 2, "rate_limited": 1},
+        "total_dead_letter_reason_counts": {"rate_limited": 1, "timeout": 2},
+        "dead_letter_reason_points": {"rate_limited": 1, "timeout": 1},
     }
 
 

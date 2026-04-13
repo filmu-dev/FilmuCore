@@ -394,6 +394,7 @@ class QueueStatusResponse(BaseModel):
     alerts: list["QueueAlertResponse"] = []
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
+    dead_letter_oldest_age_seconds: float | None = None
     dead_letter_reason_counts: dict[str, int] = {}
 
 
@@ -418,6 +419,7 @@ class QueueStatusHistoryPointResponse(BaseModel):
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
     alert_level: Literal["ok", "warning", "critical"] = "ok"
+    dead_letter_oldest_age_seconds: float | None = None
     dead_letter_reason_counts: dict[str, int] = {}
 
 
@@ -428,16 +430,31 @@ class QueueStatusHistorySummaryResponse(BaseModel):
     latest_alert_level: Literal["ok", "warning", "critical"] = "ok"
     critical_points: int
     warning_points: int
+    dead_letter_points: int
     max_ready_jobs: int
     max_dead_letter_jobs: int
     max_oldest_ready_age_seconds: float | None = None
+    latest_dead_letter_oldest_age_seconds: float | None = None
+    max_dead_letter_oldest_age_seconds: float | None = None
+    latest_dead_letter_reason: str | None = None
     latest_dead_letter_reason_counts: dict[str, int] = {}
+    total_dead_letter_reason_counts: dict[str, int] = {}
+    dead_letter_reason_points: dict[str, int] = {}
+
+
+class QueueStatusHistoryFiltersResponse(BaseModel):
+    """Applied operator controls for one bounded queue-history response."""
+
+    alert_level: Literal["ok", "warning", "critical"] | None = None
+    min_dead_letter_jobs: int = 0
+    reason_code: str | None = None
 
 
 class QueueStatusHistoryResponse(BaseModel):
     """Bounded queue-history timeline for operator views."""
 
     queue_name: str
+    applied_filters: QueueStatusHistoryFiltersResponse
     summary: QueueStatusHistorySummaryResponse
     history: list[QueueStatusHistoryPointResponse]
 
