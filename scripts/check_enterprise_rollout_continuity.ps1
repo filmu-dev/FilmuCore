@@ -105,6 +105,31 @@ function Read-JsonFile {
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
+function Get-ConsecutivePassedHistoryStreak {
+    param(
+        [string] $HistoryRoot,
+        [string] $Filter
+    )
+
+    if (-not (Test-Path -LiteralPath $HistoryRoot)) {
+        return 0
+    }
+
+    $records = @(
+        Get-ChildItem -LiteralPath $HistoryRoot -Filter $Filter -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending
+    )
+    $streak = 0
+    foreach ($recordFile in $records) {
+        $record = Read-JsonFile -Path $recordFile.FullName
+        if ([string]($record.status ?? '') -ne 'passed') {
+            break
+        }
+        $streak += 1
+    }
+    return $streak
+}
+
 function Get-LatestPlaybackStabilitySummaryPaths {
     param([string] $Root)
 
@@ -336,6 +361,9 @@ Add-Check -Section 'playback_trends' -Name 'trend_history_depth' `
     -Expected:(">={0}" -f $MinimumPlaybackTrendRecords)
 
 $operatorSummaryPath = Join-Path $OperatorArtifactDir 'log-pipeline-rollout-summary.json'
+$operatorGreenStreak = Get-ConsecutivePassedHistoryStreak `
+    -HistoryRoot $OperatorHistoryRoot `
+    -Filter 'log-pipeline-rollout-record-*.json'
 Add-Check -Section 'operator_rollout' -Name 'rollout_summary_present' `
     -Passed:((Test-Path -LiteralPath $operatorSummaryPath) -or $AllowBootstrap) `
     -Observed:$operatorSummaryPath `
@@ -351,9 +379,12 @@ if (Test-Path -LiteralPath $operatorSummaryPath) {
         -Passed:($null -ne $operatorAgeHours -and $operatorAgeHours -le $MaxEvidenceAgeHours) `
         -Observed:$operatorAgeHours `
         -Expected:("<={0}" -f $MaxEvidenceAgeHours)
+    if ($operatorSummary.PSObject.Properties.Name -contains 'green_streak') {
+        $operatorGreenStreak = [int]($operatorSummary.green_streak ?? $operatorGreenStreak)
+    }
     Add-Check -Section 'operator_rollout' -Name 'rollout_green_streak' `
-        -Passed:([int]($operatorSummary.green_streak ?? 0) -ge $MinimumOperatorTrendRecords -or $AllowBootstrap) `
-        -Observed:([int]($operatorSummary.green_streak ?? 0)) `
+        -Passed:($operatorGreenStreak -ge $MinimumOperatorTrendRecords -or $AllowBootstrap) `
+        -Observed:$operatorGreenStreak `
         -Expected:(">={0}" -f $MinimumOperatorTrendRecords)
 }
 $operatorHistoryCount = if (Test-Path -LiteralPath $OperatorHistoryRoot) {

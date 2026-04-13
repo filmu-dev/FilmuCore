@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -1051,6 +1051,32 @@ def test_control_plane_subscribers_route_returns_persisted_rows() -> None:
     assert response.status_code == 200
     assert response.json()[0]["consumer_name"] == "consumer-1"
     assert response.json()[0]["last_delivered_event_id"] == "2-0"
+
+
+def test_has_unresolved_fence_ignores_stale_historical_fence_errors() -> None:
+    now = datetime(2026, 4, 11, 13, 0, tzinfo=UTC)
+
+    resolved = type("ControlPlaneSubscriberRecord", (), {})()
+    resolved.status = "active"
+    resolved.last_error = "consumer_fenced owner=node-a contender=node-b"
+    resolved.updated_at = now
+    resolved.last_heartbeat_at = now + timedelta(seconds=30)
+
+    unresolved = type("ControlPlaneSubscriberRecord", (), {})()
+    unresolved.status = "active"
+    unresolved.last_error = "consumer_fenced owner=node-a contender=node-b"
+    unresolved.updated_at = now
+    unresolved.last_heartbeat_at = now - timedelta(seconds=30)
+
+    explicitly_fenced = type("ControlPlaneSubscriberRecord", (), {})()
+    explicitly_fenced.status = "fenced"
+    explicitly_fenced.last_error = None
+    explicitly_fenced.updated_at = now
+    explicitly_fenced.last_heartbeat_at = now + timedelta(seconds=30)
+
+    assert default_routes._has_unresolved_fence(resolved) is False
+    assert default_routes._has_unresolved_fence(unresolved) is True
+    assert default_routes._has_unresolved_fence(explicitly_fenced) is True
 
 
 def test_auth_context_route_returns_current_identity_and_persisted_mapping() -> None:
