@@ -641,6 +641,10 @@ def test_stream_status_route_exposes_serving_governance_snapshot() -> None:
     assert payload["governance"]["heavy_stage_executor_mode"] == "process_pool_preferred"
     assert payload["governance"]["heavy_stage_max_workers"] == 2
     assert payload["governance"]["heavy_stage_max_tasks_per_child"] == 0
+    assert payload["governance"]["heavy_stage_spawn_context_required"] == 1
+    assert payload["governance"]["heavy_stage_max_worker_ceiling"] == 2
+    assert payload["governance"]["heavy_stage_policy_violation_count"] == 0
+    assert payload["governance"]["heavy_stage_policy_violations"] == []
     assert payload["governance"]["heavy_stage_process_isolation_required"] == 0
     assert payload["governance"]["heavy_stage_exit_ready"] == 0
     assert payload["governance"]["heavy_stage_index_timeout_seconds"] == 45.0
@@ -9860,6 +9864,30 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_prefetch_pressure_ratio"] == 0.75
     assert governance["vfs_runtime_provider_pressure_incidents"] == 22
     assert governance["vfs_runtime_fairness_pressure_incidents"] == 2
+    assert governance["vfs_runtime_cache_pressure_class"] == "critical"
+    assert governance["vfs_runtime_cache_pressure_reasons"] == [
+        "disk_write_errors",
+        "disk_evictions_observed",
+    ]
+    assert governance["vfs_runtime_chunk_coalescing_pressure_class"] == "warning"
+    assert governance["vfs_runtime_chunk_coalescing_pressure_reasons"] == [
+        "coalescing_wait_misses",
+        "coalescing_wait_latency_high",
+        "coalescing_wait_spike",
+    ]
+    assert governance["vfs_runtime_upstream_wait_class"] == "critical"
+    assert governance["vfs_runtime_upstream_wait_reasons"] == [
+        "provider_pressure_incidents",
+        "retryable_network_wait",
+        "retryable_read_body_wait",
+    ]
+    assert governance["vfs_runtime_refresh_pressure_class"] == "critical"
+    assert governance["vfs_runtime_refresh_pressure_reasons"] == [
+        "backend_fallback_failures",
+        "inline_refresh_errors",
+        "inline_refresh_timeouts",
+        "backend_fallback_activity",
+    ]
     assert governance["vfs_runtime_rollout_readiness"] == "blocked"
     assert governance["vfs_runtime_rollout_reasons"] == [
         "backend_fallback_failures",
@@ -10074,6 +10102,10 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     assert governance["vfs_runtime_rollout_canary_decision"] == "promote_to_next_environment_class"
     assert governance["vfs_runtime_rollout_merge_gate"] == "ready"
     assert governance["vfs_runtime_rollout_environment_class"] == "windows-native:enterprise"
+    assert governance["vfs_runtime_cache_pressure_class"] == "healthy"
+    assert governance["vfs_runtime_chunk_coalescing_pressure_class"] == "healthy"
+    assert governance["vfs_runtime_upstream_wait_class"] == "healthy"
+    assert governance["vfs_runtime_refresh_pressure_class"] == "healthy"
 
 
 def test_hls_route_failure_governance_counts_generation_timeout(
@@ -11224,6 +11256,159 @@ def test_local_hls_playlist_route_marks_the_returned_variant_playlist_path(
 
     assert response.status_code == 200
     assert touched == [playlist_path]
+
+
+def test_playback_source_service_persist_media_entry_control_state_updates_projection_and_active_role() -> None:
+    item = _build_item(item_id="item-persist-media-entry-control-state")
+    attachment = _build_playback_attachment(
+        attachment_id="attachment-persist-media-entry-control-state",
+        item_id=item.id,
+        kind="remote-direct",
+        locator="https://cdn.example.com/direct-stale",
+        restricted_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-media-entry-control-state",
+    )
+    target_entry = _build_media_entry(
+        media_entry_id="media-entry-persist-media-entry-control-state-target",
+        item_id=item.id,
+        source_attachment_id=attachment.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-media-entry-control-state",
+    )
+    target_entry.source_attachment = attachment
+    previous_active_entry = _build_media_entry(
+        media_entry_id="media-entry-persist-media-entry-control-state-previous",
+        item_id=item.id,
+        kind="remote-direct",
+        unrestricted_url="https://cdn.example.com/direct-previous",
+        refresh_state="ready",
+        provider="realdebrid",
+        provider_download_id="download-persist-media-entry-control-state-previous",
+    )
+    item.playback_attachments = [attachment]
+    item.media_entries = [target_entry, previous_active_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=previous_active_entry.id, role="direct")
+    ]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    service = PlaybackSourceService(database)
+
+    result = asyncio.run(
+        service.persist_media_entry_control_state(
+            item.id,
+            target_entry.id,
+            active_role="direct",
+            download_url="https://api.example.com/direct-fresh",
+            unrestricted_url="https://cdn.example.com/direct-fresh",
+            refresh_state="ready",
+            expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result is not None
+    assert result.item_identifier == item.id
+    assert result.media_entry_id == target_entry.id
+    assert result.applied_role == "direct"
+
+    persisted_item = asyncio.run(PlaybackSourceService(database)._list_items())[0]
+    persisted_target_entry = next(
+        entry for entry in persisted_item.media_entries if entry.id == target_entry.id
+    )
+    persisted_attachment = persisted_item.playback_attachments[0]
+    persisted_direct_stream = next(
+        active_stream for active_stream in persisted_item.active_streams if active_stream.role == "direct"
+    )
+
+    assert persisted_direct_stream.media_entry_id == target_entry.id
+    assert persisted_target_entry.download_url == "https://api.example.com/direct-fresh"
+    assert (
+        persisted_target_entry.unrestricted_url
+        == "https://cdn.example.com/direct-fresh"
+    )
+    assert persisted_target_entry.refresh_state == "ready"
+    assert persisted_target_entry.last_refresh_error is None
+    assert persisted_target_entry.expires_at == datetime(2099, 3, 14, 0, 0, tzinfo=UTC)
+    assert persisted_attachment.restricted_url == "https://api.example.com/direct-fresh"
+    assert (
+        persisted_attachment.unrestricted_url
+        == "https://cdn.example.com/direct-fresh"
+    )
+    assert persisted_attachment.locator == "https://cdn.example.com/direct-fresh"
+    assert persisted_attachment.refresh_state == "ready"
+
+
+def test_playback_source_service_persist_playback_attachment_control_state_syncs_linked_media_entries() -> None:
+    item = _build_item(item_id="item-persist-playback-attachment-control-state")
+    attachment = _build_playback_attachment(
+        attachment_id="attachment-persist-playback-attachment-control-state",
+        item_id=item.id,
+        kind="remote-direct",
+        locator="https://cdn.example.com/direct-stale",
+        restricted_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-playback-attachment-control-state",
+    )
+    linked_entry = _build_media_entry(
+        media_entry_id="media-entry-persist-playback-attachment-control-state",
+        item_id=item.id,
+        source_attachment_id=attachment.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-playback-attachment-control-state",
+    )
+    linked_entry.source_attachment = attachment
+    item.playback_attachments = [attachment]
+    item.media_entries = [linked_entry]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    service = PlaybackSourceService(database)
+
+    result = asyncio.run(
+        service.persist_playback_attachment_control_state(
+            item.id,
+            attachment.id,
+            locator="https://cdn.example.com/direct-fresh",
+            restricted_url="https://api.example.com/direct-fresh",
+            unrestricted_url="https://cdn.example.com/direct-fresh",
+            refresh_state="ready",
+            expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result is not None
+    assert result.item_identifier == item.id
+    assert result.attachment_id == attachment.id
+    assert len(result.linked_media_entries) == 1
+
+    persisted_item = asyncio.run(PlaybackSourceService(database)._list_items())[0]
+    persisted_attachment = persisted_item.playback_attachments[0]
+    persisted_entry = persisted_item.media_entries[0]
+
+    assert persisted_attachment.locator == "https://cdn.example.com/direct-fresh"
+    assert persisted_attachment.restricted_url == "https://api.example.com/direct-fresh"
+    assert (
+        persisted_attachment.unrestricted_url
+        == "https://cdn.example.com/direct-fresh"
+    )
+    assert persisted_attachment.refresh_state == "ready"
+    assert persisted_attachment.expires_at == datetime(2099, 3, 14, 0, 0, tzinfo=UTC)
+    assert persisted_entry.download_url == "https://api.example.com/direct-fresh"
+    assert persisted_entry.unrestricted_url == "https://cdn.example.com/direct-fresh"
+    assert persisted_entry.refresh_state == "ready"
+    assert persisted_entry.provider_download_id == attachment.provider_download_id
 
 
 

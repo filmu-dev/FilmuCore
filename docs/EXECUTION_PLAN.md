@@ -113,6 +113,8 @@ No undocumented requirements are assumed.
 ### Re-audit note
 
 - GraphQL remains the strategic parity track with `filmu-ts`, but it is not the main blocker for testing the current REST/BFF-driven frontend locally.
+- The shared media-domain seam is now deeper across graph, mounted-read, and the key REST compatibility paths: specialization-backed service projections feed GraphQL calendar/detail consumers directly, the GraphQL `items` list now reuses `search_items()` instead of flattening from raw records, GraphQL now also exposes VFS-backed `vfsDirectory`, `vfsCatalogEntry`, `vfsSnapshot`, and `vfsBlockedItems` reads from the shared catalog supplier snapshot, runtime lifecycle plus queue/metadata operator history from the existing shared lifecycle/Redis-backed stores, richer item-detail playback/media-entry ownership projections on `mediaItem`, graph-first playback control-plane mutations for direct/HLS refresh triggering plus HLS stale marking backed by the shared playback controllers/service, a persisted `persistMediaEntryControlState` graph mutation backed by the shared playback-service write seam for bounded media-entry URL/state correction plus active-role rebinding, and a persisted `persistPlaybackAttachmentControlState` graph mutation backed by the same shared playback seam for attachment-side URL/state correction plus linked media-entry synchronization; meanwhile the FilmuVFS catalog supplier still prefers specialization-backed hierarchy over metadata-first path shaping, REST item-detail season coverage still prefers persisted `Show -> Season` rows, the extended compatibility `metadata` blob is normalized from the same specialization record, and the keyed `/api/v1/calendar` compatibility payload still preserves additive specialization-backed identity fields instead of dropping them. The remaining domain gap is now the narrower compatibility tail plus broader active-stream selection/control mutation depth and broader cached control-plane composition.
+- Delivery rule from this point: prefer GraphQL-first and shared service-layer expansion for new product/control-plane work; treat REST as a compatibility surface that should receive only minimal additive maintenance required by the current frontend.
 
 ---
 
@@ -239,15 +241,18 @@ No undocumented requirements are assumed.
 - Retry/dead-letter baseline exists for the current worker graph.
 - Scrape -> parse-scrape-results -> rank-streams -> debrid -> finalize now runs as a real provider-backed worker pipeline with stable job IDs and persisted state transitions.
 - Retry-library recovery and transactional outbox publication are implemented.
+- A first-class scheduled metadata reindex/reconciliation program now runs above `index_item`, including index re-entry for `partially_completed` / `ongoing` items, metadata refresh reconciliation for `completed` items, repair of identifier gaps on repairable `failed` items with immediate re-entry into `index_item`, and bounded operator rollups on `/api/v1/workers/metadata-reindex` plus `/api/v1/workers/metadata-reindex/history`.
+- Heavy-stage isolation now enforces a stricter enterprise baseline: spawn-required process-backed execution, bounded worker ceiling, recycle budget validation, and explicit policy-violation reporting on `/api/v1/stream/status` plus `/api/v1/operations/governance`.
 - Workers now resolve persisted runtime settings and execute real built-in scraper and downloader provider paths.
-- Worker observability baseline now exists through stage duration, retry, and dead-letter metrics plus correlation contextvars.
+- Worker observability baseline now exists through stage duration, retry, and dead-letter metrics plus correlation contextvars, and queue-history operator surfaces now include dead-letter age/reason rollups plus bounded filters for replay triage.
 
 ### Main missing pieces
 
 - Stronger stage-idempotency and enqueue-dedup boundaries across the broader queue graph.
-- Content-service intake, index, and richer queue graph parity beyond the current scrape/download flow.
-- Queue lag/backlog/operator ergonomics beyond the current retry/DLQ counts.
+- Content-service intake and richer queue graph parity beyond the current scrape/download plus scheduled-reindex baseline.
+- Queue lag/backlog/operator ergonomics beyond the new dead-letter age/reason rollups and bounded queue-history controls.
 - Broader post-download/container execution and compensation semantics beyond the current `downloaded` handoff.
+- Broader worker/database isolation and sandboxed heavy-job families beyond the current spawn-required worker-ceiling/recycle baseline.
 
 ### Exit criteria
 
@@ -313,7 +318,7 @@ No undocumented requirements are assumed.
 - [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py) has an explicit byte-range direct-play baseline with governed sessions and lease-refresh integration.
 - [`/api/v1/stream/hls/{item_id}/*`](../filmu_py/api/routes/stream.py) has an implemented baseline for local generation, upstream proxying, and `remote-direct` transcode fallback with explicit lifecycle governance.
 - Playback attachment/source resolution now also lives behind [`filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) rather than remaining route-local.
-- [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) exposes the current serving-runtime/governance state.
+- [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) exposes the current serving-runtime/governance state, including mounted cache/chunk-coalescing/upstream-wait/refresh pressure classes and machine-readable reasons derived from the Rust runtime snapshot.
 - An async gRPC catalog bridge now exists in [`filmu_py/services/vfs_server.py`](../filmu_py/services/vfs_server.py), accepting subscribe/ack/heartbeat traffic, serving initial snapshots, serving reconnect deltas when possible, and exposing `RefreshCatalogEntry` for forced provider-link refresh.
 - The Rust sidecar now has catalog client, in-memory state, and a mount-facing lifecycle layer with `getattr`/`readdir`/`open`/`read`/`release` behavior.
 - Mounted stale reads now retry inline through the refresh RPC, the Rust chunk cache now uses `moka::future::Cache`, and catalog state now preserves stable assigned inodes with fallback allocation on collisions.
@@ -321,7 +326,7 @@ No undocumented requirements are assumed.
 - Live validation on the mounted WSL path now confirms season-grouped output for real shows such as `Stranger Things (2016)` instead of a flat root-level file dump.
 - Link resolution is implemented through built-in Real-Debrid / AllDebrid / Debrid-Link clients with persisted media-entry leases and provider-backed refresh orchestration.
 - Linux-target compile validation, WSL/Linux mount lifecycle validation, manual mounted-read smoke, and Plex/Emby playback validation all pass for the current Rust sidecar path.
-- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics remain thinner.
+- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics now also feed operator-facing pressure classes on the API surfaces and the Windows soak artifacts. A first repo-level multi-environment gate now aggregates `soak-stability-*.json` across distinct environment classes; the remaining gap is real environment breadth and repeated evidence collection rather than missing aggregation code.
 
 ### Main missing pieces
 
@@ -329,7 +334,7 @@ No undocumented requirements are assumed.
 - Mount/HTTP convergence on the shared chunk engine semantics for mounted reads.
 - Decide whether the current canonical-plus-alias mounted browse policy should stop here or grow into a fully separate id-keyed tree, and what broader queue-backed/orchestrated resolver workflow should exist above the current mount-side inline refresh dedup.
 - Optional disk/persistent cache and smarter prefetch evolution above the now-async Rust cache.
-- Broader long-running soak/backpressure validation and mounted data-plane observability.
+- Broader long-running soak/backpressure validation and real multi-environment mounted data-plane breadth on top of the new aggregation gate.
 - VFS rollout controls.
 
 ### Exit criteria

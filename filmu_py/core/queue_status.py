@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncIterable, Awaitable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
@@ -62,6 +63,7 @@ class QueueStatusHistoryPoint:
     oldest_ready_age_seconds: float | None
     next_scheduled_in_seconds: float | None
     alert_level: AlertLevel
+    dead_letter_oldest_age_seconds: float | None = None
     dead_letter_reason_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -82,6 +84,7 @@ class QueueStatusSnapshot:
     next_scheduled_in_seconds: float | None
     alert_level: AlertLevel
     alerts: tuple[QueueAlert, ...]
+    dead_letter_oldest_age_seconds: float | None = None
     dead_letter_reason_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -176,6 +179,7 @@ class QueueStatusReader:
                 "oldest_ready_age_seconds": snapshot.oldest_ready_age_seconds,
                 "next_scheduled_in_seconds": snapshot.next_scheduled_in_seconds,
                 "alert_level": snapshot.alert_level,
+                "dead_letter_oldest_age_seconds": snapshot.dead_letter_oldest_age_seconds,
                 "dead_letter_reason_counts": snapshot.dead_letter_reason_counts,
             },
             separators=(",", ":"),
@@ -183,21 +187,50 @@ class QueueStatusReader:
         await self._await_maybe(lpush(history_key, payload))
         await self._await_maybe(ltrim(history_key, 0, max(0, self.history_limit - 1)))
 
-    async def _dead_letter_reason_counts(self, *, limit: int = 50) -> dict[str, int]:
+    async def _dead_letter_payloads(
+        self,
+        *,
+        start: int = 0,
+        stop: int = -1,
+    ) -> list[dict[str, Any]]:
         lrange = getattr(self.redis, "lrange", None)
         if lrange is None:
-            return {}
+            return []
 
-        rows = await self._await_maybe(
-            lrange(f"{_DEAD_LETTER_KEY_PREFIX}{self.queue_name}", 0, max(0, limit - 1))
-        )
-        counts: dict[str, int] = {}
+        rows = await self._await_maybe(lrange(f"{_DEAD_LETTER_KEY_PREFIX}{self.queue_name}", start, stop))
+        payloads: list[dict[str, Any]] = []
         for row in cast(list[object], rows):
             raw = row.decode("utf-8") if isinstance(row, bytes) else str(row)
             try:
                 payload = cast(dict[str, Any], json.loads(raw))
             except Exception:
                 continue
+            payloads.append(payload)
+        return payloads
+
+    @staticmethod
+    def _payload_queued_age_seconds(
+        payload: dict[str, Any],
+        *,
+        now_seconds: float,
+    ) -> float | None:
+        queued_at = payload.get("queued_at")
+        if not isinstance(queued_at, str) or not queued_at.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(queued_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(0.0, now_seconds - parsed.timestamp())
+
+    @staticmethod
+    def _dead_letter_reason_counts_from_payloads(
+        payloads: Iterable[dict[str, Any]],
+    ) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for payload in payloads:
             reason_code = payload.get("reason_code")
             if not isinstance(reason_code, str) or not reason_code:
                 continue
@@ -371,6 +404,9 @@ class QueueStatusReader:
                         payload.get("next_scheduled_in_seconds")
                     ),
                     alert_level=self._coerce_alert_level(payload.get("alert_level")),
+                    dead_letter_oldest_age_seconds=self._coerce_optional_float(
+                        payload.get("dead_letter_oldest_age_seconds")
+                    ),
                     dead_letter_reason_counts=cast(
                         dict[str, int],
                         payload.get("dead_letter_reason_counts", {}) or {},
@@ -424,7 +460,21 @@ class QueueStatusReader:
                 cast(Any, self.redis).llen(f"{_DEAD_LETTER_KEY_PREFIX}{self.queue_name}")
             )
         )
-        dead_letter_reason_counts = await self._dead_letter_reason_counts()
+        sampled_dead_letter_payloads = await self._dead_letter_payloads(start=0, stop=49)
+        dead_letter_reason_counts = self._dead_letter_reason_counts_from_payloads(
+            sampled_dead_letter_payloads
+        )
+        dead_letter_oldest_age_seconds: float | None = None
+        if dead_letter_jobs > 0:
+            oldest_dead_letter_payloads = await self._dead_letter_payloads(
+                start=max(0, dead_letter_jobs - 1),
+                stop=max(0, dead_letter_jobs - 1),
+            )
+            if oldest_dead_letter_payloads:
+                dead_letter_oldest_age_seconds = self._payload_queued_age_seconds(
+                    oldest_dead_letter_payloads[0],
+                    now_seconds=current_time_seconds,
+                )
         alert_level, alerts = self._classify_alerts(
             ready_jobs=ready_jobs,
             retry_jobs=retry_jobs,
@@ -445,6 +495,7 @@ class QueueStatusReader:
             next_scheduled_in_seconds=next_scheduled_in_seconds,
             alert_level=alert_level,
             alerts=alerts,
+            dead_letter_oldest_age_seconds=dead_letter_oldest_age_seconds,
             dead_letter_reason_counts=dead_letter_reason_counts,
         )
         self._publish_metrics(snapshot)

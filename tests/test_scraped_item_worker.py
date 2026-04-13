@@ -10,10 +10,12 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from arq import Retry
 from arq.jobs import JobStatus
 
 from filmu_py.config import Settings
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.db.models import (
     EpisodeORM,
     ItemStateEventORM,
@@ -397,6 +399,7 @@ class FakeArqRedis:
         self.deleted: list[str] = []
         self.integers: dict[str, int] = {}
         self.expirations: dict[str, int] = {}
+        self.lists: dict[str, list[bytes]] = {}
 
     async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> object | None:
         self.calls.append((function, args, kwargs))
@@ -413,6 +416,22 @@ class FakeArqRedis:
     async def expire(self, key: str, seconds: int) -> bool:
         self.expirations[key] = seconds
         return True
+
+    async def lpush(self, key: str, *values: Any) -> int:
+        bucket = self.lists.setdefault(key, [])
+        for value in values:
+            bucket.insert(0, value if isinstance(value, bytes) else str(value).encode("utf-8"))
+        return len(bucket)
+
+    async def ltrim(self, key: str, start: int, stop: int) -> bool:
+        bucket = self.lists.get(key, [])
+        self.lists[key] = bucket[start : stop + 1]
+        return True
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[bytes]:
+        bucket = self.lists.get(key, [])
+        end = None if stop == -1 else stop + 1
+        return bucket[start:end]
 
 
 class _AllowedLimiter:
@@ -2680,6 +2699,313 @@ def test_build_worker_settings_includes_recovery_worker() -> None:
     worker_settings = tasks.build_worker_settings(_build_worker_settings())
 
     assert tasks.recover_incomplete_library in worker_settings["functions"]
+    assert tasks.scheduled_metadata_reindex_reconciliation in worker_settings["functions"]
+
+
+def test_build_worker_settings_includes_scheduled_metadata_reindex_cron() -> None:
+    settings = _build_worker_settings()
+    settings.indexer.schedule_offset_minutes = 45
+
+    worker_settings = tasks.build_worker_settings(settings)
+    cron_jobs = worker_settings["cron_jobs"]
+    metadata_reindex_job = next(
+        job for job in cron_jobs if job.name == "scheduled_metadata_reindex_reconciliation"
+    )
+
+    assert metadata_reindex_job.hour == {0}
+    assert metadata_reindex_job.minute == {45}
+    assert metadata_reindex_job.job_id == "scheduled-metadata-reindex-reconciliation"
+
+
+def test_scheduled_metadata_reindex_reconciliation_runs_reindex_and_completed_refresh(
+    monkeypatch: Any,
+) -> None:
+    partial = MediaItemRecord(
+        id="item-partial-reindex",
+        external_ref="tmdb:item-partial-reindex",
+        title="Partial Item",
+        state=ItemState.PARTIALLY_COMPLETED,
+        attributes={"item_type": "show"},
+    )
+    ongoing = MediaItemRecord(
+        id="item-ongoing-reindex",
+        external_ref="tmdb:item-ongoing-reindex",
+        title="Ongoing Item",
+        state=ItemState.ONGOING,
+        attributes={"item_type": "show"},
+    )
+    completed = MediaItemRecord(
+        id="item-completed-reindex",
+        external_ref="tmdb:item-completed-reindex",
+        title="Completed Item",
+        state=ItemState.COMPLETED,
+        attributes={"item_type": "movie"},
+    )
+
+    media_service = FakePipelineMediaService(
+        item_id="item-completed-reindex",
+        listed_items=[partial, ongoing, completed],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def index_job_active(
+        _: object,
+        *,
+        item_id: str,
+        job_id: str | None = None,
+    ) -> bool:
+        if item_id == "item-ongoing-reindex":
+            assert job_id == tasks.index_item_followup_job_id(
+                "item-ongoing-reindex",
+                discriminator="scheduled-reindex",
+            )
+        return item_id == "item-ongoing-reindex"
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_index_item_job_active", index_job_active)
+
+    result = asyncio.run(
+        tasks.scheduled_metadata_reindex_reconciliation(
+            {"settings": _build_worker_settings(), "queue_name": "filmu-py"}
+        )
+    )
+
+    assert result == {
+        "processed": 3,
+        "queued": 1,
+        "reconciled": 1,
+        "skipped_active": 1,
+        "failed": 0,
+        "repair_attempted": 0,
+        "repair_enriched": 0,
+        "repair_skipped_no_tmdb_id": 0,
+        "repair_failed": 0,
+        "repair_requeued": 0,
+        "repair_skipped_active": 0,
+    }
+    assert redis.calls == [
+        (
+            "index_item",
+            ("item-partial-reindex",),
+            {
+                "_job_id": tasks.index_item_followup_job_id(
+                    "item-partial-reindex",
+                    discriminator="scheduled-reindex",
+                ),
+                "_queue_name": "filmu-py",
+            },
+        )
+    ]
+    history = asyncio.run(
+        MetadataReindexStatusStore(redis, queue_name="filmu-py").history(limit=5)
+    )
+    assert len(history) == 1
+    assert history[0].processed == 3
+    assert history[0].queued == 1
+    assert history[0].reconciled == 1
+    assert history[0].skipped_active == 1
+    assert history[0].failed == 0
+    assert history[0].repair_attempted == 0
+    assert history[0].repair_enriched == 0
+    assert history[0].repair_failed == 0
+    assert history[0].outcome == "ok"
+    assert media_service.calls.count("enrich_item_metadata") == 1
+
+
+def test_scheduled_metadata_reindex_reconciliation_checks_followup_job_id(
+    monkeypatch: Any,
+) -> None:
+    partial = MediaItemRecord(
+        id="item-partial-followup-check",
+        external_ref="tmdb:item-partial-followup-check",
+        title="Partial Item",
+        state=ItemState.PARTIALLY_COMPLETED,
+        attributes={"item_type": "show"},
+    )
+    media_service = FakePipelineMediaService(
+        item_id="item-partial-followup-check",
+        listed_items=[partial],
+    )
+    redis = FakeArqRedis()
+    observed_job_ids: list[str | None] = []
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def index_job_inactive(_: object, *, item_id: str, job_id: str | None = None) -> bool:
+        assert item_id == "item-partial-followup-check"
+        observed_job_ids.append(job_id)
+        return False
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_index_item_job_active", index_job_inactive)
+
+    result = asyncio.run(
+        tasks.scheduled_metadata_reindex_reconciliation(
+            {"settings": _build_worker_settings(), "queue_name": "filmu-py"}
+        )
+    )
+
+    assert result["queued"] == 1
+    assert observed_job_ids == [
+        tasks.index_item_followup_job_id(
+            "item-partial-followup-check",
+            discriminator="scheduled-reindex",
+        )
+    ]
+
+
+def test_scheduled_metadata_reindex_reconciliation_records_critical_run_failures(
+    monkeypatch: Any,
+) -> None:
+    media_service = FakePipelineMediaService(
+        item_id="item-run-failure",
+        listed_items=[],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def list_items_in_states(*_args: Any, **_kwargs: Any) -> list[MediaItemRecord]:
+        raise RuntimeError("metadata source unavailable")
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    media_service.list_items_in_states = list_items_in_states  # type: ignore[method-assign]
+
+    with pytest.raises(Retry):
+        asyncio.run(
+            tasks.scheduled_metadata_reindex_reconciliation(
+                {"settings": _build_worker_settings(), "queue_name": "filmu-py", "job_try": 1}
+            )
+        )
+
+    history = asyncio.run(
+        MetadataReindexStatusStore(redis, queue_name="filmu-py").history(limit=5)
+    )
+    assert len(history) == 1
+    assert history[0].processed == 0
+    assert history[0].failed == 0
+    assert history[0].repair_attempted == 0
+    assert history[0].outcome == "critical"
+    assert history[0].run_failed is True
+    assert history[0].last_error == "metadata source unavailable"
+
+
+def test_scheduled_metadata_reindex_reconciliation_repairs_failed_items_and_reenqueues_index(
+    monkeypatch: Any,
+) -> None:
+    failed = MediaItemRecord(
+        id="item-failed-repair",
+        external_ref="tmdb:item-failed-repair",
+        title="Failed Item",
+        state=ItemState.FAILED,
+        attributes={"item_type": "movie", "tmdb_id": "550"},
+    )
+    media_service = FakePipelineMediaService(
+        item_id="unused",
+        listed_items=[failed],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    class _FakeSession:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+            _ = (exc_type, exc_val, exc_tb)
+
+    class _FakeDB:
+        def session(self) -> Any:
+            return _FakeSession()
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def get_item(item_id: str) -> MediaItemRecord | None:
+        if item_id != "item-failed-repair":
+            return None
+        return MediaItemRecord(
+            id=item_id,
+            external_ref="tmdb:item-failed-repair",
+            title="Failed Item",
+            state=ItemState.REQUESTED,
+            attributes={"item_type": "movie", "tmdb_id": "550", "imdb_id": "tt0137523"},
+        )
+
+    async def backfill_missing_imdb_ids(_session: Any) -> dict[str, int]:
+        media_service.calls.append("backfill_missing_imdb_ids")
+        return {"attempted": 1, "enriched": 1, "skipped_no_tmdb_id": 0, "failed": 0}
+
+    async def index_job_inactive(_: object, *, item_id: str, job_id: str | None = None) -> bool:
+        assert item_id == "item-failed-repair"
+        assert job_id == tasks.index_item_followup_job_id(
+            "item-failed-repair",
+            discriminator="metadata-repair",
+        )
+        return False
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_index_item_job_active", index_job_inactive)
+    monkeypatch.setattr(media_service, "get_item", get_item)
+    monkeypatch.setattr(
+        media_service,
+        "backfill_missing_imdb_ids",
+        backfill_missing_imdb_ids,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        tasks.scheduled_metadata_reindex_reconciliation(
+            {
+                "settings": _build_worker_settings(),
+                "queue_name": "filmu-py",
+                "db": _FakeDB(),
+            }
+        )
+    )
+
+    assert result == {
+        "processed": 1,
+        "queued": 0,
+        "reconciled": 0,
+        "skipped_active": 0,
+        "failed": 0,
+        "repair_attempted": 1,
+        "repair_enriched": 1,
+        "repair_skipped_no_tmdb_id": 0,
+        "repair_failed": 0,
+        "repair_requeued": 1,
+        "repair_skipped_active": 0,
+    }
+    assert redis.calls == [
+        (
+            "index_item",
+            ("item-failed-repair",),
+            {
+                "_job_id": tasks.index_item_followup_job_id(
+                    "item-failed-repair",
+                    discriminator="metadata-repair",
+                ),
+                "_queue_name": "filmu-py",
+            },
+        )
+    ]
+    history = asyncio.run(
+        MetadataReindexStatusStore(redis, queue_name="filmu-py").history(limit=5)
+    )
+    assert len(history) == 1
+    assert history[0].repair_attempted == 1
+    assert history[0].repair_enriched == 1
+    assert history[0].repair_requeued == 1
+    assert history[0].outcome == "ok"
 
 
 # --- SHOW COMPLETION TESTS ---
@@ -2986,6 +3312,35 @@ def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) ->
             executor.shutdown(wait=False, cancel_futures=True)
         tasks._HEAVY_STAGE_EXECUTORS.clear()
         tasks._HEAVY_STAGE_EXECUTORS.update(original_cache)
+
+
+def test_heavy_stage_executor_rejects_policy_violations(monkeypatch: Any) -> None:
+    settings = _build_worker_settings()
+    invalid_settings = settings.model_copy(
+        update={
+            "orchestration": settings.orchestration.model_copy(
+                update={
+                    "heavy_stage_isolation": settings.orchestration.heavy_stage_isolation.model_copy(
+                        update={
+                            "executor_mode": "process_pool_required",
+                            "max_workers": 3,
+                            "max_worker_ceiling": 2,
+                            "max_tasks_per_child": 0,
+                        }
+                    )
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(tasks, "get_settings", lambda: invalid_settings)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        tasks._heavy_stage_executor("index_item")
+
+    assert str(exc_info.value) == (
+        "invalid heavy-stage isolation policy for "
+        "index_item: process_recycle_unbounded,worker_ceiling_exceeded"
+    )
 
 
 def test_evaluate_show_missing_specialization() -> None:

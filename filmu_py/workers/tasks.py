@@ -31,6 +31,7 @@ from sqlalchemy import select
 from filmu_py.config import Settings, TenantQuotaLimitSettings, get_settings, set_runtime_settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.db.models import MediaItemORM, StreamORM
 from filmu_py.db.runtime import DatabaseRuntime
@@ -83,6 +84,9 @@ DEBRID_RETRY_POLICY = RetryPolicy(max_attempts=5, base_delay_seconds=3, max_dela
 FINALIZE_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=2, max_delay_seconds=20)
 RECOVERY_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=30, max_delay_seconds=300)
 OUTBOX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=5, max_delay_seconds=60)
+METADATA_REINDEX_RETRY_POLICY = RetryPolicy(
+    max_attempts=3, base_delay_seconds=30, max_delay_seconds=300
+)
 WORKER_ENQUEUE_DECISIONS_TOTAL = Counter(
     "filmu_py_worker_enqueue_decisions_total",
     "Downstream worker enqueue decisions by stage",
@@ -109,7 +113,7 @@ WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
     ["stage"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
 )
-_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int], Executor] = {}
+_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int, int, int], Executor] = {}
 
 
 class _RankBatchInput(TypedDict):
@@ -138,11 +142,19 @@ def _heavy_stage_executor(stage_name: str) -> Executor:
 
     settings = get_settings()
     policy = settings.orchestration.heavy_stage_isolation
+    violations = policy.policy_violations()
+    if violations:
+        raise RuntimeError(
+            "invalid heavy-stage isolation policy for "
+            f"{stage_name}: {','.join(sorted(violations))}"
+        )
     executor_key = (
         stage_name,
         policy.executor_mode,
         policy.max_workers,
         policy.max_tasks_per_child,
+        int(policy.require_spawn_context),
+        policy.max_worker_ceiling,
     )
     stale_keys = [key for key in _HEAVY_STAGE_EXECUTORS if key[1:] != executor_key[1:]]
     for stale_key in stale_keys:
@@ -161,7 +173,13 @@ def _heavy_stage_executor(stage_name: str) -> Executor:
             policy.max_tasks_per_child if policy.max_tasks_per_child > 0 else None
         )
         try:
-            if multiprocessing.get_start_method(allow_none=True) == "fork":
+            if policy.require_spawn_context:
+                executor = ProcessPoolExecutor(
+                    max_workers=policy.max_workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    max_tasks_per_child=max_tasks_per_child,
+                )
+            elif multiprocessing.get_start_method(allow_none=True) == "fork":
                 executor = ProcessPoolExecutor(
                     max_workers=policy.max_workers,
                     max_tasks_per_child=max_tasks_per_child,
@@ -601,6 +619,52 @@ def _job_status_name(status: JobStatus) -> str:
 
 def _worker_stage_logger() -> Any:
     return structlog.get_logger(__name__)
+
+
+async def _record_metadata_reindex_run(
+    *,
+    redis: object | None,
+    queue_name: str,
+    processed: int,
+    queued: int,
+    reconciled: int,
+    skipped_active: int,
+    failed: int,
+    repair_attempted: int = 0,
+    repair_enriched: int = 0,
+    repair_skipped_no_tmdb_id: int = 0,
+    repair_failed: int = 0,
+    repair_requeued: int = 0,
+    repair_skipped_active: int = 0,
+    run_failed: bool = False,
+    last_error: str | None = None,
+) -> None:
+    """Persist one bounded metadata reindex/reconciliation run record."""
+
+    if redis is None:
+        return
+
+    try:
+        await MetadataReindexStatusStore(redis, queue_name=queue_name).record_run(
+            processed=processed,
+            queued=queued,
+            reconciled=reconciled,
+            skipped_active=skipped_active,
+            failed=failed,
+            repair_attempted=repair_attempted,
+            repair_enriched=repair_enriched,
+            repair_skipped_no_tmdb_id=repair_skipped_no_tmdb_id,
+            repair_failed=repair_failed,
+            repair_requeued=repair_requeued,
+            repair_skipped_active=repair_skipped_active,
+            run_failed=run_failed,
+            last_error=last_error,
+        )
+    except Exception:
+        _worker_stage_logger().warning(
+            "scheduled_metadata_reindex_reconciliation.status_record_failed",
+            exc_info=True,
+        )
 
 
 def _record_enqueue_decision(stage_name: str, decision: str) -> None:
@@ -1066,6 +1130,18 @@ def _ongoing_show_poll_hours(settings: Settings) -> set[int]:
     return set(range(0, 24, interval_hours))
 
 
+def _indexer_schedule_offset_minute(settings: Settings) -> int:
+    """Return one bounded minute offset for scheduled metadata reindex work."""
+
+    raw = getattr(settings.indexer, "schedule_offset_minutes", 30)
+    if not isinstance(raw, int):
+        try:
+            raw = int(raw)
+        except (TypeError, ValueError):
+            raw = 30
+    return max(0, min(59, raw))
+
+
 async def enqueue_debrid_item(
     redis: ArqRedis,
     *,
@@ -1146,10 +1222,12 @@ async def is_rank_streams_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
-async def is_index_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
-    """Return whether the index-item stage job is already queued or running."""
+async def is_index_item_job_active(
+    redis: ArqRedis, *, item_id: str, job_id: str | None = None
+) -> bool:
+    """Return whether one index-item stage job is already queued or running."""
 
-    status = await Job(index_item_job_id(item_id), redis=redis).status()
+    status = await Job(job_id or index_item_job_id(item_id), redis=redis).status()
     _record_job_status("index_item", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
@@ -3450,6 +3528,30 @@ def _resolve_item_type(item: MediaItemRecord) -> str:
     return "show"
 
 
+def _extract_string_attribute(attributes: dict[str, object], key: str) -> str | None:
+    value = attributes.get(key)
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None
+
+
+def _needs_failed_metadata_repair(item: MediaItemRecord) -> bool:
+    """Return whether a failed item still has identifier repair work worth retrying."""
+
+    if item.state is not ItemState.FAILED:
+        return False
+
+    attributes = item.attributes
+    tmdb_id = _extract_string_attribute(attributes, "tmdb_id")
+    imdb_id = _extract_string_attribute(attributes, "imdb_id")
+    tvdb_id = _extract_string_attribute(attributes, "tvdb_id")
+    needs_tvdb_metadata_repair = tmdb_id is None and (
+        tvdb_id is not None or item.external_ref.startswith("tvdb:")
+    )
+    return imdb_id is None or needs_tvdb_metadata_repair
+
+
 def _build_search_query(
     *,
     title: str,
@@ -3982,6 +4084,180 @@ async def poll_unreleased_items(ctx: dict[str, object]) -> dict[str, int]:
     return {"processed": processed_count, "transitioned": transitioned_count}
 
 
+@timed_stage("scheduled_metadata_reindex_reconciliation")
+async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> dict[str, int]:
+    """Run one scheduled metadata reconciliation pass above item-triggered indexing."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(
+        ctx=mutable_ctx,
+        stage="scheduled_metadata_reindex_reconciliation",
+        item_id="metadata-reindex",
+    )
+    media_service = _resolve_media_service(mutable_ctx)
+    settings = await _resolve_runtime_settings(mutable_ctx)
+    queue_name = str(mutable_ctx.get("queue_name", _queue_name(settings)))
+    processed_count = 0
+    queued_count = 0
+    reconciled_count = 0
+    skipped_active_count = 0
+    failed_count = 0
+    repair_attempted_count = 0
+    repair_enriched_count = 0
+    repair_skipped_no_tmdb_id_count = 0
+    repair_failed_count = 0
+    repair_requeued_count = 0
+    repair_skipped_active_count = 0
+    arq_redis: ArqRedis | None = None
+
+    try:
+        arq_redis = await _resolve_arq_redis(mutable_ctx)
+        items = await media_service.list_items_in_states(
+            states=[
+                ItemState.PARTIALLY_COMPLETED,
+                ItemState.ONGOING,
+                ItemState.COMPLETED,
+                ItemState.FAILED,
+            ]
+        )
+        failed_repair_candidate_ids = [
+            item.id for item in items if _needs_failed_metadata_repair(item)
+        ]
+
+        for item in items:
+            processed_count += 1
+            try:
+                if item.state in {ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING}:
+                    followup_job_id = index_item_followup_job_id(
+                        item.id,
+                        discriminator="scheduled-reindex",
+                    )
+                    if await is_index_item_job_active(
+                        arq_redis,
+                        item_id=item.id,
+                        job_id=followup_job_id,
+                    ):
+                        skipped_active_count += 1
+                        continue
+                    if await enqueue_index_item(
+                        arq_redis,
+                        item_id=item.id,
+                        queue_name=queue_name,
+                        tenant_id=item.tenant_id,
+                        job_id=followup_job_id,
+                    ):
+                        queued_count += 1
+                    continue
+
+                if item.state is ItemState.COMPLETED:
+                    await media_service.enrich_item_metadata(item_id=item.id)
+                    reconciled_count += 1
+            except Exception:
+                failed_count += 1
+                _worker_stage_logger().warning(
+                    "scheduled_metadata_reindex_reconciliation.item_failed",
+                    item_id=item.id,
+                    state=item.state.value,
+                    exc_info=True,
+                )
+
+        if failed_repair_candidate_ids:
+            db = cast(
+                DatabaseRuntime,
+                mutable_ctx.get("db") or DatabaseRuntime(get_settings().postgres_dsn),
+            )
+            mutable_ctx["db"] = db
+            async with db.session() as session:
+                repair_summary = await media_service.backfill_missing_imdb_ids(session)
+            repair_attempted_count = int(repair_summary.get("attempted", 0))
+            repair_enriched_count = int(repair_summary.get("enriched", 0))
+            repair_skipped_no_tmdb_id_count = int(repair_summary.get("skipped_no_tmdb_id", 0))
+            repair_failed_count = int(repair_summary.get("failed", 0))
+
+            for item_id in failed_repair_candidate_ids:
+                refreshed_item = await media_service.get_item(item_id)
+                if refreshed_item is None or refreshed_item.state is not ItemState.REQUESTED:
+                    continue
+                followup_job_id = index_item_followup_job_id(
+                    item_id,
+                    discriminator="metadata-repair",
+                )
+                if await is_index_item_job_active(
+                    arq_redis,
+                    item_id=item_id,
+                    job_id=followup_job_id,
+                ):
+                    repair_skipped_active_count += 1
+                    continue
+                if await enqueue_index_item(
+                    arq_redis,
+                    item_id=item_id,
+                    queue_name=queue_name,
+                    tenant_id=refreshed_item.tenant_id,
+                    job_id=followup_job_id,
+                ):
+                    repair_requeued_count += 1
+
+        await _record_metadata_reindex_run(
+            redis=arq_redis,
+            queue_name=queue_name,
+            processed=processed_count,
+            queued=queued_count,
+            reconciled=reconciled_count,
+            skipped_active=skipped_active_count,
+            failed=failed_count,
+            repair_attempted=repair_attempted_count,
+            repair_enriched=repair_enriched_count,
+            repair_skipped_no_tmdb_id=repair_skipped_no_tmdb_id_count,
+            repair_failed=repair_failed_count,
+            repair_requeued=repair_requeued_count,
+            repair_skipped_active=repair_skipped_active_count,
+        )
+        return {
+            "processed": processed_count,
+            "queued": queued_count,
+            "reconciled": reconciled_count,
+            "skipped_active": skipped_active_count,
+            "failed": failed_count,
+            "repair_attempted": repair_attempted_count,
+            "repair_enriched": repair_enriched_count,
+            "repair_skipped_no_tmdb_id": repair_skipped_no_tmdb_id_count,
+            "repair_failed": repair_failed_count,
+            "repair_requeued": repair_requeued_count,
+            "repair_skipped_active": repair_skipped_active_count,
+        }
+    except Exception as exc:
+        attempt = task_try_count(mutable_ctx)
+        if METADATA_REINDEX_RETRY_POLICY.should_dead_letter(attempt):
+            await route_dead_letter(
+                ctx=mutable_ctx,
+                task_name="scheduled_metadata_reindex_reconciliation",
+                item_id="metadata-reindex",
+                reason=str(exc),
+            )
+            raise
+        await _record_metadata_reindex_run(
+            redis=arq_redis,
+            queue_name=queue_name,
+            processed=processed_count,
+            queued=queued_count,
+            reconciled=reconciled_count,
+            skipped_active=skipped_active_count,
+            failed=failed_count,
+            repair_attempted=repair_attempted_count,
+            repair_enriched=repair_enriched_count,
+            repair_skipped_no_tmdb_id=repair_skipped_no_tmdb_id_count,
+            repair_failed=repair_failed_count,
+            repair_requeued=repair_requeued_count,
+            repair_skipped_active=repair_skipped_active_count,
+            run_failed=True,
+            last_error=str(exc),
+        )
+        raise Retry(
+            defer=METADATA_REINDEX_RETRY_POLICY.next_delay_seconds(attempt)
+        ) from exc
+
+
 async def on_startup(ctx: dict[str, Any]) -> None:
     """Initialize shared worker context objects once per worker process."""
 
@@ -4051,6 +4327,7 @@ def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
             retry_library,
             poll_unreleased_items,
             poll_ongoing_shows,
+            scheduled_metadata_reindex_reconciliation,
             publish_outbox_events,
         ],
         "cron_jobs": [
@@ -4103,6 +4380,15 @@ def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
                 second=0,
                 unique=True,
                 job_id="poll-content-services",
+            ),
+            cron(
+                scheduled_metadata_reindex_reconciliation,
+                name="scheduled_metadata_reindex_reconciliation",
+                hour={0},
+                minute={_indexer_schedule_offset_minute(current)},
+                second=0,
+                unique=True,
+                job_id="scheduled-metadata-reindex-reconciliation",
             ),
         ],
         "queue_name": queue_name,

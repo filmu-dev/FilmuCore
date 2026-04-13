@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import fnmatch
+import json
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any, cast
 
+from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
@@ -13,6 +18,11 @@ from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
+from filmu_py.core.runtime_lifecycle import (
+    RuntimeLifecycleHealth,
+    RuntimeLifecyclePhase,
+    RuntimeLifecycleState,
+)
 from filmu_py.db.models import StreamORM
 from filmu_py.graphql import GraphQLPluginRegistry, create_graphql_router
 from filmu_py.resources import AppResources
@@ -20,11 +30,34 @@ from filmu_py.services.media import (
     CalendarProjectionRecord,
     CalendarReleaseDataRecord,
     MediaItemRecord,
+    MediaItemSpecializationRecord,
     MediaItemSummaryRecord,
+    ParentIdsRecord,
     RecoveryMechanism,
     RecoveryPlanRecord,
     RecoveryTargetStage,
     StatsProjection,
+)
+from filmu_py.services.playback import (
+    DirectPlaybackRefreshControlPlaneTriggerResult,
+    DirectPlaybackRefreshRecommendation,
+    DirectPlaybackRefreshScheduleRequest,
+    DirectPlaybackRefreshSchedulingResult,
+    HlsFailedLeaseRefreshControlPlaneTriggerResult,
+    HlsFailedLeaseRefreshResult,
+    HlsRestrictedFallbackRefreshControlPlaneTriggerResult,
+    HlsRestrictedFallbackRefreshResult,
+    MediaEntryLeaseRefreshExecution,
+    PersistedMediaEntryControlMutationResult,
+    PersistedPlaybackAttachmentControlMutationResult,
+)
+from filmu_py.services.vfs_catalog import (
+    VfsCatalogCorrelationKeys,
+    VfsCatalogDirectoryEntry,
+    VfsCatalogEntry,
+    VfsCatalogFileEntry,
+    VfsCatalogSnapshot,
+    VfsCatalogStats,
 )
 from filmu_py.state.item import ItemState
 
@@ -37,6 +70,82 @@ class DummyRedis:
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
         return None
+
+
+@dataclass
+class FakeOperatorRedis(DummyRedis):
+    zsets: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
+    lists: dict[str, list[str]] = field(default_factory=dict)
+    keys: set[str] = field(default_factory=set)
+
+    def zcard(self, name: str) -> int:
+        return len(self.zsets.get(name, []))
+
+    def zcount(self, name: str, minimum: str | int, maximum: str | int) -> int:
+        return len(self._filter_scores(self.zsets.get(name, []), minimum, maximum))
+
+    def zrangebyscore(
+        self,
+        name: str,
+        minimum: str | int,
+        maximum: str | int,
+        *,
+        start: int = 0,
+        num: int = 1,
+        withscores: bool = True,
+    ) -> list[tuple[str, float]]:
+        _ = withscores
+        rows = self._filter_scores(self.zsets.get(name, []), minimum, maximum)
+        ordered = sorted(rows, key=lambda item: item[1])
+        return ordered[start : start + num]
+
+    def scan_iter(self, *, match: str) -> list[str]:
+        return [key for key in sorted(self.keys) if fnmatch.fnmatch(key, match)]
+
+    def llen(self, name: str) -> int:
+        return len(self.lists.get(name, []))
+
+    def lrange(self, name: str, start: int, stop: int) -> list[str]:
+        values = list(self.lists.get(name, []))
+        if not values:
+            return []
+        end = None if stop == -1 else stop + 1
+        return values[start:end]
+
+    def lpush(self, name: str, value: str) -> int:
+        values = self.lists.setdefault(name, [])
+        values.insert(0, value)
+        return len(values)
+
+    def ltrim(self, name: str, start: int, stop: int) -> bool:
+        values = list(self.lists.get(name, []))
+        end = None if stop == -1 else stop + 1
+        self.lists[name] = values[start:end]
+        return True
+
+    @staticmethod
+    def _filter_scores(
+        rows: list[tuple[str, float]],
+        minimum: str | int,
+        maximum: str | int,
+    ) -> list[tuple[str, float]]:
+        def _matches_lower(score: float, boundary: str | int) -> bool:
+            if boundary == "-inf":
+                return True
+            if isinstance(boundary, str) and boundary.startswith("("):
+                return score > float(boundary[1:])
+            return score >= float(boundary)
+
+        def _matches_upper(score: float, boundary: str | int) -> bool:
+            if boundary == "+inf":
+                return True
+            if isinstance(boundary, str) and boundary.startswith("("):
+                return score < float(boundary[1:])
+            return score <= float(boundary)
+
+        return [
+            row for row in rows if _matches_lower(row[1], minimum) and _matches_upper(row[1], maximum)
+        ]
 
 
 class DummyDatabaseRuntime:
@@ -102,7 +211,91 @@ class FakeMediaService:
         class _Page:
             items: list[MediaItemSummaryRecord]
 
-        return _Page(items=[self.detail] if self.detail is not None else [])
+        if self.detail is not None:
+            return _Page(items=[self.detail])
+        return _Page(
+            items=[
+                MediaItemSummaryRecord(
+                    id=record.id,
+                    type=str(record.attributes.get("item_type", "unknown")),
+                    title=record.title,
+                    state=record.state.value,
+                    tmdb_id=(
+                        str(record.attributes["tmdb_id"])
+                        if record.attributes.get("tmdb_id") is not None
+                        else None
+                    ),
+                    tvdb_id=(
+                        str(record.attributes["tvdb_id"])
+                        if record.attributes.get("tvdb_id") is not None
+                        else None
+                    ),
+                    external_ref=record.external_ref,
+                    aired_at=(
+                        str(record.attributes["aired_at"])
+                        if record.attributes.get("aired_at") is not None
+                        else None
+                    ),
+                    poster_path=(
+                        str(record.attributes["poster_path"])
+                        if record.attributes.get("poster_path") is not None
+                        else None
+                    ),
+                    specialization=MediaItemSpecializationRecord(
+                        item_type=str(record.attributes.get("item_type", "unknown")),
+                        tmdb_id=(
+                            str(record.attributes["tmdb_id"])
+                            if record.attributes.get("tmdb_id") is not None
+                            else None
+                        ),
+                        tvdb_id=(
+                            str(record.attributes["tvdb_id"])
+                            if record.attributes.get("tvdb_id") is not None
+                            else None
+                        ),
+                        imdb_id=(
+                            str(record.attributes["imdb_id"])
+                            if record.attributes.get("imdb_id") is not None
+                            else None
+                        ),
+                        parent_ids=(
+                            ParentIdsRecord(
+                                tmdb_id=(
+                                    str(cast(dict[str, object], record.attributes["parent_ids"]).get("tmdb_id"))
+                                    if cast(dict[str, object], record.attributes["parent_ids"]).get("tmdb_id")
+                                    is not None
+                                    else None
+                                ),
+                                tvdb_id=(
+                                    str(cast(dict[str, object], record.attributes["parent_ids"]).get("tvdb_id"))
+                                    if cast(dict[str, object], record.attributes["parent_ids"]).get("tvdb_id")
+                                    is not None
+                                    else None
+                                ),
+                            )
+                            if isinstance(record.attributes.get("parent_ids"), dict)
+                            else None
+                        ),
+                        show_title=(
+                            str(record.attributes["show_title"])
+                            if record.attributes.get("show_title") is not None
+                            else None
+                        ),
+                        season_number=(
+                            int(record.attributes["season_number"])
+                            if record.attributes.get("season_number") is not None
+                            else None
+                        ),
+                        episode_number=(
+                            int(record.attributes["episode_number"])
+                            if record.attributes.get("episode_number") is not None
+                            else None
+                        ),
+                    ),
+                )
+                for record in self.item_records[:limit]
+            ]
+        )
 
     async def get_stream_candidates(self, *, media_item_id: str) -> list[StreamORM]:
         _ = media_item_id
@@ -119,30 +312,154 @@ class FakeMediaService:
         return next((record for record in self.item_records if record.id == item_id), None)
 
 
+@dataclass
+class FakeVfsCatalogSupplier:
+    snapshot: VfsCatalogSnapshot | None = None
+    snapshots_by_generation: dict[int, VfsCatalogSnapshot] = field(default_factory=dict)
+
+    async def build_snapshot(self) -> VfsCatalogSnapshot:
+        if self.snapshot is None:
+            raise AssertionError("test did not configure a VFS snapshot")
+        return self.snapshot
+
+    async def snapshot_for_generation(self, generation_id: int) -> VfsCatalogSnapshot | None:
+        return self.snapshots_by_generation.get(generation_id)
+
+
+@dataclass
+class FakePlaybackTriggerController:
+    result: object
+    triggered_item_ids: list[str] = field(default_factory=list)
+
+    async def trigger(self, item_identifier: str, *, at: datetime | None = None) -> object:
+        _ = at
+        self.triggered_item_ids.append(item_identifier)
+        return self.result
+
+
+@dataclass
+class FakePlaybackService:
+    stale_result: bool = True
+    stale_item_ids: list[str] = field(default_factory=list)
+    attachment_persist_result: PersistedPlaybackAttachmentControlMutationResult | None = None
+    attachment_persist_calls: list[dict[str, object]] = field(default_factory=list)
+    persist_result: PersistedMediaEntryControlMutationResult | None = None
+    persist_calls: list[dict[str, object]] = field(default_factory=list)
+
+    async def mark_selected_hls_media_entry_stale(
+        self,
+        item_identifier: str,
+        *,
+        at: datetime | None = None,
+    ) -> bool:
+        _ = at
+        self.stale_item_ids.append(item_identifier)
+        return self.stale_result
+
+    async def persist_media_entry_control_state(
+        self,
+        item_identifier: str,
+        media_entry_id: str,
+        *,
+        active_role: str | None = None,
+        local_path: str | None = None,
+        download_url: str | None = None,
+        unrestricted_url: str | None = None,
+        refresh_state: str | None = None,
+        last_refresh_error: str | None = None,
+        expires_at: datetime | None = None,
+        at: datetime | None = None,
+    ) -> PersistedMediaEntryControlMutationResult | None:
+        _ = at
+        self.persist_calls.append(
+            {
+                "item_identifier": item_identifier,
+                "media_entry_id": media_entry_id,
+                "active_role": active_role,
+                "local_path": local_path,
+                "download_url": download_url,
+                "unrestricted_url": unrestricted_url,
+                "refresh_state": refresh_state,
+                "last_refresh_error": last_refresh_error,
+                "expires_at": expires_at,
+            }
+        )
+        return self.persist_result
+
+    async def persist_playback_attachment_control_state(
+        self,
+        item_identifier: str,
+        attachment_id: str,
+        *,
+        locator: str | None = None,
+        local_path: str | None = None,
+        restricted_url: str | None = None,
+        unrestricted_url: str | None = None,
+        refresh_state: str | None = None,
+        last_refresh_error: str | None = None,
+        expires_at: datetime | None = None,
+        at: datetime | None = None,
+    ) -> PersistedPlaybackAttachmentControlMutationResult | None:
+        _ = at
+        self.attachment_persist_calls.append(
+            {
+                "item_identifier": item_identifier,
+                "attachment_id": attachment_id,
+                "locator": locator,
+                "local_path": local_path,
+                "restricted_url": restricted_url,
+                "unrestricted_url": unrestricted_url,
+                "refresh_state": refresh_state,
+                "last_refresh_error": last_refresh_error,
+                "expires_at": expires_at,
+            }
+        )
+        return self.attachment_persist_result
+
+
 def _build_settings() -> Settings:
     return Settings(
         FILMU_PY_API_KEY=SecretStr("a" * 32),
         FILMU_PY_POSTGRES_DSN="postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
         FILMU_PY_REDIS_URL=AnyUrl("redis://localhost:6379/0"),
+        FILMU_PY_ARQ_ENABLED=False,
         FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
         FILMU_PY_LOG_LEVEL="INFO",
         FILMU_PY_SERVICE_NAME="filmu-python-test",
     )
 
 
-def _build_client(media_service: FakeMediaService) -> TestClient:
+def _build_client(
+    media_service: FakeMediaService,
+    *,
+    vfs_catalog_supplier: FakeVfsCatalogSupplier | None = None,
+    redis: DummyRedis | None = None,
+    runtime_lifecycle: RuntimeLifecycleState | None = None,
+    queued_direct_playback_refresh_controller: object | None = None,
+    queued_hls_failed_lease_refresh_controller: object | None = None,
+    queued_hls_restricted_fallback_refresh_controller: object | None = None,
+    playback_service: object | None = None,
+) -> TestClient:
     settings = _build_settings()
-    redis = DummyRedis()
+    runtime_redis = redis or DummyRedis()
     app = FastAPI()
     resources = AppResources(
         settings=settings,
-        redis=redis,  # type: ignore[arg-type]
-        cache=CacheManager(redis=redis, namespace="test"),  # type: ignore[arg-type]
-        rate_limiter=DistributedRateLimiter(redis=redis),  # type: ignore[arg-type]
+        redis=runtime_redis,  # type: ignore[arg-type]
+        cache=CacheManager(redis=runtime_redis, namespace="test"),  # type: ignore[arg-type]
+        rate_limiter=DistributedRateLimiter(redis=runtime_redis),  # type: ignore[arg-type]
         event_bus=EventBus(),
         db=DummyDatabaseRuntime(),  # type: ignore[arg-type]
         media_service=media_service,  # type: ignore[arg-type]
         graphql_plugin_registry=GraphQLPluginRegistry(),
+        runtime_lifecycle=runtime_lifecycle or RuntimeLifecycleState(),
+        vfs_catalog_supplier=vfs_catalog_supplier,  # type: ignore[arg-type]
+        playback_service=playback_service,  # type: ignore[arg-type]
+        queued_direct_playback_refresh_controller=queued_direct_playback_refresh_controller,
+        queued_hls_failed_lease_refresh_controller=queued_hls_failed_lease_refresh_controller,
+        queued_hls_restricted_fallback_refresh_controller=(
+            queued_hls_restricted_fallback_refresh_controller
+        ),
     )
     app.state.resources = resources
     app.include_router(create_graphql_router(resources.graphql_plugin_registry), prefix="/graphql")
@@ -164,6 +481,16 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
                     air_date="2026-03-15T10:00:00+00:00",
                     last_state="Completed",
                     release_data=CalendarReleaseDataRecord(next_aired="2026-03-16T10:00:00+00:00"),
+                    specialization=MediaItemSpecializationRecord(
+                        item_type="episode",
+                        tmdb_id="789",
+                        tvdb_id="654",
+                        imdb_id="tt1234567",
+                        parent_ids=ParentIdsRecord(tmdb_id="999", tvdb_id="555"),
+                        show_title="Example Show",
+                        season_number=1,
+                        episode_number=2,
+                    ),
                 )
             ]
         )
@@ -172,7 +499,7 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
     response = client.post(
         "/graphql",
         json={
-            "query": "query { calendarEntries { itemId showTitle itemType airedAt lastState season episode tmdbId tvdbId releaseData } }"
+            "query": "query { calendarEntries { itemId showTitle itemType airedAt lastState season episode tmdbId tvdbId imdbId parentTmdbId parentTvdbId releaseData } }"
         },
     )
 
@@ -189,6 +516,9 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
             "episode": 2,
             "tmdbId": 123,
             "tvdbId": 456,
+            "imdbId": "tt1234567",
+            "parentTmdbId": 999,
+            "parentTvdbId": 555,
             "releaseData": '{"next_aired": "2026-03-16T10:00:00+00:00", "nextAired": null, "last_aired": null, "lastAired": null}',
         }
     ]
@@ -234,8 +564,138 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
         title="Example Movie",
         state="Completed",
         tmdb_id="123",
+        tvdb_id="456",
         created_at="2026-03-15T10:00:00+00:00",
         updated_at="2026-03-15T11:00:00+00:00",
+        specialization=MediaItemSpecializationRecord(
+            item_type="episode",
+            tmdb_id="123",
+            tvdb_id="456",
+            imdb_id="tt1234567",
+            parent_ids=ParentIdsRecord(tmdb_id="999", tvdb_id="555"),
+            show_title="Example Show",
+            season_number=2,
+            episode_number=7,
+        ),
+        playback_attachments=[
+            cast(
+                Any,
+                type(
+                    "Attachment",
+                    (),
+                    {
+                        "id": "attachment-1",
+                        "kind": "direct",
+                        "locator": "https://cdn.example.com/direct",
+                        "source_key": "persisted",
+                        "provider": "realdebrid",
+                        "provider_download_id": "torrent-123",
+                        "provider_file_id": "file-123",
+                        "provider_file_path": "/downloads/Example.Movie.mkv",
+                        "original_filename": "Example.Movie.mkv",
+                        "file_size": 123456789,
+                        "local_path": None,
+                        "restricted_url": "https://api.real-debrid.com/restricted",
+                        "unrestricted_url": "https://cdn.example.com/direct",
+                        "is_preferred": True,
+                        "preference_rank": 1,
+                        "refresh_state": "ready",
+                        "expires_at": "2026-03-15T12:00:00+00:00",
+                        "last_refreshed_at": "2026-03-15T11:00:00+00:00",
+                        "last_refresh_error": None,
+                    },
+                )(),
+            )
+        ],
+        resolved_playback=cast(
+            Any,
+            type(
+                "ResolvedPlayback",
+                (),
+                {
+                    "direct": type(
+                        "ResolvedAttachment",
+                        (),
+                        {
+                            "kind": "direct",
+                            "locator": "https://cdn.example.com/direct",
+                            "source_key": "persisted",
+                            "provider": "realdebrid",
+                            "provider_download_id": "torrent-123",
+                            "provider_file_id": "file-123",
+                            "provider_file_path": "/downloads/Example.Movie.mkv",
+                            "original_filename": "Example.Movie.mkv",
+                            "file_size": 123456789,
+                            "local_path": None,
+                            "restricted_url": None,
+                            "unrestricted_url": "https://cdn.example.com/direct",
+                        },
+                    )(),
+                    "hls": None,
+                    "direct_ready": True,
+                    "hls_ready": False,
+                    "missing_local_file": False,
+                },
+            )(),
+        ),
+        active_stream=cast(
+            Any,
+            type(
+                "ActiveStream",
+                (),
+                {
+                    "direct_ready": True,
+                    "hls_ready": False,
+                    "missing_local_file": False,
+                    "direct_owner": type(
+                        "ActiveOwner",
+                        (),
+                        {
+                            "media_entry_index": 0,
+                            "kind": "remote-direct",
+                            "original_filename": "Example.Movie.mkv",
+                            "provider": "realdebrid",
+                            "provider_download_id": "torrent-123",
+                            "provider_file_id": "file-123",
+                            "provider_file_path": "/downloads/Example.Movie.mkv",
+                        },
+                    )(),
+                    "hls_owner": None,
+                },
+            )(),
+        ),
+        media_entries=[
+            cast(
+                Any,
+                type(
+                    "MediaEntry",
+                    (),
+                    {
+                        "entry_type": "media",
+                        "kind": "remote-direct",
+                        "original_filename": "Example.Movie.mkv",
+                        "url": "https://cdn.example.com/direct",
+                        "local_path": None,
+                        "download_url": "https://api.real-debrid.com/restricted",
+                        "unrestricted_url": "https://cdn.example.com/direct",
+                        "provider": "realdebrid",
+                        "provider_download_id": "torrent-123",
+                        "provider_file_id": "file-123",
+                        "provider_file_path": "/downloads/Example.Movie.mkv",
+                        "size": 123456789,
+                        "created": "2026-03-15T10:30:00+00:00",
+                        "modified": "2026-03-15T11:00:00+00:00",
+                        "refresh_state": "ready",
+                        "expires_at": "2026-03-15T12:00:00+00:00",
+                        "last_refreshed_at": "2026-03-15T11:00:00+00:00",
+                        "last_refresh_error": None,
+                        "active_for_direct": True,
+                        "active_for_hls": False,
+                        "is_active_stream": True,
+                    },
+                )(),
+            )
+        ],
     )
     selected_stream = StreamORM(
         id="stream-1",
@@ -277,7 +737,7 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
     response = client.post(
         "/graphql",
         json={
-            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } } }'
+            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } playbackAttachments { id kind sourceKey provider providerDownloadId originalFilename fileSize refreshState } resolvedPlayback { directReady hlsReady missingLocalFile direct { kind locator sourceKey providerDownloadId originalFilename } } activeStream { directReady hlsReady missingLocalFile directOwner { mediaEntryIndex kind providerDownloadId originalFilename } } mediaEntries { entryType kind originalFilename providerDownloadId size refreshState activeForDirect activeForHls isActiveStream } } }'
         },
     )
 
@@ -292,9 +752,64 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
         "recoveryAttemptCount": 2,
         "isInCooldown": False,
     }
+    assert payload["tvdbId"] == 456
+    assert payload["imdbId"] == "tt1234567"
+    assert payload["parentTmdbId"] == 999
+    assert payload["parentTvdbId"] == 555
+    assert payload["showTitle"] == "Example Show"
+    assert payload["seasonNumber"] == 2
+    assert payload["episodeNumber"] == 7
     assert len(payload["streamCandidates"]) == 2
     assert payload["selectedStream"]["id"] == "stream-1"
     assert payload["streamCandidates"][0]["rawTitle"] == "Example.Movie.1080p.WEB-DL"
+    assert payload["playbackAttachments"] == [
+        {
+            "id": "attachment-1",
+            "kind": "direct",
+            "sourceKey": "persisted",
+            "provider": "realdebrid",
+            "providerDownloadId": "torrent-123",
+            "originalFilename": "Example.Movie.mkv",
+            "fileSize": 123456789,
+            "refreshState": "ready",
+        }
+    ]
+    assert payload["resolvedPlayback"] == {
+        "directReady": True,
+        "hlsReady": False,
+        "missingLocalFile": False,
+        "direct": {
+            "kind": "direct",
+            "locator": "https://cdn.example.com/direct",
+            "sourceKey": "persisted",
+            "providerDownloadId": "torrent-123",
+            "originalFilename": "Example.Movie.mkv",
+        },
+    }
+    assert payload["activeStream"] == {
+        "directReady": True,
+        "hlsReady": False,
+        "missingLocalFile": False,
+        "directOwner": {
+            "mediaEntryIndex": 0,
+            "kind": "remote-direct",
+            "providerDownloadId": "torrent-123",
+            "originalFilename": "Example.Movie.mkv",
+        },
+    }
+    assert payload["mediaEntries"] == [
+        {
+            "entryType": "media",
+            "kind": "remote-direct",
+            "originalFilename": "Example.Movie.mkv",
+            "providerDownloadId": "torrent-123",
+            "size": 123456789,
+            "refreshState": "ready",
+            "activeForDirect": True,
+            "activeForHls": False,
+            "isActiveStream": True,
+        }
+    ]
 
 
 def test_graphql_items_exposes_media_type_and_media_kind() -> None:
@@ -306,7 +821,14 @@ def test_graphql_items_exposes_media_type_and_media_kind() -> None:
                     external_ref="tvdb:555",
                     title="Example Show",
                     state=ItemState.REQUESTED,
-                    attributes={"item_type": "show", "tvdb_id": "555"},
+                    attributes={
+                        "item_type": "show",
+                        "tmdb_id": "999",
+                        "tvdb_id": "555",
+                        "imdb_id": "tt5550001",
+                        "show_title": "Example Show",
+                        "poster_path": "/poster.jpg",
+                    },
                 )
             ]
         )
@@ -314,10 +836,982 @@ def test_graphql_items_exposes_media_type_and_media_kind() -> None:
 
     response = client.post(
         "/graphql",
-        json={"query": "query { items(limit: 1) { id mediaType mediaKind } }"},
+        json={
+            "query": "query { items(limit: 1) { id mediaType mediaKind tmdbId tvdbId imdbId showTitle posterPath } }"
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["items"] == [
-        {"id": "show-1", "mediaType": "show", "mediaKind": "SHOW"}
+        {
+            "id": "show-1",
+            "mediaType": "show",
+            "mediaKind": "SHOW",
+            "tmdbId": 999,
+            "tvdbId": 555,
+            "imdbId": "tt5550001",
+            "showTitle": "Example Show",
+            "posterPath": "/poster.jpg",
+        }
     ]
+
+
+def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
+    snapshot = VfsCatalogSnapshot(
+        generation_id="7",
+        published_at=datetime(2026, 4, 13, 12, 0, tzinfo=UTC),
+        entries=(
+            VfsCatalogEntry(
+                entry_id="dir:/",
+                parent_entry_id=None,
+                path="/",
+                name="/",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/"),
+            ),
+            VfsCatalogEntry(
+                entry_id="dir:/Shows",
+                parent_entry_id="dir:/",
+                path="/Shows",
+                name="Shows",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/Shows"),
+            ),
+            VfsCatalogEntry(
+                entry_id="dir:/Shows/Example Show (2024)",
+                parent_entry_id="dir:/Shows",
+                path="/Shows/Example Show (2024)",
+                name="Example Show (2024)",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/Shows/Example Show (2024)"),
+            ),
+            VfsCatalogEntry(
+                entry_id="dir:/Shows/Example Show (2024)/Season 01",
+                parent_entry_id="dir:/Shows/Example Show (2024)",
+                path="/Shows/Example Show (2024)/Season 01",
+                name="Season 01",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/Shows/Example Show (2024)/Season 01"),
+            ),
+            VfsCatalogEntry(
+                entry_id="file:entry-1",
+                parent_entry_id="dir:/Shows/Example Show (2024)/Season 01",
+                path="/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                name="Example Show S01E01.mkv",
+                kind="file",
+                correlation=VfsCatalogCorrelationKeys(
+                    item_id="item-1",
+                    media_entry_id="entry-1",
+                    provider="realdebrid",
+                    provider_download_id="torrent-123",
+                    provider_file_path="/downloads/Example.Show.S01E01.mkv",
+                ),
+                file=VfsCatalogFileEntry(
+                    item_id="item-1",
+                    item_title="Example Show",
+                    item_external_ref="tvdb:555",
+                    media_entry_id="entry-1",
+                    source_attachment_id="attachment-1",
+                    media_type="episode",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/stream/entry-1",
+                    unrestricted_url="https://cdn.example.com/stream/entry-1",
+                    original_filename="Example Show S01E01.mkv",
+                    size_bytes=987654321,
+                    lease_state="ready",
+                    last_refreshed_at=datetime(2026, 4, 13, 11, 55, tzinfo=UTC),
+                    provider="realdebrid",
+                    provider_download_id="torrent-123",
+                    provider_file_path="/downloads/Example.Show.S01E01.mkv",
+                    active_roles=("direct",),
+                    source_key="persisted",
+                    query_strategy="persisted_media_entries",
+                    provider_family="debrid",
+                    locator_source="unrestricted_url",
+                    match_basis="provider_identity",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=4, file_count=1, blocked_item_count=0),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(
+            snapshot=snapshot,
+            snapshots_by_generation={7: snapshot},
+        ),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsDirectory(path: "/Shows/Example Show (2024)/Season 01", generationId: "7") {
+                    generationId
+                    path
+                    entry { entryId kind path }
+                    stats { directoryCount fileCount blockedItemCount }
+                    directories { path name kind }
+                    files {
+                      path
+                      name
+                      kind
+                      correlation { itemId mediaEntryId provider providerDownloadId providerFilePath }
+                      file {
+                        itemId
+                        itemTitle
+                        itemExternalRef
+                        mediaEntryId
+                        mediaType
+                        transport
+                        locator
+                        unrestrictedUrl
+                        originalFilename
+                        sizeBytes
+                        leaseState
+                        lastRefreshedAt
+                        activeRoles
+                        sourceKey
+                        queryStrategy
+                        providerFamily
+                        locatorSource
+                        matchBasis
+                      }
+                    }
+                  }
+                  vfsCatalogEntry(path: "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv", generationId: "7") {
+                    path
+                    kind
+                    correlation { itemId mediaEntryId providerDownloadId }
+                    file { mediaEntryId providerDownloadId restrictedFallback }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["vfsDirectory"] == {
+        "generationId": "7",
+        "path": "/Shows/Example Show (2024)/Season 01",
+        "entry": {
+            "entryId": "dir:/Shows/Example Show (2024)/Season 01",
+            "kind": "directory",
+            "path": "/Shows/Example Show (2024)/Season 01",
+        },
+        "stats": {
+            "directoryCount": 4,
+            "fileCount": 1,
+            "blockedItemCount": 0,
+        },
+        "directories": [],
+        "files": [
+            {
+                "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                "name": "Example Show S01E01.mkv",
+                "kind": "file",
+                "correlation": {
+                    "itemId": "item-1",
+                    "mediaEntryId": "entry-1",
+                    "provider": "realdebrid",
+                    "providerDownloadId": "torrent-123",
+                    "providerFilePath": "/downloads/Example.Show.S01E01.mkv",
+                },
+                "file": {
+                    "itemId": "item-1",
+                    "itemTitle": "Example Show",
+                    "itemExternalRef": "tvdb:555",
+                    "mediaEntryId": "entry-1",
+                    "mediaType": "episode",
+                    "transport": "remote-direct",
+                    "locator": "https://cdn.example.com/stream/entry-1",
+                    "unrestrictedUrl": "https://cdn.example.com/stream/entry-1",
+                    "originalFilename": "Example Show S01E01.mkv",
+                    "sizeBytes": 987654321,
+                    "leaseState": "ready",
+                    "lastRefreshedAt": "2026-04-13T11:55:00+00:00",
+                    "activeRoles": ["direct"],
+                    "sourceKey": "persisted",
+                    "queryStrategy": "persisted_media_entries",
+                    "providerFamily": "debrid",
+                    "locatorSource": "unrestricted_url",
+                    "matchBasis": "provider_identity",
+                },
+            }
+        ],
+    }
+    assert payload["vfsCatalogEntry"] == {
+        "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+        "kind": "file",
+        "correlation": {
+            "itemId": "item-1",
+            "mediaEntryId": "entry-1",
+            "providerDownloadId": "torrent-123",
+        },
+        "file": {
+            "mediaEntryId": "entry-1",
+            "providerDownloadId": "torrent-123",
+            "restrictedFallback": False,
+        },
+    }
+
+
+def test_graphql_vfs_snapshot_and_blocked_items_queries_use_catalog_snapshot() -> None:
+    snapshot = VfsCatalogSnapshot(
+        generation_id="12",
+        published_at=datetime(2026, 4, 13, 12, 30, tzinfo=UTC),
+        entries=(),
+        stats=VfsCatalogStats(directory_count=3, file_count=5, blocked_item_count=1),
+        blocked_items=(
+            cast(
+                Any,
+                type(
+                    "BlockedItem",
+                    (),
+                    {
+                        "item_id": "item-blocked",
+                        "external_ref": "tmdb:42",
+                        "title": "Blocked Example",
+                        "reason": "missing_media_entry",
+                    },
+                )(),
+            ),
+        ),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(snapshot=snapshot, snapshots_by_generation={12: snapshot}),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsSnapshot(generationId: "12") {
+                    generationId
+                    publishedAt
+                    stats { directoryCount fileCount blockedItemCount }
+                    blockedItems { itemId externalRef title reason }
+                  }
+                  vfsBlockedItems(generationId: "12") {
+                    itemId
+                    externalRef
+                    title
+                    reason
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["vfsSnapshot"] == {
+        "generationId": "12",
+        "publishedAt": "2026-04-13T12:30:00+00:00",
+        "stats": {
+            "directoryCount": 3,
+            "fileCount": 5,
+            "blockedItemCount": 1,
+        },
+        "blockedItems": [
+            {
+                "itemId": "item-blocked",
+                "externalRef": "tmdb:42",
+                "title": "Blocked Example",
+                "reason": "missing_media_entry",
+            }
+        ],
+    }
+    assert payload["vfsBlockedItems"] == [
+        {
+            "itemId": "item-blocked",
+            "externalRef": "tmdb:42",
+            "title": "Blocked Example",
+            "reason": "missing_media_entry",
+        }
+    ]
+
+
+def test_graphql_operator_queries_expose_runtime_queue_and_metadata_history() -> None:
+    current_ms = datetime.now(UTC).timestamp() * 1000
+    redis = FakeOperatorRedis(
+        zsets={
+            "filmu-py": [
+                ("job-ready", current_ms - 30_000),
+                ("job-deferred", current_ms + 45_000),
+            ],
+        },
+        lists={
+            "arq:queue-status-history:filmu-py": [
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-13T12:01:00Z",
+                        "total_jobs": 5,
+                        "ready_jobs": 2,
+                        "deferred_jobs": 1,
+                        "in_progress_jobs": 1,
+                        "retry_jobs": 1,
+                        "dead_letter_jobs": 2,
+                        "oldest_ready_age_seconds": 12.5,
+                        "next_scheduled_in_seconds": 42.0,
+                        "alert_level": "critical",
+                        "dead_letter_oldest_age_seconds": 420.0,
+                        "dead_letter_reason_counts": {"provider_timeout": 2},
+                    }
+                )
+            ],
+            "arq:metadata-reindex-history:filmu-py": [
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-13T12:02:00Z",
+                        "processed": 10,
+                        "queued": 3,
+                        "reconciled": 6,
+                        "skipped_active": 1,
+                        "failed": 1,
+                        "repair_attempted": 2,
+                        "repair_enriched": 1,
+                        "repair_skipped_no_tmdb_id": 0,
+                        "repair_failed": 1,
+                        "repair_requeued": 1,
+                        "repair_skipped_active": 0,
+                        "outcome": "warning",
+                        "run_failed": False,
+                        "last_error": "provider_timeout",
+                    }
+                )
+            ],
+            "arq:dead-letter:filmu-py": [
+                json.dumps({"queued_at": "2026-04-13T11:50:00Z", "reason_code": "provider_timeout"})
+            ],
+        },
+        keys={
+            f"{retry_key_prefix}filmu-py:1",
+            f"{in_progress_key_prefix}filmu-py:1",
+            f"{result_key_prefix}filmu-py:1",
+        },
+    )
+    lifecycle = RuntimeLifecycleState()
+    lifecycle.transition(
+        RuntimeLifecyclePhase.PLUGIN_REGISTRATION,
+        detail="plugins_registered",
+        health=RuntimeLifecycleHealth.HEALTHY,
+    )
+    lifecycle.transition(
+        RuntimeLifecyclePhase.STEADY_STATE,
+        detail="runtime_steady",
+        health=RuntimeLifecycleHealth.HEALTHY,
+    )
+    client = _build_client(FakeMediaService(), redis=redis, runtime_lifecycle=lifecycle)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  runtimeLifecycle {
+                    phase
+                    health
+                    detail
+                    transitions { phase health detail }
+                  }
+                  workerQueueStatus {
+                    queueName
+                    arqEnabled
+                    totalJobs
+                    readyJobs
+                    deferredJobs
+                    inProgressJobs
+                    retryJobs
+                    resultJobs
+                    deadLetterJobs
+                    alertLevel
+                    deadLetterReasonCounts
+                  }
+                  workerQueueHistory(limit: 5, alertLevel: "critical", minDeadLetterJobs: 2, reasonCode: "provider_timeout") {
+                    observedAt
+                    alertLevel
+                    deadLetterJobs
+                    deadLetterReasonCounts
+                  }
+                  workerMetadataReindexStatus {
+                    queueName
+                    hasHistory
+                    processed
+                    queued
+                    reconciled
+                    failed
+                    outcome
+                    lastError
+                  }
+                  workerMetadataReindexHistory(limit: 5) {
+                    observedAt
+                    processed
+                    queued
+                    reconciled
+                    failed
+                    repairAttempted
+                    repairFailed
+                    outcome
+                    lastError
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["runtimeLifecycle"]["phase"] == "steady_state"
+    assert payload["runtimeLifecycle"]["detail"] == "runtime_steady"
+    assert payload["runtimeLifecycle"]["transitions"][-1] == {
+        "phase": "steady_state",
+        "health": "healthy",
+        "detail": "runtime_steady",
+    }
+    assert payload["workerQueueStatus"] == {
+        "queueName": "filmu-py",
+        "arqEnabled": False,
+        "totalJobs": 2,
+        "readyJobs": 1,
+        "deferredJobs": 1,
+        "inProgressJobs": 1,
+        "retryJobs": 1,
+        "resultJobs": 1,
+        "deadLetterJobs": 1,
+        "alertLevel": "critical",
+        "deadLetterReasonCounts": {"provider_timeout": 1},
+    }
+    assert payload["workerQueueHistory"] == [
+        {
+            "observedAt": "2026-04-13T12:01:00Z",
+            "alertLevel": "critical",
+            "deadLetterJobs": 2,
+            "deadLetterReasonCounts": {"provider_timeout": 2},
+        }
+    ]
+    assert payload["workerMetadataReindexStatus"] == {
+        "queueName": "filmu-py",
+        "hasHistory": True,
+        "processed": 10,
+        "queued": 3,
+        "reconciled": 6,
+        "failed": 1,
+        "outcome": "warning",
+        "lastError": "provider_timeout",
+    }
+    assert payload["workerMetadataReindexHistory"] == [
+        {
+            "observedAt": "2026-04-13T12:02:00Z",
+            "processed": 10,
+            "queued": 3,
+            "reconciled": 6,
+            "failed": 1,
+            "repairAttempted": 2,
+            "repairFailed": 1,
+            "outcome": "warning",
+            "lastError": "provider_timeout",
+        }
+    ]
+
+
+def test_graphql_playback_control_plane_mutations_use_shared_resources() -> None:
+    direct_controller = FakePlaybackTriggerController(
+        result=DirectPlaybackRefreshControlPlaneTriggerResult(
+            item_identifier="item-1",
+            outcome="scheduled",
+            scheduling_result=DirectPlaybackRefreshSchedulingResult(
+                outcome="scheduled",
+                scheduled_request=DirectPlaybackRefreshScheduleRequest(
+                    item_identifier="item-1",
+                    recommendation=DirectPlaybackRefreshRecommendation(
+                        reason="provider_direct_stale",
+                        target="attachment",
+                        target_id="attachment-1",
+                    ),
+                    requested_at=datetime(2026, 4, 13, 12, 10, tzinfo=UTC),
+                    not_before=datetime(2026, 4, 13, 12, 15, tzinfo=UTC),
+                    retry_after_seconds=30.0,
+                ),
+                retry_after_seconds=30.0,
+            ),
+        )
+    )
+    failed_controller = FakePlaybackTriggerController(
+        result=HlsFailedLeaseRefreshControlPlaneTriggerResult(
+            item_identifier="item-1",
+            outcome="no_action",
+            refresh_result=HlsFailedLeaseRefreshResult(
+                item_identifier="item-1",
+                outcome="completed",
+                execution=MediaEntryLeaseRefreshExecution(
+                    media_entry_id="entry-1",
+                    ok=True,
+                    refresh_state="ready",
+                    locator="https://cdn.example.com/hls.m3u8",
+                    error=None,
+                ),
+            ),
+        )
+    )
+    restricted_controller = FakePlaybackTriggerController(
+        result=HlsRestrictedFallbackRefreshControlPlaneTriggerResult(
+            item_identifier="item-1",
+            outcome="no_action",
+            refresh_result=HlsRestrictedFallbackRefreshResult(
+                item_identifier="item-1",
+                outcome="run_later",
+                execution=MediaEntryLeaseRefreshExecution(
+                    media_entry_id="entry-2",
+                    ok=False,
+                    refresh_state="refreshing",
+                    locator="https://restricted.example.com/hls.m3u8",
+                    error="provider_circuit_open",
+                ),
+                retry_after_seconds=45.0,
+                deferred_reason="provider_circuit_open",
+            ),
+        )
+    )
+    playback_service = FakePlaybackService(stale_result=True)
+    client = _build_client(
+        FakeMediaService(),
+        queued_direct_playback_refresh_controller=direct_controller,
+        queued_hls_failed_lease_refresh_controller=failed_controller,
+        queued_hls_restricted_fallback_refresh_controller=restricted_controller,
+        playback_service=playback_service,
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation {
+                  direct: triggerDirectPlaybackRefresh(itemId: "item-1") {
+                    itemId
+                    outcome
+                    controllerAttached
+                    controlPlaneOutcome
+                    refreshOutcome
+                    retryAfterSeconds
+                    scheduledRequestedAt
+                    scheduledNotBefore
+                  }
+                  failed: triggerHlsFailedLeaseRefresh(itemId: "item-1") {
+                    itemId
+                    outcome
+                    controllerAttached
+                    controlPlaneOutcome
+                    refreshOutcome
+                    executionOk
+                    executionRefreshState
+                    executionLocator
+                  }
+                  restricted: triggerHlsRestrictedFallbackRefresh(itemId: "item-1") {
+                    itemId
+                    outcome
+                    controllerAttached
+                    controlPlaneOutcome
+                    refreshOutcome
+                    executionOk
+                    executionRefreshState
+                    executionLocator
+                    executionError
+                    retryAfterSeconds
+                    deferredReason
+                  }
+                  stale: markSelectedHlsMediaEntryStale(itemId: "item-1") {
+                    itemId
+                    success
+                    error
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["direct"] == {
+        "itemId": "item-1",
+        "outcome": "triggered",
+        "controllerAttached": True,
+        "controlPlaneOutcome": "scheduled",
+        "refreshOutcome": "scheduled",
+        "retryAfterSeconds": 30.0,
+        "scheduledRequestedAt": "2026-04-13T12:10:00+00:00",
+        "scheduledNotBefore": "2026-04-13T12:15:00+00:00",
+    }
+    assert payload["failed"] == {
+        "itemId": "item-1",
+        "outcome": "triggered",
+        "controllerAttached": True,
+        "controlPlaneOutcome": "no_action",
+        "refreshOutcome": "completed",
+        "executionOk": True,
+        "executionRefreshState": "ready",
+        "executionLocator": "https://cdn.example.com/hls.m3u8",
+    }
+    assert payload["restricted"] == {
+        "itemId": "item-1",
+        "outcome": "triggered",
+        "controllerAttached": True,
+        "controlPlaneOutcome": "no_action",
+        "refreshOutcome": "run_later",
+        "executionOk": False,
+        "executionRefreshState": "refreshing",
+        "executionLocator": "https://restricted.example.com/hls.m3u8",
+        "executionError": "provider_circuit_open",
+        "retryAfterSeconds": 45.0,
+        "deferredReason": "provider_circuit_open",
+    }
+    assert payload["stale"] == {
+        "itemId": "item-1",
+        "success": True,
+        "error": None,
+    }
+    assert direct_controller.triggered_item_ids == ["item-1"]
+    assert failed_controller.triggered_item_ids == ["item-1"]
+    assert restricted_controller.triggered_item_ids == ["item-1"]
+    assert playback_service.stale_item_ids == ["item-1"]
+
+
+def test_graphql_mark_selected_hls_media_entry_stale_reports_unavailable_service() -> None:
+    client = _build_client(FakeMediaService())
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation {
+                  markSelectedHlsMediaEntryStale(itemId: "item-1") {
+                    itemId
+                    success
+                    error
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["markSelectedHlsMediaEntryStale"] == {
+        "itemId": "item-1",
+        "success": False,
+        "error": "playback_service_unavailable",
+    }
+
+
+def test_graphql_persist_media_entry_control_state_uses_shared_playback_service() -> None:
+    persisted_item = SimpleNamespace(
+        id="item-1",
+        active_streams=[
+            SimpleNamespace(role="direct", media_entry_id="entry-1"),
+        ],
+    )
+    persisted_entry = SimpleNamespace(
+        id="entry-1",
+        entry_type="media",
+        kind="remote-direct",
+        original_filename="Example.Movie.mkv",
+        local_path=None,
+        download_url="https://api.example.com/direct-fresh",
+        unrestricted_url="https://cdn.example.com/direct-fresh",
+        provider="realdebrid",
+        provider_download_id="download-1",
+        provider_file_id="file-1",
+        provider_file_path="/downloads/Example.Movie.mkv",
+        size_bytes=123456789,
+        created_at=datetime(2026, 4, 13, 12, 20, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 13, 12, 25, tzinfo=UTC),
+        refresh_state="ready",
+        expires_at=datetime(2026, 4, 13, 13, 0, tzinfo=UTC),
+        last_refreshed_at=None,
+        last_refresh_error=None,
+    )
+    playback_service = FakePlaybackService(
+        persist_result=PersistedMediaEntryControlMutationResult(
+            item_identifier="item-1",
+            media_entry_id="entry-1",
+            item=persisted_item,
+            media_entry=persisted_entry,
+            applied_role="direct",
+        )
+    )
+    client = _build_client(FakeMediaService(), playback_service=playback_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistMediaEntryControlInput!) {
+                  persistMediaEntryControlState(input: $input) {
+                    itemId
+                    mediaEntryId
+                    success
+                    error
+                    appliedRole
+                    mediaEntry {
+                      entryType
+                      kind
+                      downloadUrl
+                      unrestrictedUrl
+                      refreshState
+                      providerFileId
+                      activeForDirect
+                      activeForHls
+                      isActiveStream
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "mediaEntryId": "entry-1",
+                    "activeRole": "DIRECT",
+                    "downloadUrl": "https://api.example.com/direct-fresh",
+                    "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+                    "refreshState": "ready",
+                    "expiresAt": "2026-04-13T13:00:00Z",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistMediaEntryControlState"] == {
+        "itemId": "item-1",
+        "mediaEntryId": "entry-1",
+        "success": True,
+        "error": None,
+        "appliedRole": "direct",
+        "mediaEntry": {
+            "entryType": "media",
+            "kind": "remote-direct",
+            "downloadUrl": "https://api.example.com/direct-fresh",
+            "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+            "refreshState": "ready",
+            "providerFileId": "file-1",
+            "activeForDirect": True,
+            "activeForHls": False,
+            "isActiveStream": True,
+        },
+    }
+    assert playback_service.persist_calls == [
+        {
+            "item_identifier": "item-1",
+            "media_entry_id": "entry-1",
+            "active_role": "direct",
+            "local_path": None,
+            "download_url": "https://api.example.com/direct-fresh",
+            "unrestricted_url": "https://cdn.example.com/direct-fresh",
+            "refresh_state": "ready",
+            "last_refresh_error": None,
+            "expires_at": datetime(2026, 4, 13, 13, 0, tzinfo=UTC),
+        }
+    ]
+
+
+def test_graphql_persist_media_entry_control_state_rejects_empty_mutation() -> None:
+    client = _build_client(FakeMediaService(), playback_service=FakePlaybackService())
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistMediaEntryControlInput!) {
+                  persistMediaEntryControlState(input: $input) {
+                    itemId
+                    mediaEntryId
+                    success
+                    error
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "mediaEntryId": "entry-1",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistMediaEntryControlState"] == {
+        "itemId": "item-1",
+        "mediaEntryId": "entry-1",
+        "success": False,
+        "error": "no_changes_requested",
+    }
+
+
+def test_graphql_persist_playback_attachment_control_state_uses_shared_playback_service() -> None:
+    persisted_item = SimpleNamespace(id="item-1")
+    persisted_attachment = SimpleNamespace(
+        id="attachment-1",
+        kind="remote-direct",
+        locator="https://cdn.example.com/direct-fresh",
+        source_key="persisted",
+        provider="realdebrid",
+        provider_download_id="download-1",
+        provider_file_id="file-1",
+        provider_file_path="/downloads/Example.Movie.mkv",
+        original_filename="Example.Movie.mkv",
+        file_size=123456789,
+        local_path=None,
+        restricted_url="https://api.example.com/direct-fresh",
+        unrestricted_url="https://cdn.example.com/direct-fresh",
+        is_preferred=True,
+        preference_rank=1,
+        refresh_state="ready",
+        expires_at=datetime(2026, 4, 13, 13, 30, tzinfo=UTC),
+        last_refreshed_at=None,
+        last_refresh_error=None,
+    )
+    linked_entry = SimpleNamespace(
+        entry_type="media",
+        kind="remote-direct",
+        original_filename="Example.Movie.mkv",
+        url="https://cdn.example.com/direct-fresh",
+        local_path=None,
+        download_url="https://api.example.com/direct-fresh",
+        unrestricted_url="https://cdn.example.com/direct-fresh",
+        provider="realdebrid",
+        provider_download_id="download-1",
+        provider_file_id="file-1",
+        provider_file_path="/downloads/Example.Movie.mkv",
+        size=123456789,
+        created="2026-04-13T12:20:00+00:00",
+        modified="2026-04-13T12:25:00+00:00",
+        refresh_state="ready",
+        expires_at="2026-04-13T13:30:00+00:00",
+        last_refreshed_at=None,
+        last_refresh_error=None,
+        active_for_direct=False,
+        active_for_hls=False,
+        is_active_stream=False,
+    )
+    playback_service = FakePlaybackService(
+        attachment_persist_result=PersistedPlaybackAttachmentControlMutationResult(
+            item_identifier="item-1",
+            attachment_id="attachment-1",
+            item=persisted_item,
+            attachment=persisted_attachment,
+            linked_media_entries=(linked_entry,),
+        )
+    )
+    client = _build_client(FakeMediaService(), playback_service=playback_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistPlaybackAttachmentControlInput!) {
+                  persistPlaybackAttachmentControlState(input: $input) {
+                    itemId
+                    attachmentId
+                    success
+                    error
+                    attachment {
+                      locator
+                      restrictedUrl
+                      unrestrictedUrl
+                      refreshState
+                    }
+                    linkedMediaEntries {
+                      entryType
+                      downloadUrl
+                      unrestrictedUrl
+                      refreshState
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "attachmentId": "attachment-1",
+                    "locator": "https://cdn.example.com/direct-fresh",
+                    "restrictedUrl": "https://api.example.com/direct-fresh",
+                    "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+                    "refreshState": "ready",
+                    "expiresAt": "2026-04-13T13:30:00Z",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistPlaybackAttachmentControlState"] == {
+        "itemId": "item-1",
+        "attachmentId": "attachment-1",
+        "success": True,
+        "error": None,
+        "attachment": {
+            "locator": "https://cdn.example.com/direct-fresh",
+            "restrictedUrl": "https://api.example.com/direct-fresh",
+            "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+            "refreshState": "ready",
+        },
+        "linkedMediaEntries": [
+            {
+                "entryType": "media",
+                "downloadUrl": "https://api.example.com/direct-fresh",
+                "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+                "refreshState": "ready",
+            }
+        ],
+    }
+    assert playback_service.attachment_persist_calls == [
+        {
+            "item_identifier": "item-1",
+            "attachment_id": "attachment-1",
+            "locator": "https://cdn.example.com/direct-fresh",
+            "local_path": None,
+            "restricted_url": "https://api.example.com/direct-fresh",
+            "unrestricted_url": "https://cdn.example.com/direct-fresh",
+            "refresh_state": "ready",
+            "last_refresh_error": None,
+            "expires_at": datetime(2026, 4, 13, 13, 30, tzinfo=UTC),
+        }
+    ]
+
+
+def test_graphql_persist_playback_attachment_control_state_rejects_empty_mutation() -> None:
+    client = _build_client(FakeMediaService(), playback_service=FakePlaybackService())
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistPlaybackAttachmentControlInput!) {
+                  persistPlaybackAttachmentControlState(input: $input) {
+                    itemId
+                    attachmentId
+                    success
+                    error
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "attachmentId": "attachment-1",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistPlaybackAttachmentControlState"] == {
+        "itemId": "item-1",
+        "attachmentId": "attachment-1",
+        "success": False,
+        "error": "no_changes_requested",
+    }

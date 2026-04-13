@@ -16,6 +16,8 @@ from pydantic import AnyUrl, SecretStr
 from redis.exceptions import ResponseError
 
 from filmu_py.api.router import create_api_router
+from filmu_py.api.routes import default as default_routes
+from filmu_py.api.routes import stream as stream_routes
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.chunk_engine import ChunkCache
@@ -1460,7 +1462,26 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
     assert "records" in audit_response.json()
 
 
-def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
+def test_operations_governance_route_returns_enterprise_slice_posture(
+    monkeypatch: Any,
+) -> None:
+    playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
+    playback_gate_governance.update(
+        {
+            "playback_gate_snapshot_available": 1,
+            "playback_gate_gate_mode": "strict",
+            "playback_gate_rollout_readiness": "blocked",
+            "playback_gate_rollout_reasons": ["playback_gate_failed_or_incomplete"],
+            "playback_gate_rollout_next_action": "resolve_failed_playback_gate_proofs",
+            "playback_gate_policy_validation_status": "unverified",
+        }
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "_playback_gate_governance_snapshot",
+        lambda: dict(playback_gate_governance),
+    )
+
     client = _build_client(arq_enabled=True)
 
     response = client.get(
@@ -1488,10 +1509,11 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
         "heavy_stage_workload_isolation",
         "release_metadata_performance",
     }
-    assert body["playback_gate"]["status"] == "partial"
+    assert body["playback_gate"]["status"] == "blocked"
     assert "proof:playback:gate:enterprise package entrypoint exists" in body[
         "playback_gate"
     ]["evidence"]
+    assert "playback_gate_rollout_readiness=blocked" in body["playback_gate"]["evidence"]
     assert body["identity_authz"]["status"] == "blocked"
     assert "authentication_mode=api_key" in body["identity_authz"]["evidence"]
     assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
@@ -1506,6 +1528,10 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "chunk_cache_enabled=True" in body["vfs_data_plane"]["evidence"]
     assert body["distributed_control_plane"]["status"] == "not_ready"
     assert "EventBus backend=process_local" in body["distributed_control_plane"]["evidence"]
+    assert (
+        "GET /api/v1/workers/queue/history exposes dead-letter age/reason rollups and bounded replay filters"
+        in body["distributed_control_plane"]["evidence"]
+    )
     assert body["runtime_lifecycle"]["status"] == "blocked"
     assert "runtime_phase=bootstrap" in body["runtime_lifecycle"]["evidence"]
     assert body["sre_program"]["status"] == "partial"
@@ -1523,6 +1549,18 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "heavy_stage_proof_ref_count=0" in body["heavy_stage_workload_isolation"]["evidence"]
     assert body["heavy_stage_workload_isolation"]["status"] == "partial"
     assert body["release_metadata_performance"]["status"] == "partial"
+    assert (
+        "GET /api/v1/workers/metadata-reindex and /api/v1/workers/metadata-reindex/history expose bounded operator rollups"
+        in body["release_metadata_performance"]["evidence"]
+    )
+    assert (
+        "repairable failed items now receive identifier repair plus immediate index re-entry inside the scheduled metadata program"
+        in body["release_metadata_performance"]["evidence"]
+    )
+    assert (
+        "metadata reindex/reconciliation trends are not yet exposed on a dedicated operator summary surface"
+        not in body["release_metadata_performance"]["remaining_gaps"]
+    )
 
 
 def test_operations_governance_route_marks_identity_ready_when_wave2_exit_gates_are_satisfied() -> None:
@@ -1596,10 +1634,18 @@ def test_operations_governance_route_blocks_queued_refresh_without_runtime_queue
     assert "heavy_stage_executor_mode=thread_pool_only" in heavy_stage["evidence"]
     assert "heavy_stage_max_workers=3" in heavy_stage["evidence"]
     assert "heavy_stage_max_tasks_per_child=0" in heavy_stage["evidence"]
+    assert "heavy_stage_spawn_context_required=1" in heavy_stage["evidence"]
+    assert "heavy_stage_max_worker_ceiling=2" in heavy_stage["evidence"]
+    assert "heavy_stage_policy_violations=worker_ceiling_exceeded" in heavy_stage["evidence"]
     assert "heavy_stage_process_isolation_required=0" in heavy_stage["evidence"]
     assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_exit_ready=0" in heavy_stage["evidence"]
+    assert "require_process_backed_heavy_stage_isolation" in heavy_stage["required_actions"]
+    assert any(
+        gap == "heavy stages are not yet forced into process-backed isolation"
+        for gap in heavy_stage["remaining_gaps"]
+    )
 
 
 def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satisfied() -> None:
@@ -1613,6 +1659,8 @@ def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satis
                     "executor_mode": "process_pool_required",
                     "max_workers": 2,
                     "max_tasks_per_child": 25,
+                    "require_spawn_context": True,
+                    "max_worker_ceiling": 2,
                     "proof_refs": ["ops/wave3/heavy-stage-failure-injection.md"],
                 },
             },
@@ -1637,6 +1685,9 @@ def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satis
     assert "heavy_stage_executor_mode=process_pool_required" in heavy_stage["evidence"]
     assert "heavy_stage_max_workers=2" in heavy_stage["evidence"]
     assert "heavy_stage_max_tasks_per_child=25" in heavy_stage["evidence"]
+    assert "heavy_stage_spawn_context_required=1" in heavy_stage["evidence"]
+    assert "heavy_stage_max_worker_ceiling=2" in heavy_stage["evidence"]
+    assert "heavy_stage_policy_violations=none" in heavy_stage["evidence"]
     assert "heavy_stage_process_isolation_required=1" in heavy_stage["evidence"]
     assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
@@ -1783,6 +1834,11 @@ def test_operations_governance_route_surfaces_live_vfs_rollout_posture(
     assert "vfs_runtime_rollout_reasons=backend_fallback_failures,mounted_read_errors,prefetch_background_errors,disk_cache_write_errors" in vfs_data_plane["evidence"]
     assert "vfs_runtime_cache_hit_ratio=0.750" in vfs_data_plane["evidence"]
     assert "vfs_runtime_provider_pressure_incidents=22" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_cache_pressure_class=critical" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_chunk_coalescing_pressure_class=warning" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_upstream_wait_class=critical" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_refresh_pressure_class=critical" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_cache_pressure_reasons=disk_write_errors,disk_evictions_observed" in vfs_data_plane["evidence"]
     assert "resolve_blocking_runtime_failures" in vfs_data_plane["required_actions"]
     assert any(
         gap.startswith("live runtime rollout reasons are present:")
@@ -1928,6 +1984,8 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
         "vfs_data_plane"
     ]["evidence"]
     assert "vfs_runtime_rollout_merge_gate=ready" in body["vfs_data_plane"]["evidence"]
+    assert "vfs_runtime_cache_pressure_class=healthy" in body["vfs_data_plane"]["evidence"]
+    assert "vfs_runtime_upstream_wait_class=healthy" in body["vfs_data_plane"]["evidence"]
 
 
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:
@@ -1963,7 +2021,16 @@ def test_worker_queue_route_returns_control_plane_snapshot() -> None:
     redis.values["arq:in-progress:job-ready"] = b"active"
     redis.values["arq:retry:job-ready"] = b"retry"
     redis.values["arq:result:job-done"] = b"done"
-    redis.lists["arq:dead-letter:filmu-py"] = [b"dlq"]
+    redis.lists["arq:dead-letter:filmu-py"] = [
+        json.dumps(
+            {
+                "task": "scrape_item",
+                "reason": "timeout",
+                "reason_code": "timeout",
+                "queued_at": "2026-04-12T12:00:00+00:00",
+            }
+        ).encode("utf-8")
+    ]
 
     response = client.get("/api/v1/workers/queue", headers=_headers())
 
@@ -1981,6 +2048,8 @@ def test_worker_queue_route_returns_control_plane_snapshot() -> None:
     assert body["dead_letter_jobs"] == 1
     assert body["alert_level"] == "critical"
     assert body["alerts"][0]["code"] == "dead_letter_backlog"
+    assert body["dead_letter_oldest_age_seconds"] is not None
+    assert body["dead_letter_reason_counts"] == {"timeout": 1}
     assert 0.5 <= body["oldest_ready_age_seconds"] <= 3.0
     assert 0.0 <= body["next_scheduled_in_seconds"] <= 5.0
 
@@ -2002,15 +2071,214 @@ def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
     assert history[0]["total_jobs"] == 1
     assert history[0]["ready_jobs"] == 1
     assert history[0]["alert_level"] == "ok"
+    assert body["applied_filters"] == {
+        "alert_level": None,
+        "min_dead_letter_jobs": 0,
+        "reason_code": None,
+    }
     assert body["summary"] == {
         "points": 1,
         "latest_alert_level": "ok",
         "critical_points": 0,
         "warning_points": 0,
+        "dead_letter_points": 0,
         "max_ready_jobs": 1,
         "max_dead_letter_jobs": 0,
         "max_oldest_ready_age_seconds": history[0]["oldest_ready_age_seconds"],
+        "latest_dead_letter_oldest_age_seconds": None,
+        "max_dead_letter_oldest_age_seconds": None,
+        "latest_dead_letter_reason": None,
         "latest_dead_letter_reason_counts": {},
+        "total_dead_letter_reason_counts": {},
+        "dead_letter_reason_points": {},
+    }
+
+
+def test_worker_queue_history_route_supports_dead_letter_filters_and_reason_rollups() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    redis.lists["arq:queue-status-history:filmu-py"] = [
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T01:05:00Z",
+                "total_jobs": 4,
+                "ready_jobs": 1,
+                "deferred_jobs": 0,
+                "in_progress_jobs": 1,
+                "retry_jobs": 0,
+                "dead_letter_jobs": 2,
+                "oldest_ready_age_seconds": 12.0,
+                "next_scheduled_in_seconds": None,
+                "alert_level": "critical",
+                "dead_letter_oldest_age_seconds": 240.0,
+                "dead_letter_reason_counts": {"timeout": 2, "rate_limited": 1},
+            }
+        ).encode("utf-8"),
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T01:00:00Z",
+                "total_jobs": 2,
+                "ready_jobs": 0,
+                "deferred_jobs": 1,
+                "in_progress_jobs": 0,
+                "retry_jobs": 1,
+                "dead_letter_jobs": 1,
+                "oldest_ready_age_seconds": None,
+                "next_scheduled_in_seconds": 30.0,
+                "alert_level": "warning",
+                "dead_letter_oldest_age_seconds": 180.0,
+                "dead_letter_reason_counts": {"timeout": 1},
+            }
+        ).encode("utf-8"),
+    ]
+
+    response = client.get(
+        "/api/v1/workers/queue/history",
+        params={"alert_level": "critical", "reason_code": "timeout", "min_dead_letter_jobs": 2},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["history"]) == 1
+    assert body["applied_filters"] == {
+        "alert_level": "critical",
+        "min_dead_letter_jobs": 2,
+        "reason_code": "timeout",
+    }
+    assert body["summary"] == {
+        "points": 1,
+        "latest_alert_level": "critical",
+        "critical_points": 1,
+        "warning_points": 0,
+        "dead_letter_points": 1,
+        "max_ready_jobs": 1,
+        "max_dead_letter_jobs": 2,
+        "max_oldest_ready_age_seconds": 12.0,
+        "latest_dead_letter_oldest_age_seconds": 240.0,
+        "max_dead_letter_oldest_age_seconds": 240.0,
+        "latest_dead_letter_reason": "timeout",
+        "latest_dead_letter_reason_counts": {"timeout": 2, "rate_limited": 1},
+        "total_dead_letter_reason_counts": {"rate_limited": 1, "timeout": 2},
+        "dead_letter_reason_points": {"rate_limited": 1, "timeout": 1},
+    }
+
+
+def test_worker_metadata_reindex_route_returns_latest_run_summary() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    redis.lists["arq:metadata-reindex-history:filmu-py"] = [
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T00:30:00Z",
+                "processed": 3,
+                "queued": 1,
+                "reconciled": 1,
+                "skipped_active": 1,
+                "failed": 0,
+                "outcome": "ok",
+                "run_failed": False,
+                "last_error": None,
+            }
+        ).encode("utf-8")
+    ]
+
+    response = client.get("/api/v1/workers/metadata-reindex", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "queue_name": "filmu-py",
+        "schedule_offset_minutes": 30,
+        "has_history": True,
+        "observed_at": "2026-04-13T00:30:00Z",
+        "processed": 3,
+        "queued": 1,
+        "reconciled": 1,
+        "skipped_active": 1,
+        "failed": 0,
+        "repair_attempted": 0,
+        "repair_enriched": 0,
+        "repair_skipped_no_tmdb_id": 0,
+        "repair_failed": 0,
+        "repair_requeued": 0,
+        "repair_skipped_active": 0,
+        "outcome": "ok",
+        "run_failed": False,
+        "last_error": None,
+    }
+
+
+def test_worker_metadata_reindex_history_route_returns_bounded_summary() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    redis.lists["arq:metadata-reindex-history:filmu-py"] = [
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T00:35:00Z",
+                "processed": 0,
+                "queued": 0,
+                "reconciled": 0,
+                "skipped_active": 0,
+                "failed": 0,
+                "repair_attempted": 1,
+                "repair_enriched": 1,
+                "repair_skipped_no_tmdb_id": 0,
+                "repair_failed": 0,
+                "repair_requeued": 1,
+                "repair_skipped_active": 0,
+                "outcome": "critical",
+                "run_failed": True,
+                "last_error": "metadata source unavailable",
+            }
+        ).encode("utf-8"),
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T00:30:00Z",
+                "processed": 3,
+                "queued": 1,
+                "reconciled": 1,
+                "skipped_active": 1,
+                "failed": 1,
+                "repair_attempted": 0,
+                "repair_enriched": 0,
+                "repair_skipped_no_tmdb_id": 1,
+                "repair_failed": 1,
+                "repair_requeued": 0,
+                "repair_skipped_active": 0,
+                "outcome": "warning",
+                "run_failed": False,
+                "last_error": None,
+            }
+        ).encode("utf-8"),
+    ]
+
+    response = client.get("/api/v1/workers/metadata-reindex/history", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queue_name"] == "filmu-py"
+    assert body["schedule_offset_minutes"] == 30
+    assert len(body["history"]) == 2
+    assert body["summary"] == {
+        "points": 2,
+        "latest_outcome": "critical",
+        "critical_points": 1,
+        "warning_points": 1,
+        "total_processed": 3,
+        "total_queued": 1,
+        "total_reconciled": 1,
+        "total_skipped_active": 1,
+        "total_failed": 1,
+        "total_repair_attempted": 1,
+        "total_repair_enriched": 1,
+        "total_repair_skipped_no_tmdb_id": 1,
+        "total_repair_failed": 1,
+        "total_repair_requeued": 1,
+        "total_repair_skipped_active": 0,
+        "max_processed": 3,
+        "max_failed": 1,
+        "latest_run_failed": True,
+        "latest_error": "metadata source unavailable",
     }
 
 

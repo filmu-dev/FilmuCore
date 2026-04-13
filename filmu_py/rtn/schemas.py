@@ -164,8 +164,8 @@ class Options(BaseModel):
     remove_ranks_under: int = -10000
     remove_unknown_languages: bool = False
     allow_english_in_languages: bool = True
-    # TODO: `enable_fetch_speed_mode` exists in the production settings shape but its behavior is
-    # not defined in the audited RTN report yet, so the standalone package stores it without using it.
+    # Softens non-safety fetch failures (while preserving hard safety checks) so ranking can
+    # continue under degraded provider or metadata quality conditions.
     enable_fetch_speed_mode: bool = False
     remove_adult_content: bool = True
 

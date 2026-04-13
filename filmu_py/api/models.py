@@ -394,6 +394,7 @@ class QueueStatusResponse(BaseModel):
     alerts: list["QueueAlertResponse"] = []
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
+    dead_letter_oldest_age_seconds: float | None = None
     dead_letter_reason_counts: dict[str, int] = {}
 
 
@@ -418,6 +419,7 @@ class QueueStatusHistoryPointResponse(BaseModel):
     oldest_ready_age_seconds: float | None = None
     next_scheduled_in_seconds: float | None = None
     alert_level: Literal["ok", "warning", "critical"] = "ok"
+    dead_letter_oldest_age_seconds: float | None = None
     dead_letter_reason_counts: dict[str, int] = {}
 
 
@@ -428,18 +430,109 @@ class QueueStatusHistorySummaryResponse(BaseModel):
     latest_alert_level: Literal["ok", "warning", "critical"] = "ok"
     critical_points: int
     warning_points: int
+    dead_letter_points: int
     max_ready_jobs: int
     max_dead_letter_jobs: int
     max_oldest_ready_age_seconds: float | None = None
+    latest_dead_letter_oldest_age_seconds: float | None = None
+    max_dead_letter_oldest_age_seconds: float | None = None
+    latest_dead_letter_reason: str | None = None
     latest_dead_letter_reason_counts: dict[str, int] = {}
+    total_dead_letter_reason_counts: dict[str, int] = {}
+    dead_letter_reason_points: dict[str, int] = {}
+
+
+class QueueStatusHistoryFiltersResponse(BaseModel):
+    """Applied operator controls for one bounded queue-history response."""
+
+    alert_level: Literal["ok", "warning", "critical"] | None = None
+    min_dead_letter_jobs: int = 0
+    reason_code: str | None = None
 
 
 class QueueStatusHistoryResponse(BaseModel):
     """Bounded queue-history timeline for operator views."""
 
     queue_name: str
+    applied_filters: QueueStatusHistoryFiltersResponse
     summary: QueueStatusHistorySummaryResponse
     history: list[QueueStatusHistoryPointResponse]
+
+
+class MetadataReindexStatusResponse(BaseModel):
+    """Latest metadata reindex/reconciliation run summary."""
+
+    queue_name: str
+    schedule_offset_minutes: int
+    has_history: bool = False
+    observed_at: str
+    processed: int
+    queued: int
+    reconciled: int
+    skipped_active: int
+    failed: int
+    repair_attempted: int = 0
+    repair_enriched: int = 0
+    repair_skipped_no_tmdb_id: int = 0
+    repair_failed: int = 0
+    repair_requeued: int = 0
+    repair_skipped_active: int = 0
+    outcome: Literal["ok", "warning", "critical"] = "ok"
+    run_failed: bool = False
+    last_error: str | None = None
+
+
+class MetadataReindexHistoryPointResponse(BaseModel):
+    """One persisted metadata reindex/reconciliation run record."""
+
+    observed_at: str
+    processed: int
+    queued: int
+    reconciled: int
+    skipped_active: int
+    failed: int
+    repair_attempted: int = 0
+    repair_enriched: int = 0
+    repair_skipped_no_tmdb_id: int = 0
+    repair_failed: int = 0
+    repair_requeued: int = 0
+    repair_skipped_active: int = 0
+    outcome: Literal["ok", "warning", "critical"] = "ok"
+    run_failed: bool = False
+    last_error: str | None = None
+
+
+class MetadataReindexHistorySummaryResponse(BaseModel):
+    """Derived operator rollup for one bounded metadata reindex history response."""
+
+    points: int
+    latest_outcome: Literal["ok", "warning", "critical"] = "ok"
+    critical_points: int
+    warning_points: int
+    total_processed: int
+    total_queued: int
+    total_reconciled: int
+    total_skipped_active: int
+    total_failed: int
+    total_repair_attempted: int
+    total_repair_enriched: int
+    total_repair_skipped_no_tmdb_id: int
+    total_repair_failed: int
+    total_repair_requeued: int
+    total_repair_skipped_active: int
+    max_processed: int
+    max_failed: int
+    latest_run_failed: bool = False
+    latest_error: str | None = None
+
+
+class MetadataReindexHistoryResponse(BaseModel):
+    """Bounded metadata reindex/reconciliation run history for operator views."""
+
+    queue_name: str
+    schedule_offset_minutes: int
+    summary: MetadataReindexHistorySummaryResponse
+    history: list[MetadataReindexHistoryPointResponse]
 
 
 class ApiKeyRotationResponse(BaseModel):
@@ -581,6 +674,10 @@ class ServingGovernanceResponse(BaseModel):
     ]
     heavy_stage_max_workers: int
     heavy_stage_max_tasks_per_child: int
+    heavy_stage_spawn_context_required: int
+    heavy_stage_max_worker_ceiling: int
+    heavy_stage_policy_violation_count: int
+    heavy_stage_policy_violations: list[str]
     heavy_stage_process_isolation_required: int
     heavy_stage_exit_ready: int
     heavy_stage_index_timeout_seconds: float
@@ -730,6 +827,14 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_prefetch_pressure_ratio: float
     vfs_runtime_provider_pressure_incidents: int
     vfs_runtime_fairness_pressure_incidents: int
+    vfs_runtime_cache_pressure_class: str
+    vfs_runtime_cache_pressure_reasons: list[str]
+    vfs_runtime_chunk_coalescing_pressure_class: str
+    vfs_runtime_chunk_coalescing_pressure_reasons: list[str]
+    vfs_runtime_upstream_wait_class: str
+    vfs_runtime_upstream_wait_reasons: list[str]
+    vfs_runtime_refresh_pressure_class: str
+    vfs_runtime_refresh_pressure_reasons: list[str]
     vfs_runtime_rollout_readiness: str
     vfs_runtime_rollout_reasons: list[str]
     vfs_runtime_rollout_next_action: str
@@ -1074,6 +1179,8 @@ class CalendarItemResponse(BaseModel):
     item_id: str
     tvdb_id: str | None = None
     tmdb_id: str | None = None
+    imdb_id: str | None = None
+    parent_ids: ItemParentIdsResponse | None = None
     show_title: str
     item_type: str
     aired_at: str

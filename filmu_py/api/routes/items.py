@@ -394,7 +394,6 @@ async def get_item(
 
     state = result.state.replace("_", " ").title() if result.state else None
     next_retry_at = datetime.fromisoformat(result.next_retry_at) if result.next_retry_at else None
-
     seasons: list[ItemSeasonStateResponse] | None = None
     if result.type in {"show", "tv"} and result.covered_season_numbers:
         seasons = [

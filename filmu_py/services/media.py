@@ -291,24 +291,6 @@ def _build_calendar_release_data(attributes: dict[str, object]) -> CalendarRelea
     return None
 
 
-def _resolve_calendar_parent_identifiers(
-    attributes: dict[str, object],
-    *,
-    fallback_tmdb_id: str | None,
-    fallback_tvdb_id: str | None,
-) -> tuple[str | None, str | None]:
-    """Return calendar ids rebound to parent-show identifiers when metadata exposes them."""
-
-    parent_ids = _coerce_parent_ids(attributes)
-    if parent_ids is not None:
-        return parent_ids.tmdb_id, parent_ids.tvdb_id
-
-    return (
-        _extract_first_string(attributes, "parent_tmdb_id", "show_tmdb_id") or fallback_tmdb_id,
-        _extract_first_string(attributes, "parent_tvdb_id", "show_tvdb_id") or fallback_tvdb_id,
-    )
-
-
 def _resolve_calendar_show_title(item: MediaItemORM, attributes: dict[str, object]) -> str:
     """Return the frontend-facing show title for one calendar row."""
 
@@ -316,6 +298,24 @@ def _resolve_calendar_show_title(item: MediaItemORM, attributes: dict[str, objec
         _extract_first_string(attributes, "show_title", "series_title", "parent_title")
         or item.title
     )
+
+
+def _calendar_projection_type(specialization: MediaItemSpecializationRecord) -> str:
+    """Return the compatibility calendar item type for one specialization."""
+
+    if specialization.item_type == "show":
+        return "tv"
+    return specialization.item_type
+
+
+def _calendar_projection_identifiers(
+    specialization: MediaItemSpecializationRecord,
+) -> tuple[str | None, str | None]:
+    """Return calendar identifiers rebound to the parent show when available."""
+
+    if specialization.item_type in {"season", "episode"} and specialization.parent_ids is not None:
+        return specialization.parent_ids.tmdb_id, specialization.parent_ids.tvdb_id
+    return specialization.tmdb_id, specialization.tvdb_id
 
 
 def _canonical_state_name(state: str) -> str:
@@ -354,21 +354,151 @@ def _normalize_poster_path(value: str | None) -> str | None:
     return normalized
 
 
+@dataclass(frozen=True)
+class MediaItemSpecializationRecord:
+    """Stable specialization-backed hierarchy and identifier projection."""
+
+    item_type: str
+    tmdb_id: str | None = None
+    tvdb_id: str | None = None
+    imdb_id: str | None = None
+    parent_ids: ParentIdsRecord | None = None
+    show_title: str | None = None
+    season_number: int | None = None
+    episode_number: int | None = None
+
+
+def _build_specialization_record(item: MediaItemORM) -> MediaItemSpecializationRecord:
+    """Return specialization-backed item hierarchy above metadata fallbacks."""
+
+    attributes = cast(dict[str, object], item.attributes or {})
+    item_type = _canonical_item_type_name(_extract_string(attributes, "item_type"))
+    tmdb_id = _extract_string(attributes, "tmdb_id")
+    tvdb_id = _extract_string(attributes, "tvdb_id")
+    imdb_id = _extract_string(attributes, "imdb_id")
+    parent_ids = _coerce_parent_ids(attributes)
+    show_title = _extract_first_string(attributes, "show_title", "series_title", "parent_title")
+    season_number = _extract_int_value(attributes, "season_number", "season", "parent_season_number")
+    episode_number = _extract_int_value(attributes, "episode_number", "episode")
+
+    if item.movie is not None:
+        item_type = "movie"
+        tmdb_id = item.movie.tmdb_id or tmdb_id
+        imdb_id = item.movie.imdb_id or imdb_id
+    elif item.show is not None:
+        item_type = "show"
+        tmdb_id = item.show.tmdb_id or tmdb_id
+        tvdb_id = item.show.tvdb_id or tvdb_id
+        imdb_id = item.show.imdb_id or imdb_id
+        show_title = item.title
+    elif item.season is not None:
+        item_type = "season"
+        tmdb_id = item.season.tmdb_id or tmdb_id
+        tvdb_id = item.season.tvdb_id or tvdb_id
+        season_number = item.season.season_number or season_number
+        if item.season.show is not None:
+            show = item.season.show
+            show_title = show.media_item.title if show.media_item is not None else show_title or item.title
+            parent_ids = ParentIdsRecord(
+                tmdb_id=show.tmdb_id or (parent_ids.tmdb_id if parent_ids is not None else None),
+                tvdb_id=show.tvdb_id or (parent_ids.tvdb_id if parent_ids is not None else None),
+            )
+    elif item.episode is not None:
+        item_type = "episode"
+        tmdb_id = item.episode.tmdb_id or tmdb_id
+        tvdb_id = item.episode.tvdb_id or tvdb_id
+        imdb_id = item.episode.imdb_id or imdb_id
+        episode_number = item.episode.episode_number or episode_number
+        if item.episode.season is not None:
+            season = item.episode.season
+            season_number = season.season_number or season_number
+            if season.show is not None:
+                show = season.show
+                show_title = show.media_item.title if show.media_item is not None else show_title or item.title
+                parent_ids = ParentIdsRecord(
+                    tmdb_id=show.tmdb_id or (parent_ids.tmdb_id if parent_ids is not None else None),
+                    tvdb_id=show.tvdb_id or (parent_ids.tvdb_id if parent_ids is not None else None),
+                )
+        show_title = show_title or item.title
+    elif item_type == "tv":
+        item_type = "show"
+
+    return MediaItemSpecializationRecord(
+        item_type=item_type,
+        tmdb_id=tmdb_id,
+        tvdb_id=tvdb_id,
+        imdb_id=imdb_id,
+        parent_ids=parent_ids,
+        show_title=show_title,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
+
+
+def _projection_item_load_options() -> tuple[Any, ...]:
+    """Return the eager-load policy for specialization-backed read models."""
+
+    return (
+        selectinload(MediaItemORM.movie),
+        selectinload(MediaItemORM.show),
+        selectinload(MediaItemORM.season)
+        .selectinload(SeasonORM.show)
+        .selectinload(ShowORM.media_item),
+        selectinload(MediaItemORM.episode)
+        .selectinload(EpisodeORM.season)
+        .selectinload(SeasonORM.show)
+        .selectinload(ShowORM.media_item),
+    )
+
+
+def _build_compatibility_metadata(
+    attributes: dict[str, object],
+    *,
+    specialization: MediaItemSpecializationRecord,
+) -> dict[str, object]:
+    """Return compatibility metadata normalized to the persisted specialization seam."""
+
+    metadata = dict(attributes)
+    metadata["item_type"] = specialization.item_type
+    if specialization.tmdb_id is not None:
+        metadata["tmdb_id"] = specialization.tmdb_id
+    if specialization.tvdb_id is not None:
+        metadata["tvdb_id"] = specialization.tvdb_id
+    if specialization.imdb_id is not None:
+        metadata["imdb_id"] = specialization.imdb_id
+    if specialization.parent_ids is not None:
+        metadata["parent_ids"] = {
+            "tmdb_id": specialization.parent_ids.tmdb_id,
+            "tvdb_id": specialization.parent_ids.tvdb_id,
+        }
+    if specialization.show_title is not None:
+        metadata["show_title"] = specialization.show_title
+    if specialization.season_number is not None:
+        metadata["season_number"] = specialization.season_number
+    if specialization.episode_number is not None:
+        metadata["episode_number"] = specialization.episode_number
+    return metadata
+
+
 def _build_summary_record(item: MediaItemORM, *, extended: bool) -> MediaItemSummaryRecord:
     """Map one ORM item into the current REST compatibility summary shape."""
 
     attributes = cast(dict[str, object], item.attributes or {})
-    item_type = _canonical_item_type_name(_extract_string(attributes, "item_type"))
-    metadata = attributes if extended else None
+    specialization = _build_specialization_record(item)
+    metadata = (
+        _build_compatibility_metadata(attributes, specialization=specialization)
+        if extended
+        else None
+    )
     next_retry_at = _effective_next_retry_at(item.next_retry_at)
     return MediaItemSummaryRecord(
         id=item.id,
-        type=item_type,
+        type=specialization.item_type,
         title=item.title,
         state=_canonical_state_name(item.state),
-        tmdb_id=_extract_string(attributes, "tmdb_id"),
-        tvdb_id=_extract_string(attributes, "tvdb_id"),
-        parent_ids=_coerce_parent_ids(attributes),
+        tmdb_id=specialization.tmdb_id,
+        tvdb_id=specialization.tvdb_id,
+        parent_ids=specialization.parent_ids,
         poster_path=_normalize_poster_path(_extract_string(attributes, "poster_path")),
         aired_at=_extract_string(attributes, "aired_at"),
         external_ref=item.external_ref,
@@ -378,6 +508,7 @@ def _build_summary_record(item: MediaItemORM, *, extended: bool) -> MediaItemSum
         recovery_attempt_count=int(item.recovery_attempt_count or 0),
         is_in_cooldown=_is_retry_cooldown_active(next_retry_at),
         metadata=metadata,
+        specialization=specialization,
     )
 
 
@@ -1091,26 +1222,7 @@ def _build_detail_record(
         for entry in sorted(item.subtitle_entries, key=lambda entry: (entry.created_at, entry.id))
     ]
 
-    # Always infer covered season numbers from media entries for show-type items,
-    # regardless of the `extended` flag (media_entries are always selectinloaded).
-    covered_season_numbers: list[int] | None = None
-    if summary.type in {"show", "tv"}:
-        season_set: set[int] = set()
-        for entry in item.media_entries:
-            if (
-                getattr(entry, "refresh_state", None)
-                not in _SATISFYING_MEDIA_ENTRY_REFRESH_STATES
-                or getattr(entry, "entry_type", None) != "media"
-            ):
-                continue
-            # Use range-aware inference so pack torrents named "S01-S04"
-            # expand to [1,2,3,4] rather than just [1].
-            for sn in _infer_season_range_from_path(
-                entry.provider_file_path or entry.original_filename
-            ):
-                season_set.add(sn)
-        if season_set:
-            covered_season_numbers = sorted(season_set)
+    covered_season_numbers = _resolve_covered_season_numbers(item, summary_type=summary.type)
 
     return MediaItemSummaryRecord(
         id=summary.id,
@@ -1137,6 +1249,45 @@ def _build_detail_record(
         subtitles=subtitles,
         covered_season_numbers=covered_season_numbers,
     )
+
+
+def _resolve_covered_season_numbers(
+    item: MediaItemORM,
+    *,
+    summary_type: str,
+) -> list[int] | None:
+    """Return show season coverage, preferring persisted specialization hierarchy."""
+
+    if summary_type not in {"show", "tv"}:
+        return None
+
+    if item.show is not None and item.show.seasons:
+        persisted_seasons = sorted(
+            {
+                season.season_number
+                for season in item.show.seasons
+                if season.season_number is not None
+            }
+        )
+        if persisted_seasons:
+            return persisted_seasons
+
+    inferred_seasons: set[int] = set()
+    for entry in item.media_entries:
+        if (
+            getattr(entry, "refresh_state", None) not in _SATISFYING_MEDIA_ENTRY_REFRESH_STATES
+            or getattr(entry, "entry_type", None) != "media"
+        ):
+            continue
+        # Use range-aware inference so pack torrents named "S01-S04"
+        # expand to [1,2,3,4] rather than just [1].
+        for season_number in _infer_season_range_from_path(
+            entry.provider_file_path or entry.original_filename
+        ):
+            inferred_seasons.add(season_number)
+    if inferred_seasons:
+        return sorted(inferred_seasons)
+    return None
 
 
 def _matches_item_type(item: MediaItemSummaryRecord, requested_types: list[str] | None) -> bool:
@@ -1463,6 +1614,7 @@ class MediaItemSummaryRecord:
     next_retry_at: str | None = None
     recovery_attempt_count: int = 0
     is_in_cooldown: bool = False
+    specialization: MediaItemSpecializationRecord | None = None
     metadata: dict[str, object] | None = None
     request: ItemRequestSummaryRecord | None = None
     playback_attachments: list[PlaybackAttachmentDetailRecord] | None = None
@@ -2575,15 +2727,18 @@ class CalendarItemRecord:
     """Calendar item record for current frontend compatibility."""
 
     item_id: str
-    tvdb_id: str | None
-    tmdb_id: str | None
     show_title: str
     item_type: str
     aired_at: str
+    tvdb_id: str | None = None
+    tmdb_id: str | None = None
+    imdb_id: str | None = None
+    parent_ids: ParentIdsRecord | None = None
     season: int | None = None
     episode: int | None = None
     last_state: str | None = None
     release_data: CalendarReleaseDataRecord | None = None
+    specialization: MediaItemSpecializationRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -2600,6 +2755,9 @@ class CalendarProjectionRecord:
     air_date: str
     last_state: str | None = None
     release_data: CalendarReleaseDataRecord | None = None
+    specialization: MediaItemSpecializationRecord | None = None
+
+
 @dataclass(frozen=True)
 class ShowCompletionResult:
     """Coverage result for one requested show scope using cached metadata only."""
@@ -4923,7 +5081,11 @@ class MediaService:
         bounded_page = max(1, page)
 
         async with self._db.session() as session:
-            statement = select(MediaItemORM).order_by(MediaItemORM.created_at.desc())
+            statement = (
+                select(MediaItemORM)
+                .options(*_projection_item_load_options())
+                .order_by(MediaItemORM.created_at.desc())
+            )
             if tenant_id is not None:
                 statement = statement.where(MediaItemORM.tenant_id == tenant_id)
             rows = ((await session.execute(statement)).scalars().all())
@@ -5013,6 +5175,8 @@ class MediaService:
             statement = (
                 select(MediaItemORM)
                 .options(
+                    *_projection_item_load_options(),
+                    selectinload(MediaItemORM.show).selectinload(ShowORM.seasons),
                     selectinload(MediaItemORM.item_requests),
                     selectinload(MediaItemORM.playback_attachments),
                     selectinload(MediaItemORM.media_entries).selectinload(
@@ -5140,6 +5304,10 @@ class MediaService:
                 item_id=item.item_id,
                 tvdb_id=item.tvdb_id,
                 tmdb_id=item.tmdb_id,
+                imdb_id=(item.specialization.imdb_id if item.specialization is not None else None),
+                parent_ids=(
+                    item.specialization.parent_ids if item.specialization is not None else None
+                ),
                 show_title=item.title,
                 item_type=item.item_type,
                 aired_at=item.air_date,
@@ -5147,6 +5315,7 @@ class MediaService:
                 episode=item.episode_number,
                 last_state=item.last_state,
                 release_data=item.release_data,
+                specialization=item.specialization,
             )
             for item in projection
         }
@@ -5163,13 +5332,7 @@ class MediaService:
         async with self._db.session() as session:
             statement = (
                 select(MediaItemORM)
-                .options(
-                    selectinload(MediaItemORM.show),
-                    selectinload(MediaItemORM.season).selectinload(SeasonORM.show),
-                    selectinload(MediaItemORM.episode)
-                    .selectinload(EpisodeORM.season)
-                    .selectinload(SeasonORM.show),
-                )
+                .options(*_projection_item_load_options())
                 .order_by(MediaItemORM.created_at.desc())
             )
             if tenant_id is not None:
@@ -5180,6 +5343,7 @@ class MediaService:
         child_show_item_ids: set[str] = set()
         for item in rows:
             attributes = cast(dict[str, object], item.attributes or {})
+            specialization = _build_specialization_record(item)
             aired_at = _extract_string(attributes, "aired_at")
             aired_at_dt = _parse_calendar_datetime(aired_at)
             if aired_at_dt is None:
@@ -5201,50 +5365,27 @@ class MediaService:
                 if aired_ts > end_cutoff:
                     continue
 
-            item_type = _extract_first_string(attributes, "item_type") or (
-                "episode"
-                if item.episode is not None
-                else "season"
-                if item.season is not None
-                else "tv"
-                if item.show is not None
-                else "movie"
-            )
-            if item_type == "show":
-                item_type = "tv"
-            tmdb_id = _extract_string(attributes, "tmdb_id")
-            tvdb_id = _extract_string(attributes, "tvdb_id")
-            season_number = _extract_int_value(
-                attributes, "season_number", "season", "parent_season_number"
-            )
-            episode_number = _extract_int_value(attributes, "episode_number", "episode")
+            item_type = _calendar_projection_type(specialization)
+            tmdb_id, tvdb_id = _calendar_projection_identifiers(specialization)
+            season_number = specialization.season_number
+            episode_number = specialization.episode_number
             release_data = _build_calendar_release_data(attributes)
 
             if item.season is not None:
                 season_number = item.season.season_number
                 if item.season.show is not None:
                     child_show_item_ids.add(item.season.show.media_item_id)
-                    tmdb_id, tvdb_id = _resolve_calendar_parent_identifiers(
-                        attributes,
-                        fallback_tmdb_id=item.season.show.tmdb_id,
-                        fallback_tvdb_id=item.season.show.tvdb_id,
-                    )
             elif item.episode is not None:
                 episode_number = item.episode.episode_number
                 if item.episode.season is not None:
                     season_number = item.episode.season.season_number
                     if item.episode.season.show is not None:
                         child_show_item_ids.add(item.episode.season.show.media_item_id)
-                        tmdb_id, tvdb_id = _resolve_calendar_parent_identifiers(
-                            attributes,
-                            fallback_tmdb_id=item.episode.season.show.tmdb_id,
-                            fallback_tvdb_id=item.episode.season.show.tvdb_id,
-                        )
 
             result.append(
                 CalendarProjectionRecord(
                     item_id=item.id,
-                    title=_resolve_calendar_show_title(item, attributes),
+                    title=specialization.show_title or _resolve_calendar_show_title(item, attributes),
                     item_type=item_type,
                     tmdb_id=tmdb_id,
                     tvdb_id=tvdb_id,
@@ -5253,6 +5394,7 @@ class MediaService:
                     air_date=aired_at or item.created_at.date().isoformat(),
                     last_state=_canonical_state_name(item.state),
                     release_data=release_data,
+                    specialization=specialization,
                 )
             )
 
@@ -5262,6 +5404,8 @@ class MediaService:
                 continue
 
             attributes = cast(dict[str, object], item.attributes or {})
+            specialization = _build_specialization_record(item)
+            tmdb_id, tvdb_id = _calendar_projection_identifiers(specialization)
             release_data = _build_calendar_release_data(attributes)
             if release_data is None:
                 continue
@@ -5288,15 +5432,16 @@ class MediaService:
             result.append(
                 CalendarProjectionRecord(
                     item_id=item.id,
-                    title=_resolve_calendar_show_title(item, attributes),
-                    item_type=_extract_first_string(attributes, "item_type") or "show",
-                    tmdb_id=_extract_string(attributes, "tmdb_id"),
-                    tvdb_id=_extract_string(attributes, "tvdb_id"),
-                    episode_number=None,
-                    season_number=None,
+                    title=specialization.show_title or _resolve_calendar_show_title(item, attributes),
+                    item_type=_calendar_projection_type(specialization),
+                    tmdb_id=tmdb_id,
+                    tvdb_id=tvdb_id,
+                    episode_number=specialization.episode_number,
+                    season_number=specialization.season_number,
                     air_date=next_aired or fallback_dt.date().isoformat(),
                     last_state=_canonical_state_name(item.state),
                     release_data=release_data,
+                    specialization=specialization,
                 )
             )
 

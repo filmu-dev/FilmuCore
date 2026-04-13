@@ -15,6 +15,7 @@ from filmu_py.api.deps import get_auth_context, require_permissions
 from filmu_py.audit import audit_action
 from filmu_py.authz import evaluate_permissions, permission_constraints_from_mapping
 from filmu_py.config import set_runtime_settings
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
 from filmu_py.services.debrid import DownloaderAccountService
@@ -39,8 +40,13 @@ from ..models import (
     EnterpriseOperationsGovernanceResponse,
     EnterpriseOperationsSliceResponse,
     HealthResponse,
+    ItemParentIdsResponse,
     LogsResponse,
     MessageResponse,
+    MetadataReindexHistoryPointResponse,
+    MetadataReindexHistoryResponse,
+    MetadataReindexHistorySummaryResponse,
+    MetadataReindexStatusResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
     PluginGovernanceOverrideResponse,
@@ -48,6 +54,7 @@ from ..models import (
     PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
     QueueAlertResponse,
+    QueueStatusHistoryFiltersResponse,
     QueueStatusHistoryPointResponse,
     QueueStatusHistoryResponse,
     QueueStatusHistorySummaryResponse,
@@ -311,11 +318,35 @@ def _summarize_queue_history(
     """Return operator rollups for one bounded queue-history response."""
 
     latest = history[0].alert_level if history else "ok"
+    total_dead_letter_reason_counts: dict[str, int] = {}
+    dead_letter_reason_points: dict[str, int] = {}
+    for item in history:
+        for reason_code, count in item.dead_letter_reason_counts.items():
+            total_dead_letter_reason_counts[reason_code] = (
+                total_dead_letter_reason_counts.get(reason_code, 0) + count
+            )
+            dead_letter_reason_points[reason_code] = (
+                dead_letter_reason_points.get(reason_code, 0) + 1
+            )
+    latest_dead_letter_reason_counts = (
+        dict(history[0].dead_letter_reason_counts) if history else {}
+    )
+    latest_dead_letter_reason = None
+    if latest_dead_letter_reason_counts:
+        latest_dead_letter_reason = min(
+            (
+                reason_code
+                for reason_code, count in latest_dead_letter_reason_counts.items()
+                if count == max(latest_dead_letter_reason_counts.values())
+            ),
+            default=None,
+        )
     return QueueStatusHistorySummaryResponse(
         points=len(history),
         latest_alert_level=latest,
         critical_points=sum(1 for item in history if item.alert_level == "critical"),
         warning_points=sum(1 for item in history if item.alert_level == "warning"),
+        dead_letter_points=sum(1 for item in history if item.dead_letter_jobs > 0),
         max_ready_jobs=max((item.ready_jobs for item in history), default=0),
         max_dead_letter_jobs=max((item.dead_letter_jobs for item in history), default=0),
         max_oldest_ready_age_seconds=max(
@@ -326,9 +357,52 @@ def _summarize_queue_history(
             ),
             default=None,
         ),
-        latest_dead_letter_reason_counts=(
-            dict(history[0].dead_letter_reason_counts) if history else {}
+        latest_dead_letter_oldest_age_seconds=(
+            history[0].dead_letter_oldest_age_seconds if history else None
         ),
+        max_dead_letter_oldest_age_seconds=max(
+            (
+                item.dead_letter_oldest_age_seconds
+                for item in history
+                if item.dead_letter_oldest_age_seconds is not None
+            ),
+            default=None,
+        ),
+        latest_dead_letter_reason=latest_dead_letter_reason,
+        latest_dead_letter_reason_counts=latest_dead_letter_reason_counts,
+        total_dead_letter_reason_counts=dict(sorted(total_dead_letter_reason_counts.items())),
+        dead_letter_reason_points=dict(sorted(dead_letter_reason_points.items())),
+    )
+
+
+def _summarize_metadata_reindex_history(
+    history: list[MetadataReindexHistoryPointResponse],
+) -> MetadataReindexHistorySummaryResponse:
+    """Return operator rollups for one bounded metadata reindex history response."""
+
+    latest_outcome = history[0].outcome if history else "ok"
+    return MetadataReindexHistorySummaryResponse(
+        points=len(history),
+        latest_outcome=latest_outcome,
+        critical_points=sum(1 for item in history if item.outcome == "critical"),
+        warning_points=sum(1 for item in history if item.outcome == "warning"),
+        total_processed=sum(item.processed for item in history),
+        total_queued=sum(item.queued for item in history),
+        total_reconciled=sum(item.reconciled for item in history),
+        total_skipped_active=sum(item.skipped_active for item in history),
+        total_failed=sum(item.failed for item in history),
+        total_repair_attempted=sum(item.repair_attempted for item in history),
+        total_repair_enriched=sum(item.repair_enriched for item in history),
+        total_repair_skipped_no_tmdb_id=sum(
+            item.repair_skipped_no_tmdb_id for item in history
+        ),
+        total_repair_failed=sum(item.repair_failed for item in history),
+        total_repair_requeued=sum(item.repair_requeued for item in history),
+        total_repair_skipped_active=sum(item.repair_skipped_active for item in history),
+        max_processed=max((item.processed for item in history), default=0),
+        max_failed=max((item.failed for item in history), default=0),
+        latest_run_failed=history[0].run_failed if history else False,
+        latest_error=history[0].last_error if history else None,
     )
 
 
@@ -711,6 +785,22 @@ def _vfs_data_plane_evidence(
                     f"{runtime_governance['vfs_runtime_fairness_pressure_incidents']}"
                 ),
                 (
+                    "vfs_runtime_cache_pressure_class="
+                    f"{runtime_governance['vfs_runtime_cache_pressure_class']}"
+                ),
+                (
+                    "vfs_runtime_chunk_coalescing_pressure_class="
+                    f"{runtime_governance['vfs_runtime_chunk_coalescing_pressure_class']}"
+                ),
+                (
+                    "vfs_runtime_upstream_wait_class="
+                    f"{runtime_governance['vfs_runtime_upstream_wait_class']}"
+                ),
+                (
+                    "vfs_runtime_refresh_pressure_class="
+                    f"{runtime_governance['vfs_runtime_refresh_pressure_class']}"
+                ),
+                (
                     "vfs_runtime_mounted_reads_total="
                     f"{runtime_governance['vfs_runtime_mounted_reads_total']}"
                 ),
@@ -725,6 +815,50 @@ def _vfs_data_plane_evidence(
                 (
                     "vfs_runtime_prefetch_active_background_tasks="
                     f"{runtime_governance['vfs_runtime_prefetch_active_background_tasks']}"
+                ),
+                (
+                    "vfs_runtime_cache_pressure_reasons="
+                    + (
+                        ",".join(
+                            cast(list[str], runtime_governance["vfs_runtime_cache_pressure_reasons"])
+                        )
+                        or "none"
+                    )
+                ),
+                (
+                    "vfs_runtime_chunk_coalescing_pressure_reasons="
+                    + (
+                        ",".join(
+                            cast(
+                                list[str],
+                                runtime_governance[
+                                    "vfs_runtime_chunk_coalescing_pressure_reasons"
+                                ],
+                            )
+                        )
+                        or "none"
+                    )
+                ),
+                (
+                    "vfs_runtime_upstream_wait_reasons="
+                    + (
+                        ",".join(
+                            cast(list[str], runtime_governance["vfs_runtime_upstream_wait_reasons"])
+                        )
+                        or "none"
+                    )
+                ),
+                (
+                    "vfs_runtime_refresh_pressure_reasons="
+                    + (
+                        ",".join(
+                            cast(
+                                list[str],
+                                runtime_governance["vfs_runtime_refresh_pressure_reasons"],
+                            )
+                        )
+                        or "none"
+                    )
                 ),
             ]
         )
@@ -768,14 +902,12 @@ async def _enterprise_operations_governance(
         )
     )
     heavy_stage_policy = settings.orchestration.heavy_stage_isolation
-    heavy_stage_exit_ready = (
-        settings.arq_enabled
-        and settings.stream.refresh_dispatch_mode == "queued"
-        and queued_refresh_ready
-        and heavy_stage_policy.executor_mode == "process_pool_required"
-        and heavy_stage_policy.max_tasks_per_child > 0
-        and bool(heavy_stage_policy.proof_refs)
-        and bool(settings.orchestration.queued_refresh_proof_refs)
+    heavy_stage_policy_violations = heavy_stage_policy.policy_violations()
+    heavy_stage_exit_ready = heavy_stage_policy.exit_ready(
+        arq_enabled=settings.arq_enabled,
+        refresh_dispatch_mode=settings.stream.refresh_dispatch_mode,
+        queued_refresh_ready=queued_refresh_ready,
+        queued_refresh_proof_refs=settings.orchestration.queued_refresh_proof_refs,
     )
     oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(settings)
@@ -1069,6 +1201,7 @@ async def _enterprise_operations_governance(
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
                 "GET /api/v1/operations/control-plane/subscribers exposes durable replay ownership",
+                "GET /api/v1/workers/queue/history exposes dead-letter age/reason rollups and bounded replay filters",
             ],
             required_actions=[
                 "promote_redis_stream_consumer_groups_into_active_subscribers",
@@ -1283,7 +1416,10 @@ async def _enterprise_operations_governance(
                 f"heavy_stage_executor_mode={heavy_stage_policy.executor_mode}",
                 f"heavy_stage_max_workers={heavy_stage_policy.max_workers}",
                 f"heavy_stage_max_tasks_per_child={heavy_stage_policy.max_tasks_per_child}",
-                f"heavy_stage_process_isolation_required={int(heavy_stage_policy.executor_mode == 'process_pool_required')}",
+                f"heavy_stage_spawn_context_required={int(heavy_stage_policy.require_spawn_context)}",
+                f"heavy_stage_max_worker_ceiling={heavy_stage_policy.max_worker_ceiling}",
+                f"heavy_stage_policy_violations={','.join(heavy_stage_policy_violations) or 'none'}",
+                f"heavy_stage_process_isolation_required={int(heavy_stage_policy.process_isolation_required())}",
                 (
                     "heavy_stage_timeouts="
                     "index_item:"
@@ -1313,14 +1449,22 @@ async def _enterprise_operations_governance(
                         else "review_queued_refresh_soak_evidence"
                     ),
                     "require_process_backed_heavy_stage_isolation"
-                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    if not heavy_stage_policy.process_isolation_required()
                     else (
-                        "set_heavy_stage_process_recycle_budget"
-                        if heavy_stage_policy.max_tasks_per_child <= 0
+                        "require_spawn_context_for_heavy_stage_processes"
+                        if "spawn_context_not_required" in heavy_stage_policy_violations
                         else (
-                            "record_heavy_stage_failure_injection_or_soak_evidence"
-                            if not heavy_stage_policy.proof_refs
-                            else "review_heavy_stage_isolation_evidence"
+                            "reduce_heavy_stage_worker_ceiling"
+                            if "worker_ceiling_exceeded" in heavy_stage_policy_violations
+                            else (
+                                "set_heavy_stage_process_recycle_budget"
+                                if "process_recycle_unbounded" in heavy_stage_policy_violations
+                                else (
+                                    "record_heavy_stage_failure_injection_or_soak_evidence"
+                                    if not heavy_stage_policy.proof_refs
+                                    else "review_heavy_stage_isolation_evidence"
+                                )
+                            )
                         )
                     ),
                 ]
@@ -1333,9 +1477,13 @@ async def _enterprise_operations_governance(
                     if settings.stream.refresh_dispatch_mode != "queued" or not queued_refresh_ready
                     else "queued stream-link refresh soak evidence has not been recorded",
                     "heavy stages are not yet forced into process-backed isolation"
-                    if heavy_stage_policy.executor_mode != "process_pool_required"
+                    if not heavy_stage_policy.process_isolation_required()
+                    else "heavy-stage process workers are not forced onto spawn context"
+                    if "spawn_context_not_required" in heavy_stage_policy_violations
+                    else "heavy-stage worker ceiling exceeds the enterprise policy cap"
+                    if "worker_ceiling_exceeded" in heavy_stage_policy_violations
                     else "heavy-stage worker recycle limits are not configured"
-                    if heavy_stage_policy.max_tasks_per_child <= 0
+                    if "process_recycle_unbounded" in heavy_stage_policy_violations
                     else "heavy-stage isolation evidence has not been recorded",
                 ]
             ),
@@ -1348,15 +1496,16 @@ async def _enterprise_operations_governance(
                 "package.json exposes security:audit, security:bandit, and perf:bench",
                 "STATUS.md plus the active TODO matrix set track release, metadata, and chaos gaps explicitly",
                 "scripts/run_backup_restore_proof.ps1 and playback/VFS proof gates already produce promotion evidence inputs",
+                "scheduled metadata reindex/reconciliation now runs as a first-class worker cron program",
+                "repairable failed items now receive identifier repair plus immediate index re-entry inside the scheduled metadata program",
+                "GET /api/v1/workers/metadata-reindex and /api/v1/workers/metadata-reindex/history expose bounded operator rollups",
             ],
             required_actions=[
                 "add_sbom_signing_and_artifact_promotion_policy",
-                "promote_metadata_reindex_and_reconciliation_into_a_first_class_program",
                 "define_benchmark_baselines_and_chaos_regression_thresholds",
             ],
             remaining_gaps=[
                 "artifact provenance and SBOM policy are not yet first-class release gates",
-                "metadata and reindex governance are not yet exposed as a dedicated operator surface",
                 "benchmark and chaos discipline are not yet enforced by regression thresholds",
             ],
         ),
@@ -1931,6 +2080,7 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
         ],
         oldest_ready_age_seconds=snapshot.oldest_ready_age_seconds,
         next_scheduled_in_seconds=snapshot.next_scheduled_in_seconds,
+        dead_letter_oldest_age_seconds=snapshot.dead_letter_oldest_age_seconds,
         dead_letter_reason_counts=dict(snapshot.dead_letter_reason_counts),
     )
 
@@ -1943,6 +2093,9 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
 async def get_worker_queue_history(
     request: Request,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    alert_level: Annotated[Literal["ok", "warning", "critical"] | None, Query()] = None,
+    min_dead_letter_jobs: Annotated[int, Query(ge=0, le=10_000)] = 0,
+    reason_code: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
 ) -> QueueStatusHistoryResponse:
     """Return bounded queue trend history captured during queue observations."""
 
@@ -1962,13 +2115,127 @@ async def get_worker_queue_history(
             oldest_ready_age_seconds=item.oldest_ready_age_seconds,
             next_scheduled_in_seconds=item.next_scheduled_in_seconds,
             alert_level=item.alert_level,
+            dead_letter_oldest_age_seconds=item.dead_letter_oldest_age_seconds,
             dead_letter_reason_counts=dict(item.dead_letter_reason_counts),
         )
         for item in history
     ]
+    if alert_level is not None:
+        history_points = [item for item in history_points if item.alert_level == alert_level]
+    if min_dead_letter_jobs > 0:
+        history_points = [
+            item for item in history_points if item.dead_letter_jobs >= min_dead_letter_jobs
+        ]
+    if reason_code is not None:
+        history_points = [
+            item for item in history_points if item.dead_letter_reason_counts.get(reason_code, 0) > 0
+        ]
     return QueueStatusHistoryResponse(
         queue_name=queue_name,
+        applied_filters=QueueStatusHistoryFiltersResponse(
+            alert_level=alert_level,
+            min_dead_letter_jobs=min_dead_letter_jobs,
+            reason_code=reason_code,
+        ),
         summary=_summarize_queue_history(history_points),
+        history=history_points,
+    )
+
+
+@router.get(
+    "/workers/metadata-reindex",
+    operation_id="default.worker_metadata_reindex",
+    response_model=MetadataReindexStatusResponse,
+)
+async def get_worker_metadata_reindex_status(request: Request) -> MetadataReindexStatusResponse:
+    """Return the latest metadata reindex/reconciliation run summary."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    latest = await MetadataReindexStatusStore(redis, queue_name=queue_name).latest()
+    if latest is None:
+        return MetadataReindexStatusResponse(
+            queue_name=queue_name,
+            schedule_offset_minutes=resources.settings.indexer.schedule_offset_minutes,
+            has_history=False,
+            observed_at="",
+            processed=0,
+            queued=0,
+            reconciled=0,
+            skipped_active=0,
+            failed=0,
+            repair_attempted=0,
+            repair_enriched=0,
+            repair_skipped_no_tmdb_id=0,
+            repair_failed=0,
+            repair_requeued=0,
+            repair_skipped_active=0,
+            outcome="ok",
+            run_failed=False,
+            last_error=None,
+        )
+    return MetadataReindexStatusResponse(
+        queue_name=queue_name,
+        schedule_offset_minutes=resources.settings.indexer.schedule_offset_minutes,
+        has_history=True,
+        observed_at=latest.observed_at,
+        processed=latest.processed,
+        queued=latest.queued,
+        reconciled=latest.reconciled,
+        skipped_active=latest.skipped_active,
+        failed=latest.failed,
+        repair_attempted=latest.repair_attempted,
+        repair_enriched=latest.repair_enriched,
+        repair_skipped_no_tmdb_id=latest.repair_skipped_no_tmdb_id,
+        repair_failed=latest.repair_failed,
+        repair_requeued=latest.repair_requeued,
+        repair_skipped_active=latest.repair_skipped_active,
+        outcome=latest.outcome,
+        run_failed=latest.run_failed,
+        last_error=latest.last_error,
+    )
+
+
+@router.get(
+    "/workers/metadata-reindex/history",
+    operation_id="default.worker_metadata_reindex_history",
+    response_model=MetadataReindexHistoryResponse,
+)
+async def get_worker_metadata_reindex_history(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> MetadataReindexHistoryResponse:
+    """Return bounded metadata reindex/reconciliation trend history."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    history = await MetadataReindexStatusStore(redis, queue_name=queue_name).history(limit=limit)
+    history_points = [
+        MetadataReindexHistoryPointResponse(
+            observed_at=item.observed_at,
+            processed=item.processed,
+            queued=item.queued,
+            reconciled=item.reconciled,
+            skipped_active=item.skipped_active,
+            failed=item.failed,
+            repair_attempted=item.repair_attempted,
+            repair_enriched=item.repair_enriched,
+            repair_skipped_no_tmdb_id=item.repair_skipped_no_tmdb_id,
+            repair_failed=item.repair_failed,
+            repair_requeued=item.repair_requeued,
+            repair_skipped_active=item.repair_skipped_active,
+            outcome=item.outcome,
+            run_failed=item.run_failed,
+            last_error=item.last_error,
+        )
+        for item in history
+    ]
+    return MetadataReindexHistoryResponse(
+        queue_name=queue_name,
+        schedule_offset_minutes=resources.settings.indexer.schedule_offset_minutes,
+        summary=_summarize_metadata_reindex_history(history_points),
         history=history_points,
     )
 
@@ -2416,6 +2683,15 @@ async def get_calendar(
                 item_id=item.item_id,
                 tvdb_id=item.tvdb_id,
                 tmdb_id=item.tmdb_id,
+                imdb_id=item.imdb_id,
+                parent_ids=(
+                    ItemParentIdsResponse(
+                        tmdb_id=item.parent_ids.tmdb_id,
+                        tvdb_id=item.parent_ids.tvdb_id,
+                    )
+                    if item.parent_ids is not None
+                    else None
+                ),
                 show_title=item.show_title,
                 item_type=item.item_type,
                 aired_at=item.aired_at,

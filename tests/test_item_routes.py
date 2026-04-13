@@ -18,7 +18,15 @@ from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
-from filmu_py.db.models import ActiveStreamORM, MediaEntryORM, MediaItemORM, PlaybackAttachmentORM
+from filmu_py.db.models import (
+    ActiveStreamORM,
+    EpisodeORM,
+    MediaEntryORM,
+    MediaItemORM,
+    PlaybackAttachmentORM,
+    SeasonORM,
+    ShowORM,
+)
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.media import (
@@ -27,6 +35,7 @@ from filmu_py.services.media import (
     ItemActionResult,
     MediaEntryDetailRecord,
     MediaItemsPage,
+    MediaItemSpecializationRecord,
     MediaItemSummaryRecord,
     ParentIdsRecord,
     PlaybackAttachmentDetailRecord,
@@ -100,6 +109,11 @@ class DummyMediaService:
                     next_retry_at="2026-03-22T22:00:00+00:00",
                     recovery_attempt_count=2,
                     is_in_cooldown=True,
+                    specialization=MediaItemSpecializationRecord(
+                        item_type="movie",
+                        tmdb_id="123",
+                        imdb_id="tt1234567",
+                    ),
                 )
             ],
             page=page,
@@ -222,6 +236,16 @@ class DummyMediaService:
             next_retry_at="2026-03-22T22:00:00+00:00",
             recovery_attempt_count=2,
             is_in_cooldown=True,
+            specialization=MediaItemSpecializationRecord(
+                item_type="show" if media_type == "tv" else "movie",
+                tmdb_id="123",
+                tvdb_id="456" if media_type == "tv" else None,
+                imdb_id="tt1234567",
+                parent_ids=ParentIdsRecord(tvdb_id="456") if media_type == "tv" else None,
+                show_title="Example Show" if media_type == "tv" else None,
+                season_number=3 if media_type == "tv" else None,
+                episode_number=7 if media_type == "tv" else None,
+            ),
             metadata={"item_type": "movie", "year": 2024},
             active_stream=active_stream,
             media_entries=media_entries,
@@ -749,6 +773,112 @@ def test_build_detail_record_prefers_persisted_active_stream_relation() -> None:
     assert detail.media_entries[0].is_active_stream is False
     assert detail.media_entries[1].active_for_direct is True
     assert detail.media_entries[1].is_active_stream is True
+
+
+def test_build_detail_record_prefers_specialization_season_coverage_over_path_inference() -> None:
+    item = MediaItemORM(
+        id="item-specialization-season-coverage",
+        external_ref="tvdb:12345",
+        title="Canonical Show",
+        state="completed",
+        attributes={
+            "item_type": "show",
+            "show_title": "Wrong Metadata Show",
+        },
+    )
+    show = ShowORM(
+        media_item_id=item.id,
+        tmdb_id="12345",
+        tvdb_id="54321",
+        imdb_id="tt9988776",
+    )
+    show.media_item = item
+    show.seasons = [
+        SeasonORM(media_item_id="season-item-2", show_id=show.id, season_number=2),
+        SeasonORM(media_item_id="season-item-4", show_id=show.id, season_number=4),
+    ]
+    item.show = show
+    item.media_entries = [
+        MediaEntryORM(
+            id="media-entry-specialization-season-coverage",
+            item_id=item.id,
+            entry_type="media",
+            kind="remote-direct",
+            original_filename="Wrong Metadata Show S09-S10 Pack.mkv",
+            provider_file_path="Wrong Metadata Show S09-S10 Pack.mkv",
+            refresh_state="ready",
+            created_at=datetime(2026, 3, 12, 10, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 12, 12, tzinfo=UTC),
+        )
+    ]
+
+    detail = _build_detail_record(item, extended=False)
+
+    assert detail.type == "show"
+    assert detail.covered_season_numbers == [2, 4]
+
+
+def test_build_detail_record_normalizes_extended_metadata_from_specialization() -> None:
+    show_item = MediaItemORM(
+        id="item-specialization-metadata-show",
+        external_ref="tvdb:777",
+        title="Canonical Show",
+        state="completed",
+        attributes={
+            "item_type": "movie",
+            "tmdb_id": "metadata-tmdb",
+            "tvdb_id": "metadata-tvdb",
+            "show_title": "Wrong Metadata Show",
+            "season_number": 9,
+            "episode_number": 99,
+            "parent_ids": {"tmdb_id": "111", "tvdb_id": "222"},
+        },
+    )
+    show = ShowORM(media_item_id=show_item.id, tmdb_id="special-show", tvdb_id="special-tv")
+    show.media_item = show_item
+
+    season = SeasonORM(media_item_id="season-specialization-metadata", show_id=show.id, season_number=2)
+    season.show = show
+    show.seasons = [season]
+
+    episode_item = MediaItemORM(
+        id="item-specialization-metadata-episode",
+        external_ref="tvdb:episode-777",
+        title="Episode Title",
+        state="completed",
+        attributes={
+            "item_type": "movie",
+            "tmdb_id": "metadata-episode-tmdb",
+            "tvdb_id": "metadata-episode-tvdb",
+            "show_title": "Wrong Metadata Show",
+            "season_number": 9,
+            "episode_number": 99,
+            "parent_ids": {"tmdb_id": "111", "tvdb_id": "222"},
+        },
+    )
+    episode_item.episode = EpisodeORM(
+        media_item_id=episode_item.id,
+        season_id=season.id,
+        episode_number=3,
+        tmdb_id="special-episode-tmdb",
+        tvdb_id="special-episode-tvdb",
+        imdb_id="tt-special-episode",
+    )
+    episode_item.episode.media_item = episode_item
+    episode_item.episode.season = season
+    season.episodes = [episode_item.episode]
+
+    detail = _build_detail_record(episode_item, extended=True)
+
+    assert detail.metadata is not None
+    assert detail.metadata["item_type"] == "episode"
+    assert detail.metadata["tmdb_id"] == "special-episode-tmdb"
+    assert detail.metadata["tvdb_id"] == "special-episode-tvdb"
+    assert detail.metadata["imdb_id"] == "tt-special-episode"
+    assert detail.metadata["show_title"] == "Canonical Show"
+    assert detail.metadata["season_number"] == 2
+    assert detail.metadata["episode_number"] == 3
+    assert detail.metadata["parent_ids"] == {"tmdb_id": "special-show", "tvdb_id": "special-tv"}
 
 
 def test_get_item_route_returns_404_for_missing_item() -> None:

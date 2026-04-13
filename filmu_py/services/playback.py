@@ -33,7 +33,7 @@ from filmu_py.api.playback_resolution import (
 )
 from filmu_py.config import Settings, get_settings
 from filmu_py.core.rate_limiter import RateLimitDecision
-from filmu_py.db.models import MediaEntryORM, MediaItemORM, PlaybackAttachmentORM
+from filmu_py.db.models import ActiveStreamORM, MediaEntryORM, MediaItemORM, PlaybackAttachmentORM
 from filmu_py.db.runtime import DatabaseRuntime
 
 if TYPE_CHECKING:
@@ -176,6 +176,28 @@ class MediaEntryLeaseRefreshExecution:
     refresh_state: str
     locator: str | None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class PersistedMediaEntryControlMutationResult:
+    """Outcome of one persisted media-entry control-plane write operation."""
+
+    item_identifier: str
+    media_entry_id: str
+    item: MediaItemORM
+    media_entry: MediaEntryORM
+    applied_role: str | None = None
+
+
+@dataclass(frozen=True)
+class PersistedPlaybackAttachmentControlMutationResult:
+    """Outcome of one persisted playback-attachment control-plane write operation."""
+
+    item_identifier: str
+    attachment_id: str
+    item: MediaItemORM
+    attachment: PlaybackAttachmentORM
+    linked_media_entries: tuple[MediaEntryORM, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1730,6 +1752,20 @@ class PlaybackSourceService:
                 .all()
             )
 
+    @classmethod
+    def _find_item_in_scalars(
+        cls,
+        scalars: list[object],
+        *,
+        item_identifier: str,
+    ) -> MediaItemORM | None:
+        for candidate in scalars:
+            if isinstance(candidate, MediaItemORM) and cls._matches_identifier(
+                candidate, item_identifier
+            ):
+                return candidate
+        return None
+
     @staticmethod
     def _result_scalars_all(result: object) -> list[object]:
         scalars = getattr(result, "scalars", None)
@@ -1792,6 +1828,30 @@ class PlaybackSourceService:
         target.last_refresh_error = source.last_refresh_error
         target.updated_at = source.updated_at
         return target
+
+    @staticmethod
+    def _sync_media_entry_from_source_attachment(
+        entry: MediaEntryORM,
+        attachment: PlaybackAttachmentORM,
+        *,
+        at: datetime | None = None,
+    ) -> MediaEntryORM:
+        refreshed_at = at or attachment.updated_at or datetime.now(UTC)
+        entry.local_path = attachment.local_path
+        entry.download_url = attachment.restricted_url
+        entry.unrestricted_url = attachment.unrestricted_url
+        entry.provider = attachment.provider
+        entry.provider_download_id = attachment.provider_download_id
+        entry.provider_file_id = attachment.provider_file_id
+        entry.provider_file_path = attachment.provider_file_path
+        entry.original_filename = attachment.original_filename
+        entry.size_bytes = attachment.file_size
+        entry.refresh_state = attachment.refresh_state
+        entry.expires_at = attachment.expires_at
+        entry.last_refreshed_at = attachment.last_refreshed_at
+        entry.last_refresh_error = attachment.last_refresh_error
+        entry.updated_at = refreshed_at
+        return entry
 
     @staticmethod
     def _sync_source_attachment_from_media_entry(
@@ -1894,6 +1954,229 @@ class PlaybackSourceService:
                 return
             self._copy_attachment_refresh_projection(persisted_attachment, attachment)
             await session.commit()
+
+    async def persist_playback_attachment_control_state(
+        self,
+        item_identifier: str,
+        attachment_id: str,
+        *,
+        locator: str | None = None,
+        local_path: str | None = None,
+        restricted_url: str | None = None,
+        unrestricted_url: str | None = None,
+        refresh_state: str | None = None,
+        last_refresh_error: str | None = None,
+        expires_at: datetime | None = None,
+        at: datetime | None = None,
+    ) -> PersistedPlaybackAttachmentControlMutationResult | None:
+        """Persist bounded playback-attachment URL/state changes and sync linked media entries."""
+
+        if refresh_state is not None and refresh_state not in _ATTACHMENT_REFRESH_STATES:
+            raise ValueError(f"unsupported playback attachment refresh state: {refresh_state}")
+
+        requested_at = at or datetime.now(UTC)
+        async with self._db.session() as session:
+            if not hasattr(session, "execute") or not hasattr(session, "commit"):
+                return None
+            result = await session.execute(
+                select(MediaItemORM)
+                .options(
+                    selectinload(MediaItemORM.playback_attachments),
+                    selectinload(MediaItemORM.media_entries).selectinload(
+                        MediaEntryORM.source_attachment
+                    ),
+                    selectinload(MediaItemORM.active_streams),
+                )
+                .order_by(MediaItemORM.created_at.desc())
+            )
+            scalars = self._result_scalars_all(result)
+            item = self._find_item_in_scalars(scalars, item_identifier=item_identifier)
+            if item is None:
+                return None
+            attachment = self._find_attachment_in_scalars([item], attachment_id=attachment_id)
+            if attachment is None:
+                return None
+
+            if locator is not None:
+                attachment.locator = locator
+            if local_path is not None:
+                attachment.local_path = local_path
+            if restricted_url is not None:
+                attachment.restricted_url = restricted_url
+            if unrestricted_url is not None:
+                attachment.unrestricted_url = unrestricted_url
+            if expires_at is not None:
+                attachment.expires_at = expires_at
+
+            if refresh_state == "stale":
+                self.mark_attachment_stale(attachment, at=requested_at)
+            elif refresh_state == "refreshing":
+                self.start_attachment_refresh(attachment, at=requested_at)
+            elif refresh_state == "failed":
+                self.fail_attachment_refresh(
+                    attachment,
+                    error=(
+                        last_refresh_error
+                        or attachment.last_refresh_error
+                        or "playback attachment refresh failed"
+                    ),
+                    at=requested_at,
+                )
+            elif refresh_state == "ready":
+                self.complete_attachment_refresh(
+                    attachment,
+                    locator=attachment.locator,
+                    restricted_url=attachment.restricted_url,
+                    unrestricted_url=attachment.unrestricted_url,
+                    expires_at=attachment.expires_at,
+                    provider_file_id=attachment.provider_file_id,
+                    provider_file_path=attachment.provider_file_path,
+                    original_filename=attachment.original_filename,
+                    file_size=attachment.file_size,
+                    at=requested_at,
+                )
+            else:
+                attachment.updated_at = requested_at
+
+            if (refresh_state is None and last_refresh_error is not None) or (refresh_state in {"stale", "refreshing"} and last_refresh_error is not None):
+                attachment.last_refresh_error = last_refresh_error
+
+            linked_entries: list[MediaEntryORM] = []
+            for entry in item.media_entries:
+                if entry.source_attachment_id != attachment.id:
+                    continue
+                self._sync_media_entry_from_source_attachment(
+                    entry,
+                    attachment,
+                    at=attachment.updated_at,
+                )
+                linked_entries.append(entry)
+
+            await session.commit()
+            return PersistedPlaybackAttachmentControlMutationResult(
+                item_identifier=item.id,
+                attachment_id=attachment.id,
+                item=item,
+                attachment=attachment,
+                linked_media_entries=tuple(linked_entries),
+            )
+
+    async def persist_media_entry_control_state(
+        self,
+        item_identifier: str,
+        media_entry_id: str,
+        *,
+        active_role: str | None = None,
+        local_path: str | None = None,
+        download_url: str | None = None,
+        unrestricted_url: str | None = None,
+        refresh_state: str | None = None,
+        last_refresh_error: str | None = None,
+        expires_at: datetime | None = None,
+        at: datetime | None = None,
+    ) -> PersistedMediaEntryControlMutationResult | None:
+        """Persist bounded media-entry URL/state changes and optional active-role rebinding."""
+
+        if active_role is not None and active_role not in {
+            _ACTIVE_STREAM_ROLE_DIRECT,
+            _ACTIVE_STREAM_ROLE_HLS,
+        }:
+            raise ValueError(f"unsupported active stream role: {active_role}")
+        if refresh_state is not None and refresh_state not in _MEDIA_ENTRY_REFRESH_STATES:
+            raise ValueError(f"unsupported media entry refresh state: {refresh_state}")
+
+        requested_at = at or datetime.now(UTC)
+        async with self._db.session() as session:
+            if not hasattr(session, "execute") or not hasattr(session, "commit"):
+                return None
+            result = await session.execute(
+                select(MediaItemORM)
+                .options(
+                    selectinload(MediaItemORM.playback_attachments),
+                    selectinload(MediaItemORM.media_entries).selectinload(
+                        MediaEntryORM.source_attachment
+                    ),
+                    selectinload(MediaItemORM.active_streams),
+                )
+                .order_by(MediaItemORM.created_at.desc())
+            )
+            scalars = self._result_scalars_all(result)
+            item = self._find_item_in_scalars(scalars, item_identifier=item_identifier)
+            if item is None:
+                return None
+            entry = self._find_media_entry_in_scalars(
+                [item],
+                media_entry_id=media_entry_id,
+            )
+            if entry is None:
+                return None
+
+            if local_path is not None:
+                entry.local_path = local_path
+            if download_url is not None:
+                entry.download_url = download_url
+            if unrestricted_url is not None:
+                entry.unrestricted_url = unrestricted_url
+            if expires_at is not None:
+                entry.expires_at = expires_at
+
+            if refresh_state == "stale":
+                self.mark_media_entry_stale(entry, at=requested_at)
+            elif refresh_state == "refreshing":
+                self.start_media_entry_refresh(entry, at=requested_at)
+            elif refresh_state == "failed":
+                self.fail_media_entry_refresh(
+                    entry,
+                    error=last_refresh_error or entry.last_refresh_error or "media entry refresh failed",
+                    at=requested_at,
+                )
+            elif refresh_state == "ready":
+                self.complete_media_entry_refresh(
+                    entry,
+                    download_url=entry.download_url,
+                    unrestricted_url=entry.unrestricted_url,
+                    expires_at=entry.expires_at,
+                    provider_file_id=entry.provider_file_id,
+                    provider_file_path=entry.provider_file_path,
+                    original_filename=entry.original_filename,
+                    size_bytes=entry.size_bytes,
+                    at=requested_at,
+                )
+            else:
+                entry.updated_at = requested_at
+
+            if (refresh_state is None and last_refresh_error is not None) or (refresh_state in {"stale", "refreshing"} and last_refresh_error is not None):
+                entry.last_refresh_error = last_refresh_error
+
+            self._sync_source_attachment_from_media_entry(entry, at=entry.updated_at)
+
+            if active_role is not None:
+                matching_streams = [
+                    active_stream
+                    for active_stream in item.active_streams
+                    if active_stream.role == active_role
+                ]
+                existing = matching_streams[0] if matching_streams else None
+                if existing is None:
+                    item.active_streams.append(
+                        ActiveStreamORM(
+                            item_id=item.id,
+                            media_entry_id=entry.id,
+                            role=active_role,
+                        )
+                    )
+                else:
+                    existing.media_entry_id = entry.id
+                    existing.updated_at = requested_at
+
+            await session.commit()
+            return PersistedMediaEntryControlMutationResult(
+                item_identifier=item.id,
+                media_entry_id=entry.id,
+                item=item,
+                media_entry=entry,
+                applied_role=active_role,
+            )
 
     @staticmethod
     def _build_attachment_from_media_entry(

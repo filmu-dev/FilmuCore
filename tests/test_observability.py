@@ -22,6 +22,13 @@ from filmu_py.api.router import (
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.metadata_reindex_status import (
+    METADATA_REINDEX_LAST_COUNTS,
+    METADATA_REINDEX_LAST_OUTCOME,
+    METADATA_REINDEX_LAST_RUN_FAILED,
+    METADATA_REINDEX_RUNS_TOTAL,
+    MetadataReindexStatusStore,
+)
 from filmu_py.core.queue_status import (
     QUEUE_ALERT_LEVEL,
     QUEUE_JOBS,
@@ -685,7 +692,10 @@ def test_queue_status_reader_updates_metrics() -> None:
     redis.values["arq:in-progress:ready-job"] = b"active"
     redis.values["arq:retry:future-job"] = b"retry"
     redis.values["arq:result:done-job"] = b"result"
-    redis.lists["arq:dead-letter:filmu-py"] = [b"dlq-1", b"dlq-2"]
+    redis.lists["arq:dead-letter:filmu-py"] = [
+        b'{"reason_code":"rate_limited","queued_at":"1970-01-01T00:00:01+00:00"}',
+        b'{"reason_code":"timeout","queued_at":"1970-01-01T00:00:00+00:00"}',
+    ]
 
     snapshot = asyncio.run(
         QueueStatusReader(redis, queue_name="filmu-py").snapshot(now_seconds=2.0)
@@ -698,6 +708,8 @@ def test_queue_status_reader_updates_metrics() -> None:
     assert snapshot.retry_jobs == 1
     assert snapshot.result_jobs == 1
     assert snapshot.dead_letter_jobs == 2
+    assert snapshot.dead_letter_reason_counts == {"timeout": 1, "rate_limited": 1}
+    assert snapshot.dead_letter_oldest_age_seconds == 2.0
     assert snapshot.oldest_ready_age_seconds == 1.0
     assert snapshot.next_scheduled_in_seconds == 3.0
     assert snapshot.alert_level == "critical"
@@ -712,6 +724,62 @@ def test_queue_status_reader_updates_metrics() -> None:
     history = asyncio.run(QueueStatusReader(redis, queue_name="filmu-py").history(limit=5))
     assert len(history) == 1
     assert history[0].alert_level == "critical"
+    assert history[0].dead_letter_oldest_age_seconds == 2.0
+
+
+def test_metadata_reindex_status_store_updates_metrics() -> None:
+    redis = DummyRedis()
+    runs_before = _counter_value(
+        METADATA_REINDEX_RUNS_TOTAL,
+        queue_name="filmu-py",
+        outcome="warning",
+    )
+
+    point = asyncio.run(
+        MetadataReindexStatusStore(redis, queue_name="filmu-py").record_run(
+            processed=4,
+            queued=2,
+            reconciled=1,
+            skipped_active=1,
+            failed=1,
+            now_seconds=1_710_000_000.0,
+        )
+    )
+
+    assert point.outcome == "warning"
+    assert _counter_value(
+        METADATA_REINDEX_RUNS_TOTAL,
+        queue_name="filmu-py",
+        outcome="warning",
+    ) == runs_before + 1.0
+    assert (
+        float(
+            METADATA_REINDEX_LAST_COUNTS.labels(
+                queue_name="filmu-py",
+                kind="processed",
+            )._value.get()
+        )
+        == 4.0
+    )
+    assert float(METADATA_REINDEX_LAST_OUTCOME.labels(queue_name="filmu-py")._value.get()) == 1.0
+    assert (
+        float(METADATA_REINDEX_LAST_RUN_FAILED.labels(queue_name="filmu-py")._value.get()) == 0.0
+    )
+    history = asyncio.run(MetadataReindexStatusStore(redis, queue_name="filmu-py").history(limit=5))
+    assert len(history) == 1
+    assert history[0].failed == 1
+    assert history[0].outcome == "warning"
+
+
+def test_metadata_reindex_status_store_history_tolerates_none_rows() -> None:
+    class _NoneHistoryRedis(DummyRedis):
+        async def lrange(self, key: str, start: int, stop: int) -> None:
+            _ = (key, start, stop)
+            return None
+
+    history = asyncio.run(MetadataReindexStatusStore(_NoneHistoryRedis(), queue_name="filmu-py").history(limit=5))
+
+    assert history == []
 
 
 def test_graphql_metrics_track_successful_operations() -> None:
