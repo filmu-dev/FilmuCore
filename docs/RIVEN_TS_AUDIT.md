@@ -41,9 +41,9 @@ FilmuCore now has a real end-to-end request to playback path on validated local 
 
 The remaining gap is no longer first pipeline completeness or first mounted playback success. The active gap is enterprise hardening and breadth beyond the now-landed repo baseline:
 
-- metadata-reconciliation depth and multi-environment/provider breadth above the now-landed scheduled reindex baseline
+- scheduled reindex and metadata-reconciliation breadth above the now-real `index_item` stage
 - broader plugin and package breadth
-- stricter sandbox/process isolation beyond the current spawn-required heavy-stage ceiling/recycle baseline
+- stricter sandbox/process isolation beyond the current heavy-stage exit-gate baseline
 - environment-owned searchable observability
 - HA and distributed control-plane maturity
 
@@ -80,13 +80,13 @@ Current local baseline details that matter for Filmu planning:
 | Area | `riven-ts` | FilmuCore |
 | --- | --- | --- |
 | Request intake | Overseerr/Plex/Listrr plugin flows into DB | Real request pipeline with persisted item and request rows plus downstream triggers |
-| Index and metadata | Dedicated indexing flow with plugin-backed metadata sources | Dedicated `index_item` worker stage now exists, scheduled metadata reconciliation now covers partial/ongoing/completed plus repairable failed items, but metadata-provider breadth is still narrower |
+| Index and metadata | Dedicated indexing flow with plugin-backed metadata sources | Dedicated `index_item` worker stage now exists, but metadata-provider breadth and reindex governance are still narrower |
 | Scrape and ranking | Mature BullMQ scrape plus parse plus ranking flow | Real `scrape_item` -> `parse_scrape_results` -> `rank_streams` path with built-in Torrentio and RTN-compatible ranking |
 | Debrid and download | Newer plugin lineup plus sandboxed validation jobs | Built-in Real-Debrid, AllDebrid, and Debrid-Link clients for both pipeline and playback refresh |
 | VFS mount | Running `fuse-native` VFS on `main` | Real Rust sidecar mount runtime with Linux `fuse3`, Windows ProjFS/WinFSP adapters, and validated playback proof paths |
 | HTTP playback | Compatibility path secondary to mount | Real `/api/v1/stream/*` path with direct-file, HLS, and status/governance surfaces |
 | Plugin ecosystem | Broader package/plugin breadth | Narrower breadth, but stronger trust, publisher, tenancy, and quarantine policy |
-| Queue durability | BullMQ with richer long-running workflow breadth | ARQ with real job graph, retry/dead-letter behavior, transactional outbox, DLQ age/reason operator rollups, bounded replay filters, and recovery seams |
+| Queue durability | BullMQ with richer long-running workflow breadth | ARQ with real job graph, retry/dead-letter behavior, transactional outbox, replay baseline, and recovery seams |
 | Observability | Stronger monorepo-local observability stack and Elastic local baseline | Stronger operator-facing policy/governance APIs, but environment-owned search/export still remains |
 
 ## Where FilmuCore is already ahead
@@ -102,20 +102,18 @@ Current local baseline details that matter for Filmu planning:
 - plugin trust, publisher, quarantine, and tenancy governance
 - enterprise posture surface on `/api/v1/operations/governance`
 - broader REST and SSE compatibility surface
-- graph-first specialization-backed calendar/detail/list lineage on the shared media-domain service seam, including additive GraphQL calendar identity fields, GraphQL VFS-backed directory/stat/snapshot/blocked-item queries over the shared catalog supplier snapshot, GraphQL runtime lifecycle plus queue/metadata operator history over the existing lifecycle and Redis-backed stores, richer graph item-detail playback/media-entry ownership projections, graph-first playback refresh/stale-mark mutations over the shared playback controllers/service, persisted graph `mediaEntry` and `playbackAttachment` control-state mutations over the shared playback-service write seam, specialization-backed mounted catalog path shaping on the FilmuVFS supplier boundary, specialization-backed REST detail season coverage, specialization-normalized compatibility metadata, and additive calendar identity projection
 
 ## Where FilmuCore still trails
 
 - deeper multi-actor lifecycle orchestration comparable to the TS `program` / `bootstrap` / `plugin-registrar` / `main-runner` hierarchy
-- broader scheduled reindex / reconciliation depth, especially pluginized metadata-index breadth and multi-environment/provider coverage
+- scheduled reindex / reconciliation depth and pluginized metadata-index breadth
 - stricter sandbox/process isolation for heavy parse/map/validate stages beyond Filmu's bounded executor baseline
 - broader worker/database isolation around those background runtimes
 - queue-backed plugin execution breadth across more hook families
 - broader queue-backed stream-link orchestration breadth beyond Filmu's current optional queued refresh path
 - broader plugin and integration ecosystem breadth, including Seerr/Listrr intake, Comet scraping, Plex post-download hooks, and pluginized TMDB/TVDB indexing
 - GraphQL-first cached control-plane breadth with Redis-backed response caching and dataloader-shaped ORM access
-- GraphQL VFS/control-plane mutation breadth is now partially closed by playback refresh/stale-mark triggers plus persisted media-entry and attachment control writes; the remaining gap is broader active-stream selection/control breadth on top of the now-landed VFS-backed directory/stat/snapshot/operator queries
-- broader compatibility-tail read-model adoption beyond the now-landed graph/VFS/detail-first specialization projections, compatibility-metadata normalization, and additive calendar identity projection
+- GraphQL VFS/control-plane breadth, including VFS-backed directory/stat queries and stream-url persistence mutation
 - database seed/factory tooling in the main app
 - environment-owned searchable log and trace infrastructure
 - more complete HA and distributed control-plane operating model
@@ -125,14 +123,14 @@ Current local baseline details that matter for Filmu planning:
 What current `riven-ts` still has that Filmu does not yet match:
 
 - deeper XState app lifecycle orchestration across startup, plugin registration, and steady-state execution
-- broader metadata reconciliation depth around scheduled reindexing, especially pluginized index breadth and multi-environment/provider coverage
-- broader BullMQ flow isolation, including sandboxed parse/map/validate workers beyond Filmu's spawn-required bounded executor/process-policy baseline
+- a first-class scheduled reindex/reconciliation program above the indexing stage
+- broader BullMQ flow isolation, including sandboxed parse/map/validate workers beyond Filmu's bounded executor/process-policy baseline
 - broader worker/database isolation around those background runtimes
 - queue-backed plugin worker fan-out across a larger typed event surface
 - queue-backed stream-link request handling directly on the VFS open path rather than Filmu's current optional queued control-plane dispatch
 - broader verified integration inventory: `seerr`, `listrr`, `comet`, `plex`, pluginized `tmdb`, pluginized `tvdb`, `torrentio`, `stremthru`, `mdblist`, notifications
 - GraphQL-first Redis-cached control-plane composition with dataloader-oriented ORM access
-- broader active-stream selection/control breadth and broader cached control-plane composition on the GraphQL VFS/control-plane surface
+- VFS-backed GraphQL directory/stat access plus stream-url persistence mutation
 - DB seeds/factories for repeatable local and test-state setup
 
 What Filmu already does better:
@@ -158,7 +156,7 @@ What Filmu already does better:
 
 - one cross-surface serving model spanning HTTP direct-play, HLS, and the mounted control plane
 - first-class session, handle, and path accounting instead of scattered per-handler maps
-- operator-visible runtime and governance state on `/api/v1/stream/status`, now including mounted cache/chunk-coalescing/upstream-wait/refresh pressure classes on top of the earlier rollout ratios/reasons
+- operator-visible runtime and governance state on `/api/v1/stream/status`
 - cross-platform mount architecture with Linux and native Windows adapters
 - a cleaner separation between control plane and byte-serving plane
 
@@ -184,11 +182,11 @@ That means the active comparison-driven priorities are:
 
 1. deepen the indexing stage that is now present in-repo into a first-class reindex / reconciliation program
 2. decide which indexing and metadata-enrichment paths should be pluginized instead of staying as host-only services
-3. deepen heavy-stage isolation from the current spawn-required worker-ceiling/recycle policy baseline into stricter sandbox/process ceilings where warranted
+3. deepen heavy-stage isolation from bounded executors/process-policy gates into stricter sandbox/process ceilings where warranted
 4. harden the mounted data plane into repeatable rollout policy
 5. broaden plugin/package breadth without weakening trust and governance
 6. decide deliberately how far queue-backed stream-link resolution should expand beyond the current optional queued dispatch plus inline refresh/dedup path
-7. prioritize GraphQL control-plane/read-model surfaces over broad new REST expansion, and keep REST limited to compatibility maintenance unless the current frontend is blocked
+7. add GraphQL control-plane surfaces only where they materially improve operator workflows
 8. complete the environment-owned log/search/export story
 9. strengthen HA and failover posture for the distributed control plane
 
