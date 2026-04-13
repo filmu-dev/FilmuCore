@@ -65,7 +65,7 @@ from ..models import (
     StatsResponse,
     TenantQuotaPolicyResponse,
 )
-from .stream import _playback_gate_governance_snapshot, _vfs_runtime_governance_snapshot
+from .runtime_governance import playback_gate_governance_snapshot, vfs_runtime_governance_snapshot
 
 router = APIRouter(tags=["default"])
 _MAX_API_KEY_ID_LENGTH = 128
@@ -75,6 +75,27 @@ API_KEY_ROTATION_WARNING = (
     "Update BACKEND_API_KEY in your frontend environment and restart the frontend "
     "server before your next request, or all API calls will fail."
 )
+
+
+def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
+    """Compatibility wrapper around shared playback-gate governance extraction."""
+
+    return playback_gate_governance_snapshot()
+
+
+def _vfs_runtime_governance_snapshot(
+    playback_gate_governance: dict[str, int | str | list[str]] | None = None,
+    *,
+    request_tenant_id: str | None = None,
+    authorized_tenant_ids: set[str] | None = None,
+) -> dict[str, int | float | str | list[str]]:
+    """Compatibility wrapper around shared VFS runtime governance extraction."""
+
+    return vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate_governance,
+        request_tenant_id=request_tenant_id,
+        authorized_tenant_ids=authorized_tenant_ids,
+    )
 _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("library_read", ("library:read",)),
     ("item_write", ("library:write",)),

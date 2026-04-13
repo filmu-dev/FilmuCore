@@ -13,6 +13,7 @@
 - Mount-vs-HTTP chunk parity now has an explicit contract harness (`scripts/check_mount_http_chunk_parity.ps1`) and CI verify task coverage.
 - Release provenance/perf/chaos now has a dedicated CI gate with generated SBOM + in-toto provenance evidence and contract-backed chaos thresholds as merge blockers.
 - Operator log-pipeline rollout now enforces environment health/search/alert endpoint checks with required correlation-field contract validation.
+- Route-level no-behavior-change decomposition is underway: shared playback/VFS runtime-governance snapshot logic now lives in [`../filmu_py/api/routes/runtime_governance.py`](../filmu_py/api/routes/runtime_governance.py), and [`../filmu_py/api/routes/default.py`](../filmu_py/api/routes/default.py) no longer imports private helpers from [`../filmu_py/api/routes/stream.py`](../filmu_py/api/routes/stream.py).
 
 The current priority order is:
 
