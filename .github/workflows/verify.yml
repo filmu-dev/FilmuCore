@@ -24,7 +24,7 @@ jobs:
       matrix:
         task:
           - name: Python Lint
-            command: uv run ruff check . && uv run mypy filmu_py
+            command: pwsh -NoProfile -File ./scripts/check_publish_hygiene.ps1 && uv run ruff check . && uv run mypy filmu_py
             python: true
             rust: false
             fuse: false
