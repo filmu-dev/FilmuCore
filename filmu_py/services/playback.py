@@ -2038,9 +2038,7 @@ class PlaybackSourceService:
             else:
                 attachment.updated_at = requested_at
 
-            if refresh_state is None and last_refresh_error is not None:
-                attachment.last_refresh_error = last_refresh_error
-            elif refresh_state in {"stale", "refreshing"} and last_refresh_error is not None:
+            if (refresh_state is None and last_refresh_error is not None) or (refresh_state in {"stale", "refreshing"} and last_refresh_error is not None):
                 attachment.last_refresh_error = last_refresh_error
 
             linked_entries: list[MediaEntryORM] = []
@@ -2147,9 +2145,7 @@ class PlaybackSourceService:
             else:
                 entry.updated_at = requested_at
 
-            if refresh_state is None and last_refresh_error is not None:
-                entry.last_refresh_error = last_refresh_error
-            elif refresh_state in {"stale", "refreshing"} and last_refresh_error is not None:
+            if (refresh_state is None and last_refresh_error is not None) or (refresh_state in {"stale", "refreshing"} and last_refresh_error is not None):
                 entry.last_refresh_error = last_refresh_error
 
             self._sync_source_attachment_from_media_entry(entry, at=entry.updated_at)

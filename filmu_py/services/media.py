@@ -435,7 +435,7 @@ def _build_specialization_record(item: MediaItemORM) -> MediaItemSpecializationR
     )
 
 
-def _projection_item_load_options() -> tuple[object, ...]:
+def _projection_item_load_options() -> tuple[Any, ...]:
     """Return the eager-load policy for specialization-backed read models."""
 
     return (

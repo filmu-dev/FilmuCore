@@ -14,8 +14,8 @@ from arq import Retry
 from arq.jobs import JobStatus
 
 from filmu_py.config import Settings
-from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.db.models import (
     EpisodeORM,
     ItemStateEventORM,

@@ -40,6 +40,7 @@ from ..models import (
     EnterpriseOperationsGovernanceResponse,
     EnterpriseOperationsSliceResponse,
     HealthResponse,
+    ItemParentIdsResponse,
     LogsResponse,
     MessageResponse,
     MetadataReindexHistoryPointResponse,
