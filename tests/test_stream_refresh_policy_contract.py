@@ -7,12 +7,13 @@ from typing import Any, cast
 
 import pytest
 
+from filmu_py.api.routes import runtime_refresh_governance
 from filmu_py.api.routes import stream as stream_routes
 
 
 def _reset_policy_counters() -> None:
-    for key in stream_routes._STREAM_REFRESH_POLICY_GOVERNANCE:
-        stream_routes._STREAM_REFRESH_POLICY_GOVERNANCE[key] = 0
+    for key in runtime_refresh_governance.STREAM_REFRESH_POLICY_GOVERNANCE:
+        runtime_refresh_governance.STREAM_REFRESH_POLICY_GOVERNANCE[key] = 0
 
 
 def test_runtime_pressure_requires_queued_dispatch_when_latency_slo_breaches() -> None:
