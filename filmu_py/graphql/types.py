@@ -56,6 +56,16 @@ class GQLMediaItem:
     state: str
     media_type: str = strawberry.field(name="mediaType")
     media_kind: MediaKind = strawberry.field(name="mediaKind")
+    tmdb_id: int | None = strawberry.field(name="tmdbId", default=None)
+    tvdb_id: int | None = strawberry.field(name="tvdbId", default=None)
+    imdb_id: str | None = strawberry.field(name="imdbId", default=None)
+    parent_tmdb_id: int | None = strawberry.field(name="parentTmdbId", default=None)
+    parent_tvdb_id: int | None = strawberry.field(name="parentTvdbId", default=None)
+    show_title: str | None = strawberry.field(name="showTitle", default=None)
+    season_number: int | None = strawberry.field(name="seasonNumber", default=None)
+    episode_number: int | None = strawberry.field(name="episodeNumber", default=None)
+    poster_path: str | None = strawberry.field(name="posterPath", default=None)
+    aired_at: str | None = strawberry.field(name="airedAt", default=None)
 
 
 @strawberry.type
