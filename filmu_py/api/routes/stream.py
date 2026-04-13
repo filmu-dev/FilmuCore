@@ -7,16 +7,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import tempfile
 from asyncio.subprocess import PIPE
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
-from time import monotonic
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, cast
 from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
@@ -28,10 +25,6 @@ from prometheus_client import Counter
 from filmu_py.api.deps import get_auth_context, get_db, get_event_bus, get_log_stream, get_resources
 from filmu_py.api.models import (
     EventTypesResponse,
-    ServingGovernanceResponse,
-    ServingHandleResponse,
-    ServingPathResponse,
-    ServingSessionResponse,
     ServingStatusResponse,
 )
 from filmu_py.core import byte_streaming
@@ -48,7 +41,43 @@ from filmu_py.services.playback import (
     trigger_hls_failed_lease_refresh_from_resources,
     trigger_hls_restricted_fallback_refresh_from_resources,
 )
-from filmu_py.services.vfs_server import build_empty_vfs_catalog_governance_snapshot
+
+from . import runtime_refresh_governance
+from .runtime_governance import (
+    empty_playback_gate_governance_snapshot,
+    playback_gate_governance_snapshot,
+    runtime_pressure_requires_queued_dispatch,
+    vfs_runtime_governance_snapshot,
+)
+from .runtime_hls_governance import (
+    classify_hls_route_failure_reason,
+    hls_route_failure_governance_snapshot,
+    is_retryable_remote_hls_error,
+    raise_remote_hls_cooldown_if_active,
+    record_hls_route_failure,
+    record_inline_remote_hls_refresh,
+    remote_hls_recovery_governance_snapshot,
+    run_remote_hls_with_retry,
+    start_remote_hls_cooldown,
+    validate_upstream_hls_playlist,
+)
+from .runtime_refresh_governance import (
+    direct_playback_trigger_governance_snapshot,
+    hls_failed_lease_trigger_governance_snapshot,
+    hls_restricted_fallback_trigger_governance_snapshot,
+    record_route_refresh_trigger_pending,
+    select_refresh_dispatch_preference,
+    stream_refresh_policy_governance_snapshot,
+)
+from .runtime_status_payload import build_serving_status_response
+
+_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE = runtime_refresh_governance.DIRECT_PLAYBACK_TRIGGER_GOVERNANCE
+_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE = (
+    runtime_refresh_governance.HLS_FAILED_LEASE_TRIGGER_GOVERNANCE
+)
+_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE = (
+    runtime_refresh_governance.HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE
+)
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -57,77 +86,11 @@ STREAM_ROUTE_RESULTS = Counter(
     "Count of stream route outcomes by route and HTTP status code.",
     labelnames=("route", "status_code"),
 )
-HLS_ROUTE_FAILURE_EVENTS = Counter(
-    "filmu_py_stream_hls_route_failures_total",
-    "Count of normalized HLS route failures by classified reason.",
-    labelnames=("reason",),
-)
-REMOTE_HLS_RECOVERY_EVENTS = Counter(
-    "filmu_py_stream_remote_hls_recovery_total",
-    "Count of remote-HLS retry/cooldown recovery events by kind.",
-    labelnames=("event",),
-)
-INLINE_REMOTE_HLS_REFRESH_EVENTS = Counter(
-    "filmu_py_stream_inline_remote_hls_refresh_total",
-    "Count of inline remote-HLS media-entry repair attempts by outcome.",
-    labelnames=("event",),
-)
 _PLAYBACK_PROOF_ARTIFACTS_ROOT = Path(__file__).resolve().parents[3] / "playback-proof-artifacts"
 _MANAGED_WINDOWS_VFS_STATE_PATH = (
     _PLAYBACK_PROOF_ARTIFACTS_ROOT / "windows-native-stack" / "filmuvfs-windows-state.json"
 )
-
-_HLS_ROUTE_FAILURE_GOVERNANCE = {
-    "generation_failed": 0,
-    "generation_timeout": 0,
-    "generation_capacity_exceeded": 0,
-    "generator_unavailable": 0,
-    "lease_failed": 0,
-    "transcode_source_unavailable": 0,
-    "manifest_invalid": 0,
-    "generated_missing": 0,
-    "upstream_failed": 0,
-    "upstream_manifest_invalid": 0,
-}
-_REMOTE_HLS_RETRY_GOVERNANCE = {
-    "retry_attempts": 0,
-    "cooldown_starts": 0,
-    "cooldown_hits": 0,
-}
-_INLINE_REMOTE_HLS_REFRESH_GOVERNANCE = {
-    "attempts": 0,
-    "recovered": 0,
-    "no_action": 0,
-    "failures": 0,
-}
-_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE = {
-    "starts": 0,
-    "no_action": 0,
-    "controller_unavailable": 0,
-    "already_pending": 0,
-    "backoff_pending": 0,
-    "failures": 0,
-}
-_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE = {
-    "starts": 0,
-    "no_action": 0,
-    "controller_unavailable": 0,
-    "already_pending": 0,
-    "backoff_pending": 0,
-    "failures": 0,
-}
-_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE = {
-    "starts": 0,
-    "no_action": 0,
-    "controller_unavailable": 0,
-    "already_pending": 0,
-    "backoff_pending": 0,
-    "failures": 0,
-}
-_REMOTE_HLS_COOLDOWNS: dict[str, tuple[float, int, str]] = {}
-_REMOTE_HLS_COOLDOWN_LOCK = Lock()
-_REMOTE_HLS_RETRY_ATTEMPTS = 2
-_REMOTE_HLS_COOLDOWN_SECONDS = 15.0
+_STREAM_REFRESH_LATENCY_SLO_MS = 250
 _BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
 _HLS_FAILED_LEASE_BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
 _HLS_RESTRICTED_FALLBACK_BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
@@ -258,101 +221,31 @@ def _record_stream_route_result(*, route: str, status_code: int) -> None:
 def _record_hls_route_failure(*, reason: str) -> None:
     """Record one normalized HLS route failure by classified reason."""
 
-    HLS_ROUTE_FAILURE_EVENTS.labels(reason=reason).inc()
-    _HLS_ROUTE_FAILURE_GOVERNANCE[reason] += 1
+    record_hls_route_failure(reason=reason)
 
 
 def _classify_hls_route_failure_reason(exc: HTTPException) -> str:
     """Classify one normalized HLS route failure into a small reason taxonomy."""
 
-    detail = exc.detail if isinstance(exc.detail, str) else ""
-    if detail.startswith("HLS transcode source is unavailable"):
-        return "transcode_source_unavailable"
-    if detail.startswith("HLS generation capacity exceeded"):
-        return "generation_capacity_exceeded"
-    if detail.startswith("Generated HLS playlist is"):
-        return "manifest_invalid"
-    if detail.startswith("Upstream HLS playlist is"):
-        return "upstream_manifest_invalid"
-    if exc.status_code == status.HTTP_504_GATEWAY_TIMEOUT:
-        return "generation_timeout"
-    if exc.status_code == status.HTTP_501_NOT_IMPLEMENTED:
-        return "generator_unavailable"
-    if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
-        return "lease_failed"
-    return "generation_failed"
+    return classify_hls_route_failure_reason(exc)
 
 
 def _hls_route_failure_governance_snapshot() -> dict[str, int]:
     """Return additive governance counters for normalized HLS route failures."""
 
-    return {
-        "hls_route_failures_total": sum(_HLS_ROUTE_FAILURE_GOVERNANCE.values()),
-        "hls_route_failures_generation_failed": _HLS_ROUTE_FAILURE_GOVERNANCE["generation_failed"],
-        "hls_route_failures_generation_timeout": _HLS_ROUTE_FAILURE_GOVERNANCE[
-            "generation_timeout"
-        ],
-        "hls_route_failures_generation_capacity_exceeded": _HLS_ROUTE_FAILURE_GOVERNANCE[
-            "generation_capacity_exceeded"
-        ],
-        "hls_route_failures_generator_unavailable": _HLS_ROUTE_FAILURE_GOVERNANCE[
-            "generator_unavailable"
-        ],
-        "hls_route_failures_lease_failed": _HLS_ROUTE_FAILURE_GOVERNANCE["lease_failed"],
-        "hls_route_failures_transcode_source_unavailable": _HLS_ROUTE_FAILURE_GOVERNANCE[
-            "transcode_source_unavailable"
-        ],
-        "hls_route_failures_manifest_invalid": _HLS_ROUTE_FAILURE_GOVERNANCE["manifest_invalid"],
-        "hls_route_failures_generated_missing": _HLS_ROUTE_FAILURE_GOVERNANCE["generated_missing"],
-        "hls_route_failures_upstream_failed": _HLS_ROUTE_FAILURE_GOVERNANCE["upstream_failed"],
-        "hls_route_failures_upstream_manifest_invalid": _HLS_ROUTE_FAILURE_GOVERNANCE[
-            "upstream_manifest_invalid"
-        ],
-    }
-
-
-def _cleanup_remote_hls_cooldowns(*, now: float | None = None) -> None:
-    """Drop expired remote-HLS cooldown entries."""
-
-    current_time = monotonic() if now is None else now
-    expired_keys = [
-        key
-        for key, (expires_at, _, _) in _REMOTE_HLS_COOLDOWNS.items()
-        if expires_at <= current_time
-    ]
-    for key in expired_keys:
-        _REMOTE_HLS_COOLDOWNS.pop(key, None)
+    return hls_route_failure_governance_snapshot()
 
 
 def _remote_hls_recovery_governance_snapshot() -> dict[str, int]:
     """Return additive governance counters for remote-HLS retry/cooldown behavior."""
 
-    with _REMOTE_HLS_COOLDOWN_LOCK:
-        _cleanup_remote_hls_cooldowns()
-        active_cooldowns = len(_REMOTE_HLS_COOLDOWNS)
-    return {
-        "remote_hls_retry_attempts": _REMOTE_HLS_RETRY_GOVERNANCE["retry_attempts"],
-        "remote_hls_cooldown_starts": _REMOTE_HLS_RETRY_GOVERNANCE["cooldown_starts"],
-        "remote_hls_cooldown_hits": _REMOTE_HLS_RETRY_GOVERNANCE["cooldown_hits"],
-        "remote_hls_cooldowns_active": active_cooldowns,
-        "inline_remote_hls_refresh_attempts": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE["attempts"],
-        "inline_remote_hls_refresh_recovered": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[
-            "recovered"
-        ],
-        "inline_remote_hls_refresh_no_action": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[
-            "no_action"
-        ],
-        "inline_remote_hls_refresh_failures": _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[
-            "failures"
-        ],
-    }
+    return remote_hls_recovery_governance_snapshot()
 
 
 def _record_inline_remote_hls_refresh(*, event: str) -> None:
     """Record one inline remote-HLS media-entry repair event."""
 
-    INLINE_REMOTE_HLS_REFRESH_EVENTS.labels(event=event).inc()
-    _INLINE_REMOTE_HLS_REFRESH_GOVERNANCE[event] += 1
+    record_inline_remote_hls_refresh(event=event)
 
 
 async def _allow_tenant_refresh_trigger(
@@ -383,1063 +276,57 @@ def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
     """Return additive governance counters for route-adjacent direct-play refresh triggering."""
 
     active_tasks = sum(1 for task in _BACKGROUND_ROUTE_TASKS if not task.done())
-    return {
-        "direct_playback_refresh_trigger_starts": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["starts"],
-        "direct_playback_refresh_trigger_no_action": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "no_action"
-        ],
-        "direct_playback_refresh_trigger_controller_unavailable": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "controller_unavailable"
-        ],
-        "direct_playback_refresh_trigger_already_pending": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "already_pending"
-        ],
-        "direct_playback_refresh_trigger_backoff_pending": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE[
-            "backoff_pending"
-        ],
-        "direct_playback_refresh_trigger_failures": _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["failures"],
-        "direct_playback_refresh_trigger_tasks_active": active_tasks,
-    }
+    return direct_playback_trigger_governance_snapshot(active_tasks=active_tasks)
 
 
-def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str]]:
-    """Return the default Rust runtime governance payload for /stream/status."""
+def _stream_refresh_policy_governance_snapshot() -> dict[str, int]:
+    """Return route-adjacent stream refresh dispatch policy counters."""
 
-    return {
-        "vfs_runtime_snapshot_available": 0,
-        "vfs_runtime_open_handles": 0,
-        "vfs_runtime_peak_open_handles": 0,
-        "vfs_runtime_active_reads": 0,
-        "vfs_runtime_peak_active_reads": 0,
-        "vfs_runtime_chunk_cache_weighted_bytes": 0,
-        "vfs_runtime_chunk_cache_backend": "unknown",
-        "vfs_runtime_chunk_cache_memory_bytes": 0,
-        "vfs_runtime_chunk_cache_memory_max_bytes": 0,
-        "vfs_runtime_chunk_cache_memory_hits": 0,
-        "vfs_runtime_chunk_cache_memory_misses": 0,
-        "vfs_runtime_chunk_cache_disk_bytes": 0,
-        "vfs_runtime_chunk_cache_disk_max_bytes": 0,
-        "vfs_runtime_chunk_cache_disk_hits": 0,
-        "vfs_runtime_chunk_cache_disk_misses": 0,
-        "vfs_runtime_chunk_cache_disk_writes": 0,
-        "vfs_runtime_chunk_cache_disk_write_errors": 0,
-        "vfs_runtime_chunk_cache_disk_evictions": 0,
-        "vfs_runtime_handle_startup_total": 0,
-        "vfs_runtime_handle_startup_ok": 0,
-        "vfs_runtime_handle_startup_error": 0,
-        "vfs_runtime_handle_startup_estale": 0,
-        "vfs_runtime_handle_startup_cancelled": 0,
-        "vfs_runtime_handle_startup_average_duration_ms": 0,
-        "vfs_runtime_handle_startup_max_duration_ms": 0,
-        "vfs_runtime_mounted_reads_total": 0,
-        "vfs_runtime_mounted_reads_ok": 0,
-        "vfs_runtime_mounted_reads_error": 0,
-        "vfs_runtime_mounted_reads_estale": 0,
-        "vfs_runtime_mounted_reads_cancelled": 0,
-        "vfs_runtime_mounted_reads_average_duration_ms": 0,
-        "vfs_runtime_mounted_reads_max_duration_ms": 0,
-        "vfs_runtime_upstream_fetch_operations": 0,
-        "vfs_runtime_upstream_fetch_bytes_total": 0,
-        "vfs_runtime_upstream_fetch_average_duration_ms": 0,
-        "vfs_runtime_upstream_fetch_max_duration_ms": 0,
-        "vfs_runtime_upstream_fail_invalid_url": 0,
-        "vfs_runtime_upstream_fail_build_request": 0,
-        "vfs_runtime_upstream_fail_network": 0,
-        "vfs_runtime_upstream_fail_stale_status": 0,
-        "vfs_runtime_upstream_fail_unexpected_status": 0,
-        "vfs_runtime_upstream_fail_unexpected_status_too_many_requests": 0,
-        "vfs_runtime_upstream_fail_unexpected_status_server_error": 0,
-        "vfs_runtime_upstream_fail_read_body": 0,
-        "vfs_runtime_upstream_retryable_network": 0,
-        "vfs_runtime_upstream_retryable_read_body": 0,
-        "vfs_runtime_upstream_retryable_status_too_many_requests": 0,
-        "vfs_runtime_upstream_retryable_status_server_error": 0,
-        "vfs_runtime_backend_fallback_attempts": 0,
-        "vfs_runtime_backend_fallback_success": 0,
-        "vfs_runtime_backend_fallback_failure": 0,
-        "vfs_runtime_backend_fallback_attempts_direct_read_failure": 0,
-        "vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable": 0,
-        "vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure": 0,
-        "vfs_runtime_backend_fallback_success_direct_read_failure": 0,
-        "vfs_runtime_backend_fallback_success_inline_refresh_unavailable": 0,
-        "vfs_runtime_backend_fallback_success_post_inline_refresh_failure": 0,
-        "vfs_runtime_backend_fallback_failure_direct_read_failure": 0,
-        "vfs_runtime_backend_fallback_failure_inline_refresh_unavailable": 0,
-        "vfs_runtime_backend_fallback_failure_post_inline_refresh_failure": 0,
-        "vfs_runtime_chunk_cache_hits": 0,
-        "vfs_runtime_chunk_cache_misses": 0,
-        "vfs_runtime_chunk_cache_inserts": 0,
-        "vfs_runtime_chunk_cache_prefetch_hits": 0,
-        "vfs_runtime_prefetch_concurrency_limit": 0,
-        "vfs_runtime_prefetch_available_permits": 0,
-        "vfs_runtime_prefetch_active_permits": 0,
-        "vfs_runtime_prefetch_active_background_tasks": 0,
-        "vfs_runtime_prefetch_peak_active_background_tasks": 0,
-        "vfs_runtime_prefetch_background_spawned": 0,
-        "vfs_runtime_prefetch_background_backpressure": 0,
-        "vfs_runtime_prefetch_fairness_denied": 0,
-        "vfs_runtime_prefetch_global_backpressure_denied": 0,
-        "vfs_runtime_prefetch_background_error": 0,
-        "vfs_runtime_chunk_coalescing_in_flight_chunks": 0,
-        "vfs_runtime_chunk_coalescing_peak_in_flight_chunks": 0,
-        "vfs_runtime_chunk_coalescing_waits_total": 0,
-        "vfs_runtime_chunk_coalescing_waits_hit": 0,
-        "vfs_runtime_chunk_coalescing_waits_miss": 0,
-        "vfs_runtime_chunk_coalescing_wait_average_duration_ms": 0.0,
-        "vfs_runtime_chunk_coalescing_wait_max_duration_ms": 0.0,
-        "vfs_runtime_inline_refresh_success": 0,
-        "vfs_runtime_inline_refresh_no_url": 0,
-        "vfs_runtime_inline_refresh_error": 0,
-        "vfs_runtime_inline_refresh_timeout": 0,
-        "vfs_runtime_windows_callbacks_cancelled": 0,
-        "vfs_runtime_windows_callbacks_error": 0,
-        "vfs_runtime_windows_callbacks_estale": 0,
-        "vfs_runtime_cache_hit_ratio": 0.0,
-        "vfs_runtime_fallback_success_ratio": 0.0,
-        "vfs_runtime_prefetch_pressure_ratio": 0.0,
-        "vfs_runtime_provider_pressure_incidents": 0,
-        "vfs_runtime_fairness_pressure_incidents": 0,
-        "vfs_runtime_cache_pressure_class": "healthy",
-        "vfs_runtime_cache_pressure_reasons": [],
-        "vfs_runtime_chunk_coalescing_pressure_class": "healthy",
-        "vfs_runtime_chunk_coalescing_pressure_reasons": [],
-        "vfs_runtime_upstream_wait_class": "healthy",
-        "vfs_runtime_upstream_wait_reasons": [],
-        "vfs_runtime_refresh_pressure_class": "healthy",
-        "vfs_runtime_refresh_pressure_reasons": [],
-        "vfs_runtime_rollout_readiness": "unknown",
-        "vfs_runtime_rollout_reasons": ["runtime_snapshot_unavailable"],
-        "vfs_runtime_rollout_next_action": "capture_runtime_status",
-        "vfs_runtime_rollout_canary_decision": "capture_runtime_status",
-        "vfs_runtime_rollout_merge_gate": "blocked",
-        "vfs_runtime_rollout_environment_class": "",
-        "vfs_runtime_active_handle_summaries": [],
-    }
-
-
-def _as_int(value: object) -> int:
-    """Normalize Rust runtime JSON numbers into additive integer counters."""
-
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return round(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return 0
-        try:
-            return int(stripped)
-        except ValueError:
-            try:
-                return round(float(stripped))
-            except ValueError:
-                return 0
-    return 0
-
-
-def _as_float(value: object) -> float:
-    """Normalize Rust runtime JSON numbers into additive float durations."""
-
-    if isinstance(value, bool):
-        return float(value)
-    if isinstance(value, int | float):
-        return float(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return 0.0
-        try:
-            return float(stripped)
-        except ValueError:
-            return 0.0
-    return 0.0
-
-
-def _as_str(value: object, *, default: str = "") -> str:
-    """Normalize Rust runtime JSON string values into safe status payloads."""
-
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped:
-            return stripped
-    return default
-
-
-def _as_str_list(value: object) -> list[str]:
-    """Normalize list-like runtime snapshot strings into bounded operator summaries."""
-
-    if not isinstance(value, list):
-        return []
-    normalized: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        stripped = item.strip()
-        if stripped:
-            normalized.append(stripped)
-    return normalized[:10]
-
-
-def _safe_ratio(numerator: int, denominator: int) -> float:
-    """Return a bounded operator-facing ratio for additive governance counters."""
-
-    if denominator <= 0:
-        return 0.0
-    return round(numerator / denominator, 4)
-
-
-def _pressure_class(
-    *, critical: bool, warning: bool
-) -> Literal["healthy", "warning", "critical"]:
-    """Collapse additive runtime signals into a bounded operator pressure class."""
-
-    if critical:
-        return "critical"
-    if warning:
-        return "warning"
-    return "healthy"
-
-
-def _nested_mapping_value(payload: object, *keys: str) -> object | None:
-    """Safely walk nested JSON objects loaded from the Rust runtime status file."""
-
-    current = payload
-    for key in keys:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return current
-
-
-def _candidate_vfs_runtime_status_paths() -> list[Path]:
-    """Return the preferred Rust runtime snapshot locations in precedence order."""
-
-    paths: list[Path] = []
-    env_path = os.getenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH")
-    if env_path and env_path.strip():
-        paths.append(Path(env_path.strip()))
-    try:
-        state_payload = json.loads(_MANAGED_WINDOWS_VFS_STATE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        state_payload = None
-    if isinstance(state_payload, dict):
-        runtime_status_path = state_payload.get("runtime_status_path")
-        if isinstance(runtime_status_path, str) and runtime_status_path.strip():
-            paths.append(Path(runtime_status_path.strip()))
-    paths.append(_MANAGED_WINDOWS_VFS_STATE_PATH.parent / "filmuvfs-runtime-status.json")
-    unique_paths: list[Path] = []
-    seen: set[Path] = set()
-    for path in paths:
-        normalized = path.expanduser()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        unique_paths.append(normalized)
-    return unique_paths
-
-
-def _load_vfs_runtime_status_payload() -> dict[str, object] | None:
-    """Load the first readable Rust runtime status JSON payload, if any."""
-
-    for path in _candidate_vfs_runtime_status_paths():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict):
-            return cast(dict[str, object], payload)
-    return None
-
-
-def _candidate_playback_artifacts_roots() -> list[Path]:
-    """Return playback-proof artifact roots in precedence order."""
-
-    roots: list[Path] = []
-    env_root = os.getenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT")
-    if env_root and env_root.strip():
-        roots.append(Path(env_root.strip()))
-    roots.append(_PLAYBACK_PROOF_ARTIFACTS_ROOT)
-
-    unique_roots: list[Path] = []
-    seen: set[Path] = set()
-    for root in roots:
-        normalized = root.expanduser()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        unique_roots.append(normalized)
-    return unique_roots
-
-
-def _candidate_github_main_policy_paths() -> list[Path]:
-    """Return candidate current-policy artifact paths in precedence order."""
-
-    paths: list[Path] = []
-    env_path = os.getenv("FILMU_PY_GITHUB_MAIN_POLICY_PATH")
-    if env_path and env_path.strip():
-        paths.append(Path(env_path.strip()))
-    for root in _candidate_playback_artifacts_roots():
-        paths.append(root / "github-main-policy-current.json")
-
-    unique_paths: list[Path] = []
-    seen: set[Path] = set()
-    for path in paths:
-        normalized = path.expanduser()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        unique_paths.append(normalized)
-    return unique_paths
-
-
-def _load_json_file(path: Path) -> dict[str, object] | None:
-    """Load one JSON file if it exists and contains an object payload."""
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if isinstance(payload, dict):
-        return cast(dict[str, object], payload)
-    return None
-
-
-def _load_latest_json_artifact(*, prefix: str, subdir: str | None = None) -> dict[str, object] | None:
-    """Load the newest matching JSON artifact from the playback-proof artifact tree."""
-
-    for root in _candidate_playback_artifacts_roots():
-        candidate_root = root / subdir if subdir is not None else root
-        try:
-            matches = list(candidate_root.glob(f"{prefix}*.json"))
-        except OSError:
-            continue
-        newest_path: Path | None = None
-        newest_mtime = -1.0
-        for path in matches:
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if stat.st_mtime > newest_mtime:
-                newest_mtime = stat.st_mtime
-                newest_path = path
-        if newest_path is None:
-            continue
-        payload = _load_json_file(newest_path)
-        if payload is not None:
-            return payload
-    return None
-
-
-def _load_current_github_main_policy_artifact() -> dict[str, object] | None:
-    """Load the newest available GitHub main-policy validation artifact, if present."""
-
-    for path in _candidate_github_main_policy_paths():
-        payload = _load_json_file(path)
-        if payload is not None:
-            return payload
-    return None
-
-
-def _load_playback_artifact_at_relative_path(relative_path: str) -> dict[str, object] | None:
-    """Load one playback-proof artifact by relative path across candidate roots."""
-
-    for root in _candidate_playback_artifacts_roots():
-        payload = _load_json_file(root / relative_path)
-        if payload is not None:
-            return payload
-    return None
-
-
-def _empty_playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
-    """Return the default playback-gate promotion snapshot."""
-
-    return {
-        "playback_gate_snapshot_available": 0,
-        "playback_gate_artifact_generated_at": "",
-        "playback_gate_environment_class": "",
-        "playback_gate_repeat_count": 0,
-        "playback_gate_gate_mode": "unknown",
-        "playback_gate_provider_gate_required": 0,
-        "playback_gate_provider_gate_ran": 0,
-        "playback_gate_stability_ready": 0,
-        "playback_gate_provider_parity_ready": 0,
-        "playback_gate_windows_provider_ready": 0,
-        "playback_gate_windows_soak_ready": 0,
-        "playback_gate_policy_validation_status": "unverified",
-        "playback_gate_policy_ready": 0,
-        "playback_gate_rollout_readiness": "not_ready",
-        "playback_gate_rollout_reasons": ["missing_playback_gate_artifacts"],
-        "playback_gate_rollout_next_action": "run_proof_playback_gate_enterprise",
-    }
+    return stream_refresh_policy_governance_snapshot(
+        stream_refresh_latency_slo_ms=_STREAM_REFRESH_LATENCY_SLO_MS
+    )
 
 
 def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
-    """Return machine-shaped playback-gate promotion posture from local artifacts."""
+    """Return machine-shaped playback-gate promotion posture from shared governance module."""
 
-    governance = _empty_playback_gate_governance_snapshot()
-    stability_summary = _load_latest_json_artifact(prefix="stability-summary-")
-    ci_summary = _load_playback_artifact_at_relative_path("ci-execution-summary.json")
-    provider_summary = _load_latest_json_artifact(prefix="media-server-gate-")
-    windows_provider_summary = _load_latest_json_artifact(prefix="windows-media-server-gate-")
-    windows_soak_summary = _load_latest_json_artifact(
-        prefix="soak-stability-",
-        subdir="windows-native-stack",
-    )
-    policy_summary = _load_current_github_main_policy_artifact()
-
-    if stability_summary is not None:
-        governance["playback_gate_snapshot_available"] = 1
-        governance["playback_gate_artifact_generated_at"] = _as_str(
-            stability_summary.get("timestamp"),
-        )
-        governance["playback_gate_environment_class"] = _as_str(
-            stability_summary.get("environment_class"),
-        )
-        governance["playback_gate_repeat_count"] = _as_int(stability_summary.get("repeat_count"))
-        if bool(stability_summary.get("all_green")) and not bool(stability_summary.get("dry_run")):
-            governance["playback_gate_stability_ready"] = 1
-
-    if ci_summary is not None:
-        governance["playback_gate_gate_mode"] = _as_str(
-            ci_summary.get("gate_mode"),
-            default="unknown",
-        )
-        governance["playback_gate_provider_gate_required"] = _as_int(
-            ci_summary.get("provider_gate_required"),
-        )
-        governance["playback_gate_provider_gate_ran"] = _as_int(
-            ci_summary.get("provider_gate_ran"),
-        )
-
-    provider_summary_available = provider_summary is not None
-    if provider_summary is not None and bool(provider_summary.get("all_green")):
-        governance["playback_gate_provider_parity_ready"] = 1
-
-    windows_provider_summary_available = windows_provider_summary is not None
-    if windows_provider_summary is not None:
-        results = windows_provider_summary.get("results")
-        if (
-            isinstance(results, list)
-            and any(
-                isinstance(result, dict) and result.get("status") == "passed" for result in results
-            )
-            and all(
-                not isinstance(result, dict) or result.get("status") in {"passed", "skipped"}
-                for result in results
-            )
-        ):
-            governance["playback_gate_windows_provider_ready"] = 1
-
-    windows_soak_summary_available = windows_soak_summary is not None
-    if windows_soak_summary is not None and bool(windows_soak_summary.get("all_green")):
-        governance["playback_gate_windows_soak_ready"] = 1
-
-    if policy_summary is not None:
-        validation = policy_summary.get("validation")
-        if isinstance(validation, dict):
-            validation_status = _as_str(validation.get("status"), default="unverified")
-            governance["playback_gate_policy_validation_status"] = validation_status
-            if validation_status == "ready":
-                governance["playback_gate_policy_ready"] = 1
-
-    rollout_reasons: list[str] = []
-    if governance["playback_gate_snapshot_available"] == 0:
-        rollout_reasons.append("missing_playback_gate_artifacts")
-    elif governance["playback_gate_gate_mode"] == "dry_run":
-        rollout_reasons.append("playback_gate_dry_run_mode")
-    elif governance["playback_gate_stability_ready"] == 0:
-        rollout_reasons.append("playback_gate_failed_or_incomplete")
-
-    provider_gate_required = _as_int(governance["playback_gate_provider_gate_required"]) > 0
-    provider_gate_ran = _as_int(governance["playback_gate_provider_gate_ran"]) > 0
-    if provider_gate_required and not provider_gate_ran:
-        rollout_reasons.append("provider_gate_not_run")
-    elif provider_gate_ran:
-        if not provider_summary_available:
-            rollout_reasons.append("provider_gate_artifact_missing")
-        elif _as_int(governance["playback_gate_provider_parity_ready"]) == 0:
-            rollout_reasons.append("provider_gate_not_green")
-
-    if not windows_provider_summary_available:
-        rollout_reasons.append("windows_provider_gate_artifact_missing")
-    elif _as_int(governance["playback_gate_windows_provider_ready"]) == 0:
-        rollout_reasons.append("windows_provider_gate_not_green")
-
-    if not windows_soak_summary_available:
-        rollout_reasons.append("windows_vfs_soak_artifact_missing")
-    elif _as_int(governance["playback_gate_windows_soak_ready"]) == 0:
-        rollout_reasons.append("windows_vfs_soak_not_green")
-
-    policy_status = _as_str(governance["playback_gate_policy_validation_status"], default="unverified")
-    if policy_status == "not_ready":
-        rollout_reasons.append("github_main_policy_not_ready")
-    elif policy_status == "unverified":
-        rollout_reasons.append("github_main_policy_unverified")
-
-    blocked_reasons = {
-        "playback_gate_failed_or_incomplete",
-        "provider_gate_not_green",
-        "windows_provider_gate_not_green",
-        "windows_vfs_soak_not_green",
-        "github_main_policy_not_ready",
-    }
-    warning_reasons = {
-        "missing_playback_gate_artifacts",
-        "playback_gate_dry_run_mode",
-        "provider_gate_not_run",
-        "provider_gate_artifact_missing",
-        "windows_provider_gate_artifact_missing",
-        "windows_vfs_soak_artifact_missing",
-        "github_main_policy_unverified",
-    }
-
-    if any(reason in blocked_reasons for reason in rollout_reasons):
-        governance["playback_gate_rollout_readiness"] = "blocked"
-        governance["playback_gate_rollout_next_action"] = "resolve_failed_playback_gate_proofs"
-    elif any(reason in warning_reasons for reason in rollout_reasons):
-        governance["playback_gate_rollout_readiness"] = "warning"
-        governance["playback_gate_rollout_next_action"] = "record_enterprise_playback_gate_evidence"
-    else:
-        governance["playback_gate_rollout_readiness"] = "ready"
-        governance["playback_gate_rollout_next_action"] = "keep_required_checks_enforced"
-        rollout_reasons.append("enterprise_playback_gate_green")
-
-    governance["playback_gate_rollout_reasons"] = rollout_reasons
-    return governance
+    return playback_gate_governance_snapshot()
 
 
-def _apply_vfs_rollout_policy(
-    governance: dict[str, int | float | str | list[str]],
-    *,
-    playback_gate_governance: dict[str, int | str | list[str]] | None = None,
-) -> dict[str, int | float | str | list[str]]:
-    """Apply canary and rollback policy to the runtime-derived VFS rollout posture."""
+def _empty_playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
+    """Return the default playback-gate promotion snapshot from shared governance module."""
 
-    canary_environment = ""
-    if playback_gate_governance is not None:
-        canary_environment = _as_str(
-            playback_gate_governance.get("playback_gate_environment_class"),
-        )
-
-    governance["vfs_runtime_rollout_environment_class"] = canary_environment
-    governance["vfs_runtime_rollout_canary_decision"] = "capture_runtime_status"
-    governance["vfs_runtime_rollout_merge_gate"] = "blocked"
-
-    if _as_int(governance["vfs_runtime_snapshot_available"]) <= 0:
-        return governance
-
-    rollout_readiness = _as_str(
-        governance["vfs_runtime_rollout_readiness"],
-        default="unknown",
-    )
-    windows_soak_ready = (
-        playback_gate_governance is not None
-        and _as_int(playback_gate_governance.get("playback_gate_windows_soak_ready")) > 0
-    )
-
-    if rollout_readiness == "blocked":
-        governance["vfs_runtime_rollout_canary_decision"] = "rollback_current_environment"
-        governance["vfs_runtime_rollout_merge_gate"] = "blocked"
-    elif not windows_soak_ready:
-        governance["vfs_runtime_rollout_canary_decision"] = "hold_until_windows_soak_is_green"
-        governance["vfs_runtime_rollout_merge_gate"] = "hold"
-        rollout_reasons = cast(list[str], governance["vfs_runtime_rollout_reasons"])
-        if "windows_vfs_soak_not_green" not in rollout_reasons:
-            rollout_reasons.append("windows_vfs_soak_not_green")
-    elif rollout_readiness == "warning":
-        governance["vfs_runtime_rollout_canary_decision"] = "hold_canary_and_repeat_soak"
-        governance["vfs_runtime_rollout_merge_gate"] = "hold"
-    else:
-        governance["vfs_runtime_rollout_canary_decision"] = "promote_to_next_environment_class"
-        governance["vfs_runtime_rollout_merge_gate"] = "ready"
-
-    return governance
+    return empty_playback_gate_governance_snapshot()
 
 
 def _vfs_runtime_governance_snapshot(
     playback_gate_governance: dict[str, int | str | list[str]] | None = None,
+    *,
+    request_tenant_id: str | None = None,
+    authorized_tenant_ids: set[str] | None = None,
 ) -> dict[str, int | float | str | list[str]]:
-    """Return additive governance counters extracted from the Rust runtime snapshot."""
+    """Return additive runtime governance counters from the shared governance module."""
 
-    payload = _load_vfs_runtime_status_payload()
-    governance = _empty_vfs_runtime_governance_snapshot()
-    if payload is None:
-        return _apply_vfs_rollout_policy(
-            governance,
-            playback_gate_governance=playback_gate_governance,
-        )
-    governance["vfs_runtime_snapshot_available"] = 1
-    governance["vfs_runtime_open_handles"] = _as_int(_nested_mapping_value(payload, "runtime", "open_handles"))
-    governance["vfs_runtime_peak_open_handles"] = _as_int(
-        _nested_mapping_value(payload, "runtime", "peak_open_handles")
-    )
-    governance["vfs_runtime_active_reads"] = _as_int(_nested_mapping_value(payload, "runtime", "active_reads"))
-    governance["vfs_runtime_peak_active_reads"] = _as_int(
-        _nested_mapping_value(payload, "runtime", "peak_active_reads")
-    )
-    governance["vfs_runtime_chunk_cache_weighted_bytes"] = _as_int(
-        _nested_mapping_value(payload, "runtime", "chunk_cache_weighted_bytes")
-    )
-    governance["vfs_runtime_chunk_cache_backend"] = _as_str(
-        _nested_mapping_value(payload, "chunk_cache", "backend"),
-        default="unknown",
-    )
-    governance["vfs_runtime_chunk_cache_memory_bytes"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "memory_bytes")
-    )
-    governance["vfs_runtime_chunk_cache_memory_max_bytes"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "memory_max_bytes")
-    )
-    governance["vfs_runtime_chunk_cache_memory_hits"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "memory_hits")
-    )
-    governance["vfs_runtime_chunk_cache_memory_misses"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "memory_misses")
-    )
-    governance["vfs_runtime_chunk_cache_disk_bytes"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "disk_bytes")
-    )
-    governance["vfs_runtime_chunk_cache_disk_max_bytes"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "disk_max_bytes")
-    )
-    governance["vfs_runtime_chunk_cache_disk_hits"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "disk_hits")
-    )
-    governance["vfs_runtime_chunk_cache_disk_misses"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "disk_misses")
-    )
-    governance["vfs_runtime_chunk_cache_disk_writes"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "disk_writes")
-    )
-    governance["vfs_runtime_chunk_cache_disk_write_errors"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "disk_write_errors")
-    )
-    governance["vfs_runtime_chunk_cache_disk_evictions"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "disk_evictions")
-    )
-    governance["vfs_runtime_handle_startup_total"] = _as_int(
-        _nested_mapping_value(payload, "handle_startup", "total")
-    )
-    governance["vfs_runtime_handle_startup_ok"] = _as_int(
-        _nested_mapping_value(payload, "handle_startup", "ok")
-    )
-    governance["vfs_runtime_handle_startup_error"] = _as_int(
-        _nested_mapping_value(payload, "handle_startup", "error")
-    )
-    governance["vfs_runtime_handle_startup_estale"] = _as_int(
-        _nested_mapping_value(payload, "handle_startup", "estale")
-    )
-    governance["vfs_runtime_handle_startup_cancelled"] = _as_int(
-        _nested_mapping_value(payload, "handle_startup", "cancelled")
-    )
-    governance["vfs_runtime_handle_startup_average_duration_ms"] = _as_int(
-        _nested_mapping_value(payload, "handle_startup", "average_duration_ms")
-    )
-    governance["vfs_runtime_handle_startup_max_duration_ms"] = _as_int(
-        _nested_mapping_value(payload, "handle_startup", "max_duration_ms")
-    )
-    governance["vfs_runtime_mounted_reads_total"] = _as_int(
-        _nested_mapping_value(payload, "mounted_reads", "total")
-    )
-    governance["vfs_runtime_mounted_reads_ok"] = _as_int(
-        _nested_mapping_value(payload, "mounted_reads", "ok")
-    )
-    governance["vfs_runtime_mounted_reads_error"] = _as_int(
-        _nested_mapping_value(payload, "mounted_reads", "error")
-    )
-    governance["vfs_runtime_mounted_reads_estale"] = _as_int(
-        _nested_mapping_value(payload, "mounted_reads", "estale")
-    )
-    governance["vfs_runtime_mounted_reads_cancelled"] = _as_int(
-        _nested_mapping_value(payload, "mounted_reads", "cancelled")
-    )
-    governance["vfs_runtime_mounted_reads_average_duration_ms"] = _as_int(
-        _nested_mapping_value(payload, "mounted_reads", "average_duration_ms")
-    )
-    governance["vfs_runtime_mounted_reads_max_duration_ms"] = _as_int(
-        _nested_mapping_value(payload, "mounted_reads", "max_duration_ms")
-    )
-    governance["vfs_runtime_upstream_fetch_operations"] = _as_int(
-        _nested_mapping_value(payload, "upstream_fetch", "operations")
-    )
-    governance["vfs_runtime_upstream_fetch_bytes_total"] = _as_int(
-        _nested_mapping_value(payload, "upstream_fetch", "bytes_total")
-    )
-    governance["vfs_runtime_upstream_fetch_average_duration_ms"] = _as_int(
-        _nested_mapping_value(payload, "upstream_fetch", "average_duration_ms")
-    )
-    governance["vfs_runtime_upstream_fetch_max_duration_ms"] = _as_int(
-        _nested_mapping_value(payload, "upstream_fetch", "max_duration_ms")
-    )
-    governance["vfs_runtime_upstream_fail_invalid_url"] = _as_int(
-        _nested_mapping_value(payload, "upstream_failures", "invalid_url")
-    )
-    governance["vfs_runtime_upstream_fail_build_request"] = _as_int(
-        _nested_mapping_value(payload, "upstream_failures", "build_request")
-    )
-    governance["vfs_runtime_upstream_fail_network"] = _as_int(
-        _nested_mapping_value(payload, "upstream_failures", "network")
-    )
-    governance["vfs_runtime_upstream_fail_stale_status"] = _as_int(
-        _nested_mapping_value(payload, "upstream_failures", "stale_status")
-    )
-    governance["vfs_runtime_upstream_fail_unexpected_status"] = _as_int(
-        _nested_mapping_value(payload, "upstream_failures", "unexpected_status")
-    )
-    governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "upstream_failures",
-            "unexpected_status_too_many_requests",
-        )
-    )
-    governance["vfs_runtime_upstream_fail_unexpected_status_server_error"] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "upstream_failures",
-            "unexpected_status_server_error",
-        )
-    )
-    governance["vfs_runtime_upstream_fail_read_body"] = _as_int(
-        _nested_mapping_value(payload, "upstream_failures", "read_body")
-    )
-    governance["vfs_runtime_upstream_retryable_network"] = _as_int(
-        _nested_mapping_value(payload, "upstream_retryable_events", "network")
-    )
-    governance["vfs_runtime_upstream_retryable_read_body"] = _as_int(
-        _nested_mapping_value(payload, "upstream_retryable_events", "read_body")
-    )
-    governance["vfs_runtime_upstream_retryable_status_too_many_requests"] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "upstream_retryable_events",
-            "status_too_many_requests",
-        )
-    )
-    governance["vfs_runtime_upstream_retryable_status_server_error"] = _as_int(
-        _nested_mapping_value(payload, "upstream_retryable_events", "status_server_error")
-    )
-    governance["vfs_runtime_backend_fallback_attempts"] = _as_int(
-        _nested_mapping_value(payload, "backend_fallback", "attempts")
-    )
-    governance["vfs_runtime_backend_fallback_success"] = _as_int(
-        _nested_mapping_value(payload, "backend_fallback", "success")
-    )
-    governance["vfs_runtime_backend_fallback_failure"] = _as_int(
-        _nested_mapping_value(payload, "backend_fallback", "failure")
-    )
-    governance["vfs_runtime_backend_fallback_attempts_direct_read_failure"] = _as_int(
-        _nested_mapping_value(payload, "backend_fallback", "attempts_direct_read_failure")
-    )
-    governance["vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable"] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "backend_fallback",
-            "attempts_inline_refresh_unavailable",
-        )
-    )
-    governance[
-        "vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure"
-    ] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "backend_fallback",
-            "attempts_post_inline_refresh_failure",
-        )
-    )
-    governance["vfs_runtime_backend_fallback_success_direct_read_failure"] = _as_int(
-        _nested_mapping_value(payload, "backend_fallback", "success_direct_read_failure")
-    )
-    governance["vfs_runtime_backend_fallback_success_inline_refresh_unavailable"] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "backend_fallback",
-            "success_inline_refresh_unavailable",
-        )
-    )
-    governance[
-        "vfs_runtime_backend_fallback_success_post_inline_refresh_failure"
-    ] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "backend_fallback",
-            "success_post_inline_refresh_failure",
-        )
-    )
-    governance["vfs_runtime_backend_fallback_failure_direct_read_failure"] = _as_int(
-        _nested_mapping_value(payload, "backend_fallback", "failure_direct_read_failure")
-    )
-    governance["vfs_runtime_backend_fallback_failure_inline_refresh_unavailable"] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "backend_fallback",
-            "failure_inline_refresh_unavailable",
-        )
-    )
-    governance[
-        "vfs_runtime_backend_fallback_failure_post_inline_refresh_failure"
-    ] = _as_int(
-        _nested_mapping_value(
-            payload,
-            "backend_fallback",
-            "failure_post_inline_refresh_failure",
-        )
-    )
-    governance["vfs_runtime_chunk_cache_hits"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "hits")
-    )
-    governance["vfs_runtime_chunk_cache_misses"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "misses")
-    )
-    governance["vfs_runtime_chunk_cache_inserts"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "inserts")
-    )
-    governance["vfs_runtime_chunk_cache_prefetch_hits"] = _as_int(
-        _nested_mapping_value(payload, "chunk_cache", "prefetch_hits")
-    )
-    governance["vfs_runtime_prefetch_concurrency_limit"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "concurrency_limit")
-    )
-    governance["vfs_runtime_prefetch_available_permits"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "available_permits")
-    )
-    governance["vfs_runtime_prefetch_active_permits"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "active_permits")
-    )
-    governance["vfs_runtime_prefetch_active_background_tasks"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "active_background_tasks")
-    )
-    governance["vfs_runtime_prefetch_peak_active_background_tasks"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "peak_active_background_tasks")
-    )
-    governance["vfs_runtime_prefetch_background_spawned"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "background_spawned")
-    )
-    governance["vfs_runtime_prefetch_background_backpressure"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "background_backpressure")
-    )
-    governance["vfs_runtime_prefetch_fairness_denied"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "fairness_denied")
-    )
-    governance["vfs_runtime_prefetch_global_backpressure_denied"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "global_backpressure_denied")
-    )
-    governance["vfs_runtime_prefetch_background_error"] = _as_int(
-        _nested_mapping_value(payload, "prefetch", "background_error")
-    )
-    governance["vfs_runtime_chunk_coalescing_in_flight_chunks"] = _as_int(
-        _nested_mapping_value(payload, "chunk_coalescing", "in_flight_chunks")
-    )
-    governance["vfs_runtime_chunk_coalescing_peak_in_flight_chunks"] = _as_int(
-        _nested_mapping_value(payload, "chunk_coalescing", "peak_in_flight_chunks")
-    )
-    governance["vfs_runtime_chunk_coalescing_waits_total"] = _as_int(
-        _nested_mapping_value(payload, "chunk_coalescing", "waits_total")
-    )
-    governance["vfs_runtime_chunk_coalescing_waits_hit"] = _as_int(
-        _nested_mapping_value(payload, "chunk_coalescing", "waits_hit")
-    )
-    governance["vfs_runtime_chunk_coalescing_waits_miss"] = _as_int(
-        _nested_mapping_value(payload, "chunk_coalescing", "waits_miss")
-    )
-    governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] = _as_float(
-        _nested_mapping_value(payload, "chunk_coalescing", "wait_average_duration_ms")
-    )
-    governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] = _as_float(
-        _nested_mapping_value(payload, "chunk_coalescing", "wait_max_duration_ms")
-    )
-    governance["vfs_runtime_inline_refresh_success"] = _as_int(
-        _nested_mapping_value(payload, "inline_refresh", "success")
-    )
-    governance["vfs_runtime_inline_refresh_no_url"] = _as_int(
-        _nested_mapping_value(payload, "inline_refresh", "no_url")
-    )
-    governance["vfs_runtime_inline_refresh_error"] = _as_int(
-        _nested_mapping_value(payload, "inline_refresh", "error")
-    )
-    governance["vfs_runtime_inline_refresh_timeout"] = _as_int(
-        _nested_mapping_value(payload, "inline_refresh", "timeout")
-    )
-    governance["vfs_runtime_windows_callbacks_cancelled"] = _as_int(
-        _nested_mapping_value(payload, "windows_projfs", "callbacks_cancelled")
-    )
-    governance["vfs_runtime_windows_callbacks_error"] = _as_int(
-        _nested_mapping_value(payload, "windows_projfs", "callbacks_error")
-    )
-    governance["vfs_runtime_windows_callbacks_estale"] = _as_int(
-        _nested_mapping_value(payload, "windows_projfs", "callbacks_estale")
-    )
-    total_cache_lookups = (
-        _as_int(governance["vfs_runtime_chunk_cache_hits"])
-        + _as_int(governance["vfs_runtime_chunk_cache_misses"])
-    )
-    governance["vfs_runtime_cache_hit_ratio"] = _safe_ratio(
-        _as_int(governance["vfs_runtime_chunk_cache_hits"]),
-        total_cache_lookups,
-    )
-    governance["vfs_runtime_fallback_success_ratio"] = _safe_ratio(
-        _as_int(governance["vfs_runtime_backend_fallback_success"]),
-        _as_int(governance["vfs_runtime_backend_fallback_attempts"]),
-    )
-    governance["vfs_runtime_prefetch_pressure_ratio"] = _safe_ratio(
-        _as_int(governance["vfs_runtime_prefetch_active_permits"]),
-        _as_int(governance["vfs_runtime_prefetch_active_permits"])
-        + _as_int(governance["vfs_runtime_prefetch_available_permits"]),
-    )
-    governance["vfs_runtime_provider_pressure_incidents"] = (
-        _as_int(governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"])
-        + _as_int(governance["vfs_runtime_upstream_fail_unexpected_status_server_error"])
-        + _as_int(governance["vfs_runtime_upstream_retryable_status_too_many_requests"])
-        + _as_int(governance["vfs_runtime_upstream_retryable_status_server_error"])
-        + _as_int(governance["vfs_runtime_prefetch_background_backpressure"])
-    )
-    governance["vfs_runtime_fairness_pressure_incidents"] = (
-        _as_int(governance["vfs_runtime_prefetch_fairness_denied"])
-        + _as_int(governance["vfs_runtime_prefetch_global_backpressure_denied"])
-    )
-    cache_pressure_reasons: list[str] = []
-    cache_memory_pressure_ratio = _safe_ratio(
-        _as_int(governance["vfs_runtime_chunk_cache_memory_bytes"]),
-        _as_int(governance["vfs_runtime_chunk_cache_memory_max_bytes"]),
-    )
-    cache_disk_pressure_ratio = _safe_ratio(
-        _as_int(governance["vfs_runtime_chunk_cache_disk_bytes"]),
-        _as_int(governance["vfs_runtime_chunk_cache_disk_max_bytes"]),
-    )
-    if _as_int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0:
-        cache_pressure_reasons.append("disk_write_errors")
-    if max(cache_memory_pressure_ratio, cache_disk_pressure_ratio) >= 0.85:
-        cache_pressure_reasons.append("cache_capacity_high")
-    if _as_int(governance["vfs_runtime_chunk_cache_disk_evictions"]) > 0:
-        cache_pressure_reasons.append("disk_evictions_observed")
-    governance["vfs_runtime_cache_pressure_class"] = _pressure_class(
-        critical=(
-            _as_int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0
-            or max(cache_memory_pressure_ratio, cache_disk_pressure_ratio) >= 0.95
-        ),
-        warning=bool(cache_pressure_reasons),
-    )
-    governance["vfs_runtime_cache_pressure_reasons"] = cache_pressure_reasons
-
-    chunk_pressure_reasons: list[str] = []
-    if _as_int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) > 0:
-        chunk_pressure_reasons.append("coalescing_wait_misses")
-    if _as_float(governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"]) >= 10.0:
-        chunk_pressure_reasons.append("coalescing_wait_latency_high")
-    if _as_float(governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"]) >= 75.0:
-        chunk_pressure_reasons.append("coalescing_wait_spike")
-    governance["vfs_runtime_chunk_coalescing_pressure_class"] = _pressure_class(
-        critical=(
-            _as_int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) >= 5
-            or _as_float(governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"]) >= 250.0
-        ),
-        warning=bool(chunk_pressure_reasons),
-    )
-    governance["vfs_runtime_chunk_coalescing_pressure_reasons"] = chunk_pressure_reasons
-
-    upstream_wait_reasons: list[str] = []
-    if _as_int(governance["vfs_runtime_provider_pressure_incidents"]) > 0:
-        upstream_wait_reasons.append("provider_pressure_incidents")
-    if _as_int(governance["vfs_runtime_upstream_retryable_network"]) > 0:
-        upstream_wait_reasons.append("retryable_network_wait")
-    if _as_int(governance["vfs_runtime_upstream_retryable_read_body"]) > 0:
-        upstream_wait_reasons.append("retryable_read_body_wait")
-    if _as_int(governance["vfs_runtime_upstream_fetch_average_duration_ms"]) >= 50:
-        upstream_wait_reasons.append("average_fetch_latency_high")
-    if _as_int(governance["vfs_runtime_upstream_fetch_max_duration_ms"]) >= 250:
-        upstream_wait_reasons.append("max_fetch_latency_high")
-    governance["vfs_runtime_upstream_wait_class"] = _pressure_class(
-        critical=(
-            _as_int(governance["vfs_runtime_provider_pressure_incidents"]) >= 10
-            or _as_int(governance["vfs_runtime_upstream_fetch_average_duration_ms"]) >= 100
-            or _as_int(governance["vfs_runtime_upstream_fetch_max_duration_ms"]) >= 500
-        ),
-        warning=bool(upstream_wait_reasons),
-    )
-    governance["vfs_runtime_upstream_wait_reasons"] = upstream_wait_reasons
-
-    refresh_pressure_reasons: list[str] = []
-    if _as_int(governance["vfs_runtime_backend_fallback_failure"]) > 0:
-        refresh_pressure_reasons.append("backend_fallback_failures")
-    if _as_int(governance["vfs_runtime_inline_refresh_error"]) > 0:
-        refresh_pressure_reasons.append("inline_refresh_errors")
-    if _as_int(governance["vfs_runtime_inline_refresh_timeout"]) > 0:
-        refresh_pressure_reasons.append("inline_refresh_timeouts")
-    if _as_int(governance["vfs_runtime_backend_fallback_attempts"]) > 0:
-        refresh_pressure_reasons.append("backend_fallback_activity")
-    governance["vfs_runtime_refresh_pressure_class"] = _pressure_class(
-        critical=(
-            _as_int(governance["vfs_runtime_backend_fallback_failure"]) > 0
-            or _as_int(governance["vfs_runtime_inline_refresh_timeout"]) >= 3
-        ),
-        warning=bool(refresh_pressure_reasons),
-    )
-    governance["vfs_runtime_refresh_pressure_reasons"] = refresh_pressure_reasons
-    rollout_reasons: list[str] = []
-    if _as_int(governance["vfs_runtime_backend_fallback_failure"]) > 0:
-        rollout_reasons.append("backend_fallback_failures")
-    if _as_int(governance["vfs_runtime_mounted_reads_error"]) > 0:
-        rollout_reasons.append("mounted_read_errors")
-    if _as_int(governance["vfs_runtime_prefetch_background_error"]) > 0:
-        rollout_reasons.append("prefetch_background_errors")
-    if _as_int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0:
-        rollout_reasons.append("disk_cache_write_errors")
-    if rollout_reasons:
-        governance["vfs_runtime_rollout_readiness"] = "blocked"
-        governance["vfs_runtime_rollout_next_action"] = "resolve_blocking_runtime_failures"
-    else:
-        if _as_int(governance["vfs_runtime_provider_pressure_incidents"]) > 0:
-            rollout_reasons.append("provider_pressure_incidents")
-        if _as_int(governance["vfs_runtime_fairness_pressure_incidents"]) > 0:
-            rollout_reasons.append("fairness_pressure_incidents")
-        if _as_int(governance["vfs_runtime_inline_refresh_error"]) > 0:
-            rollout_reasons.append("inline_refresh_errors")
-        if _as_int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) > 0:
-            rollout_reasons.append("chunk_coalescing_misses")
-    if governance["vfs_runtime_rollout_readiness"] != "blocked" and rollout_reasons:
-        governance["vfs_runtime_rollout_readiness"] = "warning"
-        governance["vfs_runtime_rollout_next_action"] = "repeat_soak_and_tune_thresholds"
-    elif governance["vfs_runtime_rollout_readiness"] != "blocked":
-        governance["vfs_runtime_rollout_readiness"] = "ready"
-        governance["vfs_runtime_rollout_next_action"] = "promote_to_next_environment_class"
-        rollout_reasons.append("no_blocking_runtime_signals")
-    governance["vfs_runtime_rollout_reasons"] = rollout_reasons
-    governance["vfs_runtime_active_handle_summaries"] = _as_str_list(
-        _nested_mapping_value(payload, "runtime", "active_handle_summaries")
-    )
-    return _apply_vfs_rollout_policy(
-        governance,
+    return vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
+        request_tenant_id=request_tenant_id,
+        authorized_tenant_ids=authorized_tenant_ids,
     )
+
+
+def _runtime_pressure_requires_queued_dispatch(
+    governance: dict[str, int | float | str | list[str]],
+) -> tuple[bool, bool]:
+    """Return queued-dispatch recommendation and latency-SLO breach flag."""
+
+    return runtime_pressure_requires_queued_dispatch(governance)
 
 
 def _hls_failed_lease_trigger_governance_snapshot() -> dict[str, int]:
     """Return additive governance counters for route-adjacent HLS failed-lease refresh triggering."""
 
     active_tasks = sum(1 for task in _HLS_FAILED_LEASE_BACKGROUND_ROUTE_TASKS if not task.done())
-    return {
-        "hls_failed_lease_refresh_trigger_starts": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["starts"],
-        "hls_failed_lease_refresh_trigger_no_action": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "no_action"
-        ],
-        "hls_failed_lease_refresh_trigger_controller_unavailable": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "controller_unavailable"
-        ],
-        "hls_failed_lease_refresh_trigger_already_pending": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "already_pending"
-        ],
-        "hls_failed_lease_refresh_trigger_backoff_pending": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "backoff_pending"
-        ],
-        "hls_failed_lease_refresh_trigger_failures": _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE[
-            "failures"
-        ],
-        "hls_failed_lease_refresh_trigger_tasks_active": active_tasks,
-    }
+    return hls_failed_lease_trigger_governance_snapshot(active_tasks=active_tasks)
 
 
 def _hls_restricted_fallback_trigger_governance_snapshot() -> dict[str, int]:
@@ -1448,76 +335,25 @@ def _hls_restricted_fallback_trigger_governance_snapshot() -> dict[str, int]:
     active_tasks = sum(
         1 for task in _HLS_RESTRICTED_FALLBACK_BACKGROUND_ROUTE_TASKS if not task.done()
     )
-    return {
-        "hls_restricted_fallback_refresh_trigger_starts": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "starts"
-        ],
-        "hls_restricted_fallback_refresh_trigger_no_action": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "no_action"
-        ],
-        "hls_restricted_fallback_refresh_trigger_controller_unavailable": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "controller_unavailable"
-        ],
-        "hls_restricted_fallback_refresh_trigger_already_pending": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "already_pending"
-        ],
-        "hls_restricted_fallback_refresh_trigger_backoff_pending": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "backoff_pending"
-        ],
-        "hls_restricted_fallback_refresh_trigger_failures": _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE[
-            "failures"
-        ],
-        "hls_restricted_fallback_refresh_trigger_tasks_active": active_tasks,
-    }
+    return hls_restricted_fallback_trigger_governance_snapshot(active_tasks=active_tasks)
 
 
 def _is_retryable_remote_hls_error(exc: HTTPException) -> bool:
     """Return whether one remote-HLS HTTP exception is safe to retry briefly."""
 
-    if exc.status_code not in {status.HTTP_502_BAD_GATEWAY, status.HTTP_504_GATEWAY_TIMEOUT}:
-        return False
-    detail = exc.detail if isinstance(exc.detail, str) else ""
-    return detail in {
-        "Upstream HLS request timed out",
-        "Upstream HLS request transport failed",
-        "Upstream playback request timed out",
-        "Upstream playback request transport failed",
-    }
+    return is_retryable_remote_hls_error(exc)
 
 
 def _raise_remote_hls_cooldown_if_active(*, cooldown_key: str) -> None:
     """Fail fast when one remote-HLS upstream is in a short cooldown window."""
 
-    current_time = monotonic()
-    with _REMOTE_HLS_COOLDOWN_LOCK:
-        _cleanup_remote_hls_cooldowns(now=current_time)
-        cooldown = _REMOTE_HLS_COOLDOWNS.get(cooldown_key)
-        if cooldown is None:
-            return
-        expires_at, status_code, detail = cooldown
-        _REMOTE_HLS_RETRY_GOVERNANCE["cooldown_hits"] += 1
-        REMOTE_HLS_RECOVERY_EVENTS.labels(event="cooldown_hit").inc()
-        retry_after = max(1, int(expires_at - current_time + 0.999))
-    raise HTTPException(
-        status_code=status_code,
-        detail=detail,
-        headers={"Retry-After": str(retry_after)},
-    )
+    raise_remote_hls_cooldown_if_active(cooldown_key=cooldown_key)
 
 
 def _start_remote_hls_cooldown(*, cooldown_key: str, exc: HTTPException) -> None:
     """Start a short cooldown for one remote-HLS upstream after repeated transient failure."""
 
-    detail = exc.detail if isinstance(exc.detail, str) else "Upstream HLS request transport failed"
-    with _REMOTE_HLS_COOLDOWN_LOCK:
-        _cleanup_remote_hls_cooldowns()
-        _REMOTE_HLS_COOLDOWNS[cooldown_key] = (
-            monotonic() + _REMOTE_HLS_COOLDOWN_SECONDS,
-            exc.status_code,
-            detail,
-        )
-        _REMOTE_HLS_RETRY_GOVERNANCE["cooldown_starts"] += 1
-    REMOTE_HLS_RECOVERY_EVENTS.labels(event="cooldown_start").inc()
+    start_remote_hls_cooldown(cooldown_key=cooldown_key, exc=exc)
 
 
 async def _run_remote_hls_with_retry(
@@ -1527,46 +363,13 @@ async def _run_remote_hls_with_retry(
 ) -> Any:
     """Run one remote-HLS operation with a single transient retry and short cooldown."""
 
-    _raise_remote_hls_cooldown_if_active(cooldown_key=cooldown_key)
-    for attempt in range(_REMOTE_HLS_RETRY_ATTEMPTS):
-        try:
-            return await operation()
-        except HTTPException as exc:
-            if not _is_retryable_remote_hls_error(exc):
-                raise
-            if attempt + 1 >= _REMOTE_HLS_RETRY_ATTEMPTS:
-                _start_remote_hls_cooldown(cooldown_key=cooldown_key, exc=exc)
-                raise
-            _REMOTE_HLS_RETRY_GOVERNANCE["retry_attempts"] += 1
-            REMOTE_HLS_RECOVERY_EVENTS.labels(event="retry_attempt").inc()
-            await asyncio.sleep(0)
-
-    raise AssertionError("remote HLS retry loop exhausted unexpectedly")
+    return await run_remote_hls_with_retry(cooldown_key=cooldown_key, operation=operation)
 
 
 def _validate_upstream_hls_playlist(playlist_text: str) -> None:
     """Validate one upstream HLS playlist before rewriting its child references."""
 
-    lines = playlist_text.splitlines()
-    if not lines:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Upstream HLS playlist is empty",
-        )
-
-    first_non_empty = next((line.strip() for line in lines if line.strip()), "")
-    if first_non_empty != "#EXTM3U":
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Upstream HLS playlist is malformed",
-        )
-
-    has_reference = any(line.strip() and not line.strip().startswith("#") for line in lines)
-    if not has_reference:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Upstream HLS playlist has no child references",
-        )
+    validate_upstream_hls_playlist(playlist_text)
 
 
 def _encode_sse(payload: dict[str, Any]) -> bytes:
@@ -1729,14 +532,11 @@ def _record_route_refresh_trigger_pending(
 ) -> bool:
     """Record duplicate-trigger/backoff governance when route-adjacent work is already pending."""
 
-    if not controller.has_pending(item_identifier):
-        return False
-
-    governance["already_pending"] += 1
-    last_result = controller.get_last_result(item_identifier)
-    if last_result is not None and last_result.retry_after_seconds is not None:
-        governance["backoff_pending"] += 1
-    return True
+    return record_route_refresh_trigger_pending(
+        governance=governance,
+        item_identifier=item_identifier,
+        controller=controller,
+    )
 
 
 async def _run_app_scoped_refresh_trigger(
@@ -1744,7 +544,8 @@ async def _run_app_scoped_refresh_trigger(
     request: Request,
     item_identifier: str,
     governance: dict[str, int],
-    trigger: Callable[[Any, str], Awaitable[Any]],
+    trigger: Callable[..., Awaitable[Any]],
+    prefer_queued: bool | None = None,
 ) -> None:
     """Trigger one app-scoped refresh controller and record shared route governance."""
 
@@ -1755,7 +556,11 @@ async def _run_app_scoped_refresh_trigger(
         return
 
     try:
-        result = await trigger(resources, item_identifier)
+        result = await trigger(
+            resources,
+            item_identifier,
+            prefer_queued=prefer_queued,
+        )
     except Exception:
         governance["failures"] += 1
         return
@@ -1780,7 +585,27 @@ async def _run_app_scoped_refresh_trigger(
         governance["no_action"] += 1
 
 
-async def _run_direct_playback_refresh_trigger(*, request: Request, item_identifier: str) -> None:
+def _select_refresh_dispatch_preference(
+    *,
+    resources: AppResources,
+    queued_controller_available: bool,
+) -> bool:
+    """Return whether route-adjacent refresh work should prefer queued dispatch."""
+
+    return select_refresh_dispatch_preference(
+        refresh_dispatch_mode=resources.settings.stream.refresh_dispatch_mode,
+        queued_controller_available=queued_controller_available,
+        runtime_governance_provider=_vfs_runtime_governance_snapshot,
+        runtime_pressure_evaluator=_runtime_pressure_requires_queued_dispatch,
+    )
+
+
+async def _run_direct_playback_refresh_trigger(
+    *,
+    request: Request,
+    item_identifier: str,
+    prefer_queued: bool | None = None,
+) -> None:
     """Trigger app-scoped direct-play refresh work without blocking the route response path."""
 
     if not await _allow_tenant_refresh_trigger(
@@ -1794,6 +619,7 @@ async def _run_direct_playback_refresh_trigger(*, request: Request, item_identif
         item_identifier=item_identifier,
         governance=_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE,
         trigger=trigger_direct_playback_refresh_from_resources,
+        prefer_queued=prefer_queued,
     )
 
 
@@ -1806,7 +632,12 @@ def _is_selected_hls_failed_lease_error(exc: HTTPException) -> bool:
     )
 
 
-async def _run_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier: str) -> None:
+async def _run_hls_failed_lease_refresh_trigger(
+    *,
+    request: Request,
+    item_identifier: str,
+    prefer_queued: bool | None = None,
+) -> None:
     """Trigger app-scoped selected-HLS failed-lease refresh work without blocking the route response path."""
 
     if not await _allow_tenant_refresh_trigger(
@@ -1820,11 +651,15 @@ async def _run_hls_failed_lease_refresh_trigger(*, request: Request, item_identi
         item_identifier=item_identifier,
         governance=_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE,
         trigger=trigger_hls_failed_lease_refresh_from_resources,
+        prefer_queued=prefer_queued,
     )
 
 
 async def _run_hls_restricted_fallback_refresh_trigger(
-    *, request: Request, item_identifier: str
+    *,
+    request: Request,
+    item_identifier: str,
+    prefer_queued: bool | None = None,
 ) -> None:
     """Trigger app-scoped selected-HLS restricted-fallback refresh work without blocking the route response path."""
 
@@ -1839,6 +674,7 @@ async def _run_hls_restricted_fallback_refresh_trigger(
         item_identifier=item_identifier,
         governance=_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE,
         trigger=trigger_hls_restricted_fallback_refresh_from_resources,
+        prefer_queued=prefer_queued,
     )
 
 
@@ -1853,8 +689,18 @@ def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier
 
     controller = (
         resources.queued_hls_failed_lease_refresh_controller
-        or resources.hls_failed_lease_refresh_controller
+        if _select_refresh_dispatch_preference(
+            resources=resources,
+            queued_controller_available=resources.queued_hls_failed_lease_refresh_controller
+            is not None,
+        )
+        else resources.hls_failed_lease_refresh_controller
     )
+    if controller is None:
+        controller = (
+            resources.hls_failed_lease_refresh_controller
+            or resources.queued_hls_failed_lease_refresh_controller
+        )
     if controller is None:
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1868,7 +714,13 @@ def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier
 
     try:
         task = asyncio.create_task(
-            _run_hls_failed_lease_refresh_trigger(request=request, item_identifier=item_identifier),
+            _run_hls_failed_lease_refresh_trigger(
+                request=request,
+                item_identifier=item_identifier,
+                prefer_queued=(
+                    controller is resources.queued_hls_failed_lease_refresh_controller
+                ),
+            ),
             name=f"hls-failed-lease-refresh-trigger:{item_identifier}",
         )
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["starts"] += 1
@@ -1892,8 +744,19 @@ def _start_hls_restricted_fallback_refresh_trigger(
 
     controller = (
         resources.queued_hls_restricted_fallback_refresh_controller
-        or resources.hls_restricted_fallback_refresh_controller
+        if _select_refresh_dispatch_preference(
+            resources=resources,
+            queued_controller_available=(
+                resources.queued_hls_restricted_fallback_refresh_controller is not None
+            ),
+        )
+        else resources.hls_restricted_fallback_refresh_controller
     )
+    if controller is None:
+        controller = (
+            resources.hls_restricted_fallback_refresh_controller
+            or resources.queued_hls_restricted_fallback_refresh_controller
+        )
     if controller is None:
         _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1910,6 +773,9 @@ def _start_hls_restricted_fallback_refresh_trigger(
             _run_hls_restricted_fallback_refresh_trigger(
                 request=request,
                 item_identifier=item_identifier,
+                prefer_queued=(
+                    controller is resources.queued_hls_restricted_fallback_refresh_controller
+                ),
             ),
             name=f"hls-restricted-fallback-refresh-trigger:{item_identifier}",
         )
@@ -1932,8 +798,17 @@ def _start_direct_playback_refresh_trigger(*, request: Request, item_identifier:
 
     controller = (
         resources.queued_direct_playback_refresh_controller
-        or resources.playback_refresh_controller
+        if _select_refresh_dispatch_preference(
+            resources=resources,
+            queued_controller_available=resources.queued_direct_playback_refresh_controller
+            is not None,
+        )
+        else resources.playback_refresh_controller
     )
+    if controller is None:
+        controller = (
+            resources.playback_refresh_controller or resources.queued_direct_playback_refresh_controller
+        )
     if controller is None:
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1947,7 +822,11 @@ def _start_direct_playback_refresh_trigger(*, request: Request, item_identifier:
 
     try:
         task = asyncio.create_task(
-            _run_direct_playback_refresh_trigger(request=request, item_identifier=item_identifier),
+            _run_direct_playback_refresh_trigger(
+                request=request,
+                item_identifier=item_identifier,
+                prefer_queued=(controller is resources.queued_direct_playback_refresh_controller),
+            ),
             name=f"direct-play-refresh-trigger:{item_identifier}",
         )
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["starts"] += 1
@@ -2397,130 +1276,24 @@ async def get_event_types(
 
 @router.get("/status", operation_id="stream.status", response_model=ServingStatusResponse)
 async def get_stream_status(
+    request: Request,
     db: Annotated[DatabaseRuntime, Depends(get_db)],
     resources: Annotated[AppResources, Depends(get_resources)],
 ) -> ServingStatusResponse:
     """Return internal serving-session/accounting state for the shared serving core."""
 
-    byte_streaming.cleanup_expired_serving_runtime()
-    playback_governance = await PlaybackSourceService(db).build_playback_governance_snapshot()
-    vfs_governance = (
-        resources.vfs_catalog_server.build_governance_snapshot()
-        if resources.vfs_catalog_server is not None
-        else build_empty_vfs_catalog_governance_snapshot()
-    )
-    playback_gate_governance = _playback_gate_governance_snapshot()
-    vfs_runtime_governance = _vfs_runtime_governance_snapshot(
-        playback_gate_governance=playback_gate_governance,
-    )
-    sessions = [
-        ServingSessionResponse(
-            session_id=session.session_id,
-            category=session.category,
-            resource=session.resource,
-            started_at=session.started_at.isoformat(),
-            last_activity_at=session.last_activity_at.isoformat(),
-            bytes_served=session.bytes_served,
-        )
-        for session in byte_streaming.get_active_session_snapshot()
-    ]
-    handles = [
-        ServingHandleResponse(
-            handle_id=handle.handle_id,
-            session_id=handle.session_id,
-            category=handle.category,
-            path=handle.path,
-            path_id=handle.path_id,
-            created_at=handle.created_at.isoformat(),
-            last_activity_at=handle.last_activity_at.isoformat(),
-            bytes_served=handle.bytes_served,
-            read_offset=handle.read_offset,
-        )
-        for handle in byte_streaming.get_active_handle_snapshot()
-    ]
-    paths = [
-        ServingPathResponse(
-            path_id=path.path_id,
-            category=path.category,
-            path=path.path,
-            created_at=path.created_at.isoformat(),
-            last_activity_at=path.last_activity_at.isoformat(),
-            size_bytes=path.size_bytes,
-            active_handle_count=path.active_handle_count,
-        )
-        for path in byte_streaming.get_active_path_snapshot()
-    ]
-    queued_refresh_controllers_attached = int(
-        resources.queued_direct_playback_refresh_controller is not None
-        and resources.queued_hls_failed_lease_refresh_controller is not None
-        and resources.queued_hls_restricted_fallback_refresh_controller is not None
-    )
-    heavy_stage_policy = resources.settings.orchestration.heavy_stage_isolation
-    heavy_stage_policy_violations = heavy_stage_policy.policy_violations()
-    heavy_stage_exit_ready = int(
-        heavy_stage_policy.exit_ready(
-            arq_enabled=resources.settings.arq_enabled,
-            refresh_dispatch_mode=resources.settings.stream.refresh_dispatch_mode,
-            queued_refresh_ready=bool(
-                resources.settings.stream.refresh_dispatch_mode != "queued"
-                or (resources.arq_redis is not None and queued_refresh_controllers_attached)
-            ),
-            queued_refresh_proof_refs=resources.settings.orchestration.queued_refresh_proof_refs,
-        )
-    )
-    return ServingStatusResponse(
-        sessions=sessions,
-        handles=handles,
-        paths=paths,
-        governance=ServingGovernanceResponse.model_validate(
-            {
-                **byte_streaming.get_serving_governance_snapshot(),
-                **_hls_route_failure_governance_snapshot(),
-                **_remote_hls_recovery_governance_snapshot(),
-                **_direct_playback_trigger_governance_snapshot(),
-                **_hls_failed_lease_trigger_governance_snapshot(),
-                **_hls_restricted_fallback_trigger_governance_snapshot(),
-                **playback_governance,
-                **vfs_governance,
-                **vfs_runtime_governance,
-                **playback_gate_governance,
-                "stream_refresh_dispatch_mode": resources.settings.stream.refresh_dispatch_mode,
-                "stream_refresh_queue_enabled": int(
-                    resources.settings.stream.refresh_dispatch_mode == "queued"
-                ),
-                "stream_refresh_queue_ready": int(
-                    resources.settings.stream.refresh_dispatch_mode != "queued"
-                    or (resources.arq_redis is not None and queued_refresh_controllers_attached)
-                ),
-                "stream_refresh_proof_ref_count": len(
-                    resources.settings.orchestration.queued_refresh_proof_refs
-                ),
-                "heavy_stage_executor_mode": heavy_stage_policy.executor_mode,
-                "heavy_stage_max_workers": heavy_stage_policy.max_workers,
-                "heavy_stage_max_tasks_per_child": heavy_stage_policy.max_tasks_per_child,
-                "heavy_stage_spawn_context_required": int(
-                    heavy_stage_policy.require_spawn_context
-                ),
-                "heavy_stage_max_worker_ceiling": heavy_stage_policy.max_worker_ceiling,
-                "heavy_stage_policy_violation_count": len(heavy_stage_policy_violations),
-                "heavy_stage_policy_violations": list(heavy_stage_policy_violations),
-                "heavy_stage_process_isolation_required": int(
-                    heavy_stage_policy.process_isolation_required()
-                ),
-                "heavy_stage_exit_ready": heavy_stage_exit_ready,
-                "heavy_stage_index_timeout_seconds": heavy_stage_policy.index_timeout_seconds,
-                "heavy_stage_parse_timeout_seconds": heavy_stage_policy.parse_timeout_seconds,
-                "heavy_stage_rank_timeout_seconds": heavy_stage_policy.rank_timeout_seconds,
-                "heavy_stage_proof_ref_count": len(heavy_stage_policy.proof_refs),
-                "serving_active_session_summaries": [
-                    f"{session.session_id}:{session.category}:{session.resource}"
-                    for session in sessions[:10]
-                ],
-                "vfs_runtime_active_handle_summaries": vfs_runtime_governance.get(
-                    "vfs_runtime_active_handle_summaries", []
-                ),
-            }
+    return await build_serving_status_response(
+        request=request,
+        db=db,
+        resources=resources,
+        direct_playback_active_tasks=sum(1 for task in _BACKGROUND_ROUTE_TASKS if not task.done()),
+        hls_failed_lease_active_tasks=sum(
+            1 for task in _HLS_FAILED_LEASE_BACKGROUND_ROUTE_TASKS if not task.done()
         ),
+        hls_restricted_fallback_active_tasks=sum(
+            1 for task in _HLS_RESTRICTED_FALLBACK_BACKGROUND_ROUTE_TASKS if not task.done()
+        ),
+        stream_refresh_latency_slo_ms=_STREAM_REFRESH_LATENCY_SLO_MS,
     )
 
 

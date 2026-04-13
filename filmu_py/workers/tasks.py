@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import contextlib
 import functools
 import json
 import logging
-import multiprocessing
-import os
 from collections.abc import Awaitable, Callable
-from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -24,7 +20,6 @@ from arq.connections import ArqRedis, RedisSettings, create_pool
 from arq.cron import cron
 from arq.jobs import Job, JobStatus
 from arq.worker import Worker
-from prometheus_client import Counter, Histogram
 from redis.asyncio import Redis
 from sqlalchemy import select
 
@@ -41,7 +36,7 @@ from filmu_py.plugins.context import HostPluginDatasource, PluginContextProvider
 from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
 from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
-from filmu_py.rtn import RTN, ParsedData, RankedTorrent, RankingProfile
+from filmu_py.rtn import RankedTorrent, RankingProfile
 from filmu_py.services.debrid import (
     AllDebridPlaybackClient,
     DebridDownloadClient,
@@ -67,6 +62,9 @@ from filmu_py.services.playback import (
 )
 from filmu_py.services.settings_service import load_settings
 from filmu_py.state.item import InvalidItemTransition, ItemEvent, ItemState
+from filmu_py.workers import stage_isolation as _stage_isolation
+from filmu_py.workers import stage_job_ids as _stage_job_ids
+from filmu_py.workers import stage_observability as _stage_observability
 from filmu_py.workers.retry import (
     RetryPolicy,
     bind_worker_contextvars,
@@ -87,231 +85,35 @@ OUTBOX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=5, max_dela
 METADATA_REINDEX_RETRY_POLICY = RetryPolicy(
     max_attempts=3, base_delay_seconds=30, max_delay_seconds=300
 )
-WORKER_ENQUEUE_DECISIONS_TOTAL = Counter(
-    "filmu_py_worker_enqueue_decisions_total",
-    "Downstream worker enqueue decisions by stage",
-    ["stage", "decision"],
+WORKER_CLEANUP_TOTAL = _stage_observability.WORKER_CLEANUP_TOTAL
+WORKER_ENQUEUE_DECISIONS_TOTAL = _stage_observability.WORKER_ENQUEUE_DECISIONS_TOTAL
+WORKER_ENQUEUE_DEFER_SECONDS = _stage_observability.WORKER_ENQUEUE_DEFER_SECONDS
+WORKER_JOB_STATUS_TOTAL = _stage_observability.WORKER_JOB_STATUS_TOTAL
+WORKER_STAGE_IDEMPOTENCY_TOTAL = _stage_observability.WORKER_STAGE_IDEMPOTENCY_TOTAL
+_job_status_name = _stage_observability.job_status_name
+_record_cleanup_action = _stage_observability.record_cleanup_action
+_record_enqueue_decision = _stage_observability.record_enqueue_decision
+_record_enqueue_defer = _stage_observability.record_enqueue_defer
+_record_job_status = _stage_observability.record_job_status
+_record_stage_idempotency = _stage_observability.record_stage_idempotency
+debrid_item_job_id = _stage_job_ids.debrid_item_job_id
+finalize_item_job_id = _stage_job_ids.finalize_item_job_id
+index_item_job_id = _stage_job_ids.index_item_job_id
+parse_scrape_results_job_id = _stage_job_ids.parse_scrape_results_job_id
+process_scraped_item_job_id = _stage_job_ids.process_scraped_item_job_id
+rank_streams_job_id = _stage_job_ids.rank_streams_job_id
+refresh_direct_playback_link_job_id = _stage_job_ids.refresh_direct_playback_link_job_id
+refresh_selected_hls_failed_lease_job_id = _stage_job_ids.refresh_selected_hls_failed_lease_job_id
+refresh_selected_hls_restricted_fallback_job_id = (
+    _stage_job_ids.refresh_selected_hls_restricted_fallback_job_id
 )
-WORKER_JOB_STATUS_TOTAL = Counter(
-    "filmu_py_worker_job_status_total",
-    "Observed ARQ job statuses while coordinating worker stages",
-    ["stage", "status"],
-)
-WORKER_CLEANUP_TOTAL = Counter(
-    "filmu_py_worker_cleanup_total",
-    "Cleanup actions taken before replaying or deduplicating worker stages",
-    ["stage", "action"],
-)
-WORKER_STAGE_IDEMPOTENCY_TOTAL = Counter(
-    "filmu_py_worker_stage_idempotency_total",
-    "Observed stage idempotency and replay outcomes by stage",
-    ["stage", "outcome"],
-)
-WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
-    "filmu_py_worker_enqueue_defer_seconds",
-    "Deferred worker enqueue delays in seconds",
-    ["stage"],
-    buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
-)
-_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int, int, int], Executor] = {}
-
-
-class _RankBatchInput(TypedDict):
-    """Serializable input payload for isolated ranking work."""
-
-    stream_id: str
-    raw_title: str
-    parsed_title: dict[str, object] | str
-    resolution: str | None
-    partial_scope_bonus: int
-
-
-class _RankBatchRecord(TypedDict):
-    """Serializable output payload from isolated ranking work."""
-
-    stream_id: str
-    rank_score: int
-    lev_ratio: float
-    fetch: bool
-    passed: bool
-    rejection_reason: str | None
-
-
-def _heavy_stage_executor(stage_name: str) -> Executor:
-    """Return the bounded executor used for one CPU-heavy worker stage."""
-
-    settings = get_settings()
-    policy = settings.orchestration.heavy_stage_isolation
-    violations = policy.policy_violations()
-    if violations:
-        raise RuntimeError(
-            "invalid heavy-stage isolation policy for "
-            f"{stage_name}: {','.join(sorted(violations))}"
-        )
-    executor_key = (
-        stage_name,
-        policy.executor_mode,
-        policy.max_workers,
-        policy.max_tasks_per_child,
-        int(policy.require_spawn_context),
-        policy.max_worker_ceiling,
-    )
-    stale_keys = [key for key in _HEAVY_STAGE_EXECUTORS if key[1:] != executor_key[1:]]
-    for stale_key in stale_keys:
-        stale_executor = _HEAVY_STAGE_EXECUTORS.pop(stale_key)
-        stale_executor.shutdown(wait=False, cancel_futures=True)
-    executor = _HEAVY_STAGE_EXECUTORS.get(executor_key)
-    if executor is not None:
-        return executor
-    if policy.executor_mode == "thread_pool_only" or (
-        policy.executor_mode != "process_pool_required"
-        and "PYTEST_CURRENT_TEST" in os.environ
-    ):
-        executor = ThreadPoolExecutor(max_workers=policy.max_workers)
-    else:
-        max_tasks_per_child = (
-            policy.max_tasks_per_child if policy.max_tasks_per_child > 0 else None
-        )
-        try:
-            if policy.require_spawn_context:
-                executor = ProcessPoolExecutor(
-                    max_workers=policy.max_workers,
-                    mp_context=multiprocessing.get_context("spawn"),
-                    max_tasks_per_child=max_tasks_per_child,
-                )
-            elif multiprocessing.get_start_method(allow_none=True) == "fork":
-                executor = ProcessPoolExecutor(
-                    max_workers=policy.max_workers,
-                    max_tasks_per_child=max_tasks_per_child,
-                )
-            else:
-                executor = ProcessPoolExecutor(
-                    max_workers=policy.max_workers,
-                    mp_context=multiprocessing.get_context("spawn"),
-                    max_tasks_per_child=max_tasks_per_child,
-                )
-        except (ValueError, RuntimeError):
-            if policy.executor_mode == "process_pool_required":
-                raise RuntimeError(
-                    f"process-backed heavy-stage isolation is required for {stage_name}"
-                ) from None
-            executor = ThreadPoolExecutor(max_workers=policy.max_workers)
-    _HEAVY_STAGE_EXECUTORS[executor_key] = executor
-    return executor
-
-
-def _heavy_stage_timeout_seconds(stage_name: str) -> float:
-    """Return the configured timeout budget for one isolated heavy stage."""
-
-    policy = get_settings().orchestration.heavy_stage_isolation
-    if stage_name == "index_item":
-        return policy.index_timeout_seconds
-    if stage_name == "parse_scrape_results":
-        return policy.parse_timeout_seconds
-    if stage_name == "rank_streams":
-        return policy.rank_timeout_seconds
-    return max(policy.parse_timeout_seconds, 30.0)
-
-
-def _rank_stream_batch(
-    *,
-    item_title: str,
-    item_aliases: list[str],
-    profile: RankingProfile,
-    bucket_limit: int | None,
-    stream_inputs: list[_RankBatchInput],
-) -> list[_RankBatchRecord]:
-    """Run the expensive RTN ranking/sorting batch in an isolated worker."""
-
-    rtn = RTN(profile)
-    successful: list[tuple[str, RankedTorrent]] = []
-    failures: list[_RankBatchRecord] = []
-
-    for stream_input in stream_inputs:
-        stream_id = stream_input["stream_id"]
-        parsed = ParsedData(
-            raw_title=stream_input["raw_title"],
-            parsed_title=_coerce_rank_batch_parsed_title(stream_input["parsed_title"]),
-            resolution=stream_input["resolution"],
-        )
-        try:
-            ranked = rtn.rank_torrent(
-                parsed,
-                correct_title=item_title,
-                aliases=item_aliases or None,
-            )
-            partial_scope_bonus = stream_input["partial_scope_bonus"]
-            if partial_scope_bonus > 0:
-                score_parts = dict(ranked.score_parts)
-                score_parts["partial_scope_bonus"] = partial_scope_bonus
-                ranked = RankedTorrent(
-                    data=ranked.data,
-                    rank=ranked.rank + partial_scope_bonus,
-                    lev_ratio=ranked.lev_ratio,
-                    fetch=ranked.fetch,
-                    failed_checks=ranked.failed_checks,
-                    score_parts=score_parts,
-                )
-        except Exception as exc:  # pragma: no cover - subprocess defensive path
-            failures.append(
-                {
-                    "stream_id": stream_id,
-                    "rank_score": 0,
-                    "lev_ratio": 0.0,
-                    "fetch": False,
-                    "passed": False,
-                    "rejection_reason": str(exc),
-                }
-            )
-            continue
-        successful.append((stream_id, ranked))
-
-    sorted_ranked = rtn.sort_torrents(
-        [ranked for _, ranked in successful],
-        bucket_limit=bucket_limit,
-    )
-    kept_ids = {id(ranked.data) for ranked in sorted_ranked}
-    results = list(failures)
-    for stream_id, ranked in successful:
-        if id(ranked.data) not in kept_ids:
-            results.append(
-                {
-                    "stream_id": stream_id,
-                    "rank_score": 0,
-                    "lev_ratio": ranked.lev_ratio,
-                    "fetch": False,
-                    "passed": False,
-                    "rejection_reason": "bucket_limit_exceeded",
-                }
-            )
-            continue
-        results.append(
-            {
-                "stream_id": stream_id,
-                "rank_score": ranked.rank,
-                "lev_ratio": ranked.lev_ratio,
-                "fetch": ranked.fetch,
-                "passed": ranked.fetch,
-                "rejection_reason": None
-                if ranked.fetch
-                else ",".join(ranked.failed_checks) or "fetch_failed",
-            }
-        )
-    return results
-
-
-def _coerce_rank_batch_parsed_title(raw: dict[str, object] | str) -> dict[str, object]:
-    """Normalize serialized parsed-title payloads for the isolated rank worker."""
-
-    if isinstance(raw, dict):
-        return {key: value for key, value in raw.items() if isinstance(key, str)}
-    try:
-        parsed = ast.literal_eval(raw)
-    except (SyntaxError, ValueError):
-        return {}
-    if isinstance(parsed, dict):
-        return {key: value for key, value in parsed.items() if isinstance(key, str)}
-    return {}
+scrape_item_job_id = _stage_job_ids.scrape_item_job_id
+worker_stage_idempotency_key = _stage_job_ids.worker_stage_idempotency_key
+_RankBatchInput = _stage_isolation.RankBatchInput
+_RankBatchRecord = _stage_isolation.RankBatchRecord
+_heavy_stage_executor = _stage_isolation.heavy_stage_executor
+_heavy_stage_timeout_seconds = _stage_isolation.heavy_stage_timeout_seconds
+_rank_stream_batch = _stage_isolation.rank_stream_batch
 
 
 def _redis_from_settings(settings: Settings) -> Redis:
@@ -491,25 +293,6 @@ async def _try_transition(
         return None
 
 
-def worker_stage_idempotency_key(
-    stage_name: str,
-    item_id: str,
-    *,
-    discriminator: str | None = None,
-) -> str:
-    """Return a stable idempotency key for one stage/item combination."""
-
-    if discriminator is None or discriminator == "":
-        return f"{stage_name}:{item_id}"
-    return f"{stage_name}:{item_id}:{discriminator}"
-
-
-def index_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for index-stage processing."""
-
-    return f"index-item:{item_id}"
-
-
 def index_item_followup_job_id(
     item_id: str,
     *,
@@ -535,30 +318,6 @@ def index_item_followup_job_id(
     return ":".join([index_item_job_id(item_id), *suffix_parts])
 
 
-def parse_scrape_results_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for parse-scrape-results processing."""
-
-    return f"parse-scrape-results:{item_id}"
-
-
-def process_scraped_item_job_id(item_id: str) -> str:
-    """Backward-compatible alias for the parse-scrape-results stage identifier."""
-
-    return parse_scrape_results_job_id(item_id)
-
-
-def rank_streams_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for rank-streams processing."""
-
-    return f"rank-streams:{item_id}"
-
-
-def scrape_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for scrape-stage processing."""
-
-    return f"scrape-item:{item_id}"
-
-
 def scrape_item_followup_job_id(
     item_id: str,
     *,
@@ -581,40 +340,6 @@ def scrape_item_followup_job_id(
         )
         suffix_parts.append(f"episodes:{normalized}")
     return ":".join(suffix_parts)
-
-
-def debrid_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for debrid-stage processing."""
-
-    return f"debrid-item:{item_id}"
-
-
-def finalize_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for finalize-stage processing."""
-
-    return f"finalize-item:{item_id}"
-
-
-def refresh_direct_playback_link_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for queued direct-play refresh work."""
-
-    return f"refresh-direct-playback:{item_id}"
-
-
-def refresh_selected_hls_failed_lease_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for queued failed-HLS refresh work."""
-
-    return f"refresh-selected-hls-failed-lease:{item_id}"
-
-
-def refresh_selected_hls_restricted_fallback_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for queued restricted-fallback refresh work."""
-
-    return f"refresh-selected-hls-restricted-fallback:{item_id}"
-
-
-def _job_status_name(status: JobStatus) -> str:
-    return getattr(status, "value", str(status))
 
 
 def _worker_stage_logger() -> Any:
@@ -665,22 +390,6 @@ async def _record_metadata_reindex_run(
             "scheduled_metadata_reindex_reconciliation.status_record_failed",
             exc_info=True,
         )
-
-
-def _record_enqueue_decision(stage_name: str, decision: str) -> None:
-    WORKER_ENQUEUE_DECISIONS_TOTAL.labels(stage=stage_name, decision=decision).inc()
-
-
-def _record_job_status(stage_name: str, status: JobStatus) -> None:
-    WORKER_JOB_STATUS_TOTAL.labels(stage=stage_name, status=_job_status_name(status)).inc()
-
-
-def _record_cleanup_action(stage_name: str, action: str) -> None:
-    WORKER_CLEANUP_TOTAL.labels(stage=stage_name, action=action).inc()
-
-
-def _record_stage_idempotency(stage_name: str, outcome: str) -> None:
-    WORKER_STAGE_IDEMPOTENCY_TOTAL.labels(stage=stage_name, outcome=outcome).inc()
 
 
 async def _clear_stale_downstream_job(
@@ -890,7 +599,7 @@ async def enqueue_index_item(
         "_queue_name": queue_name,
     }
     if defer_by_seconds is not None and defer_by_seconds > 0:
-        WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="index_item").observe(float(defer_by_seconds))
+        _record_enqueue_defer("index_item", float(defer_by_seconds))
         kwargs["_defer_by"] = timedelta(seconds=defer_by_seconds)
     if missing_seasons:
         kwargs["missing_seasons"] = missing_seasons
@@ -931,7 +640,7 @@ async def enqueue_scrape_item(
     )
     normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
     if defer_by_seconds is not None and defer_by_seconds > 0:
-        WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="scrape_item").observe(float(defer_by_seconds))
+        _record_enqueue_defer("scrape_item", float(defer_by_seconds))
         if missing_seasons or normalized_episode_scope:
             kwargs: dict[str, object] = {}
             if missing_seasons:
@@ -1479,8 +1188,9 @@ async def _maybe_enqueue_next_stage(
             stage_name=cleanup_stage_name,
             job_id=cleanup_job_id,
         )
+    settings = await _resolve_runtime_settings(ctx)
     queue_name_value = ctx.get("queue_name")
-    queue_name = _queue_name(get_settings()) if queue_name_value is None else str(queue_name_value)
+    queue_name = _queue_name(settings) if queue_name_value is None else str(queue_name_value)
     tenant_id = await _resolve_item_tenant_id(ctx, item_id=item_id)
     enqueued = await enqueuer(redis_client, item_id, queue_name, tenant_id)
     _log_downstream_enqueue_result(
@@ -1524,8 +1234,9 @@ async def _maybe_enqueue_parse_stage(
             stage_name=cleanup_stage_name,
             job_id=cleanup_job_id,
         )
+    settings = await _resolve_runtime_settings(ctx)
     queue_name_value = ctx.get("queue_name")
-    queue_name = _queue_name(get_settings()) if queue_name_value is None else str(queue_name_value)
+    queue_name = _queue_name(settings) if queue_name_value is None else str(queue_name_value)
     tenant_id = await _resolve_item_tenant_id(ctx, item_id=item_id)
     enqueued = await enqueue_parse_scrape_results(
         redis_client,
@@ -4297,9 +4008,7 @@ async def on_shutdown(ctx: dict[str, Any]) -> None:
     if isinstance(arq_redis, ArqRedis):
         await arq_redis.aclose()
 
-    for executor in _HEAVY_STAGE_EXECUTORS.values():
-        executor.shutdown(wait=False, cancel_futures=True)
-    _HEAVY_STAGE_EXECUTORS.clear()
+    _stage_isolation.shutdown_heavy_stage_executors()
 
 
 def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:

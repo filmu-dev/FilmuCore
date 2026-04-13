@@ -10108,6 +10108,82 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     assert governance["vfs_runtime_refresh_pressure_class"] == "healthy"
 
 
+def test_stream_status_route_filters_runtime_handle_summaries_to_request_tenant(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 2,
+                    "peak_open_handles": 2,
+                    "active_reads": 1,
+                    "peak_active_reads": 1,
+                    "chunk_cache_weighted_bytes": 1024,
+                    "active_handle_summaries": [
+                        "global|session-a|handle-a|/mnt/global/movie.mkv|invalidated=false",
+                        "tenant-other|session-b|handle-b|/mnt/other/movie.mkv|invalidated=true",
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    client, _ = _build_client()
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["vfs_runtime_active_handles_visible"] == 1
+    assert governance["vfs_runtime_active_handles_hidden"] == 1
+    assert governance["vfs_runtime_active_handle_tenant_count"] == 1
+    assert governance["vfs_runtime_active_handle_tenants"] == ["global"]
+    assert governance["vfs_runtime_active_handle_summaries"] == [
+        "global|session-a|handle-a|invalidated=false"
+    ]
+
+
+def test_stream_status_route_hides_unknown_runtime_handle_summaries_for_tenant_scoped_requests(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 2,
+                    "peak_open_handles": 2,
+                    "active_reads": 1,
+                    "peak_active_reads": 1,
+                    "chunk_cache_weighted_bytes": 1024,
+                    "active_handle_summaries": [
+                        "global|session-a|handle-a|/mnt/global/movie.mkv|invalidated=false",
+                        "session-unknown|handle-unknown|/mnt/unknown/movie.mkv|invalidated=false",
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    client, _ = _build_client()
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["vfs_runtime_active_handles_visible"] == 1
+    assert governance["vfs_runtime_active_handles_hidden"] == 1
+    assert governance["vfs_runtime_active_handle_tenant_count"] == 1
+    assert governance["vfs_runtime_active_handle_tenants"] == ["global"]
+    assert governance["vfs_runtime_active_handle_summaries"] == [
+        "global|session-a|handle-a|invalidated=false"
+    ]
+
+
 def test_hls_route_failure_governance_counts_generation_timeout(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

@@ -669,6 +669,11 @@ class ServingGovernanceResponse(BaseModel):
     stream_refresh_queue_enabled: int
     stream_refresh_queue_ready: int
     stream_refresh_proof_ref_count: int
+    stream_refresh_latency_slo_ms: int = 250
+    stream_refresh_policy_forced_queued: int = 0
+    stream_refresh_policy_forced_in_process: int = 0
+    stream_refresh_policy_fallback_in_process: int = 0
+    stream_refresh_policy_latency_slo_breaches: int = 0
     heavy_stage_executor_mode: Literal[
         "process_pool_preferred", "process_pool_required", "thread_pool_only"
     ]
@@ -841,6 +846,10 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_rollout_canary_decision: str
     vfs_runtime_rollout_merge_gate: str
     vfs_runtime_rollout_environment_class: str
+    vfs_runtime_active_handles_visible: int = 0
+    vfs_runtime_active_handles_hidden: int = 0
+    vfs_runtime_active_handle_tenant_count: int = 0
+    vfs_runtime_active_handle_tenants: list[str] = []
     playback_gate_snapshot_available: int
     playback_gate_artifact_generated_at: str
     playback_gate_environment_class: str

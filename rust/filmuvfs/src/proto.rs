@@ -37,12 +37,14 @@ mod tests {
             provider_file_path: Some("Movies/Title.mkv".to_owned()),
             session_id: Some("session-1".to_owned()),
             handle_key: Some("handle-1".to_owned()),
+            tenant_id: Some("tenant-1".to_owned()),
         };
 
         assert_eq!(keys.provider_file_id.as_deref(), Some("provider-file-1"));
         assert_eq!(keys.provider_file_path.as_deref(), Some("Movies/Title.mkv"));
         assert_eq!(keys.session_id.as_deref(), Some("session-1"));
         assert_eq!(keys.handle_key.as_deref(), Some("handle-1"));
+        assert_eq!(keys.tenant_id.as_deref(), Some("tenant-1"));
     }
 
     #[test]

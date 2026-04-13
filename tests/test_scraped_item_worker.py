@@ -13,7 +13,8 @@ import pytest
 from arq import Retry
 from arq.jobs import JobStatus
 
-from filmu_py.config import Settings
+from filmu_py import config as config_module
+from filmu_py.config import Settings, reset_runtime_settings
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.db.models import (
@@ -26,7 +27,7 @@ from filmu_py.db.models import (
 )
 from filmu_py.plugins import ExternalIdentifiers, ScraperSearchInput
 from filmu_py.plugins import ScraperResult as PluginScraperResult
-from filmu_py.rtn import RankedTorrent
+from filmu_py.services import media as media_service_module
 from filmu_py.services.media import (
     CompletionStatus,
     EnrichmentResult,
@@ -45,7 +46,7 @@ from filmu_py.services.media import (
     validate_parsed_stream_candidate,
 )
 from filmu_py.state.item import ItemEvent, ItemState, ItemStateMachine
-from filmu_py.workers import tasks
+from filmu_py.workers import stage_isolation, tasks
 
 
 class _PluginRegistryStub:
@@ -483,11 +484,38 @@ def _build_worker_settings() -> Settings:
 
 @pytest.fixture(autouse=True)
 def _worker_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+    monkeypatch.setenv("FILMU_PY_API_KEY", "a" * 32)
+    monkeypatch.setenv(
+        "FILMU_PY_POSTGRES_DSN", "postgresql+asyncpg://postgres:postgres@localhost:5432/filmu"
+    )
+    monkeypatch.setenv("FILMU_PY_REDIS_URL", "redis://localhost:6379/0")
+    reset_runtime_settings()
+    settings = _build_worker_settings()
+    monkeypatch.setattr(config_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(media_service_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(stage_isolation, "get_settings", lambda: settings)
+    monkeypatch.setattr(tasks, "get_settings", lambda: settings)
+
     async def _no_persisted_settings(_db: Any) -> None:
         return None
 
     monkeypatch.setattr(tasks, "load_settings", _no_persisted_settings)
+    yield
+    reset_runtime_settings()
+
+
+def _pin_worker_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    settings = _build_worker_settings()
+
+    async def _resolved_runtime_settings(_: dict[str, object]) -> Settings:
+        return settings
+
+    def _unexpected_get_settings() -> Settings:
+        raise AssertionError("worker pipeline tests must use ctx/runtime settings, not global settings")
+
+    monkeypatch.setattr(tasks, "_resolve_runtime_settings", _resolved_runtime_settings)
+    monkeypatch.setattr(tasks, "get_settings", _unexpected_get_settings)
+    return settings
 
 
 class _FakeDebridClient:
@@ -642,6 +670,7 @@ def _build_recovery_service(items: list[MediaItemORM]) -> tuple[MediaService, _R
 def test_process_scraped_item_runs_parse_rank_and_select_in_sequence(
     monkeypatch: Any,
 ) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-sequence"
     unparsed = _build_stream(stream_id="stream-unparsed", item_id=item_id, parsed=False)
     selected = _build_stream(stream_id="stream-selected", item_id=item_id, parsed=True)
@@ -653,7 +682,7 @@ def test_process_scraped_item_runs_parse_rank_and_select_in_sequence(
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
     result = asyncio.run(
-        tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id)
+        tasks.process_scraped_item({"settings": settings}, item_id)
     )
 
     assert result == item_id
@@ -677,6 +706,7 @@ def test_process_scraped_item_runs_parse_rank_and_select_in_sequence(
 
 
 def test_process_scraped_item_is_idempotent_on_rerun(monkeypatch: Any) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-idempotent"
     selected = _build_stream(stream_id="stream-selected", item_id=item_id, parsed=True)
     media_service = FakePipelineMediaService(
@@ -686,8 +716,8 @@ def test_process_scraped_item_is_idempotent_on_rerun(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
-    asyncio.run(tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id))
-    asyncio.run(tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id))
+    asyncio.run(tasks.process_scraped_item({"settings": settings}, item_id))
+    asyncio.run(tasks.process_scraped_item({"settings": settings}, item_id))
 
     assert media_service.calls == [
         "get_item",
@@ -711,6 +741,7 @@ def test_process_scraped_item_is_idempotent_on_rerun(monkeypatch: Any) -> None:
 def test_process_scraped_item_transitions_to_failed_when_no_selection_possible(
     monkeypatch: Any,
 ) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-failed-selection"
     rejected = _build_stream(stream_id="stream-rejected", item_id=item_id, parsed=True)
     media_service = FakePipelineMediaService(
@@ -721,7 +752,7 @@ def test_process_scraped_item_transitions_to_failed_when_no_selection_possible(
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
     result = asyncio.run(
-        tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id)
+        tasks.process_scraped_item({"settings": settings}, item_id)
     )
 
     assert result == item_id
@@ -732,6 +763,7 @@ def test_process_scraped_item_transitions_to_failed_when_no_selection_possible(
 
 
 def test_process_scraped_item_transitions_to_downloaded_on_success(monkeypatch: Any) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-downloaded"
     selected = _build_stream(stream_id="stream-selected", item_id=item_id, parsed=True)
     media_service = FakePipelineMediaService(
@@ -742,7 +774,7 @@ def test_process_scraped_item_transitions_to_downloaded_on_success(monkeypatch: 
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
     result = asyncio.run(
-        tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id)
+        tasks.process_scraped_item({"settings": settings}, item_id)
     )
 
     assert result == item_id
@@ -1761,38 +1793,31 @@ def test_rank_streams_passes_persisted_aliases_to_rtn(monkeypatch: Any) -> None:
 
     captured: dict[str, object] = {}
 
-    class _FakeRTN:
-        def __init__(self, profile: object) -> None:
-            captured["profile"] = profile
+    def _fake_rank_stream_batch(
+        *,
+        item_title: str,
+        item_aliases: list[str],
+        profile: object,
+        bucket_limit: int | None,
+        stream_inputs: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        captured["profile"] = profile
+        captured["correct_title"] = item_title
+        captured["aliases"] = list(item_aliases)
+        captured["bucket_limit"] = bucket_limit
+        return [
+            {
+                "stream_id": str(stream_input["stream_id"]),
+                "rank_score": 300,
+                "lev_ratio": 1.0,
+                "fetch": True,
+                "passed": True,
+                "rejection_reason": None,
+            }
+            for stream_input in stream_inputs
+        ]
 
-        def rank_torrent(
-            self,
-            torrent: object,
-            *,
-            correct_title: str,
-            aliases: list[str] | None = None,
-        ) -> RankedTorrent:
-            captured["correct_title"] = correct_title
-            captured["aliases"] = list(aliases or [])
-            return RankedTorrent(
-                data=torrent,
-                rank=300,
-                lev_ratio=1.0,
-                fetch=True,
-                failed_checks=(),
-                score_parts={},
-            )
-
-        def sort_torrents(
-            self,
-            torrents: list[RankedTorrent],
-            *,
-            bucket_limit: int | None = None,
-        ) -> list[RankedTorrent]:
-            captured["bucket_limit"] = bucket_limit
-            return torrents
-
-    monkeypatch.setattr(tasks, "RTN", _FakeRTN)
+    monkeypatch.setattr(tasks, "_rank_stream_batch", _fake_rank_stream_batch)
     settings = _build_worker_settings()
     settings.scraping = {"dubbed_anime_only": False, "bucket_limit": 5, "enable_aliases": True}
 
@@ -1901,48 +1926,31 @@ def test_rank_streams_prefers_complete_season_pack_over_single_episode_for_parti
     settings = _build_worker_settings()
     settings.scraping = {"dubbed_anime_only": False, "bucket_limit": 5}
 
-    class _FakeRTN:
-        def __init__(self, profile: object) -> None:
-            _ = profile
-
-        def rank_torrent(
-            self,
-            torrent: object,
-            *,
-            correct_title: str,
-            aliases: list[str] | None = None,
-        ) -> RankedTorrent:
-            _ = (correct_title, aliases)
-            parsed_data = torrent
-            raw_title = parsed_data.raw_title
-            if "COMPLETE" in raw_title:
-                return RankedTorrent(
-                    data=parsed_data,
-                    rank=0,
-                    lev_ratio=1.0,
-                    fetch=True,
-                    failed_checks=(),
-                    score_parts={},
-                )
-            return RankedTorrent(
-                data=parsed_data,
-                rank=12800,
-                lev_ratio=1.0,
-                fetch=True,
-                failed_checks=(),
-                score_parts={},
+    def _fake_rank_stream_batch(
+        *,
+        item_title: str,
+        item_aliases: list[str],
+        profile: object,
+        bucket_limit: int | None,
+        stream_inputs: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        _ = (item_title, item_aliases, profile, bucket_limit)
+        ranked_records: list[dict[str, object]] = []
+        for stream_input in stream_inputs:
+            raw_title = str(stream_input["raw_title"])
+            ranked_records.append(
+                {
+                    "stream_id": str(stream_input["stream_id"]),
+                    "rank_score": 12800 if "COMPLETE" in raw_title else 0,
+                    "lev_ratio": 1.0,
+                    "fetch": True,
+                    "passed": True,
+                    "rejection_reason": None,
+                }
             )
+        return ranked_records
 
-        def sort_torrents(
-            self,
-            torrents: list[RankedTorrent],
-            *,
-            bucket_limit: int | None = None,
-        ) -> list[RankedTorrent]:
-            _ = bucket_limit
-            return sorted(torrents, key=lambda ranked: ranked.rank, reverse=True)
-
-    monkeypatch.setattr(tasks, "RTN", _FakeRTN)
+    monkeypatch.setattr(tasks, "_rank_stream_batch", _fake_rank_stream_batch)
 
     result = asyncio.run(tasks.rank_streams({"settings": settings}, item_id))
 
@@ -3254,8 +3262,8 @@ def test_enqueue_index_item_supports_custom_job_id_and_defer(monkeypatch: Any) -
 
 
 def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) -> None:
-    original_cache = dict(tasks._HEAVY_STAGE_EXECUTORS)
-    tasks._HEAVY_STAGE_EXECUTORS.clear()
+    original_cache = dict(stage_isolation._HEAVY_STAGE_EXECUTORS)
+    stage_isolation._HEAVY_STAGE_EXECUTORS.clear()
 
     class FakeExecutor:
         def __init__(self, max_workers: int) -> None:
@@ -3297,8 +3305,8 @@ def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) ->
     )
     current_settings = first_settings
 
-    monkeypatch.setattr(tasks, "ThreadPoolExecutor", fake_thread_pool_executor)
-    monkeypatch.setattr(tasks, "get_settings", lambda: current_settings)
+    monkeypatch.setattr(stage_isolation, "ThreadPoolExecutor", fake_thread_pool_executor)
+    monkeypatch.setattr(stage_isolation, "get_settings", lambda: current_settings)
 
     try:
         first_executor = tasks._heavy_stage_executor("index_item")
@@ -3306,12 +3314,12 @@ def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) ->
         second_executor = tasks._heavy_stage_executor("index_item")
         assert first_executor is not second_executor
         assert created[0].shutdown_calls == [(False, True)]
-        assert len(tasks._HEAVY_STAGE_EXECUTORS) == 1
+        assert len(stage_isolation._HEAVY_STAGE_EXECUTORS) == 1
     finally:
-        for executor in tasks._HEAVY_STAGE_EXECUTORS.values():
+        for executor in stage_isolation._HEAVY_STAGE_EXECUTORS.values():
             executor.shutdown(wait=False, cancel_futures=True)
-        tasks._HEAVY_STAGE_EXECUTORS.clear()
-        tasks._HEAVY_STAGE_EXECUTORS.update(original_cache)
+        stage_isolation._HEAVY_STAGE_EXECUTORS.clear()
+        stage_isolation._HEAVY_STAGE_EXECUTORS.update(original_cache)
 
 
 def test_heavy_stage_executor_rejects_policy_violations(monkeypatch: Any) -> None:
@@ -3332,7 +3340,7 @@ def test_heavy_stage_executor_rejects_policy_violations(monkeypatch: Any) -> Non
             )
         }
     )
-    monkeypatch.setattr(tasks, "get_settings", lambda: invalid_settings)
+    monkeypatch.setattr(stage_isolation, "get_settings", lambda: invalid_settings)
 
     with pytest.raises(RuntimeError) as exc_info:
         tasks._heavy_stage_executor("index_item")

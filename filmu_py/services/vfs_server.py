@@ -188,6 +188,8 @@ def _correlation_to_proto(
         message.session_id = correlation.session_id
     if correlation.handle_key is not None:
         message.handle_key = correlation.handle_key
+    if correlation.tenant_id is not None:
+        message.tenant_id = correlation.tenant_id
     return message
 
 

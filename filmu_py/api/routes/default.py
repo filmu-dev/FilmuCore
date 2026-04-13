@@ -65,7 +65,7 @@ from ..models import (
     StatsResponse,
     TenantQuotaPolicyResponse,
 )
-from .stream import _playback_gate_governance_snapshot, _vfs_runtime_governance_snapshot
+from .runtime_governance import playback_gate_governance_snapshot, vfs_runtime_governance_snapshot
 
 router = APIRouter(tags=["default"])
 _MAX_API_KEY_ID_LENGTH = 128
@@ -75,6 +75,27 @@ API_KEY_ROTATION_WARNING = (
     "Update BACKEND_API_KEY in your frontend environment and restart the frontend "
     "server before your next request, or all API calls will fail."
 )
+
+
+def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
+    """Compatibility wrapper around shared playback-gate governance extraction."""
+
+    return playback_gate_governance_snapshot()
+
+
+def _vfs_runtime_governance_snapshot(
+    playback_gate_governance: dict[str, int | str | list[str]] | None = None,
+    *,
+    request_tenant_id: str | None = None,
+    authorized_tenant_ids: set[str] | None = None,
+) -> dict[str, int | float | str | list[str]]:
+    """Compatibility wrapper around shared VFS runtime governance extraction."""
+
+    return vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate_governance,
+        request_tenant_id=request_tenant_id,
+        authorized_tenant_ids=authorized_tenant_ids,
+    )
 _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("library_read", ("library:read",)),
     ("item_write", ("library:write",)),
@@ -288,6 +309,21 @@ def _plugin_governance_summary(
             ]
         ),
     )
+
+
+def _has_unresolved_fence(record: Any) -> bool:
+    """Return whether one subscriber row still reflects an unresolved fence state."""
+
+    if getattr(record, "status", "") == "fenced":
+        return True
+    if "consumer_fenced" not in str(getattr(record, "last_error", "") or ""):
+        return False
+
+    last_heartbeat_at = getattr(record, "last_heartbeat_at", None)
+    updated_at = getattr(record, "updated_at", None)
+    if last_heartbeat_at is None or updated_at is None:
+        return False
+    return bool(last_heartbeat_at <= updated_at)
 
 
 def _next_api_key_id(auth_context: Any) -> str:
@@ -719,7 +755,11 @@ def _vfs_data_plane_evidence(
 
     resources = request.app.state.resources
     if runtime_governance is None:
-        runtime_governance = _vfs_runtime_governance_snapshot()
+        auth_context = get_auth_context(request)
+        runtime_governance = _vfs_runtime_governance_snapshot(
+            request_tenant_id=auth_context.tenant_id,
+            authorized_tenant_ids=set(auth_context.authorized_tenant_ids),
+        )
     evidence = [
         f"vfs_catalog_server_enabled={resources.vfs_catalog_server is not None}",
         f"chunk_cache_enabled={resources.chunk_cache is not None}",
@@ -890,6 +930,8 @@ async def _enterprise_operations_governance(
     playback_gate_governance = _playback_gate_governance_snapshot()
     vfs_runtime_governance = _vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
+        request_tenant_id=auth_context.tenant_id,
+        authorized_tenant_ids=set(auth_context.authorized_tenant_ids),
     )
     runtime_snapshot = resources.runtime_lifecycle.snapshot()
     queued_refresh_ready = (
@@ -941,9 +983,16 @@ async def _enterprise_operations_governance(
     if resources.plugin_governance_service is not None:
         plugin_override_count = len(await resources.plugin_governance_service.list_overrides())
 
-    control_plane_subscriber_count = 0
+    control_plane_subscribers: list[Any] = []
     if resources.control_plane_service is not None:
-        control_plane_subscriber_count = len(await resources.control_plane_service.list_subscribers())
+        control_plane_subscribers = await resources.control_plane_service.list_subscribers()
+    control_plane_subscriber_count = len(control_plane_subscribers)
+    control_plane_stale_subscriber_count = sum(
+        1 for record in control_plane_subscribers if record.status == "stale"
+    )
+    control_plane_fenced_subscriber_count = sum(
+        1 for record in control_plane_subscribers if _has_unresolved_fence(record)
+    )
 
     tenant_required_actions = [
         "define_tenant_quota_policy"
@@ -1197,6 +1246,8 @@ async def _enterprise_operations_governance(
                 f"event_replay_maxlen={settings.control_plane.event_replay_maxlen}",
                 f"consumer_group={settings.control_plane.consumer_group}",
                 f"subscriber_ledger_rows={control_plane_subscriber_count}",
+                f"subscriber_stale_rows={control_plane_stale_subscriber_count}",
+                f"subscriber_fenced_rows={control_plane_fenced_subscriber_count}",
                 "LogStreamBroker backend=process_local",
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",

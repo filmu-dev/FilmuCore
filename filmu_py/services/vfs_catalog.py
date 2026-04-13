@@ -147,6 +147,7 @@ class VfsCatalogCorrelationKeys:
     provider_file_path: str | None = None
     session_id: str | None = None
     handle_key: str | None = None
+    tenant_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -790,6 +791,7 @@ class FilmuVfsCatalogSupplier:
             provider_download_id=media_entry.provider_download_id,
             provider_file_id=media_entry.provider_file_id,
             provider_file_path=media_entry.provider_file_path,
+            tenant_id=item.tenant_id,
         )
 
     @staticmethod

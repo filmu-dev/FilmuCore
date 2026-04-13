@@ -495,12 +495,25 @@ impl MountRuntime {
             .iter()
             .map(|entry| {
                 let state = entry.value();
-                let path = self
+                let (path, tenant_id) = self
                     .entry_for_inode(state.inode)
-                    .map(|catalog_entry| catalog_entry.path.clone())
-                    .unwrap_or_else(|| format!("invalidated:inode:{}", state.inode));
+                    .map(|catalog_entry| {
+                        let tenant_id = catalog_entry
+                            .correlation
+                            .as_ref()
+                            .and_then(|correlation| correlation.tenant_id.clone())
+                            .unwrap_or_else(|| "unknown".to_owned());
+                        (catalog_entry.path.clone(), tenant_id)
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            format!("invalidated:inode:{}", state.inode),
+                            "unknown".to_owned(),
+                        )
+                    });
                 format!(
-                    "{}|{}|{}|invalidated={}",
+                    "{}|{}|{}|{}|invalidated={}",
+                    tenant_id,
                     self.session_id.as_str(),
                     state.handle_key,
                     path,

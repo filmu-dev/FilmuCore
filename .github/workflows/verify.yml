@@ -48,6 +48,26 @@ jobs:
             python: false
             rust: true
             fuse: true
+          - name: Docs Runtime Contract
+            command: pwsh -NoProfile -File ./scripts/check_docs_runtime_contract.ps1
+            python: false
+            rust: false
+            fuse: false
+          - name: Decomposition Boundary Contracts
+            command: uv run pytest -q tests/test_worker_module_boundaries.py tests/test_route_module_boundaries.py tests/test_service_module_boundaries.py
+            python: true
+            rust: false
+            fuse: false
+          - name: Mount HTTP Chunk Parity
+            command: pwsh -NoProfile -File ./scripts/check_mount_http_chunk_parity.ps1
+            python: true
+            rust: true
+            fuse: true
+          - name: Release Provenance Perf Chaos Gate
+            command: pwsh -NoProfile -File ./scripts/generate_release_provenance_perf_chaos_evidence.ps1 -RunChaosContracts && pwsh -NoProfile -File ./scripts/check_release_provenance_perf_chaos_gate.ps1 -ChaosSummaryPaths ./ci-artifacts/release-gates/chaos-contract-summary.json -MaxReconnectIncidents 0 -MaxProviderPressureIncidents 0 -MaxFatalErrorIncidents 0
+            python: true
+            rust: true
+            fuse: false
     uses: ./.github/workflows/run-project-check.yml
     with:
       name: ${{ matrix.task.name }}

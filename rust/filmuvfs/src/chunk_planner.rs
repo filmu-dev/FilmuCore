@@ -408,3 +408,126 @@ fn align_down_from_origin(value: u64, origin: u64, alignment: u64) -> u64 {
     }
     origin.saturating_add(align_down(value.saturating_sub(origin), alignment))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ChunkPlanner, ReadPattern};
+
+    fn assert_chunks_cover_request(
+        chunks: &[super::PlannedChunk],
+        request_offset: u64,
+        request_end_exclusive: u64,
+    ) {
+        assert!(!chunks.is_empty(), "expected at least one planned chunk");
+        assert!(
+            chunks[0].offset <= request_offset,
+            "first chunk must start before request start"
+        );
+        assert!(
+            chunks
+                .last()
+                .map(|chunk| chunk.end_inclusive() + 1 >= request_end_exclusive)
+                .unwrap_or(false),
+            "last chunk must cover request end"
+        );
+        for window in chunks.windows(2) {
+            let left = window[0];
+            let right = window[1];
+            assert!(
+                right.offset >= left.offset,
+                "chunks must stay sorted by offset"
+            );
+            assert!(
+                right.offset <= left.end_inclusive().saturating_add(1),
+                "chunks must be contiguous or overlapping"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_parity_contract_header_only() {
+        let planner = ChunkPlanner::default();
+        let file_size = 1_073_741_824;
+        let planned = planner.plan_read(0, 4_096, Some(file_size), None);
+        assert_eq!(planned.pattern, ReadPattern::HeaderScan);
+        assert_eq!(planned.chunks.len(), 1);
+        assert_eq!(planned.chunks[0].offset, 0);
+        assert_chunks_cover_request(&planned.chunks, 0, planned.request_end_exclusive);
+    }
+
+    #[test]
+    fn chunk_parity_contract_footer_only() {
+        let planner = ChunkPlanner::default();
+        let file_size = 1_073_741_824;
+        let geometry = planner.geometry_for_file(file_size);
+        let planned = planner.plan_read(geometry.footer_start, 4_096, Some(file_size), None);
+        assert_eq!(planned.pattern, ReadPattern::TailProbe);
+        assert_eq!(planned.chunks.len(), 1);
+        assert_eq!(planned.chunks[0].offset, geometry.footer_start);
+        assert_chunks_cover_request(
+            &planned.chunks,
+            geometry.footer_start,
+            planned.request_end_exclusive,
+        );
+    }
+
+    #[test]
+    fn chunk_parity_contract_body_random_access() {
+        let planner = ChunkPlanner::default();
+        let file_size = 1_073_741_824;
+        let offset = 16 * 1024 * 1024;
+        let planned = planner.plan_read(offset, 1_024, Some(file_size), None);
+        assert_eq!(planned.pattern, ReadPattern::RandomAccess);
+        assert_eq!(planned.chunks.len(), 1);
+        assert_chunks_cover_request(&planned.chunks, offset, planned.request_end_exclusive);
+    }
+
+    #[test]
+    fn chunk_parity_contract_header_body_boundary() {
+        let planner = ChunkPlanner::default();
+        let file_size = 1_073_741_824;
+        let geometry = planner.geometry_for_file(file_size);
+        let offset = geometry.header_end.saturating_sub(1_024);
+        let planned = planner.plan_read(offset, 4_096, Some(file_size), None);
+        assert!(
+            matches!(
+                planned.pattern,
+                ReadPattern::RandomAccess | ReadPattern::SequentialScan
+            ),
+            "expected non-tail access classification at header boundary"
+        );
+        assert!(
+            planned.chunks.len() >= 2,
+            "expected header+body chunks at header boundary"
+        );
+        assert_eq!(planned.chunks[0].offset, 0);
+        assert_chunks_cover_request(&planned.chunks, offset, planned.request_end_exclusive);
+    }
+
+    #[test]
+    fn chunk_parity_contract_body_footer_boundary() {
+        let planner = ChunkPlanner::default();
+        let file_size = 1_073_741_824;
+        let geometry = planner.geometry_for_file(file_size);
+        let offset = geometry.footer_start.saturating_sub(1_024);
+        let planned = planner.plan_read(offset, 4_096, Some(file_size), None);
+        assert!(
+            matches!(
+                planned.pattern,
+                ReadPattern::RandomAccess | ReadPattern::SequentialScan
+            ),
+            "expected non-tail body access classification at boundary"
+        );
+        assert!(
+            planned.chunks.len() >= 2,
+            "expected body+footer chunks at footer boundary"
+        );
+        let last = planned
+            .chunks
+            .last()
+            .copied()
+            .expect("expected footer chunk at boundary");
+        assert_eq!(last.offset, geometry.footer_start);
+        assert_chunks_cover_request(&planned.chunks, offset, planned.request_end_exclusive);
+    }
+}

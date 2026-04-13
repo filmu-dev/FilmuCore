@@ -23,17 +23,42 @@ function Test-CommandAvailable {
 function Invoke-GhApiJson {
     param([Parameter(Mandatory = $true)][string] $Path)
 
-    if (-not (Test-CommandAvailable -Name 'gh')) {
+    if (Test-CommandAvailable -Name 'gh') {
+        $output = & gh api $Path 2>$null
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace([string] $output)) {
+            try {
+                return $output | ConvertFrom-Json
+            }
+            catch {
+                return $null
+            }
+        }
+    }
+
+    $token = [string] $env:GH_TOKEN
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $token = [string] $env:GITHUB_TOKEN
+    }
+    if ([string]::IsNullOrWhiteSpace($token)) {
         return $null
     }
 
-    $output = & gh api $Path 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string] $output)) {
-        return $null
+    $normalizedPath = $Path.TrimStart('/')
+    $uri = if ($normalizedPath.StartsWith('http://') -or $normalizedPath.StartsWith('https://')) {
+        $normalizedPath
+    }
+    else {
+        "https://api.github.com/$normalizedPath"
+    }
+    $headers = @{
+        Authorization = "Bearer $token"
+        Accept = 'application/vnd.github+json'
+        'User-Agent' = 'filmu-github-main-policy-check'
+        'X-GitHub-Api-Version' = '2022-11-28'
     }
 
     try {
-        return $output | ConvertFrom-Json
+        return Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
     }
     catch {
         return $null

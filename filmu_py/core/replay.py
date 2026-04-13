@@ -9,6 +9,10 @@ from typing import Any, Protocol, cast
 from redis.exceptions import ResponseError
 
 
+class ReplayConsumerFencedError(RuntimeError):
+    """Raised when one consumer-group read is fenced by active ownership policy."""
+
+
 class RedisStreamClient(Protocol):
     """Subset of Redis stream commands used by the replay backplane."""
 
@@ -94,6 +98,18 @@ class ReplaySubscriptionStateSink(Protocol):
         node_id: str,
         tenant_id: str | None = None,
         error: str,
+    ) -> object:
+        pass
+
+    async def claim_consumer(
+        self,
+        *,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        node_id: str,
+        tenant_id: str | None = None,
+        heartbeat_expiry_seconds: int = 120,
     ) -> object:
         pass
 
@@ -185,8 +201,32 @@ class RedisReplayEventBackplane:
         count: int = 100,
         block_ms: int | None = None,
         offset: str = ">",
+        heartbeat_expiry_seconds: int = 120,
     ) -> list[ReplayEvent]:
         """Read events through one consumer group for durable subscription resume."""
+
+        claim_result: object | None = None
+        if self._subscription_state_sink is not None:
+            claim_consumer = getattr(self._subscription_state_sink, "claim_consumer", None)
+            if callable(claim_consumer):
+                claim_result = await claim_consumer(
+                    stream_name=self.stream_name,
+                    group_name=group_name,
+                    consumer_name=consumer_name,
+                    node_id=node_id or "unknown",
+                    tenant_id=tenant_id,
+                    heartbeat_expiry_seconds=max(1, heartbeat_expiry_seconds),
+                )
+                if isinstance(claim_result, dict):
+                    claim_outcome = claim_result.get("outcome")
+                    claim_owner = claim_result.get("owner_node_id", node_id or "unknown")
+                else:
+                    claim_outcome = getattr(claim_result, "outcome", None)
+                    claim_owner = getattr(claim_result, "owner_node_id", node_id or "unknown")
+                if claim_outcome == "fenced":
+                    raise ReplayConsumerFencedError(
+                        f"consumer {consumer_name} fenced by active owner {claim_owner}"
+                    )
 
         try:
             streams = await self._redis.xreadgroup(

@@ -1,0 +1,73 @@
+name: Windows VFS Soak Program
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_classes:
+        description: "Comma-separated environment classes (defaults to FILMU_VFS_ENVIRONMENT_CLASSES or runner hostname)"
+        required: false
+        default: ""
+      repeat_count:
+        description: "Repeat count per profile/environment"
+        required: false
+        default: "1"
+      allow_trend_bootstrap:
+        description: "Allow first trend run without historical baseline"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "30 3 * * *"
+
+concurrency:
+  group: windows-vfs-soak-program-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows-vfs-soak-program:
+    name: Windows VFS Soak Program
+    runs-on: [self-hosted, windows, filmu-vfs]
+    timeout-minutes: 240
+    env:
+      FILMU_VFS_ENVIRONMENT_CLASSES: ${{ inputs.environment_classes != '' && inputs.environment_classes || vars.FILMU_VFS_ENVIRONMENT_CLASSES }}
+      FILMU_SOAK_HISTORY_ROOT: ${{ vars.FILMU_SOAK_HISTORY_ROOT }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Execute scheduled soak program
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $args = @(
+            '-NoProfile',
+            '-File',
+            './scripts/run_windows_vfs_soak_program.ps1',
+            '-RepeatCount',
+            '${{ inputs.repeat_count != '' && inputs.repeat_count || '1' }}',
+            '-RequireRuntimeCapture',
+            '-RequireBackendStatusCapture',
+            '-MinimumEnvironmentCount',
+            '2',
+            '-FailFast'
+          )
+          if (-not [string]::IsNullOrWhiteSpace([string] $env:FILMU_SOAK_HISTORY_ROOT)) {
+            $args += @('-HistoryRoot', $env:FILMU_SOAK_HISTORY_ROOT)
+          }
+          if ('${{ inputs.allow_trend_bootstrap }}' -eq 'true') {
+            $args += '-AllowTrendBootstrap'
+          }
+          & pwsh @args
+
+      - name: Upload soak program artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-vfs-soak-program-${{ github.run_id }}
+          path: |
+            playback-proof-artifacts/windows-native-stack/**
+          if-no-files-found: warn
+          retention-days: 21
