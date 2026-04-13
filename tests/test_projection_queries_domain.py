@@ -333,6 +333,38 @@ def test_search_items_prefers_specialization_identifiers_over_metadata() -> None
     assert page.items[0].specialization.imdb_id == "tt7654321"
 
 
+def test_search_items_extended_metadata_prefers_specialization_hierarchy() -> None:
+    show_item = _build_item(
+        item_id="show-extended-1",
+        state=ItemState.REQUESTED,
+        item_type="movie",
+        title="Canonical Show",
+    )
+    show_item.attributes["tmdb_id"] = "metadata-tmdb"
+    show_item.attributes["tvdb_id"] = "metadata-tvdb"
+    show_item.attributes["show_title"] = "Wrong Metadata Show"
+    show_item.show = ShowORM(
+        media_item_id=show_item.id,
+        tmdb_id="specialized-tmdb",
+        tvdb_id="specialized-tvdb",
+        imdb_id="tt7654321",
+    )
+    service = MediaService(
+        db=cast(DatabaseRuntime, _ProjectionRuntime([show_item])),
+        event_bus=EventBus(),
+    )
+
+    page = asyncio.run(service.search_items(item_types=["show"], extended=True))
+
+    assert len(page.items) == 1
+    assert page.items[0].metadata is not None
+    assert page.items[0].metadata["item_type"] == "show"
+    assert page.items[0].metadata["tmdb_id"] == "specialized-tmdb"
+    assert page.items[0].metadata["tvdb_id"] == "specialized-tvdb"
+    assert page.items[0].metadata["imdb_id"] == "tt7654321"
+    assert page.items[0].metadata["show_title"] == "Canonical Show"
+
+
 def test_search_items_matches_show_and_tv_alias_filters() -> None:
     show_item = _build_item(
         item_id="show-1",
