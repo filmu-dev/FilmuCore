@@ -567,6 +567,42 @@ class ResetItemResult:
 
 
 @strawberry.type
+class GQLPlaybackRefreshTriggerResult:
+    """GraphQL control-plane trigger result for direct-play and selected-HLS refresh paths."""
+
+    item_id: str = strawberry.field(name="itemId")
+    outcome: str
+    controller_attached: bool = strawberry.field(name="controllerAttached")
+    control_plane_outcome: str | None = strawberry.field(name="controlPlaneOutcome", default=None)
+    refresh_outcome: str | None = strawberry.field(name="refreshOutcome", default=None)
+    execution_ok: bool | None = strawberry.field(name="executionOk", default=None)
+    execution_refresh_state: str | None = strawberry.field(
+        name="executionRefreshState", default=None
+    )
+    execution_locator: str | None = strawberry.field(name="executionLocator", default=None)
+    execution_error: str | None = strawberry.field(name="executionError", default=None)
+    retry_after_seconds: float | None = strawberry.field(
+        name="retryAfterSeconds", default=None
+    )
+    deferred_reason: str | None = strawberry.field(name="deferredReason", default=None)
+    scheduled_requested_at: str | None = strawberry.field(
+        name="scheduledRequestedAt", default=None
+    )
+    scheduled_not_before: str | None = strawberry.field(
+        name="scheduledNotBefore", default=None
+    )
+
+
+@strawberry.type
+class GQLMarkSelectedHlsMediaEntryStaleResult:
+    """GraphQL mutation result for marking the selected HLS media entry stale."""
+
+    item_id: str = strawberry.field(name="itemId")
+    success: bool
+    error: str | None = None
+
+
+@strawberry.type
 class LogEntry:
     """Intentional structured log-stream entry for future GraphQL consumers."""
 

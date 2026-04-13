@@ -39,6 +39,17 @@ from filmu_py.services.media import (
     RecoveryTargetStage,
     StatsProjection,
 )
+from filmu_py.services.playback import (
+    DirectPlaybackRefreshControlPlaneTriggerResult,
+    DirectPlaybackRefreshRecommendation,
+    DirectPlaybackRefreshScheduleRequest,
+    DirectPlaybackRefreshSchedulingResult,
+    HlsFailedLeaseRefreshControlPlaneTriggerResult,
+    HlsFailedLeaseRefreshResult,
+    HlsRestrictedFallbackRefreshControlPlaneTriggerResult,
+    HlsRestrictedFallbackRefreshResult,
+    MediaEntryLeaseRefreshExecution,
+)
 from filmu_py.services.vfs_catalog import (
     VfsCatalogCorrelationKeys,
     VfsCatalogDirectoryEntry,
@@ -314,6 +325,33 @@ class FakeVfsCatalogSupplier:
         return self.snapshots_by_generation.get(generation_id)
 
 
+@dataclass
+class FakePlaybackTriggerController:
+    result: object
+    triggered_item_ids: list[str] = field(default_factory=list)
+
+    async def trigger(self, item_identifier: str, *, at: datetime | None = None) -> object:
+        _ = at
+        self.triggered_item_ids.append(item_identifier)
+        return self.result
+
+
+@dataclass
+class FakePlaybackService:
+    stale_result: bool = True
+    stale_item_ids: list[str] = field(default_factory=list)
+
+    async def mark_selected_hls_media_entry_stale(
+        self,
+        item_identifier: str,
+        *,
+        at: datetime | None = None,
+    ) -> bool:
+        _ = at
+        self.stale_item_ids.append(item_identifier)
+        return self.stale_result
+
+
 def _build_settings() -> Settings:
     return Settings(
         FILMU_PY_API_KEY=SecretStr("a" * 32),
@@ -331,6 +369,10 @@ def _build_client(
     vfs_catalog_supplier: FakeVfsCatalogSupplier | None = None,
     redis: DummyRedis | None = None,
     runtime_lifecycle: RuntimeLifecycleState | None = None,
+    queued_direct_playback_refresh_controller: object | None = None,
+    queued_hls_failed_lease_refresh_controller: object | None = None,
+    queued_hls_restricted_fallback_refresh_controller: object | None = None,
+    playback_service: object | None = None,
 ) -> TestClient:
     settings = _build_settings()
     runtime_redis = redis or DummyRedis()
@@ -346,6 +388,12 @@ def _build_client(
         graphql_plugin_registry=GraphQLPluginRegistry(),
         runtime_lifecycle=runtime_lifecycle or RuntimeLifecycleState(),
         vfs_catalog_supplier=vfs_catalog_supplier,  # type: ignore[arg-type]
+        playback_service=playback_service,  # type: ignore[arg-type]
+        queued_direct_playback_refresh_controller=queued_direct_playback_refresh_controller,
+        queued_hls_failed_lease_refresh_controller=queued_hls_failed_lease_refresh_controller,
+        queued_hls_restricted_fallback_refresh_controller=(
+            queued_hls_restricted_fallback_refresh_controller
+        ),
     )
     app.state.resources = resources
     app.include_router(create_graphql_router(resources.graphql_plugin_registry), prefix="/graphql")
@@ -1203,3 +1251,190 @@ def test_graphql_operator_queries_expose_runtime_queue_and_metadata_history() ->
             "lastError": "provider_timeout",
         }
     ]
+
+
+def test_graphql_playback_control_plane_mutations_use_shared_resources() -> None:
+    direct_controller = FakePlaybackTriggerController(
+        result=DirectPlaybackRefreshControlPlaneTriggerResult(
+            item_identifier="item-1",
+            outcome="scheduled",
+            scheduling_result=DirectPlaybackRefreshSchedulingResult(
+                outcome="scheduled",
+                scheduled_request=DirectPlaybackRefreshScheduleRequest(
+                    item_identifier="item-1",
+                    recommendation=DirectPlaybackRefreshRecommendation(
+                        reason="provider_direct_stale",
+                        target="attachment",
+                        target_id="attachment-1",
+                    ),
+                    requested_at=datetime(2026, 4, 13, 12, 10, tzinfo=UTC),
+                    not_before=datetime(2026, 4, 13, 12, 15, tzinfo=UTC),
+                    retry_after_seconds=30.0,
+                ),
+                retry_after_seconds=30.0,
+            ),
+        )
+    )
+    failed_controller = FakePlaybackTriggerController(
+        result=HlsFailedLeaseRefreshControlPlaneTriggerResult(
+            item_identifier="item-1",
+            outcome="no_action",
+            refresh_result=HlsFailedLeaseRefreshResult(
+                item_identifier="item-1",
+                outcome="completed",
+                execution=MediaEntryLeaseRefreshExecution(
+                    media_entry_id="entry-1",
+                    ok=True,
+                    refresh_state="ready",
+                    locator="https://cdn.example.com/hls.m3u8",
+                    error=None,
+                ),
+            ),
+        )
+    )
+    restricted_controller = FakePlaybackTriggerController(
+        result=HlsRestrictedFallbackRefreshControlPlaneTriggerResult(
+            item_identifier="item-1",
+            outcome="no_action",
+            refresh_result=HlsRestrictedFallbackRefreshResult(
+                item_identifier="item-1",
+                outcome="run_later",
+                execution=MediaEntryLeaseRefreshExecution(
+                    media_entry_id="entry-2",
+                    ok=False,
+                    refresh_state="refreshing",
+                    locator="https://restricted.example.com/hls.m3u8",
+                    error="provider_circuit_open",
+                ),
+                retry_after_seconds=45.0,
+                deferred_reason="provider_circuit_open",
+            ),
+        )
+    )
+    playback_service = FakePlaybackService(stale_result=True)
+    client = _build_client(
+        FakeMediaService(),
+        queued_direct_playback_refresh_controller=direct_controller,
+        queued_hls_failed_lease_refresh_controller=failed_controller,
+        queued_hls_restricted_fallback_refresh_controller=restricted_controller,
+        playback_service=playback_service,
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation {
+                  direct: triggerDirectPlaybackRefresh(itemId: "item-1") {
+                    itemId
+                    outcome
+                    controllerAttached
+                    controlPlaneOutcome
+                    refreshOutcome
+                    retryAfterSeconds
+                    scheduledRequestedAt
+                    scheduledNotBefore
+                  }
+                  failed: triggerHlsFailedLeaseRefresh(itemId: "item-1") {
+                    itemId
+                    outcome
+                    controllerAttached
+                    controlPlaneOutcome
+                    refreshOutcome
+                    executionOk
+                    executionRefreshState
+                    executionLocator
+                  }
+                  restricted: triggerHlsRestrictedFallbackRefresh(itemId: "item-1") {
+                    itemId
+                    outcome
+                    controllerAttached
+                    controlPlaneOutcome
+                    refreshOutcome
+                    executionOk
+                    executionRefreshState
+                    executionLocator
+                    executionError
+                    retryAfterSeconds
+                    deferredReason
+                  }
+                  stale: markSelectedHlsMediaEntryStale(itemId: "item-1") {
+                    itemId
+                    success
+                    error
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["direct"] == {
+        "itemId": "item-1",
+        "outcome": "triggered",
+        "controllerAttached": True,
+        "controlPlaneOutcome": "scheduled",
+        "refreshOutcome": "scheduled",
+        "retryAfterSeconds": 30.0,
+        "scheduledRequestedAt": "2026-04-13T12:10:00+00:00",
+        "scheduledNotBefore": "2026-04-13T12:15:00+00:00",
+    }
+    assert payload["failed"] == {
+        "itemId": "item-1",
+        "outcome": "triggered",
+        "controllerAttached": True,
+        "controlPlaneOutcome": "no_action",
+        "refreshOutcome": "completed",
+        "executionOk": True,
+        "executionRefreshState": "ready",
+        "executionLocator": "https://cdn.example.com/hls.m3u8",
+    }
+    assert payload["restricted"] == {
+        "itemId": "item-1",
+        "outcome": "triggered",
+        "controllerAttached": True,
+        "controlPlaneOutcome": "no_action",
+        "refreshOutcome": "run_later",
+        "executionOk": False,
+        "executionRefreshState": "refreshing",
+        "executionLocator": "https://restricted.example.com/hls.m3u8",
+        "executionError": "provider_circuit_open",
+        "retryAfterSeconds": 45.0,
+        "deferredReason": "provider_circuit_open",
+    }
+    assert payload["stale"] == {
+        "itemId": "item-1",
+        "success": True,
+        "error": None,
+    }
+    assert direct_controller.triggered_item_ids == ["item-1"]
+    assert failed_controller.triggered_item_ids == ["item-1"]
+    assert restricted_controller.triggered_item_ids == ["item-1"]
+    assert playback_service.stale_item_ids == ["item-1"]
+
+
+def test_graphql_mark_selected_hls_media_entry_stale_reports_unavailable_service() -> None:
+    client = _build_client(FakeMediaService())
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation {
+                  markSelectedHlsMediaEntryStale(itemId: "item-1") {
+                    itemId
+                    success
+                    error
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["markSelectedHlsMediaEntryStale"] == {
+        "itemId": "item-1",
+        "success": False,
+        "error": "playback_service_unavailable",
+    }

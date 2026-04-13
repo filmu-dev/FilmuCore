@@ -27,12 +27,14 @@ from filmu_py.graphql.types import (
     GQLHealthCheck,
     GQLItemEvent,
     GQLLibraryStats,
+    GQLMarkSelectedHlsMediaEntryStaleResult,
     GQLMediaEntry,
     GQLMediaItem,
     GQLMediaItemDetail,
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
     GQLPlaybackAttachment,
+    GQLPlaybackRefreshTriggerResult,
     GQLQueueAlert,
     GQLRecoveryMechanism,
     GQLRecoveryPlan,
@@ -72,6 +74,14 @@ from filmu_py.services.media import (
     StatsProjection,
     _canonical_item_type_name,
     _infer_request_media_type,
+)
+from filmu_py.services.playback import (
+    AppScopedDirectPlaybackRefreshTriggerResult,
+    AppScopedHlsFailedLeaseRefreshTriggerResult,
+    AppScopedHlsRestrictedFallbackRefreshTriggerResult,
+    trigger_direct_playback_refresh_from_resources,
+    trigger_hls_failed_lease_refresh_from_resources,
+    trigger_hls_restricted_fallback_refresh_from_resources,
 )
 from filmu_py.services.vfs_catalog import VfsCatalogEntry, VfsCatalogSnapshot
 
@@ -659,6 +669,94 @@ async def _build_media_item_detail(
     )
 
 
+def _serialize_trigger_datetime(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _build_direct_playback_refresh_trigger_result(
+    result: AppScopedDirectPlaybackRefreshTriggerResult,
+) -> GQLPlaybackRefreshTriggerResult:
+    control_plane_result = result.control_plane_result
+    scheduling_result = (
+        control_plane_result.scheduling_result if control_plane_result is not None else None
+    )
+    scheduled_request = None
+    if control_plane_result is not None and control_plane_result.scheduled_request is not None:
+        scheduled_request = control_plane_result.scheduled_request
+    elif scheduling_result is not None and scheduling_result.scheduled_request is not None:
+        scheduled_request = scheduling_result.scheduled_request
+
+    execution = scheduling_result.execution if scheduling_result is not None else None
+    media_entry_execution = execution.media_entry_execution if execution is not None else None
+    attachment_execution = execution.attachment_execution if execution is not None else None
+    execution_ok = None
+    execution_refresh_state = None
+    execution_locator = None
+    execution_error = None
+    if media_entry_execution is not None:
+        execution_ok = media_entry_execution.ok
+        execution_refresh_state = media_entry_execution.refresh_state
+        execution_locator = media_entry_execution.locator
+        execution_error = media_entry_execution.error
+    elif attachment_execution is not None:
+        execution_ok = attachment_execution.ok
+        execution_refresh_state = attachment_execution.refresh_state
+        execution_locator = attachment_execution.locator
+        execution_error = attachment_execution.error
+
+    return GQLPlaybackRefreshTriggerResult(
+        item_id=result.item_identifier,
+        outcome=result.outcome,
+        controller_attached=result.controller_attached,
+        control_plane_outcome=(control_plane_result.outcome if control_plane_result is not None else None),
+        refresh_outcome=(scheduling_result.outcome if scheduling_result is not None else None),
+        execution_ok=execution_ok,
+        execution_refresh_state=execution_refresh_state,
+        execution_locator=execution_locator,
+        execution_error=execution_error,
+        retry_after_seconds=(
+            scheduling_result.retry_after_seconds if scheduling_result is not None else None
+        ),
+        deferred_reason=(execution.deferred_reason if execution is not None else None),
+        scheduled_requested_at=(
+            _serialize_trigger_datetime(scheduled_request.requested_at)
+            if scheduled_request is not None
+            else None
+        ),
+        scheduled_not_before=(
+            _serialize_trigger_datetime(scheduled_request.not_before)
+            if scheduled_request is not None
+            else None
+        ),
+    )
+
+
+def _build_selected_hls_refresh_trigger_result(
+    result: (
+        AppScopedHlsFailedLeaseRefreshTriggerResult
+        | AppScopedHlsRestrictedFallbackRefreshTriggerResult
+    ),
+) -> GQLPlaybackRefreshTriggerResult:
+    control_plane_result = result.control_plane_result
+    refresh_result = control_plane_result.refresh_result if control_plane_result is not None else None
+    execution = refresh_result.execution if refresh_result is not None else None
+    return GQLPlaybackRefreshTriggerResult(
+        item_id=result.item_identifier,
+        outcome=result.outcome,
+        controller_attached=result.controller_attached,
+        control_plane_outcome=(control_plane_result.outcome if control_plane_result is not None else None),
+        refresh_outcome=(refresh_result.outcome if refresh_result is not None else None),
+        execution_ok=(execution.ok if execution is not None else None),
+        execution_refresh_state=(execution.refresh_state if execution is not None else None),
+        execution_locator=(execution.locator if execution is not None else None),
+        execution_error=(execution.error if execution is not None else None),
+        retry_after_seconds=(refresh_result.retry_after_seconds if refresh_result is not None else None),
+        deferred_reason=(refresh_result.deferred_reason if refresh_result is not None else None),
+        scheduled_requested_at=None,
+        scheduled_not_before=None,
+    )
+
+
 @strawberry.type
 class CoreQueryResolver:
     """Base query resolvers available without plugin registration."""
@@ -1016,6 +1114,71 @@ class CoreMutationResolver:
             success=True,
             error=None,
             new_state=item.state,
+        )
+
+    @strawberry.mutation(
+        description="Trigger direct-play refresh through the shared playback control plane"
+    )
+    async def trigger_direct_playback_refresh(
+        self,
+        info: Info[GraphQLContext, object],
+        item_id: strawberry.ID,
+    ) -> GQLPlaybackRefreshTriggerResult:
+        result = await trigger_direct_playback_refresh_from_resources(
+            info.context.resources,
+            str(item_id),
+        )
+        return _build_direct_playback_refresh_trigger_result(result)
+
+    @strawberry.mutation(
+        description="Trigger selected-HLS failed-lease refresh through the shared playback control plane"
+    )
+    async def trigger_hls_failed_lease_refresh(
+        self,
+        info: Info[GraphQLContext, object],
+        item_id: strawberry.ID,
+    ) -> GQLPlaybackRefreshTriggerResult:
+        result = await trigger_hls_failed_lease_refresh_from_resources(
+            info.context.resources,
+            str(item_id),
+        )
+        return _build_selected_hls_refresh_trigger_result(result)
+
+    @strawberry.mutation(
+        description="Trigger selected-HLS restricted-fallback refresh through the shared playback control plane"
+    )
+    async def trigger_hls_restricted_fallback_refresh(
+        self,
+        info: Info[GraphQLContext, object],
+        item_id: strawberry.ID,
+    ) -> GQLPlaybackRefreshTriggerResult:
+        result = await trigger_hls_restricted_fallback_refresh_from_resources(
+            info.context.resources,
+            str(item_id),
+        )
+        return _build_selected_hls_refresh_trigger_result(result)
+
+    @strawberry.mutation(
+        description="Mark the selected HLS media entry stale so the shared refresh loop can pick it up"
+    )
+    async def mark_selected_hls_media_entry_stale(
+        self,
+        info: Info[GraphQLContext, object],
+        item_id: strawberry.ID,
+    ) -> GQLMarkSelectedHlsMediaEntryStaleResult:
+        playback_service = info.context.resources.playback_service
+        if playback_service is None:
+            return GQLMarkSelectedHlsMediaEntryStaleResult(
+                item_id=str(item_id),
+                success=False,
+                error="playback_service_unavailable",
+            )
+
+        success = await playback_service.mark_selected_hls_media_entry_stale(str(item_id))
+        return GQLMarkSelectedHlsMediaEntryStaleResult(
+            item_id=str(item_id),
+            success=success,
+            error=None if success else "selected_hls_media_entry_not_marked",
         )
 
     @strawberry.mutation(description="Update one compatibility settings path")
