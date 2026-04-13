@@ -101,7 +101,7 @@ What does **not** exist yet:
 - broader long-running soak/backpressure hardening of the Unix-only `fuse3` runtime now that reconnect deltas, inline stale-link refresh, and mounted semantic path metadata are in place
 - later HLS governance deepening beyond the new production-grade HTTP baseline, especially any Rust/mount-side reuse and broader resource-policy tuning
 - deeper governance around remote-direct-backed HLS generation remains necessary even after the new transcode fallback baseline, especially around ffmpeg failure policy and end-to-end player validation
-- broader multi-environment mounted soak evidence and cross-process correlation once the shared chunk engine is driving real mounted reads
+- real multi-environment mounted soak evidence collection above the new repo-level aggregation gate, plus cross-process correlation once the shared chunk engine is driving real mounted reads
 - repeatable Docker Plex playback-proof coverage on top of the now-working `/mnt/filmuvfs` path, with the new `plex-wsl-evidence.json` artifact and per-check summary fields driven to green
 - keep native Windows Plex parity evidence green against `C:\FilmuCoreVFS` through repeatable reruns now that the local PMS path is live-green
 

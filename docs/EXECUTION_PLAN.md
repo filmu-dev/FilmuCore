@@ -322,7 +322,7 @@ No undocumented requirements are assumed.
 - Live validation on the mounted WSL path now confirms season-grouped output for real shows such as `Stranger Things (2016)` instead of a flat root-level file dump.
 - Link resolution is implemented through built-in Real-Debrid / AllDebrid / Debrid-Link clients with persisted media-entry leases and provider-backed refresh orchestration.
 - Linux-target compile validation, WSL/Linux mount lifecycle validation, manual mounted-read smoke, and Plex/Emby playback validation all pass for the current Rust sidecar path.
-- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics now also feed operator-facing pressure classes on the API surfaces and the Windows soak artifacts; the remaining gap is multi-environment runtime breadth rather than raw mounted counters or artifact vocabulary alone.
+- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics now also feed operator-facing pressure classes on the API surfaces and the Windows soak artifacts. A first repo-level multi-environment gate now aggregates `soak-stability-*.json` across distinct environment classes; the remaining gap is real environment breadth and repeated evidence collection rather than missing aggregation code.
 
 ### Main missing pieces
 
@@ -330,7 +330,7 @@ No undocumented requirements are assumed.
 - Mount/HTTP convergence on the shared chunk engine semantics for mounted reads.
 - Decide whether the current canonical-plus-alias mounted browse policy should stop here or grow into a fully separate id-keyed tree, and what broader queue-backed/orchestrated resolver workflow should exist above the current mount-side inline refresh dedup.
 - Optional disk/persistent cache and smarter prefetch evolution above the now-async Rust cache.
-- Broader long-running soak/backpressure validation and multi-environment mounted data-plane breadth.
+- Broader long-running soak/backpressure validation and real multi-environment mounted data-plane breadth on top of the new aggregation gate.
 - VFS rollout controls.
 
 ### Exit criteria
