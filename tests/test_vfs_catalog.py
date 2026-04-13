@@ -8,7 +8,14 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import cast
 
-from filmu_py.db.models import ActiveStreamORM, MediaEntryORM, MediaItemORM
+from filmu_py.db.models import (
+    ActiveStreamORM,
+    EpisodeORM,
+    MediaEntryORM,
+    MediaItemORM,
+    SeasonORM,
+    ShowORM,
+)
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.services.playback import PlaybackSourceService
 from filmu_py.services.vfs_catalog import FilmuVfsCatalogSupplier
@@ -175,6 +182,89 @@ def test_build_snapshot_projects_episode_file_into_show_hierarchy() -> None:
     )
     assert file_entry.file is not None
     assert file_entry.file.media_type == "episode"
+
+
+def test_build_snapshot_prefers_specialization_hierarchy_over_stale_episode_metadata() -> None:
+    show_item = _build_item("item-catalog-specialization-show", title="Canonical Show")
+    show_item.attributes = {"item_type": "show", "tvdb_id": "tvdb-canonical-show"}
+    show_item.show = ShowORM(
+        media_item_id=show_item.id,
+        tmdb_id="tmdb-canonical-show",
+        tvdb_id="tvdb-canonical-show",
+    )
+    show_item.show.media_item = show_item
+
+    season_item = _build_item("item-catalog-specialization-season", title="Canonical Show Season")
+    season_item.attributes = {"item_type": "season", "season_number": 9}
+    season_item.season = SeasonORM(
+        media_item_id=season_item.id,
+        show_id=show_item.show.id,
+        season_number=2,
+        tmdb_id="tmdb-canonical-season",
+        tvdb_id="tvdb-canonical-season",
+    )
+    season_item.season.media_item = season_item
+    season_item.season.show = show_item.show
+    show_item.show.seasons = [season_item.season]
+
+    item = _build_item("item-catalog-specialization-episode", title="Episode Title")
+    item.attributes = {
+        "item_type": "movie",
+        "show_title": "Wrong Metadata Show",
+        "season_number": 9,
+        "episode_number": 99,
+        "year": 2024,
+    }
+    item.episode = EpisodeORM(
+        media_item_id=item.id,
+        season_id=season_item.season.id,
+        episode_number=3,
+        tmdb_id="tmdb-canonical-episode",
+        tvdb_id="tvdb-canonical-episode",
+        imdb_id="tt-canonical-episode",
+    )
+    item.episode.media_item = item
+    item.episode.season = season_item.season
+    season_item.season.episodes = [item.episode]
+
+    media_entry = MediaEntryORM(
+        id="media-entry-catalog-specialization-episode",
+        item_id=item.id,
+        kind="remote-direct",
+        original_filename="Canonical Show - S02E03 - Episode Title.mkv",
+        download_url="https://api.example.com/restricted/specialization-episode",
+        unrestricted_url="https://cdn.example.com/specialization-episode",
+        provider="realdebrid",
+        provider_download_id="download-specialization-episode",
+        provider_file_id="provider-file-specialization-episode",
+        provider_file_path="Wrong Metadata Show/S09E99.mkv",
+        size_bytes=123456789,
+        refresh_state="ready",
+        created_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+    )
+    item.media_entries = [media_entry]
+    item.active_streams = [
+        ActiveStreamORM(
+            id="active-stream-catalog-specialization-episode",
+            item_id=item.id,
+            media_entry_id=media_entry.id,
+            role="direct",
+            created_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+        )
+    ]
+
+    snapshot = asyncio.run(_build_supplier([item]).build_snapshot())
+
+    file_entries = [entry for entry in snapshot.entries if entry.kind == "file"]
+    assert len(file_entries) == 1
+    assert (
+        file_entries[0].path
+        == "/shows/Canonical Show (2024)/Season 02/Canonical Show - S02E03 - Episode Title.mkv"
+    )
+    assert file_entries[0].file is not None
+    assert file_entries[0].file.media_type == "episode"
 
 
 def test_build_snapshot_uses_restricted_locator_for_placeholder_debrid_unrestricted_url() -> None:
@@ -362,6 +452,59 @@ def test_build_snapshot_infers_season_and_episode_from_sxx_xxx_provider_pattern(
         file_entries[0].path
         == "/shows/Stranger Things (2016)/Season 05/Stranger Things S05x08 Il mondo reale AC3 5.1 ITA.ENG 1080p H265 sub ita.eng.mkv"
     )
+
+
+def test_build_snapshot_prefers_show_specialization_for_show_level_pack_directory() -> None:
+    item = _build_item("item-catalog-specialization-show-pack", title="Pack Title")
+    item.attributes = {
+        "item_type": "movie",
+        "show_title": "Wrong Metadata Show",
+        "tvdb_id": "metadata-tvdb-show",
+    }
+    item.show = ShowORM(
+        media_item_id=item.id,
+        tmdb_id="tmdb-show-pack",
+        tvdb_id="tvdb-show-pack",
+        imdb_id="tt-show-pack",
+    )
+    item.show.media_item = item
+
+    media_entry = MediaEntryORM(
+        id="media-entry-catalog-specialization-show-pack",
+        item_id=item.id,
+        kind="remote-direct",
+        original_filename="Pack Title Episode 04.mkv",
+        download_url="https://api.example.com/restricted/show-pack",
+        unrestricted_url="https://cdn.example.com/show-pack",
+        provider="realdebrid",
+        provider_download_id="download-show-pack",
+        provider_file_id="provider-file-show-pack",
+        provider_file_path="Wrong Metadata Show Episode 04.mkv",
+        size_bytes=456789123,
+        refresh_state="ready",
+        created_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+    )
+    item.media_entries = [media_entry]
+    item.active_streams = [
+        ActiveStreamORM(
+            id="active-stream-catalog-specialization-show-pack",
+            item_id=item.id,
+            media_entry_id=media_entry.id,
+            role="direct",
+            created_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+        )
+    ]
+
+    snapshot = asyncio.run(_build_supplier([item]).build_snapshot())
+
+    file_entries = [entry for entry in snapshot.entries if entry.kind == "file"]
+    assert len(file_entries) == 1
+    assert "/shows/Pack Title/Season 01/" in file_entries[0].path
+    assert "Wrong Metadata Show" not in file_entries[0].path
+    assert file_entries[0].file is not None
+    assert file_entries[0].file.media_type == "show"
 
 
 def test_build_delta_emits_removal_when_existing_entry_path_changes() -> None:

@@ -23,6 +23,11 @@ from sqlalchemy.orm import selectinload
 
 from filmu_py.db.models import MediaEntryORM, MediaItemORM
 from filmu_py.db.runtime import DatabaseRuntime
+from filmu_py.services.media import (
+    MediaItemSpecializationRecord,
+    _build_specialization_record,
+    _projection_item_load_options,
+)
 from filmu_py.services.mount_worker import (
     MountMediaEntryQueryBlockedReason,
     MountMediaEntryQueryContract,
@@ -463,6 +468,7 @@ class FilmuVfsCatalogSupplier:
                         MediaEntryORM.source_attachment
                     ),
                     selectinload(MediaItemORM.active_streams),
+                    *_projection_item_load_options(),
                 )
                 .order_by(MediaItemORM.created_at.asc(), MediaItemORM.id.asc())
             )
@@ -634,6 +640,7 @@ class FilmuVfsCatalogSupplier:
         filename: str,
     ) -> str:
         """Build a VFS path for one specific media entry, inferring season from the entry path."""
+        specialization = FilmuVfsCatalogSupplier._specialization(item)
         attributes = cast(dict[str, object], item.attributes or {})
 
         if media_type == "movie":
@@ -642,10 +649,12 @@ class FilmuVfsCatalogSupplier:
             safe_filename = FilmuVfsCatalogSupplier._normalized_movie_filename(item, extension=extension)
             return str(PurePosixPath("/") / "movies" / movie_dir / safe_filename)
 
-        show_dir = FilmuVfsCatalogSupplier._normalized_show_directory(item)
-        season_number = FilmuVfsCatalogSupplier._extract_int(
-            attributes, "season_number", "season", "parent_season_number"
-        )
+        show_dir = FilmuVfsCatalogSupplier._normalized_show_directory(item, specialization)
+        season_number = specialization.season_number
+        if season_number is None:
+            season_number = FilmuVfsCatalogSupplier._extract_int(
+                attributes, "season_number", "season", "parent_season_number"
+            )
         # Show-level records don't always carry season_number in attributes.
         # When absent, infer from persisted provider paths. If still unavailable,
         # default to Season 01 for known episodic rows so files are grouped under
@@ -663,7 +672,11 @@ class FilmuVfsCatalogSupplier:
         ):
             season_number = 1
 
-        episode_number = FilmuVfsCatalogSupplier._extract_int(attributes, "episode_number", "episode")
+        episode_number = specialization.episode_number
+        if episode_number is None:
+            episode_number = FilmuVfsCatalogSupplier._extract_int(
+                attributes, "episode_number", "episode"
+            )
         if episode_number is None:
             entry_path = media_entry.provider_file_path or media_entry.original_filename
             episode_number = FilmuVfsCatalogSupplier._infer_episode_from_path(entry_path)
@@ -862,6 +875,16 @@ class FilmuVfsCatalogSupplier:
 
     @staticmethod
     def _normalize_media_type(item: MediaItemORM) -> VfsCatalogMediaType:
+        specialization = FilmuVfsCatalogSupplier._specialization(item)
+        mapped_specialization = {
+            "movie": "movie",
+            "show": "show",
+            "season": "season",
+            "episode": "episode",
+        }.get(specialization.item_type)
+        if mapped_specialization is not None:
+            return cast(VfsCatalogMediaType, mapped_specialization)
+
         attributes = cast(dict[str, object], item.attributes or {})
         raw_type = FilmuVfsCatalogSupplier._extract_string(attributes, "item_type", "media_type")
         if raw_type is not None:
@@ -964,6 +987,7 @@ class FilmuVfsCatalogSupplier:
         media_type: VfsCatalogMediaType,
         filename: str,
     ) -> str:
+        specialization = FilmuVfsCatalogSupplier._specialization(item)
         attributes = cast(dict[str, object], item.attributes or {})
         if media_type == "movie":
             extension = FilmuVfsCatalogSupplier._suffix_from_filename(filename)
@@ -971,13 +995,15 @@ class FilmuVfsCatalogSupplier:
             safe_filename = FilmuVfsCatalogSupplier._normalized_movie_filename(item, extension=extension)
             return str(PurePosixPath("/") / "movies" / movie_dir / safe_filename)
 
-        show_dir = FilmuVfsCatalogSupplier._normalized_show_directory(item)
-        season_number = FilmuVfsCatalogSupplier._extract_int(
-            attributes,
-            "season_number",
-            "season",
-            "parent_season_number",
-        )
+        show_dir = FilmuVfsCatalogSupplier._normalized_show_directory(item, specialization)
+        season_number = specialization.season_number
+        if season_number is None:
+            season_number = FilmuVfsCatalogSupplier._extract_int(
+                attributes,
+                "season_number",
+                "season",
+                "parent_season_number",
+            )
         safe_filename = FilmuVfsCatalogSupplier._sanitize_path_segment(filename)
         if media_type in {"season", "episode"} and season_number is not None:
             season_dir = f"Season {season_number:02d}"
@@ -1015,10 +1041,15 @@ class FilmuVfsCatalogSupplier:
         return f"{title}{extension}"
 
     @staticmethod
-    def _normalized_show_directory(item: MediaItemORM) -> str:
+    def _normalized_show_directory(
+        item: MediaItemORM,
+        specialization: MediaItemSpecializationRecord | None = None,
+    ) -> str:
         attributes = cast(dict[str, object], item.attributes or {})
+        resolved_specialization = specialization or FilmuVfsCatalogSupplier._specialization(item)
         show_title = FilmuVfsCatalogSupplier._sanitize_path_segment(
-            FilmuVfsCatalogSupplier._extract_string(
+            resolved_specialization.show_title
+            or FilmuVfsCatalogSupplier._extract_string(
                 attributes, "show_title", "series_title", "parent_title"
             )
             or item.title
@@ -1082,7 +1113,9 @@ class FilmuVfsCatalogSupplier:
                 return resolved
             counter += 1
 
-        raise AssertionError("unreachable path de-duplication loop")
+    @staticmethod
+    def _specialization(item: MediaItemORM) -> MediaItemSpecializationRecord:
+        return _build_specialization_record(item)
 
     @staticmethod
     def _build_directory_paths(prepared_files: Sequence[_PreparedCatalogFile]) -> set[str]:

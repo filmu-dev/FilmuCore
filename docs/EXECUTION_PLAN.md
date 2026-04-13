@@ -113,7 +113,7 @@ No undocumented requirements are assumed.
 ### Re-audit note
 
 - GraphQL remains the strategic parity track with `filmu-ts`, but it is not the main blocker for testing the current REST/BFF-driven frontend locally.
-- The shared media-domain seam is now also deeper on that GraphQL track: specialization-backed service projections feed GraphQL calendar/detail consumers directly, and the GraphQL `items` list now reuses `search_items()` instead of flattening from raw records, so the remaining domain gap is VFS/compatibility-tail breadth rather than first graph-side specialization consumption.
+- The shared media-domain seam is now deeper across both graph and mounted-read consumers: specialization-backed service projections feed GraphQL calendar/detail consumers directly, the GraphQL `items` list now reuses `search_items()` instead of flattening from raw records, and the FilmuVFS catalog supplier now prefers specialization-backed hierarchy over metadata-first path shaping. The remaining domain gap is now the compatibility tail rather than graph/VFS-first specialization adoption.
 
 ---
 
