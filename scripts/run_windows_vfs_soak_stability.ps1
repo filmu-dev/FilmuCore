@@ -3,6 +3,7 @@ param(
     [int] $RepeatCount = 1,
     [string] $EnvironmentClass = '',
     [string] $MountPath = '',
+    [string] $ArtifactsRoot = '',
     [string] $BackendUrl = 'http://localhost:8000',
     [string] $ApiKey = '',
     [string] $TargetFile = '',
@@ -49,7 +50,12 @@ if ([string]::IsNullOrWhiteSpace($EnvironmentClass)) {
 
 $scriptRoot = $PSScriptRoot
 $singleRunScript = Join-Path $scriptRoot 'run_windows_vfs_soak.ps1'
-$artifactsRoot = Join-Path (Split-Path -Parent $scriptRoot) 'playback-proof-artifacts\windows-native-stack'
+$artifactsRoot = if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
+    Join-Path (Split-Path -Parent $scriptRoot) 'playback-proof-artifacts\windows-native-stack'
+}
+else {
+    [System.IO.Path]::GetFullPath($ArtifactsRoot)
+}
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $summaryPath = Join-Path $artifactsRoot ("soak-stability-{0}.json" -f $timestamp)
 New-Item -ItemType Directory -Force -Path $artifactsRoot | Out-Null

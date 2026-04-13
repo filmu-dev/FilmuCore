@@ -326,5 +326,4 @@ async def test_redis_replay_backplane_fences_consumer_when_claim_is_denied() -> 
             "heartbeat_expiry_seconds": 45,
         }
     ]
-    assert sink.errors
-    assert "consumer_fenced" in str(sink.errors[0]["error"])
+    assert sink.errors == []

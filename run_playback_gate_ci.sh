@@ -166,7 +166,7 @@ stability_trend_args=(-NoProfile -File ./scripts/check_playback_stability_trends
 if [[ -n "$FILMU_PLAYBACK_STABILITY_HISTORY_ROOT" ]]; then
   stability_trend_args+=(-HistoryRoot "$FILMU_PLAYBACK_STABILITY_HISTORY_ROOT")
 else
-  stability_trend_args+=(-HistoryRoot ./playback-proof-artifacts/stability-trend-history -AllowBootstrap)
+  stability_trend_args+=(-HistoryRoot ./playback-proof-artifacts/stability-trend-history)
 fi
 if [[ "$FILMU_PLAYBACK_ALLOW_STABILITY_BOOTSTRAP" == "1" ]]; then
   stability_trend_args+=(-AllowBootstrap)

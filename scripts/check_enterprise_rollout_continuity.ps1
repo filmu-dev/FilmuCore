@@ -105,6 +105,38 @@ function Read-JsonFile {
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
+function Get-LatestPlaybackStabilitySummaryPaths {
+    param([string] $Root)
+
+    if (-not (Test-Path -LiteralPath $Root)) {
+        return @()
+    }
+
+    $latestByEnvironment = @{}
+    $summaryFiles = @(
+        Get-ChildItem -LiteralPath $Root -Filter 'stability-summary-*.json' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending
+    )
+    foreach ($summaryFile in $summaryFiles) {
+        $environmentClass = '__unknown__'
+        try {
+            $summary = Read-JsonFile -Path $summaryFile.FullName
+            $environmentClass = [string]($summary.environment_class ?? '')
+        }
+        catch {
+            $environmentClass = '__unknown__'
+        }
+        if ([string]::IsNullOrWhiteSpace($environmentClass)) {
+            $environmentClass = '__unknown__'
+        }
+        if (-not $latestByEnvironment.ContainsKey($environmentClass)) {
+            $latestByEnvironment[$environmentClass] = $summaryFile.FullName
+        }
+    }
+
+    return @($latestByEnvironment.Values)
+}
+
 $decompositionBudgets = [ordered]@{
     (Join-Path $RepoRoot 'filmu_py/services/media.py') = 6280
     (Join-Path $RepoRoot 'filmu_py/services/playback.py') = 5405
@@ -187,6 +219,28 @@ if ($ProbeOperatorNow) {
 
 $soakTrendSummaryFile = Get-LatestByPattern -Root $WindowsSoakArtifactsRoot -Filter 'soak-trend-summary-*.json'
 $soakTrendSummaryPath = if ($null -ne $soakTrendSummaryFile) { $soakTrendSummaryFile.FullName } else { $null }
+$soakProgramSummaryFile = Get-LatestByPattern -Root $WindowsSoakArtifactsRoot -Filter 'soak-program-summary-*.json'
+$soakProgramSummaryPath = if ($null -ne $soakProgramSummaryFile) { $soakProgramSummaryFile.FullName } else { $null }
+Add-Check -Section 'soak_trends' -Name 'program_summary_present' `
+    -Passed:(($null -ne $soakProgramSummaryPath) -or $AllowBootstrap) `
+    -Observed:$soakProgramSummaryPath `
+    -Expected:'latest soak-program-summary-*.json'
+if ($null -ne $soakProgramSummaryPath) {
+    $soakProgramSummary = Read-JsonFile -Path $soakProgramSummaryPath
+    $soakProgramAgeHours = Get-FileAgeHours -Path $soakProgramSummaryPath
+    Add-Check -Section 'soak_trends' -Name 'program_summary_status' `
+        -Passed:([string]$soakProgramSummary.status -eq 'passed') `
+        -Observed:([string]$soakProgramSummary.status) `
+        -Expected:'passed'
+    Add-Check -Section 'soak_trends' -Name 'program_summary_freshness_hours' `
+        -Passed:($null -ne $soakProgramAgeHours -and $soakProgramAgeHours -le $MaxEvidenceAgeHours) `
+        -Observed:$soakProgramAgeHours `
+        -Expected:("<={0}" -f $MaxEvidenceAgeHours)
+    Add-Check -Section 'soak_trends' -Name 'program_environment_count' `
+        -Passed:([int]($soakProgramSummary.environment_count ?? 0) -ge 2 -or $AllowBootstrap) `
+        -Observed:([int]($soakProgramSummary.environment_count ?? 0)) `
+        -Expected:'>=2'
+}
 Add-Check -Section 'soak_trends' -Name 'trend_summary_present' `
     -Passed:(($null -ne $soakTrendSummaryPath) -or $AllowBootstrap) `
     -Observed:$soakTrendSummaryPath `
@@ -216,17 +270,11 @@ Add-Check -Section 'soak_trends' -Name 'trend_history_depth' `
     -Observed:$soakHistoryCount `
     -Expected:(">={0}" -f $MinimumSoakTrendRecords)
 
+$playbackSummaryPaths = @(Get-LatestPlaybackStabilitySummaryPaths -Root $PlaybackArtifactsRoot)
 $playbackTrendSummaryFile = Get-LatestByPattern -Root $PlaybackArtifactsRoot -Filter 'playback-stability-trend-summary-*.json'
 $playbackTrendSummaryPath = if ($null -ne $playbackTrendSummaryFile) { $playbackTrendSummaryFile.FullName } else { $null }
 if ($null -eq $playbackTrendSummaryPath) {
-    $playbackStabilitySummaryCount = if (Test-Path -LiteralPath $PlaybackArtifactsRoot) {
-        @(
-            Get-ChildItem -LiteralPath $PlaybackArtifactsRoot -Filter 'stability-summary-*.json' -File -ErrorAction SilentlyContinue
-        ).Count
-    }
-    else {
-        0
-    }
+    $playbackStabilitySummaryCount = @($playbackSummaryPaths).Count
     Add-Check -Section 'playback_trends' -Name 'stability_summary_inputs_present' `
         -Passed:($playbackStabilitySummaryCount -gt 0 -or $AllowBootstrap) `
         -Observed:$playbackStabilitySummaryCount `
@@ -241,11 +289,15 @@ if ($null -eq $playbackTrendSummaryPath) {
         $PlaybackArtifactsRoot,
         '-HistoryRoot',
         $PlaybackHistoryRoot
-    )
-    if ($AllowBootstrap) {
-        $playbackTrendArgs += '-AllowBootstrap'
-    }
-    & pwsh @playbackTrendArgs
+        )
+        if ($playbackSummaryPaths.Count -gt 0) {
+            $playbackTrendArgs += '-SummaryPaths'
+            $playbackTrendArgs += @($playbackSummaryPaths)
+        }
+        if ($AllowBootstrap) {
+            $playbackTrendArgs += '-AllowBootstrap'
+        }
+        & pwsh @playbackTrendArgs
         if ($LASTEXITCODE -ne 0) {
             throw '[enterprise-rollout-continuity] playback stability trend probe failed.'
         }
@@ -299,6 +351,10 @@ if (Test-Path -LiteralPath $operatorSummaryPath) {
         -Passed:($null -ne $operatorAgeHours -and $operatorAgeHours -le $MaxEvidenceAgeHours) `
         -Observed:$operatorAgeHours `
         -Expected:("<={0}" -f $MaxEvidenceAgeHours)
+    Add-Check -Section 'operator_rollout' -Name 'rollout_green_streak' `
+        -Passed:([int]($operatorSummary.green_streak ?? 0) -ge $MinimumOperatorTrendRecords -or $AllowBootstrap) `
+        -Observed:([int]($operatorSummary.green_streak ?? 0)) `
+        -Expected:(">={0}" -f $MinimumOperatorTrendRecords)
 }
 $operatorHistoryCount = if (Test-Path -LiteralPath $OperatorHistoryRoot) {
     @(

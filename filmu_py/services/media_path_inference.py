@@ -7,7 +7,7 @@ import re
 _SEASON_NUMBER_RE: tuple[re.Pattern[str], ...] = (
     re.compile(r"[Ss]eason\s*(\d+)", re.IGNORECASE),  # "Season 1", "season 01"
     re.compile(r"[Ss](\d{1,2})[Ee]\d{1,2}"),  # S01E02
-    re.compile(r"(\d{1,2})x\d{1,2}"),  # 1x02
+    re.compile(r"\b(\d{1,2})x\d{1,2}\b"),  # 1x02
 )
 _EPISODE_NUMBER_RE: tuple[re.Pattern[str], ...] = (
     re.compile(r"[Ss]\d{1,2}[Ee](\d{1,3})", re.IGNORECASE),

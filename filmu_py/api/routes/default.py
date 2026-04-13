@@ -976,7 +976,12 @@ async def _enterprise_operations_governance(
         1 for record in control_plane_subscribers if record.status == "stale"
     )
     control_plane_fenced_subscriber_count = sum(
-        1 for record in control_plane_subscribers if record.status == "fenced"
+        1
+        for record in control_plane_subscribers
+        if (
+            record.status == "fenced"
+            or "consumer_fenced" in str(getattr(record, "last_error", "") or "")
+        )
     )
 
     tenant_required_actions = [
