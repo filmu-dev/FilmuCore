@@ -24,7 +24,6 @@ from arq.connections import ArqRedis, RedisSettings, create_pool
 from arq.cron import cron
 from arq.jobs import Job, JobStatus
 from arq.worker import Worker
-from prometheus_client import Counter, Histogram
 from redis.asyncio import Redis
 from sqlalchemy import select
 
@@ -67,6 +66,7 @@ from filmu_py.services.playback import (
 )
 from filmu_py.services.settings_service import load_settings
 from filmu_py.state.item import InvalidItemTransition, ItemEvent, ItemState
+from filmu_py.workers import stage_observability as _stage_observability
 from filmu_py.workers.retry import (
     RetryPolicy,
     bind_worker_contextvars,
@@ -87,32 +87,17 @@ OUTBOX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=5, max_dela
 METADATA_REINDEX_RETRY_POLICY = RetryPolicy(
     max_attempts=3, base_delay_seconds=30, max_delay_seconds=300
 )
-WORKER_ENQUEUE_DECISIONS_TOTAL = Counter(
-    "filmu_py_worker_enqueue_decisions_total",
-    "Downstream worker enqueue decisions by stage",
-    ["stage", "decision"],
-)
-WORKER_JOB_STATUS_TOTAL = Counter(
-    "filmu_py_worker_job_status_total",
-    "Observed ARQ job statuses while coordinating worker stages",
-    ["stage", "status"],
-)
-WORKER_CLEANUP_TOTAL = Counter(
-    "filmu_py_worker_cleanup_total",
-    "Cleanup actions taken before replaying or deduplicating worker stages",
-    ["stage", "action"],
-)
-WORKER_STAGE_IDEMPOTENCY_TOTAL = Counter(
-    "filmu_py_worker_stage_idempotency_total",
-    "Observed stage idempotency and replay outcomes by stage",
-    ["stage", "outcome"],
-)
-WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
-    "filmu_py_worker_enqueue_defer_seconds",
-    "Deferred worker enqueue delays in seconds",
-    ["stage"],
-    buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
-)
+WORKER_CLEANUP_TOTAL = _stage_observability.WORKER_CLEANUP_TOTAL
+WORKER_ENQUEUE_DECISIONS_TOTAL = _stage_observability.WORKER_ENQUEUE_DECISIONS_TOTAL
+WORKER_ENQUEUE_DEFER_SECONDS = _stage_observability.WORKER_ENQUEUE_DEFER_SECONDS
+WORKER_JOB_STATUS_TOTAL = _stage_observability.WORKER_JOB_STATUS_TOTAL
+WORKER_STAGE_IDEMPOTENCY_TOTAL = _stage_observability.WORKER_STAGE_IDEMPOTENCY_TOTAL
+_job_status_name = _stage_observability.job_status_name
+_record_cleanup_action = _stage_observability.record_cleanup_action
+_record_enqueue_decision = _stage_observability.record_enqueue_decision
+_record_enqueue_defer = _stage_observability.record_enqueue_defer
+_record_job_status = _stage_observability.record_job_status
+_record_stage_idempotency = _stage_observability.record_stage_idempotency
 _HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int, int, int], Executor] = {}
 
 
@@ -613,10 +598,6 @@ def refresh_selected_hls_restricted_fallback_job_id(item_id: str) -> str:
     return f"refresh-selected-hls-restricted-fallback:{item_id}"
 
 
-def _job_status_name(status: JobStatus) -> str:
-    return getattr(status, "value", str(status))
-
-
 def _worker_stage_logger() -> Any:
     return structlog.get_logger(__name__)
 
@@ -665,22 +646,6 @@ async def _record_metadata_reindex_run(
             "scheduled_metadata_reindex_reconciliation.status_record_failed",
             exc_info=True,
         )
-
-
-def _record_enqueue_decision(stage_name: str, decision: str) -> None:
-    WORKER_ENQUEUE_DECISIONS_TOTAL.labels(stage=stage_name, decision=decision).inc()
-
-
-def _record_job_status(stage_name: str, status: JobStatus) -> None:
-    WORKER_JOB_STATUS_TOTAL.labels(stage=stage_name, status=_job_status_name(status)).inc()
-
-
-def _record_cleanup_action(stage_name: str, action: str) -> None:
-    WORKER_CLEANUP_TOTAL.labels(stage=stage_name, action=action).inc()
-
-
-def _record_stage_idempotency(stage_name: str, outcome: str) -> None:
-    WORKER_STAGE_IDEMPOTENCY_TOTAL.labels(stage=stage_name, outcome=outcome).inc()
 
 
 async def _clear_stale_downstream_job(
@@ -890,7 +855,7 @@ async def enqueue_index_item(
         "_queue_name": queue_name,
     }
     if defer_by_seconds is not None and defer_by_seconds > 0:
-        WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="index_item").observe(float(defer_by_seconds))
+        _record_enqueue_defer("index_item", float(defer_by_seconds))
         kwargs["_defer_by"] = timedelta(seconds=defer_by_seconds)
     if missing_seasons:
         kwargs["missing_seasons"] = missing_seasons
@@ -931,7 +896,7 @@ async def enqueue_scrape_item(
     )
     normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
     if defer_by_seconds is not None and defer_by_seconds > 0:
-        WORKER_ENQUEUE_DEFER_SECONDS.labels(stage="scrape_item").observe(float(defer_by_seconds))
+        _record_enqueue_defer("scrape_item", float(defer_by_seconds))
         if missing_seasons or normalized_episode_scope:
             kwargs: dict[str, object] = {}
             if missing_seasons:
