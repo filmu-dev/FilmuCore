@@ -2680,6 +2680,146 @@ def test_build_worker_settings_includes_recovery_worker() -> None:
     worker_settings = tasks.build_worker_settings(_build_worker_settings())
 
     assert tasks.recover_incomplete_library in worker_settings["functions"]
+    assert tasks.scheduled_metadata_reindex_reconciliation in worker_settings["functions"]
+
+
+def test_build_worker_settings_includes_scheduled_metadata_reindex_cron() -> None:
+    settings = _build_worker_settings()
+    settings.indexer.schedule_offset_minutes = 45
+
+    worker_settings = tasks.build_worker_settings(settings)
+    cron_jobs = worker_settings["cron_jobs"]
+    metadata_reindex_job = next(
+        job for job in cron_jobs if job.name == "scheduled_metadata_reindex_reconciliation"
+    )
+
+    assert metadata_reindex_job.hour == {0}
+    assert metadata_reindex_job.minute == {45}
+    assert metadata_reindex_job.job_id == "scheduled-metadata-reindex-reconciliation"
+
+
+def test_scheduled_metadata_reindex_reconciliation_runs_reindex_and_completed_refresh(
+    monkeypatch: Any,
+) -> None:
+    partial = MediaItemRecord(
+        id="item-partial-reindex",
+        external_ref="tmdb:item-partial-reindex",
+        title="Partial Item",
+        state=ItemState.PARTIALLY_COMPLETED,
+        attributes={"item_type": "show"},
+    )
+    ongoing = MediaItemRecord(
+        id="item-ongoing-reindex",
+        external_ref="tmdb:item-ongoing-reindex",
+        title="Ongoing Item",
+        state=ItemState.ONGOING,
+        attributes={"item_type": "show"},
+    )
+    completed = MediaItemRecord(
+        id="item-completed-reindex",
+        external_ref="tmdb:item-completed-reindex",
+        title="Completed Item",
+        state=ItemState.COMPLETED,
+        attributes={"item_type": "movie"},
+    )
+
+    media_service = FakePipelineMediaService(
+        item_id="item-completed-reindex",
+        listed_items=[partial, ongoing, completed],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def index_job_active(
+        _: object,
+        *,
+        item_id: str,
+        job_id: str | None = None,
+    ) -> bool:
+        if item_id == "item-ongoing-reindex":
+            assert job_id == tasks.index_item_followup_job_id(
+                "item-ongoing-reindex",
+                discriminator="scheduled-reindex",
+            )
+        return item_id == "item-ongoing-reindex"
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_index_item_job_active", index_job_active)
+
+    result = asyncio.run(
+        tasks.scheduled_metadata_reindex_reconciliation(
+            {"settings": _build_worker_settings(), "queue_name": "filmu-py"}
+        )
+    )
+
+    assert result == {
+        "processed": 3,
+        "queued": 1,
+        "reconciled": 1,
+        "skipped_active": 1,
+        "failed": 0,
+    }
+    assert redis.calls == [
+        (
+            "index_item",
+            ("item-partial-reindex",),
+            {
+                "_job_id": tasks.index_item_followup_job_id(
+                    "item-partial-reindex",
+                    discriminator="scheduled-reindex",
+                ),
+                "_queue_name": "filmu-py",
+            },
+        )
+    ]
+    assert media_service.calls.count("enrich_item_metadata") == 1
+
+
+def test_scheduled_metadata_reindex_reconciliation_checks_followup_job_id(
+    monkeypatch: Any,
+) -> None:
+    partial = MediaItemRecord(
+        id="item-partial-followup-check",
+        external_ref="tmdb:item-partial-followup-check",
+        title="Partial Item",
+        state=ItemState.PARTIALLY_COMPLETED,
+        attributes={"item_type": "show"},
+    )
+    media_service = FakePipelineMediaService(
+        item_id="item-partial-followup-check",
+        listed_items=[partial],
+    )
+    redis = FakeArqRedis()
+    observed_job_ids: list[str | None] = []
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def index_job_inactive(_: object, *, item_id: str, job_id: str | None = None) -> bool:
+        assert item_id == "item-partial-followup-check"
+        observed_job_ids.append(job_id)
+        return False
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_index_item_job_active", index_job_inactive)
+
+    result = asyncio.run(
+        tasks.scheduled_metadata_reindex_reconciliation(
+            {"settings": _build_worker_settings(), "queue_name": "filmu-py"}
+        )
+    )
+
+    assert result["queued"] == 1
+    assert observed_job_ids == [
+        tasks.index_item_followup_job_id(
+            "item-partial-followup-check",
+            discriminator="scheduled-reindex",
+        )
+    ]
 
 
 # --- SHOW COMPLETION TESTS ---

@@ -1348,15 +1348,15 @@ async def _enterprise_operations_governance(
                 "package.json exposes security:audit, security:bandit, and perf:bench",
                 "STATUS.md plus the active TODO matrix set track release, metadata, and chaos gaps explicitly",
                 "scripts/run_backup_restore_proof.ps1 and playback/VFS proof gates already produce promotion evidence inputs",
+                "scheduled metadata reindex/reconciliation now runs as a first-class worker cron program",
             ],
             required_actions=[
                 "add_sbom_signing_and_artifact_promotion_policy",
-                "promote_metadata_reindex_and_reconciliation_into_a_first_class_program",
                 "define_benchmark_baselines_and_chaos_regression_thresholds",
             ],
             remaining_gaps=[
                 "artifact provenance and SBOM policy are not yet first-class release gates",
-                "metadata and reindex governance are not yet exposed as a dedicated operator surface",
+                "metadata reindex/reconciliation trends are not yet exposed on a dedicated operator summary surface",
                 "benchmark and chaos discipline are not yet enforced by regression thresholds",
             ],
         ),
