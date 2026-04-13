@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from sqlalchemy import select
 
@@ -29,6 +30,21 @@ class ControlPlaneSubscriberRecord:
     last_heartbeat_at: datetime
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPlaneConsumerClaimResult:
+    """Outcome for one durable consumer ownership claim/fencing decision."""
+
+    stream_name: str
+    group_name: str
+    consumer_name: str
+    node_id: str
+    tenant_id: str | None
+    outcome: Literal["claimed", "transferred", "fenced"]
+    owner_node_id: str
+    heartbeat_expired: bool
+    fence_reason: str | None = None
 
 
 class ControlPlaneService:
@@ -130,6 +146,103 @@ class ControlPlaneService:
             status="error",
             last_error=error,
         )
+
+    async def claim_consumer(
+        self,
+        *,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        node_id: str,
+        tenant_id: str | None = None,
+        heartbeat_expiry_seconds: int = 120,
+    ) -> ControlPlaneConsumerClaimResult:
+        """Claim one durable consumer row with stale-heartbeat transfer and active-owner fencing."""
+
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=max(1, heartbeat_expiry_seconds))
+        async with self._db.session() as session:
+            row = (
+                await session.execute(
+                    select(ControlPlaneSubscriberORM).where(
+                        ControlPlaneSubscriberORM.stream_name == stream_name,
+                        ControlPlaneSubscriberORM.group_name == group_name,
+                        ControlPlaneSubscriberORM.consumer_name == consumer_name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = ControlPlaneSubscriberORM(
+                    stream_name=stream_name,
+                    group_name=group_name,
+                    consumer_name=consumer_name,
+                    node_id=node_id,
+                    tenant_id=tenant_id,
+                    status="active",
+                    claimed_at=now,
+                    last_heartbeat_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                await session.flush()
+                await session.commit()
+                return ControlPlaneConsumerClaimResult(
+                    stream_name=stream_name,
+                    group_name=group_name,
+                    consumer_name=consumer_name,
+                    node_id=node_id,
+                    tenant_id=tenant_id,
+                    outcome="claimed",
+                    owner_node_id=node_id,
+                    heartbeat_expired=False,
+                )
+
+            heartbeat_expired = row.last_heartbeat_at < stale_before
+            ownership_transfer_allowed = heartbeat_expired or row.status in {"stale", "error", "fenced"}
+            if row.node_id != node_id and row.status == "active" and not ownership_transfer_allowed:
+                row.last_error = (
+                    "consumer_fenced owner="
+                    f"{row.node_id} contender={node_id}"
+                )
+                row.updated_at = now
+                await session.flush()
+                await session.commit()
+                return ControlPlaneConsumerClaimResult(
+                    stream_name=stream_name,
+                    group_name=group_name,
+                    consumer_name=consumer_name,
+                    node_id=node_id,
+                    tenant_id=tenant_id,
+                    outcome="fenced",
+                    owner_node_id=row.node_id,
+                    heartbeat_expired=False,
+                    fence_reason="active_owner_not_expired",
+                )
+
+            outcome: Literal["claimed", "transferred"] = "claimed"
+            previous_owner = row.node_id
+            if row.node_id != node_id:
+                outcome = "transferred"
+                row.claimed_at = now
+                row.last_error = f"ownership_transferred from={previous_owner} to={node_id}"
+            row.node_id = node_id
+            row.tenant_id = tenant_id
+            row.status = "active"
+            row.last_heartbeat_at = now
+            row.updated_at = now
+            await session.flush()
+            await session.commit()
+            return ControlPlaneConsumerClaimResult(
+                stream_name=stream_name,
+                group_name=group_name,
+                consumer_name=consumer_name,
+                node_id=node_id,
+                tenant_id=tenant_id,
+                outcome=outcome,
+                owner_node_id=node_id,
+                heartbeat_expired=heartbeat_expired,
+            )
 
     async def _upsert(
         self,

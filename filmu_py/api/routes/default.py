@@ -719,7 +719,11 @@ def _vfs_data_plane_evidence(
 
     resources = request.app.state.resources
     if runtime_governance is None:
-        runtime_governance = _vfs_runtime_governance_snapshot()
+        auth_context = get_auth_context(request)
+        runtime_governance = _vfs_runtime_governance_snapshot(
+            request_tenant_id=auth_context.tenant_id,
+            authorized_tenant_ids=set(auth_context.authorized_tenant_ids),
+        )
     evidence = [
         f"vfs_catalog_server_enabled={resources.vfs_catalog_server is not None}",
         f"chunk_cache_enabled={resources.chunk_cache is not None}",
@@ -890,6 +894,8 @@ async def _enterprise_operations_governance(
     playback_gate_governance = _playback_gate_governance_snapshot()
     vfs_runtime_governance = _vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
+        request_tenant_id=auth_context.tenant_id,
+        authorized_tenant_ids=set(auth_context.authorized_tenant_ids),
     )
     runtime_snapshot = resources.runtime_lifecycle.snapshot()
     queued_refresh_ready = (
@@ -941,9 +947,16 @@ async def _enterprise_operations_governance(
     if resources.plugin_governance_service is not None:
         plugin_override_count = len(await resources.plugin_governance_service.list_overrides())
 
-    control_plane_subscriber_count = 0
+    control_plane_subscribers: list[Any] = []
     if resources.control_plane_service is not None:
-        control_plane_subscriber_count = len(await resources.control_plane_service.list_subscribers())
+        control_plane_subscribers = await resources.control_plane_service.list_subscribers()
+    control_plane_subscriber_count = len(control_plane_subscribers)
+    control_plane_stale_subscriber_count = sum(
+        1 for record in control_plane_subscribers if record.status == "stale"
+    )
+    control_plane_fenced_subscriber_count = sum(
+        1 for record in control_plane_subscribers if record.status == "fenced"
+    )
 
     tenant_required_actions = [
         "define_tenant_quota_policy"
@@ -1197,6 +1210,8 @@ async def _enterprise_operations_governance(
                 f"event_replay_maxlen={settings.control_plane.event_replay_maxlen}",
                 f"consumer_group={settings.control_plane.consumer_group}",
                 f"subscriber_ledger_rows={control_plane_subscriber_count}",
+                f"subscriber_stale_rows={control_plane_stale_subscriber_count}",
+                f"subscriber_fenced_rows={control_plane_fenced_subscriber_count}",
                 "LogStreamBroker backend=process_local",
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",

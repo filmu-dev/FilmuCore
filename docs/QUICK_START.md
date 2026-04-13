@@ -13,7 +13,7 @@ Summary:
 - the Windows launcher then runs `filmuvfs.exe` natively on Windows with a folder mount such as `C:\FilmuCoreVFS`
 - point Jellyfin, Plex, or Emby at `C:\FilmuCoreVFS\movies` and `C:\FilmuCoreVFS\shows`
 - `auto` resolves to `winfsp` on Windows in the current runtime
-- `winfsp` is the verified native playback path for current Windows-host Jellyfin validation
+- `winfsp` is the verified native playback path for current Windows-host Jellyfin validation and avoids ProjFS hydration consuming the mount volume
 - use `pnpm run stack:validate` to sanity-check the split stack files and helper scripts
 - set `FILMU_STACK_VFS_MODE=auto|windows|unix` and use `pnpm run stack:start`, `pnpm run stack:status`, and `pnpm run stack:stop` for the unified launcher
 

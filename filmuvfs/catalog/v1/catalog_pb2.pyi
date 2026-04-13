@@ -323,7 +323,7 @@ class FileEntry(_message.Message):
     def __init__(self, item_id: _Optional[str] = ..., item_title: _Optional[str] = ..., item_external_ref: _Optional[str] = ..., media_entry_id: _Optional[str] = ..., source_attachment_id: _Optional[str] = ..., media_type: _Optional[_Union[CatalogMediaType, str]] = ..., transport: _Optional[_Union[CatalogFileTransport, str]] = ..., locator: _Optional[str] = ..., local_path: _Optional[str] = ..., restricted_url: _Optional[str] = ..., unrestricted_url: _Optional[str] = ..., original_filename: _Optional[str] = ..., size_bytes: _Optional[int] = ..., lease_state: _Optional[_Union[CatalogLeaseState, str]] = ..., expires_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., last_refreshed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., last_refresh_error: _Optional[str] = ..., provider: _Optional[str] = ..., provider_download_id: _Optional[str] = ..., provider_file_id: _Optional[str] = ..., provider_file_path: _Optional[str] = ..., active_roles: _Optional[_Iterable[_Union[CatalogPlaybackRole, str]]] = ..., source_key: _Optional[str] = ..., query_strategy: _Optional[str] = ..., provider_family: _Optional[_Union[CatalogProviderFamily, str]] = ..., locator_source: _Optional[_Union[CatalogLocatorSource, str]] = ..., match_basis: _Optional[_Union[CatalogMatchBasis, str]] = ..., restricted_fallback: bool = ...) -> None: ...
 
 class CatalogCorrelationKeys(_message.Message):
-    __slots__ = ("item_id", "media_entry_id", "source_attachment_id", "provider", "provider_download_id", "provider_file_id", "provider_file_path", "session_id", "handle_key")
+    __slots__ = ("item_id", "media_entry_id", "source_attachment_id", "provider", "provider_download_id", "provider_file_id", "provider_file_path", "session_id", "handle_key", "tenant_id")
     ITEM_ID_FIELD_NUMBER: _ClassVar[int]
     MEDIA_ENTRY_ID_FIELD_NUMBER: _ClassVar[int]
     SOURCE_ATTACHMENT_ID_FIELD_NUMBER: _ClassVar[int]
@@ -333,6 +333,7 @@ class CatalogCorrelationKeys(_message.Message):
     PROVIDER_FILE_PATH_FIELD_NUMBER: _ClassVar[int]
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     HANDLE_KEY_FIELD_NUMBER: _ClassVar[int]
+    TENANT_ID_FIELD_NUMBER: _ClassVar[int]
     item_id: str
     media_entry_id: str
     source_attachment_id: str
@@ -342,7 +343,8 @@ class CatalogCorrelationKeys(_message.Message):
     provider_file_path: str
     session_id: str
     handle_key: str
-    def __init__(self, item_id: _Optional[str] = ..., media_entry_id: _Optional[str] = ..., source_attachment_id: _Optional[str] = ..., provider: _Optional[str] = ..., provider_download_id: _Optional[str] = ..., provider_file_id: _Optional[str] = ..., provider_file_path: _Optional[str] = ..., session_id: _Optional[str] = ..., handle_key: _Optional[str] = ...) -> None: ...
+    tenant_id: str
+    def __init__(self, item_id: _Optional[str] = ..., media_entry_id: _Optional[str] = ..., source_attachment_id: _Optional[str] = ..., provider: _Optional[str] = ..., provider_download_id: _Optional[str] = ..., provider_file_id: _Optional[str] = ..., provider_file_path: _Optional[str] = ..., session_id: _Optional[str] = ..., handle_key: _Optional[str] = ..., tenant_id: _Optional[str] = ...) -> None: ...
 
 class CatalogProblem(_message.Message):
     __slots__ = ("code", "message", "retry_after_seconds")

@@ -8,7 +8,7 @@ import pytest
 from redis.exceptions import ResponseError
 
 from filmu_py.core.event_bus import EventBus
-from filmu_py.core.replay import RedisReplayEventBackplane
+from filmu_py.core.replay import RedisReplayEventBackplane, ReplayConsumerFencedError
 
 
 class FakeRedisStream:
@@ -123,6 +123,21 @@ class RecordingReplaySink:
     async def observe_error(self, **payload: object) -> object:
         self.errors.append(dict(payload))
         return None
+
+
+class ClaimingReplaySink(RecordingReplaySink):
+    def __init__(self, *, outcome: str) -> None:
+        super().__init__()
+        self._outcome = outcome
+        self.claims: list[dict[str, object]] = []
+
+    async def claim_consumer(self, **payload: object) -> object:
+        self.claims.append(dict(payload))
+        return {
+            "outcome": self._outcome,
+            "owner_node_id": "node-owner",
+            "fence_reason": "active_owner_not_expired",
+        }
 
 
 def _stream_id_gt(left: str, right: str) -> bool:
@@ -277,3 +292,39 @@ async def test_redis_replay_backplane_reports_delivery_and_ack_state() -> None:
             "event_id": "1-0",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_redis_replay_backplane_fences_consumer_when_claim_is_denied() -> None:
+    redis = FakeRedisStream()
+    sink = ClaimingReplaySink(outcome="fenced")
+    backplane = RedisReplayEventBackplane(
+        redis,
+        stream_name="filmu:events",
+        maxlen=10,
+        subscription_state_sink=sink,
+    )
+    await backplane.publish("tenant.updated", {"ok": True}, tenant_id="tenant-a")
+    await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
+
+    with pytest.raises(ReplayConsumerFencedError):
+        await backplane.read_group(
+            group_name="filmu-api",
+            consumer_name="consumer-1",
+            node_id="node-contender",
+            tenant_id="tenant-a",
+            heartbeat_expiry_seconds=45,
+        )
+
+    assert sink.claims == [
+        {
+            "stream_name": "filmu:events",
+            "group_name": "filmu-api",
+            "consumer_name": "consumer-1",
+            "node_id": "node-contender",
+            "tenant_id": "tenant-a",
+            "heartbeat_expiry_seconds": 45,
+        }
+    ]
+    assert sink.errors
+    assert "consumer_fenced" in str(sink.errors[0]["error"])

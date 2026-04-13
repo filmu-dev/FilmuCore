@@ -1,0 +1,64 @@
+name: Release Provenance Perf Chaos Gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  merge_group:
+
+concurrency:
+  group: release-provenance-perf-chaos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-provenance-perf-chaos-gate:
+    name: Release Provenance Perf Chaos Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      UV_PROJECT_ENVIRONMENT: .venv-ci
+      UV_LINK_MODE: copy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate release provenance/perf/chaos evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/generate_release_provenance_perf_chaos_evidence.ps1 -RunChaosContracts
+
+      - name: Enforce release provenance/perf/chaos gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/check_release_provenance_perf_chaos_gate.ps1 `
+            -ChaosSummaryPaths ./ci-artifacts/release-gates/chaos-contract-summary.json `
+            -MaxReconnectIncidents 0 `
+            -MaxProviderPressureIncidents 0 `
+            -MaxFatalErrorIncidents 0
+
+      - name: Upload release gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-provenance-perf-chaos-gate-${{ github.run_id }}
+          path: ci-artifacts/release-gates/**
+          if-no-files-found: warn
+          retention-days: 21
