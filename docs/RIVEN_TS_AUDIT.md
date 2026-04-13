@@ -43,7 +43,7 @@ The remaining gap is no longer first pipeline completeness or first mounted play
 
 - metadata-reconciliation depth and multi-environment/provider breadth above the now-landed scheduled reindex baseline
 - broader plugin and package breadth
-- stricter sandbox/process isolation beyond the current heavy-stage exit-gate baseline
+- stricter sandbox/process isolation beyond the current spawn-required heavy-stage ceiling/recycle baseline
 - environment-owned searchable observability
 - HA and distributed control-plane maturity
 
@@ -124,7 +124,7 @@ What current `riven-ts` still has that Filmu does not yet match:
 
 - deeper XState app lifecycle orchestration across startup, plugin registration, and steady-state execution
 - broader metadata reconciliation depth around scheduled reindexing, especially pluginized index breadth and multi-environment/provider coverage
-- broader BullMQ flow isolation, including sandboxed parse/map/validate workers beyond Filmu's bounded executor/process-policy baseline
+- broader BullMQ flow isolation, including sandboxed parse/map/validate workers beyond Filmu's spawn-required bounded executor/process-policy baseline
 - broader worker/database isolation around those background runtimes
 - queue-backed plugin worker fan-out across a larger typed event surface
 - queue-backed stream-link request handling directly on the VFS open path rather than Filmu's current optional queued control-plane dispatch
@@ -182,7 +182,7 @@ That means the active comparison-driven priorities are:
 
 1. deepen the indexing stage that is now present in-repo into a first-class reindex / reconciliation program
 2. decide which indexing and metadata-enrichment paths should be pluginized instead of staying as host-only services
-3. deepen heavy-stage isolation from bounded executors/process-policy gates into stricter sandbox/process ceilings where warranted
+3. deepen heavy-stage isolation from the current spawn-required worker-ceiling/recycle policy baseline into stricter sandbox/process ceilings where warranted
 4. harden the mounted data plane into repeatable rollout policy
 5. broaden plugin/package breadth without weakening trust and governance
 6. decide deliberately how far queue-backed stream-link resolution should expand beyond the current optional queued dispatch plus inline refresh/dedup path

@@ -2456,17 +2456,17 @@ async def get_stream_status(
         and resources.queued_hls_restricted_fallback_refresh_controller is not None
     )
     heavy_stage_policy = resources.settings.orchestration.heavy_stage_isolation
+    heavy_stage_policy_violations = heavy_stage_policy.policy_violations()
     heavy_stage_exit_ready = int(
-        resources.settings.arq_enabled
-        and resources.settings.stream.refresh_dispatch_mode == "queued"
-        and (
-            resources.settings.stream.refresh_dispatch_mode != "queued"
-            or (resources.arq_redis is not None and queued_refresh_controllers_attached)
+        heavy_stage_policy.exit_ready(
+            arq_enabled=resources.settings.arq_enabled,
+            refresh_dispatch_mode=resources.settings.stream.refresh_dispatch_mode,
+            queued_refresh_ready=(
+                resources.settings.stream.refresh_dispatch_mode != "queued"
+                or (resources.arq_redis is not None and queued_refresh_controllers_attached)
+            ),
+            queued_refresh_proof_refs=resources.settings.orchestration.queued_refresh_proof_refs,
         )
-        and heavy_stage_policy.executor_mode == "process_pool_required"
-        and heavy_stage_policy.max_tasks_per_child > 0
-        and bool(heavy_stage_policy.proof_refs)
-        and bool(resources.settings.orchestration.queued_refresh_proof_refs)
     )
     return ServingStatusResponse(
         sessions=sessions,
@@ -2498,8 +2498,14 @@ async def get_stream_status(
                 "heavy_stage_executor_mode": heavy_stage_policy.executor_mode,
                 "heavy_stage_max_workers": heavy_stage_policy.max_workers,
                 "heavy_stage_max_tasks_per_child": heavy_stage_policy.max_tasks_per_child,
+                "heavy_stage_spawn_context_required": int(
+                    heavy_stage_policy.require_spawn_context
+                ),
+                "heavy_stage_max_worker_ceiling": heavy_stage_policy.max_worker_ceiling,
+                "heavy_stage_policy_violation_count": len(heavy_stage_policy_violations),
+                "heavy_stage_policy_violations": list(heavy_stage_policy_violations),
                 "heavy_stage_process_isolation_required": int(
-                    heavy_stage_policy.executor_mode == "process_pool_required"
+                    heavy_stage_policy.process_isolation_required()
                 ),
                 "heavy_stage_exit_ready": heavy_stage_exit_ready,
                 "heavy_stage_index_timeout_seconds": heavy_stage_policy.index_timeout_seconds,

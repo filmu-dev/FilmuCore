@@ -240,6 +240,7 @@ No undocumented requirements are assumed.
 - Scrape -> parse-scrape-results -> rank-streams -> debrid -> finalize now runs as a real provider-backed worker pipeline with stable job IDs and persisted state transitions.
 - Retry-library recovery and transactional outbox publication are implemented.
 - A first-class scheduled metadata reindex/reconciliation program now runs above `index_item`, including index re-entry for `partially_completed` / `ongoing` items, metadata refresh reconciliation for `completed` items, repair of identifier gaps on repairable `failed` items with immediate re-entry into `index_item`, and bounded operator rollups on `/api/v1/workers/metadata-reindex` plus `/api/v1/workers/metadata-reindex/history`.
+- Heavy-stage isolation now enforces a stricter enterprise baseline: spawn-required process-backed execution, bounded worker ceiling, recycle budget validation, and explicit policy-violation reporting on `/api/v1/stream/status` plus `/api/v1/operations/governance`.
 - Workers now resolve persisted runtime settings and execute real built-in scraper and downloader provider paths.
 - Worker observability baseline now exists through stage duration, retry, and dead-letter metrics plus correlation contextvars, and queue-history operator surfaces now include dead-letter age/reason rollups plus bounded filters for replay triage.
 
@@ -249,6 +250,7 @@ No undocumented requirements are assumed.
 - Content-service intake and richer queue graph parity beyond the current scrape/download plus scheduled-reindex baseline.
 - Queue lag/backlog/operator ergonomics beyond the new dead-letter age/reason rollups and bounded queue-history controls.
 - Broader post-download/container execution and compensation semantics beyond the current `downloaded` handoff.
+- Broader worker/database isolation and sandboxed heavy-job families beyond the current spawn-required worker-ceiling/recycle baseline.
 
 ### Exit criteria
 

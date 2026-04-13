@@ -113,7 +113,7 @@ WORKER_ENQUEUE_DEFER_SECONDS = Histogram(
     ["stage"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0],
 )
-_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int], Executor] = {}
+_HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int, int, int], Executor] = {}
 
 
 class _RankBatchInput(TypedDict):
@@ -142,11 +142,19 @@ def _heavy_stage_executor(stage_name: str) -> Executor:
 
     settings = get_settings()
     policy = settings.orchestration.heavy_stage_isolation
+    violations = policy.policy_violations()
+    if violations:
+        raise RuntimeError(
+            "invalid heavy-stage isolation policy for "
+            f"{stage_name}: {','.join(sorted(violations))}"
+        )
     executor_key = (
         stage_name,
         policy.executor_mode,
         policy.max_workers,
         policy.max_tasks_per_child,
+        int(policy.require_spawn_context),
+        policy.max_worker_ceiling,
     )
     stale_keys = [key for key in _HEAVY_STAGE_EXECUTORS if key[1:] != executor_key[1:]]
     for stale_key in stale_keys:
@@ -165,7 +173,13 @@ def _heavy_stage_executor(stage_name: str) -> Executor:
             policy.max_tasks_per_child if policy.max_tasks_per_child > 0 else None
         )
         try:
-            if multiprocessing.get_start_method(allow_none=True) == "fork":
+            if policy.require_spawn_context:
+                executor = ProcessPoolExecutor(
+                    max_workers=policy.max_workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    max_tasks_per_child=max_tasks_per_child,
+                )
+            elif multiprocessing.get_start_method(allow_none=True) == "fork":
                 executor = ProcessPoolExecutor(
                     max_workers=policy.max_workers,
                     max_tasks_per_child=max_tasks_per_child,

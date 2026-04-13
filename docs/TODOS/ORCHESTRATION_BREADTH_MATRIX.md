@@ -51,7 +51,7 @@ Today the Python backend has:
 
 - queue-backed link-resolver dedup for VFS beyond the new mount-side inline refresh dedup baseline
 - broader queue-lag/operator visibility and stronger enqueue-dedup/idempotency boundaries across the widened worker graph
-- deeper process/sandbox isolation beyond the current bounded heavy-stage executor budgets
+- deeper process/sandbox isolation beyond the current spawn-required heavy-stage worker-ceiling/recycle baseline
 
 ---
 
@@ -99,7 +99,7 @@ This is the reference breadth the Python roadmap should explicitly account for.
 | **Publishable-event governance**     | Implemented baseline                                  | TS tracks publishable events explicitly                | Prevents queue buildup and undefined plugin-event fan-out                 | Done baseline          |
 | **Transactional outbox**             | ✅ `OutboxEventORM` + scheduled `publish_outbox_events` cron (30 sec) | Not identical in TS, but needed for Python correctness | Needed for publish consistency and replay-safe growth                     | ✅ Done                |
 | **Idempotency boundaries**           | Stable job ids, stage-idempotency counters, DLQ reason codes, queue-history DLQ taxonomy, dead-letter oldest-age visibility, and bounded queue-history replay filters now exist across the widened worker graph | Needed regardless of TS                                | Required for safe retries, replays, and recovery                          | ✅ Done baseline / deepen |
-| **Heavy-stage isolation**            | `index_item`, `parse_scrape_results`, and `rank_streams` now run under bounded isolated stage budgets and explicit timeouts | TS keeps sandboxed heavy jobs on disk for parse/map/validate work | Needed for crash containment, bounded CPU pressure, and enterprise workload isolation | ✅ Done baseline / deepen |
+| **Heavy-stage isolation**            | `index_item`, `parse_scrape_results`, and `rank_streams` now run under bounded isolated stage budgets and explicit timeouts, with spawn-required process pools, worker-ceiling enforcement, recycle-budget validation, and operator-visible policy violations | TS keeps sandboxed heavy jobs on disk for parse/map/validate work | Needed for crash containment, bounded CPU pressure, and enterprise workload isolation | ✅ Done baseline / deepen |
 
 ---
 
@@ -284,7 +284,7 @@ Current checkpoint:
 
 - Reached for the core scrape -> parse -> rank -> debrid -> finalize pipeline and baseline recovery.
 - Wave 3 is materially deeper than the original baseline, and the first-class scheduled reindex/reconciliation program is now landed.
-- Remaining orchestration gap above this baseline is broader multi-container/provider fan-out breadth plus wider metadata/provider coverage beyond the now-landed scheduled baseline.
+- Remaining orchestration gap above this baseline is broader multi-container/provider fan-out breadth, wider metadata/provider coverage beyond the now-landed scheduled baseline, and sandboxed heavy-job families beyond the stricter spawn-required baseline.
 
 ## Serving-core update (March 2026)
 

@@ -1488,10 +1488,11 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
         "heavy_stage_workload_isolation",
         "release_metadata_performance",
     }
-    assert body["playback_gate"]["status"] == "partial"
+    assert body["playback_gate"]["status"] == "blocked"
     assert "proof:playback:gate:enterprise package entrypoint exists" in body[
         "playback_gate"
     ]["evidence"]
+    assert "playback_gate_rollout_readiness=blocked" in body["playback_gate"]["evidence"]
     assert body["identity_authz"]["status"] == "blocked"
     assert "authentication_mode=api_key" in body["identity_authz"]["evidence"]
     assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
@@ -1612,10 +1613,18 @@ def test_operations_governance_route_blocks_queued_refresh_without_runtime_queue
     assert "heavy_stage_executor_mode=thread_pool_only" in heavy_stage["evidence"]
     assert "heavy_stage_max_workers=3" in heavy_stage["evidence"]
     assert "heavy_stage_max_tasks_per_child=0" in heavy_stage["evidence"]
+    assert "heavy_stage_spawn_context_required=1" in heavy_stage["evidence"]
+    assert "heavy_stage_max_worker_ceiling=2" in heavy_stage["evidence"]
+    assert "heavy_stage_policy_violations=worker_ceiling_exceeded" in heavy_stage["evidence"]
     assert "heavy_stage_process_isolation_required=0" in heavy_stage["evidence"]
     assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_exit_ready=0" in heavy_stage["evidence"]
+    assert "require_process_backed_heavy_stage_isolation" in heavy_stage["required_actions"]
+    assert any(
+        gap == "heavy stages are not yet forced into process-backed isolation"
+        for gap in heavy_stage["remaining_gaps"]
+    )
 
 
 def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satisfied() -> None:
@@ -1629,6 +1638,8 @@ def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satis
                     "executor_mode": "process_pool_required",
                     "max_workers": 2,
                     "max_tasks_per_child": 25,
+                    "require_spawn_context": True,
+                    "max_worker_ceiling": 2,
                     "proof_refs": ["ops/wave3/heavy-stage-failure-injection.md"],
                 },
             },
@@ -1653,6 +1664,9 @@ def test_operations_governance_route_marks_wave3_ready_when_exit_gates_are_satis
     assert "heavy_stage_executor_mode=process_pool_required" in heavy_stage["evidence"]
     assert "heavy_stage_max_workers=2" in heavy_stage["evidence"]
     assert "heavy_stage_max_tasks_per_child=25" in heavy_stage["evidence"]
+    assert "heavy_stage_spawn_context_required=1" in heavy_stage["evidence"]
+    assert "heavy_stage_max_worker_ceiling=2" in heavy_stage["evidence"]
+    assert "heavy_stage_policy_violations=none" in heavy_stage["evidence"]
     assert "heavy_stage_process_isolation_required=1" in heavy_stage["evidence"]
     assert "queued_refresh_proof_ref_count=1" in heavy_stage["evidence"]
     assert "heavy_stage_proof_ref_count=1" in heavy_stage["evidence"]
