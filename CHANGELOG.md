@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/filmu-dev/FilmuCore/compare/v0.15.0...v0.16.0) (2026-04-13)
+
+
+### Features
+
+* enterprise continuity slice 20260413 ([#45](https://github.com/filmu-dev/FilmuCore/issues/45)) ([f0f5768](https://github.com/filmu-dev/FilmuCore/commit/f0f5768e46451319507b4e4c8aa22938ee979456))
+
 ## [0.15.0](https://github.com/filmu-dev/FilmuCore/compare/v0.14.0...v0.15.0) (2026-04-13)
 
 
