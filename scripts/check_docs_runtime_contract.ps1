@@ -115,8 +115,8 @@ $forbiddenClaims = @(
     'projfs\s+remains\s+the\s+policy/default'
 )
 $requiredClaims = @(
-    'winfsp',
-    'auto'
+    'auto\s+.*resolves\s+to\s+[`'']?winfsp[`'']?.*windows',
+    '(windows\s+default|default\s+windows).*winfsp|winfsp.*(windows\s+default|default\s+windows)'
 )
 
 foreach ($relative in $docContractTargets) {

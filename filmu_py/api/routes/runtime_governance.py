@@ -272,7 +272,7 @@ def _tenant_safe_runtime_handle_summaries(
     visible_tenants: set[str] = set()
     for summary in normalized:
         tenant_id, safe_line = _normalize_active_handle_summary(summary)
-        if allow_all or tenant_id in allowed_tenants or tenant_id == "unknown":
+        if allow_all or tenant_id in allowed_tenants:
             visible.append(safe_line)
             visible_tenants.add(tenant_id)
         else:

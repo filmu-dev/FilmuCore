@@ -58,6 +58,8 @@ foreach ($environmentClass in $EnvironmentClasses) {
         '-NoProfile',
         '-File',
         $stabilityScript,
+        '-ArtifactsRoot',
+        $ArtifactsRoot,
         '-Profiles',
         ([string]::Join(',', $Profiles)),
         '-RepeatCount',
@@ -117,18 +119,38 @@ if ($summaryPaths.Count -eq 0) {
     -MinimumEnvironmentCount $MinimumEnvironmentCount `
     -RequireRuntimeCapture:$RequireRuntimeCapture `
     -RequireBackendStatusCapture:$RequireBackendStatusCapture
+$multiEnvironmentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+if ($multiEnvironmentExitCode -ne 0) {
+    throw ("[windows-vfs-soak-program] multi-environment gate failed with exit code {0}" -f $multiEnvironmentExitCode)
+}
 
 & pwsh -NoProfile -File $trendScript `
     -ArtifactsRoot $ArtifactsRoot `
     -SummaryPaths @($summaryPaths) `
     -HistoryRoot $HistoryRoot `
     -AllowBootstrap:$AllowTrendBootstrap
+$trendExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+if ($trendExitCode -ne 0) {
+    throw ("[windows-vfs-soak-program] trend gate failed with exit code {0}" -f $trendExitCode)
+}
 
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$latestMultiEnvironmentSummary = @(
+    Get-ChildItem -LiteralPath $ArtifactsRoot -Filter 'multi-environment-vfs-summary-*.json' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+)
+$latestTrendSummary = @(
+    Get-ChildItem -LiteralPath $ArtifactsRoot -Filter 'soak-trend-summary-*.json' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+)
 $programSummaryPath = Join-Path $ArtifactsRoot ("soak-program-summary-{0}.json" -f $timestamp)
 [ordered]@{
     timestamp = (Get-Date).ToString('o')
+    status = 'passed'
     environment_classes = $EnvironmentClasses
+    environment_count = @($EnvironmentClasses).Count
     profiles = $Profiles
     repeat_count = $RepeatCount
     minimum_environment_count = $MinimumEnvironmentCount
@@ -138,6 +160,8 @@ $programSummaryPath = Join-Path $ArtifactsRoot ("soak-program-summary-{0}.json" 
     max_provider_pressure_incidents = $MaxProviderPressureIncidents
     max_fatal_error_incidents = $MaxFatalErrorIncidents
     allow_trend_bootstrap = [bool]$AllowTrendBootstrap
+    multi_environment_summary_path = if ($latestMultiEnvironmentSummary.Count -gt 0) { $latestMultiEnvironmentSummary[0].FullName } else { $null }
+    trend_summary_path = if ($latestTrendSummary.Count -gt 0) { $latestTrendSummary[0].FullName } else { $null }
     results = $results
     summary_paths = @($summaryPaths)
 } | ConvertTo-Json -Depth 8 | Set-Content -Path $programSummaryPath -Encoding UTF8

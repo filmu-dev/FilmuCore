@@ -226,17 +226,6 @@ class RedisReplayEventBackplane:
                     claim_owner = getattr(claim_result, "owner_node_id", node_id or "unknown")
                     claim_reason = getattr(claim_result, "fence_reason", None) or "consumer_fenced"
                 if claim_outcome == "fenced":
-                    await self._subscription_state_sink.observe_error(
-                        stream_name=self.stream_name,
-                        group_name=group_name,
-                        consumer_name=consumer_name,
-                        node_id=node_id or "unknown",
-                        tenant_id=tenant_id,
-                        error=(
-                            f"consumer_fenced owner={claim_owner} "
-                            f"contender={node_id or 'unknown'} reason={claim_reason}"
-                        ),
-                    )
                     raise ReplayConsumerFencedError(
                         f"consumer {consumer_name} fenced by active owner {claim_owner}"
                     )

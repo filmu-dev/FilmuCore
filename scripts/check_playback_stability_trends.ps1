@@ -74,15 +74,34 @@ if ($SummaryPaths.Count -eq 0) {
     throw ("No playback stability summaries found under {0}" -f $ArtifactsRoot)
 }
 
-$currentByEnvironment = @{}
-foreach ($summaryPath in $SummaryPaths) {
-    if (-not (Test-Path -LiteralPath $summaryPath)) {
-        throw ("Summary path does not exist: {0}" -f $summaryPath)
+$resolvedSummaryEntries = [System.Collections.Generic.List[object]]::new()
+foreach ($summaryPath in @($SummaryPaths)) {
+    $fullSummaryPath = Ensure-FullPath -Path ([string]$summaryPath)
+    if (-not (Test-Path -LiteralPath $fullSummaryPath)) {
+        throw ("Summary path does not exist: {0}" -f $fullSummaryPath)
     }
+    $summaryItem = Get-Item -LiteralPath $fullSummaryPath
+    $resolvedSummaryEntries.Add([pscustomobject]@{
+        path = $fullSummaryPath
+        last_write_time_utc = $summaryItem.LastWriteTimeUtc
+    })
+}
+
+$orderedSummaryPaths = @(
+    $resolvedSummaryEntries |
+        Sort-Object last_write_time_utc -Descending |
+        Select-Object -ExpandProperty path
+)
+
+$currentByEnvironment = @{}
+foreach ($summaryPath in $orderedSummaryPaths) {
     $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
     $environmentClass = [string]($summary.environment_class ?? '')
     if ([string]::IsNullOrWhiteSpace($environmentClass)) {
         throw ("Summary path is missing environment_class: {0}" -f $summaryPath)
+    }
+    if ($currentByEnvironment.ContainsKey($environmentClass)) {
+        continue
     }
     $currentByEnvironment[$environmentClass] = [ordered]@{
         source_summary = $summaryPath
