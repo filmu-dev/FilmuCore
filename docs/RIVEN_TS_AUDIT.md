@@ -102,7 +102,7 @@ Current local baseline details that matter for Filmu planning:
 - plugin trust, publisher, quarantine, and tenancy governance
 - enterprise posture surface on `/api/v1/operations/governance`
 - broader REST and SSE compatibility surface
-- graph-first specialization-backed calendar/detail/list lineage on the shared media-domain service seam, plus specialization-backed mounted catalog path shaping on the FilmuVFS supplier boundary, specialization-backed REST detail season coverage, specialization-normalized compatibility metadata, and additive calendar identity projection
+- graph-first specialization-backed calendar/detail/list lineage on the shared media-domain service seam, including additive GraphQL calendar identity fields, plus specialization-backed mounted catalog path shaping on the FilmuVFS supplier boundary, specialization-backed REST detail season coverage, specialization-normalized compatibility metadata, and additive calendar identity projection
 
 ## Where FilmuCore still trails
 
@@ -188,7 +188,7 @@ That means the active comparison-driven priorities are:
 4. harden the mounted data plane into repeatable rollout policy
 5. broaden plugin/package breadth without weakening trust and governance
 6. decide deliberately how far queue-backed stream-link resolution should expand beyond the current optional queued dispatch plus inline refresh/dedup path
-7. add GraphQL control-plane surfaces only where they materially improve operator workflows
+7. prioritize GraphQL control-plane/read-model surfaces over broad new REST expansion, and keep REST limited to compatibility maintenance unless the current frontend is blocked
 8. complete the environment-owned log/search/export story
 9. strengthen HA and failover posture for the distributed control plane
 

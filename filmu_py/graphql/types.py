@@ -81,6 +81,9 @@ class GQLCalendarEntry:
     episode: int | None = None
     tmdb_id: int | None = strawberry.field(name="tmdbId", default=None)
     tvdb_id: int | None = strawberry.field(name="tvdbId", default=None)
+    imdb_id: str | None = strawberry.field(name="imdbId", default=None)
+    parent_tmdb_id: int | None = strawberry.field(name="parentTmdbId", default=None)
+    parent_tvdb_id: int | None = strawberry.field(name="parentTvdbId", default=None)
     release_data: str | None = strawberry.field(name="releaseData", default=None)
 
 

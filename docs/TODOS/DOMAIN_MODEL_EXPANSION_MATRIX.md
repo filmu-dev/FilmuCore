@@ -268,6 +268,11 @@ Recommended split:
 - item detail view model
 - service/downloader visibility
 
+Working rule from the current checkpoint:
+
+- prefer GraphQL-first and shared service-layer projections for new product/control-plane breadth
+- keep REST changes minimal and compatibility-shaped unless the current frontend is blocked without them
+
 This keeps the backend motor strong and avoids coupling frontend read shapes too tightly to the core persisted entity layout.
 
 ---
