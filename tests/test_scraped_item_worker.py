@@ -10,9 +10,11 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from arq import Retry
 from arq.jobs import JobStatus
 
 from filmu_py.config import Settings
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.event_bus import EventBus
 from filmu_py.db.models import (
     EpisodeORM,
@@ -397,6 +399,7 @@ class FakeArqRedis:
         self.deleted: list[str] = []
         self.integers: dict[str, int] = {}
         self.expirations: dict[str, int] = {}
+        self.lists: dict[str, list[bytes]] = {}
 
     async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> object | None:
         self.calls.append((function, args, kwargs))
@@ -413,6 +416,22 @@ class FakeArqRedis:
     async def expire(self, key: str, seconds: int) -> bool:
         self.expirations[key] = seconds
         return True
+
+    async def lpush(self, key: str, *values: Any) -> int:
+        bucket = self.lists.setdefault(key, [])
+        for value in values:
+            bucket.insert(0, value if isinstance(value, bytes) else str(value).encode("utf-8"))
+        return len(bucket)
+
+    async def ltrim(self, key: str, start: int, stop: int) -> bool:
+        bucket = self.lists.get(key, [])
+        self.lists[key] = bucket[start : stop + 1]
+        return True
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[bytes]:
+        bucket = self.lists.get(key, [])
+        end = None if stop == -1 else stop + 1
+        return bucket[start:end]
 
 
 class _AllowedLimiter:
@@ -2775,6 +2794,16 @@ def test_scheduled_metadata_reindex_reconciliation_runs_reindex_and_completed_re
             },
         )
     ]
+    history = asyncio.run(
+        MetadataReindexStatusStore(redis, queue_name="filmu-py").history(limit=5)
+    )
+    assert len(history) == 1
+    assert history[0].processed == 3
+    assert history[0].queued == 1
+    assert history[0].reconciled == 1
+    assert history[0].skipped_active == 1
+    assert history[0].failed == 0
+    assert history[0].outcome == "ok"
     assert media_service.calls.count("enrich_item_metadata") == 1
 
 
@@ -2820,6 +2849,43 @@ def test_scheduled_metadata_reindex_reconciliation_checks_followup_job_id(
             discriminator="scheduled-reindex",
         )
     ]
+
+
+def test_scheduled_metadata_reindex_reconciliation_records_critical_run_failures(
+    monkeypatch: Any,
+) -> None:
+    media_service = FakePipelineMediaService(
+        item_id="item-run-failure",
+        listed_items=[],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def list_items_in_states(*_args: Any, **_kwargs: Any) -> list[MediaItemRecord]:
+        raise RuntimeError("metadata source unavailable")
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    media_service.list_items_in_states = list_items_in_states  # type: ignore[method-assign]
+
+    with pytest.raises(Retry):
+        asyncio.run(
+            tasks.scheduled_metadata_reindex_reconciliation(
+                {"settings": _build_worker_settings(), "queue_name": "filmu-py", "job_try": 1}
+            )
+        )
+
+    history = asyncio.run(
+        MetadataReindexStatusStore(redis, queue_name="filmu-py").history(limit=5)
+    )
+    assert len(history) == 1
+    assert history[0].processed == 0
+    assert history[0].failed == 0
+    assert history[0].outcome == "critical"
+    assert history[0].run_failed is True
+    assert history[0].last_error == "metadata source unavailable"
 
 
 # --- SHOW COMPLETION TESTS ---
