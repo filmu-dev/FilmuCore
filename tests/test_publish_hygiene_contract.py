@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,9 +44,24 @@ def test_publish_hygiene_keeps_docs_forbidden_even_on_release_branches() -> None
         encoding="utf-8"
     )
 
-    assert "$alwaysForbiddenPatterns" in script
-    assert "'*.md'" in script
-    assert "$releaseManagedPaths" in script
-    assert "'package.json'" in script
-    assert "'pyproject.toml'" in script
-    assert "'rust/filmuvfs/Cargo.toml'" in script
+    always_forbidden_match = re.search(
+        r"\$alwaysForbiddenPatterns\s*=\s*@\((?P<body>.*?)\)",
+        script,
+        flags=re.DOTALL,
+    )
+    assert always_forbidden_match is not None
+    always_forbidden = re.findall(r"'([^']+)'", always_forbidden_match.group("body"))
+
+    release_managed_match = re.search(
+        r"\$releaseManagedPaths\s*=\s*@\((?P<body>.*?)\)",
+        script,
+        flags=re.DOTALL,
+    )
+    assert release_managed_match is not None
+    release_managed = re.findall(r"'([^']+)'", release_managed_match.group("body"))
+
+    assert "*.md" in always_forbidden
+    assert "*.md" not in release_managed
+    assert "package.json" in release_managed
+    assert "pyproject.toml" in release_managed
+    assert "rust/filmuvfs/Cargo.toml" in release_managed

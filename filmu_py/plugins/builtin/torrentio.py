@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -20,10 +21,12 @@ _TORRENTIO_RATE_LIMIT_REFILL_PER_SECOND = 150.0 / 60.0
 
 def _normalize_base_url(value: str) -> str:
     normalized = value.strip().rstrip("/")
-    lower = normalized.casefold()
-    if lower.startswith("http://torrentio.strem.fun"):
-        suffix = normalized[len("http://torrentio.strem.fun") :]
-        return f"{_DEFAULT_TORRENTIO_BASE_URL}{suffix}"
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme.casefold() == "http"
+        and (parsed.hostname or "").casefold() == "torrentio.strem.fun"
+    ):
+        return parsed._replace(scheme="https").geturl().rstrip("/")
     return normalized
 
 

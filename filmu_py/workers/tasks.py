@@ -1149,22 +1149,26 @@ def _resolve_enabled_downloader(
         ("alldebrid", settings.downloaders.all_debrid),
         ("debridlink", settings.downloaders.debrid_link),
     )
-    enabled = [
-        (provider, config.api_key.strip())
-        for provider, config in provider_entries
-        if config.enabled and config.api_key.strip()
-    ]
-    if len(enabled) > 1:
+    enabled_providers: list[str] = []
+    api_key_by_provider: dict[str, str] = {}
+    for provider, config in provider_entries:
+        api_key = config.api_key.strip()
+        if config.enabled and api_key:
+            enabled_providers.append(provider)
+            api_key_by_provider[provider] = api_key
+
+    if len(enabled_providers) > 1:
         logger.warning(
             "multiple downloaders enabled; selecting by fixed provider priority",
             extra={
                 "item_id": item_id,
                 "item_request_id": item_request_id,
-                "enabled_providers": [provider for provider, _ in enabled],
+                "enabled_providers": enabled_providers,
             },
         )
-    if enabled:
-        return enabled[0]
+    if enabled_providers:
+        selected_provider = enabled_providers[0]
+        return selected_provider, api_key_by_provider[selected_provider]
     raise ValueError("no_enabled_downloader")
 
 

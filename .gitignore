@@ -30,7 +30,7 @@ artifacts/
 logs/
 
 # Local development docs must never be tracked in this repo.
-*.md
+*.[mM][dD]
 
 rust/filmuvfs/target/
 target/
