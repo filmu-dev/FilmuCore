@@ -307,13 +307,25 @@ def _matches_patterns(raw_title: str, patterns: Sequence[str]) -> bool:
     return False
 
 
+def _is_fetch_speed_hard_failure(failure: str) -> bool:
+    """Return whether one failed check must still block candidates in speed mode."""
+
+    return failure.startswith("trash:") or failure in {
+        "adult",
+        "excluded_pattern",
+        "missing_required_language",
+        "excluded_language",
+    }
+
+
 def check_fetch(
     data: ParsedData,
     profile: RankingProfile,
 ) -> tuple[bool, tuple[str, ...]]:
     """Run the RTN fetch-check pipeline and return `(fetch, failed_checks)`.
 
-    This stores `enable_fetch_speed_mode` but intentionally does not apply behavior for it yet.
+    When `enable_fetch_speed_mode` is enabled, non-safety fetch failures remain observable in
+    `failed_checks` but do not block candidate fetch eligibility.
     """
 
     failed_checks: set[str] = set()
@@ -368,6 +380,9 @@ def check_fetch(
 
     if _matches_patterns(data.raw_title, profile.require):
         return True, ()
+    if profile.options.enable_fetch_speed_mode:
+        hard_failures = {check for check in failed_checks if _is_fetch_speed_hard_failure(check)}
+        return (len(hard_failures) == 0), tuple(sorted(failed_checks))
     return (len(failed_checks) == 0), tuple(sorted(failed_checks))
 
 

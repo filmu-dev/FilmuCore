@@ -193,6 +193,36 @@ def test_full_fetch_check_pipeline_reports_expected_failures() -> None:
     assert "fetch_disabled:quality:xvid" in failed_checks
 
 
+def test_fetch_speed_mode_relaxes_non_safety_fetch_failures() -> None:
+    strict_block = _build_ranking_block()
+    strict_block["options"]["enable_fetch_speed_mode"] = False
+    strict_profile = RankingProfile.from_settings_dict(strict_block)
+    speed_profile = RankingProfile.from_settings_dict(_build_ranking_block())
+    parsed = parse_torrent_name("Example.Movie.2024.480p.WEBRip.xvid-GROUP")
+    parsed.parsed_title["language"] = ["eng"]
+
+    strict_fetch, strict_failed_checks = check_fetch(parsed, strict_profile)
+    speed_fetch, speed_failed_checks = check_fetch(parsed, speed_profile)
+
+    assert strict_fetch is False
+    assert speed_fetch is True
+    assert "resolution:480p" in strict_failed_checks
+    assert "fetch_disabled:quality:xvid" in strict_failed_checks
+    assert "resolution:480p" in speed_failed_checks
+    assert "fetch_disabled:quality:xvid" in speed_failed_checks
+
+
+def test_fetch_speed_mode_keeps_safety_failures_blocking() -> None:
+    profile = RankingProfile.from_settings_dict(_build_ranking_block())
+    parsed = parse_torrent_name("Example.Movie.2024.1080p.CAM.WEB-DL-GROUP")
+    parsed.parsed_title["language"] = ["eng"]
+
+    fetch, failed_checks = check_fetch(parsed, profile)
+
+    assert fetch is False
+    assert "trash:cam" in failed_checks
+
+
 def test_title_similarity_accepts_acronym_titles_before_year_suffix() -> None:
     profile = RankingProfile.from_settings_dict(_build_ranking_block())
     rtn = RTN(profile)

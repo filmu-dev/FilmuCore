@@ -83,6 +83,9 @@ DEBRID_RETRY_POLICY = RetryPolicy(max_attempts=5, base_delay_seconds=3, max_dela
 FINALIZE_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=2, max_delay_seconds=20)
 RECOVERY_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=30, max_delay_seconds=300)
 OUTBOX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=5, max_delay_seconds=60)
+METADATA_REINDEX_RETRY_POLICY = RetryPolicy(
+    max_attempts=3, base_delay_seconds=30, max_delay_seconds=300
+)
 WORKER_ENQUEUE_DECISIONS_TOTAL = Counter(
     "filmu_py_worker_enqueue_decisions_total",
     "Downstream worker enqueue decisions by stage",
@@ -1066,6 +1069,18 @@ def _ongoing_show_poll_hours(settings: Settings) -> set[int]:
     return set(range(0, 24, interval_hours))
 
 
+def _indexer_schedule_offset_minute(settings: Settings) -> int:
+    """Return one bounded minute offset for scheduled metadata reindex work."""
+
+    raw = getattr(settings.indexer, "schedule_offset_minutes", 30)
+    if not isinstance(raw, int):
+        try:
+            raw = int(raw)
+        except (TypeError, ValueError):
+            raw = 30
+    return max(0, min(59, raw))
+
+
 async def enqueue_debrid_item(
     redis: ArqRedis,
     *,
@@ -1146,10 +1161,12 @@ async def is_rank_streams_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
-async def is_index_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
-    """Return whether the index-item stage job is already queued or running."""
+async def is_index_item_job_active(
+    redis: ArqRedis, *, item_id: str, job_id: str | None = None
+) -> bool:
+    """Return whether one index-item stage job is already queued or running."""
 
-    status = await Job(index_item_job_id(item_id), redis=redis).status()
+    status = await Job(job_id or index_item_job_id(item_id), redis=redis).status()
     _record_job_status("index_item", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
@@ -3982,6 +3999,90 @@ async def poll_unreleased_items(ctx: dict[str, object]) -> dict[str, int]:
     return {"processed": processed_count, "transitioned": transitioned_count}
 
 
+@timed_stage("scheduled_metadata_reindex_reconciliation")
+async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> dict[str, int]:
+    """Run one scheduled metadata reconciliation pass above item-triggered indexing."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(
+        ctx=mutable_ctx,
+        stage="scheduled_metadata_reindex_reconciliation",
+        item_id="metadata-reindex",
+    )
+    media_service = _resolve_media_service(mutable_ctx)
+    settings = await _resolve_runtime_settings(mutable_ctx)
+    queue_name = str(mutable_ctx.get("queue_name", _queue_name(settings)))
+
+    try:
+        arq_redis = await _resolve_arq_redis(mutable_ctx)
+        items = await media_service.list_items_in_states(
+            states=[ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING, ItemState.COMPLETED]
+        )
+        processed_count = 0
+        queued_count = 0
+        reconciled_count = 0
+        skipped_active_count = 0
+        failed_count = 0
+
+        for item in items:
+            processed_count += 1
+            try:
+                if item.state in {ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING}:
+                    followup_job_id = index_item_followup_job_id(
+                        item.id,
+                        discriminator="scheduled-reindex",
+                    )
+                    if await is_index_item_job_active(
+                        arq_redis,
+                        item_id=item.id,
+                        job_id=followup_job_id,
+                    ):
+                        skipped_active_count += 1
+                        continue
+                    if await enqueue_index_item(
+                        arq_redis,
+                        item_id=item.id,
+                        queue_name=queue_name,
+                        tenant_id=item.tenant_id,
+                        job_id=followup_job_id,
+                    ):
+                        queued_count += 1
+                    continue
+
+                if item.state is ItemState.COMPLETED:
+                    await media_service.enrich_item_metadata(item_id=item.id)
+                    reconciled_count += 1
+            except Exception:
+                failed_count += 1
+                _worker_stage_logger().warning(
+                    "scheduled_metadata_reindex_reconciliation.item_failed",
+                    item_id=item.id,
+                    state=item.state.value,
+                    exc_info=True,
+                )
+
+        return {
+            "processed": processed_count,
+            "queued": queued_count,
+            "reconciled": reconciled_count,
+            "skipped_active": skipped_active_count,
+            "failed": failed_count,
+        }
+    except Exception as exc:
+        attempt = task_try_count(mutable_ctx)
+        if METADATA_REINDEX_RETRY_POLICY.should_dead_letter(attempt):
+            await route_dead_letter(
+                ctx=mutable_ctx,
+                task_name="scheduled_metadata_reindex_reconciliation",
+                item_id="metadata-reindex",
+                reason=str(exc),
+            )
+            raise
+        raise Retry(
+            defer=METADATA_REINDEX_RETRY_POLICY.next_delay_seconds(attempt)
+        ) from exc
+
+
 async def on_startup(ctx: dict[str, Any]) -> None:
     """Initialize shared worker context objects once per worker process."""
 
@@ -4051,6 +4152,7 @@ def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
             retry_library,
             poll_unreleased_items,
             poll_ongoing_shows,
+            scheduled_metadata_reindex_reconciliation,
             publish_outbox_events,
         ],
         "cron_jobs": [
@@ -4103,6 +4205,15 @@ def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
                 second=0,
                 unique=True,
                 job_id="poll-content-services",
+            ),
+            cron(
+                scheduled_metadata_reindex_reconciliation,
+                name="scheduled_metadata_reindex_reconciliation",
+                hour={0},
+                minute={_indexer_schedule_offset_minute(current)},
+                second=0,
+                unique=True,
+                job_id="scheduled-metadata-reindex-reconciliation",
             ),
         ],
         "queue_name": queue_name,

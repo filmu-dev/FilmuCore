@@ -239,13 +239,14 @@ No undocumented requirements are assumed.
 - Retry/dead-letter baseline exists for the current worker graph.
 - Scrape -> parse-scrape-results -> rank-streams -> debrid -> finalize now runs as a real provider-backed worker pipeline with stable job IDs and persisted state transitions.
 - Retry-library recovery and transactional outbox publication are implemented.
+- A first-class scheduled metadata reindex/reconciliation program now runs above `index_item`, including index re-entry for `partially_completed` / `ongoing` items and metadata refresh reconciliation for `completed` items.
 - Workers now resolve persisted runtime settings and execute real built-in scraper and downloader provider paths.
 - Worker observability baseline now exists through stage duration, retry, and dead-letter metrics plus correlation contextvars.
 
 ### Main missing pieces
 
 - Stronger stage-idempotency and enqueue-dedup boundaries across the broader queue graph.
-- Content-service intake, index, and richer queue graph parity beyond the current scrape/download flow.
+- Content-service intake and richer queue graph parity beyond the current scrape/download plus scheduled-reindex baseline.
 - Queue lag/backlog/operator ergonomics beyond the current retry/DLQ counts.
 - Broader post-download/container execution and compensation semantics beyond the current `downloaded` handoff.
 
