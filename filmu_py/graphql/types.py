@@ -637,6 +637,36 @@ class GQLPersistMediaEntryControlResult:
     media_entry: GQLMediaEntry | None = strawberry.field(name="mediaEntry", default=None)
 
 
+@strawberry.input
+class PersistPlaybackAttachmentControlInput:
+    """Bounded persisted playback-attachment URL/state mutation input for graph control-plane writes."""
+
+    item_id: strawberry.ID = strawberry.field(name="itemId")
+    attachment_id: strawberry.ID = strawberry.field(name="attachmentId")
+    locator: str | None = None
+    local_path: str | None = strawberry.field(name="localPath", default=None)
+    restricted_url: str | None = strawberry.field(name="restrictedUrl", default=None)
+    unrestricted_url: str | None = strawberry.field(name="unrestrictedUrl", default=None)
+    refresh_state: str | None = strawberry.field(name="refreshState", default=None)
+    last_refresh_error: str | None = strawberry.field(name="lastRefreshError", default=None)
+    expires_at: str | None = strawberry.field(name="expiresAt", default=None)
+
+
+@strawberry.type
+class GQLPersistPlaybackAttachmentControlResult:
+    """GraphQL result for one persisted playback-attachment control-plane mutation."""
+
+    item_id: str = strawberry.field(name="itemId")
+    attachment_id: str = strawberry.field(name="attachmentId")
+    success: bool
+    error: str | None = None
+    attachment: GQLPlaybackAttachment | None = None
+    linked_media_entries: list[GQLMediaEntry] = strawberry.field(
+        name="linkedMediaEntries",
+        default_factory=list,
+    )
+
+
 @strawberry.type
 class LogEntry:
     """Intentional structured log-stream entry for future GraphQL consumers."""

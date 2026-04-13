@@ -36,6 +36,7 @@ from filmu_py.graphql.types import (
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
     GQLPlaybackAttachment,
+    GQLPersistPlaybackAttachmentControlResult,
     GQLPersistMediaEntryControlResult,
     GQLPlaybackRefreshTriggerResult,
     GQLQueueAlert,
@@ -60,6 +61,7 @@ from filmu_py.graphql.types import (
     ItemActionInput,
     ItemStateChangedEvent,
     MediaKind,
+    PersistPlaybackAttachmentControlInput,
     PersistMediaEntryControlInput,
     RequestItemInput,
     RequestItemResult,
@@ -83,6 +85,7 @@ from filmu_py.services.playback import (
     AppScopedDirectPlaybackRefreshTriggerResult,
     AppScopedHlsFailedLeaseRefreshTriggerResult,
     AppScopedHlsRestrictedFallbackRefreshTriggerResult,
+    PersistedPlaybackAttachmentControlMutationResult,
     PersistedMediaEntryControlMutationResult,
     trigger_direct_playback_refresh_from_resources,
     trigger_hls_failed_lease_refresh_from_resources,
@@ -819,6 +822,40 @@ def _build_persisted_media_entry_control_result(
     )
 
 
+def _build_persisted_playback_attachment_control_result(
+    result: PersistedPlaybackAttachmentControlMutationResult,
+) -> GQLPersistPlaybackAttachmentControlResult:
+    attachment_projection = SimpleNamespace(
+        id=result.attachment.id,
+        kind=result.attachment.kind,
+        locator=result.attachment.locator,
+        source_key=result.attachment.source_key,
+        provider=result.attachment.provider,
+        provider_download_id=result.attachment.provider_download_id,
+        provider_file_id=result.attachment.provider_file_id,
+        provider_file_path=result.attachment.provider_file_path,
+        original_filename=result.attachment.original_filename,
+        file_size=result.attachment.file_size,
+        local_path=result.attachment.local_path,
+        restricted_url=result.attachment.restricted_url,
+        unrestricted_url=result.attachment.unrestricted_url,
+        is_preferred=result.attachment.is_preferred,
+        preference_rank=result.attachment.preference_rank,
+        refresh_state=result.attachment.refresh_state,
+        expires_at=_serialize_trigger_datetime(result.attachment.expires_at),
+        last_refreshed_at=_serialize_trigger_datetime(result.attachment.last_refreshed_at),
+        last_refresh_error=result.attachment.last_refresh_error,
+    )
+    return GQLPersistPlaybackAttachmentControlResult(
+        item_id=result.item.id,
+        attachment_id=result.attachment.id,
+        success=True,
+        error=None,
+        attachment=_build_playback_attachment(attachment_projection),
+        linked_media_entries=[_build_media_entry(entry) for entry in result.linked_media_entries],
+    )
+
+
 @strawberry.type
 class CoreQueryResolver:
     """Base query resolvers available without plugin registration."""
@@ -1333,6 +1370,93 @@ class CoreMutationResolver:
             )
 
         return _build_persisted_media_entry_control_result(result)
+
+    @strawberry.mutation(
+        description="Persist bounded playback-attachment URL/state changes through the shared playback service and sync linked media entries"
+    )
+    async def persist_playback_attachment_control_state(
+        self,
+        info: Info[GraphQLContext, object],
+        input: PersistPlaybackAttachmentControlInput,
+    ) -> GQLPersistPlaybackAttachmentControlResult:
+        playback_service = info.context.resources.playback_service
+        if playback_service is None:
+            return GQLPersistPlaybackAttachmentControlResult(
+                item_id=str(input.item_id),
+                attachment_id=str(input.attachment_id),
+                success=False,
+                error="playback_service_unavailable",
+                attachment=None,
+                linked_media_entries=[],
+            )
+
+        if (
+            input.locator is None
+            and input.local_path is None
+            and input.restricted_url is None
+            and input.unrestricted_url is None
+            and input.refresh_state is None
+            and input.last_refresh_error is None
+            and input.expires_at is None
+        ):
+            return GQLPersistPlaybackAttachmentControlResult(
+                item_id=str(input.item_id),
+                attachment_id=str(input.attachment_id),
+                success=False,
+                error="no_changes_requested",
+                attachment=None,
+                linked_media_entries=[],
+            )
+
+        try:
+            expires_at = (
+                _parse_graphql_datetime(input.expires_at)
+                if input.expires_at is not None
+                else None
+            )
+        except ValueError:
+            return GQLPersistPlaybackAttachmentControlResult(
+                item_id=str(input.item_id),
+                attachment_id=str(input.attachment_id),
+                success=False,
+                error="invalid_expires_at",
+                attachment=None,
+                linked_media_entries=[],
+            )
+
+        try:
+            result = await playback_service.persist_playback_attachment_control_state(
+                str(input.item_id),
+                str(input.attachment_id),
+                locator=input.locator,
+                local_path=input.local_path,
+                restricted_url=input.restricted_url,
+                unrestricted_url=input.unrestricted_url,
+                refresh_state=input.refresh_state,
+                last_refresh_error=input.last_refresh_error,
+                expires_at=expires_at,
+            )
+        except ValueError as exc:
+            return GQLPersistPlaybackAttachmentControlResult(
+                item_id=str(input.item_id),
+                attachment_id=str(input.attachment_id),
+                success=False,
+                error=str(exc),
+                attachment=None,
+                linked_media_entries=[],
+            )
+
+        if result is None:
+            return GQLPersistPlaybackAttachmentControlResult(
+                item_id=str(input.item_id),
+                attachment_id=str(input.attachment_id),
+                success=False,
+                error="playback_attachment_not_found",
+                attachment=None,
+                linked_media_entries=[],
+            )
+
+        return _build_persisted_playback_attachment_control_result(result)
 
     @strawberry.mutation(description="Update one compatibility settings path")
     async def update_setting(
