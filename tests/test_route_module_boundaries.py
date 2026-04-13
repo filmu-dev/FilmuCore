@@ -8,6 +8,7 @@ from filmu_py.api.routes import (
     runtime_hls_governance,
     runtime_refresh_governance,
     runtime_status_payload,
+    stream_direct_serving,
 )
 
 
@@ -133,5 +134,28 @@ def test_stream_route_imports_runtime_status_payload_module() -> None:
     )
 
 
+def test_stream_route_imports_direct_serving_boundary_module() -> None:
+    source = _project_file("filmu_py", "api", "routes", "stream.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level != 1 or node.module != "stream_direct_serving":
+            continue
+        imported.update(alias.name for alias in node.names)
+
+    assert "resolve_direct_file_serving_descriptor" in imported
+    assert "resolve_playback_service" in imported
+    assert "head_remote_direct_url" in imported
+
+
 def test_runtime_status_payload_module_exports_contract() -> None:
     assert callable(runtime_status_payload.build_serving_status_response)
+
+
+def test_stream_direct_serving_module_exports_contract() -> None:
+    assert callable(stream_direct_serving.resolve_direct_file_serving_descriptor)
+    assert callable(stream_direct_serving.resolve_playback_service)
+    assert callable(stream_direct_serving.head_remote_direct_url)

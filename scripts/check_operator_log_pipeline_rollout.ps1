@@ -196,6 +196,22 @@ if (-not [string]::IsNullOrWhiteSpace($AlertEndpoint)) {
 }
 
 $failedChecks = @($checks | Where-Object { -not $_.passed })
+$historyRecords = @(
+    Get-ChildItem -LiteralPath $HistoryRoot -Filter 'log-pipeline-rollout-record-*.json' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending
+)
+$greenStreak = 0
+foreach ($recordFile in $historyRecords) {
+    $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json
+    if ([string]($record.status ?? '') -ne 'passed') {
+        break
+    }
+    $greenStreak += 1
+}
+$currentStatus = if ($failedChecks.Count -eq 0) { 'passed' } else { 'failed' }
+if ($currentStatus -eq 'passed') {
+    $greenStreak += 1
+}
 $summary = [ordered]@{
     generated_at       = (Get-Date).ToUniversalTime().ToString('o')
     environment        = $EnvironmentName
@@ -209,11 +225,13 @@ $summary = [ordered]@{
     }
     active_alert_count = $activeAlertCount
     max_active_alerts  = if ($MaxActiveAlerts -ge 0) { $MaxActiveAlerts } else { $null }
+    history_record_count = $historyRecords.Count
+    green_streak      = $greenStreak
     allow_offline      = [bool] $AllowOffline
     required_fields    = $requiredFields
     checks             = $checks
     failed_checks      = $failedChecks
-    status             = if ($failedChecks.Count -eq 0) { 'passed' } else { 'failed' }
+    status             = $currentStatus
 }
 
 $summaryPath = Join-Path $ArtifactDir 'log-pipeline-rollout-summary.json'
@@ -234,12 +252,8 @@ $recordPath = Join-Path $HistoryRoot $recordName
 } | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
 
 if ($HistoryKeepLatest -gt 0) {
-    $records = @(
-        Get-ChildItem -LiteralPath $HistoryRoot -Filter 'log-pipeline-rollout-record-*.json' -File |
-            Sort-Object LastWriteTimeUtc -Descending
-    )
-    if ($records.Count -gt $HistoryKeepLatest) {
-        $records | Select-Object -Skip $HistoryKeepLatest | Remove-Item -Force
+    if ($historyRecords.Count -gt $HistoryKeepLatest) {
+        $historyRecords | Select-Object -Skip $HistoryKeepLatest | Remove-Item -Force
     }
 }
 

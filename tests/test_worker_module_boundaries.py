@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from filmu_py.workers import stage_isolation, stage_job_ids, stage_observability
+from filmu_py.workers import stage_isolation, stage_job_ids, stage_observability, stage_scope
 
 
 def _project_file(*parts: str) -> Path:
@@ -32,6 +32,9 @@ def test_worker_tasks_imports_stage_modules() -> None:
     assert "filmu_py.workers.stage_isolation" in import_modules or (
         "filmu_py.workers" in from_import_modules and "stage_isolation" in source
     )
+    assert "filmu_py.workers.stage_scope" in import_modules or (
+        "filmu_py.workers" in from_import_modules and "stage_scope" in source
+    )
 
     # Keep compatibility: worker tasks should re-export these symbols from the shared module.
     assert "WORKER_ENQUEUE_DECISIONS_TOTAL =" in source
@@ -55,6 +58,8 @@ def test_worker_tasks_imports_stage_modules() -> None:
     assert "refresh_direct_playback_link_job_id =" in source
     assert "refresh_selected_hls_failed_lease_job_id =" in source
     assert "refresh_selected_hls_restricted_fallback_job_id =" in source
+    assert "_post_rank_expected_scope_reason = _stage_scope.post_rank_expected_scope_reason" in source
+    assert "_build_scraper_search_input = _stage_scope.build_scraper_search_input" in source
 
 
 def test_worker_stage_observability_module_exports_contract() -> None:
@@ -106,3 +111,10 @@ def test_worker_stage_isolation_module_exports_contract() -> None:
     assert callable(stage_isolation.shutdown_heavy_stage_executors)
     assert stage_isolation.coerce_rank_batch_parsed_title("{'a': 1}") == {"a": 1}
     assert stage_isolation.coerce_rank_batch_parsed_title("[]") == {}
+
+
+def test_worker_stage_scope_module_exports_contract() -> None:
+    assert stage_scope.normalize_requested_seasons([3, 1, 3, -1]) == [1, 3]
+    assert stage_scope.normalize_requested_episode_scope({"2": [4, 2, 4]}) == {"2": [2, 4]}
+    assert callable(stage_scope.post_rank_expected_scope_reason)
+    assert callable(stage_scope.build_scraper_search_input)
