@@ -166,4 +166,5 @@ So the expected rollout order is:
 - keep the explicit thresholded Windows soak profiles green on `C:\FilmuCoreVFS` (`proof:windows:vfs:soak:continuous`, `proof:windows:vfs:soak:seek`, `proof:windows:vfs:soak:concurrent`, and `proof:windows:vfs:soak:full`)
 - keep the repeated Windows soak stability wrappers green on real hosts so threshold tuning is based on repeated artifact evidence instead of one-off operator runs
 - keep `proof:windows:vfs:soak:enterprise` green on real hosts when promoting a release candidate, because it now requires runtime-status capture, backend-status capture, zero tolerated reconnect/provider-pressure/fatal incidents across the selected profile set, and no `critical` mounted pressure class in the captured runtime diagnostics
+- aggregate at least two real `soak-stability-*.json` environment classes through `proof:windows:vfs:soak:multi-env:enterprise` before claiming multi-environment VFS rollout readiness
 - native Windows Plex evidence is already present through [`../scripts/run_windows_media_server_gate.ps1`](../scripts/run_windows_media_server_gate.ps1); the remaining work is repeatability and policy promotion, not first bring-up
