@@ -1799,6 +1799,11 @@ def test_operations_governance_route_surfaces_live_vfs_rollout_posture(
     assert "vfs_runtime_rollout_reasons=backend_fallback_failures,mounted_read_errors,prefetch_background_errors,disk_cache_write_errors" in vfs_data_plane["evidence"]
     assert "vfs_runtime_cache_hit_ratio=0.750" in vfs_data_plane["evidence"]
     assert "vfs_runtime_provider_pressure_incidents=22" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_cache_pressure_class=critical" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_chunk_coalescing_pressure_class=warning" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_upstream_wait_class=critical" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_refresh_pressure_class=critical" in vfs_data_plane["evidence"]
+    assert "vfs_runtime_cache_pressure_reasons=disk_write_errors,disk_evictions_observed" in vfs_data_plane["evidence"]
     assert "resolve_blocking_runtime_failures" in vfs_data_plane["required_actions"]
     assert any(
         gap.startswith("live runtime rollout reasons are present:")
@@ -1944,6 +1949,8 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
         "vfs_data_plane"
     ]["evidence"]
     assert "vfs_runtime_rollout_merge_gate=ready" in body["vfs_data_plane"]["evidence"]
+    assert "vfs_runtime_cache_pressure_class=healthy" in body["vfs_data_plane"]["evidence"]
+    assert "vfs_runtime_upstream_wait_class=healthy" in body["vfs_data_plane"]["evidence"]
 
 
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:

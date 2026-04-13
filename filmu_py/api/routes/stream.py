@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
@@ -499,6 +499,14 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | li
         "vfs_runtime_prefetch_pressure_ratio": 0.0,
         "vfs_runtime_provider_pressure_incidents": 0,
         "vfs_runtime_fairness_pressure_incidents": 0,
+        "vfs_runtime_cache_pressure_class": "healthy",
+        "vfs_runtime_cache_pressure_reasons": [],
+        "vfs_runtime_chunk_coalescing_pressure_class": "healthy",
+        "vfs_runtime_chunk_coalescing_pressure_reasons": [],
+        "vfs_runtime_upstream_wait_class": "healthy",
+        "vfs_runtime_upstream_wait_reasons": [],
+        "vfs_runtime_refresh_pressure_class": "healthy",
+        "vfs_runtime_refresh_pressure_reasons": [],
         "vfs_runtime_rollout_readiness": "unknown",
         "vfs_runtime_rollout_reasons": ["runtime_snapshot_unavailable"],
         "vfs_runtime_rollout_next_action": "capture_runtime_status",
@@ -581,6 +589,18 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return round(numerator / denominator, 4)
+
+
+def _pressure_class(
+    *, critical: bool, warning: bool
+) -> Literal["healthy", "warning", "critical"]:
+    """Collapse additive runtime signals into a bounded operator pressure class."""
+
+    if critical:
+        return "critical"
+    if warning:
+        return "warning"
+    return "healthy"
 
 
 def _nested_mapping_value(payload: object, *keys: str) -> object | None:
@@ -1281,6 +1301,84 @@ def _vfs_runtime_governance_snapshot(
         _as_int(governance["vfs_runtime_prefetch_fairness_denied"])
         + _as_int(governance["vfs_runtime_prefetch_global_backpressure_denied"])
     )
+    cache_pressure_reasons: list[str] = []
+    cache_memory_pressure_ratio = _safe_ratio(
+        _as_int(governance["vfs_runtime_chunk_cache_memory_bytes"]),
+        _as_int(governance["vfs_runtime_chunk_cache_memory_max_bytes"]),
+    )
+    cache_disk_pressure_ratio = _safe_ratio(
+        _as_int(governance["vfs_runtime_chunk_cache_disk_bytes"]),
+        _as_int(governance["vfs_runtime_chunk_cache_disk_max_bytes"]),
+    )
+    if _as_int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0:
+        cache_pressure_reasons.append("disk_write_errors")
+    if max(cache_memory_pressure_ratio, cache_disk_pressure_ratio) >= 0.85:
+        cache_pressure_reasons.append("cache_capacity_high")
+    if _as_int(governance["vfs_runtime_chunk_cache_disk_evictions"]) > 0:
+        cache_pressure_reasons.append("disk_evictions_observed")
+    governance["vfs_runtime_cache_pressure_class"] = _pressure_class(
+        critical=(
+            _as_int(governance["vfs_runtime_chunk_cache_disk_write_errors"]) > 0
+            or max(cache_memory_pressure_ratio, cache_disk_pressure_ratio) >= 0.95
+        ),
+        warning=bool(cache_pressure_reasons),
+    )
+    governance["vfs_runtime_cache_pressure_reasons"] = cache_pressure_reasons
+
+    chunk_pressure_reasons: list[str] = []
+    if _as_int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) > 0:
+        chunk_pressure_reasons.append("coalescing_wait_misses")
+    if _as_float(governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"]) >= 10.0:
+        chunk_pressure_reasons.append("coalescing_wait_latency_high")
+    if _as_float(governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"]) >= 75.0:
+        chunk_pressure_reasons.append("coalescing_wait_spike")
+    governance["vfs_runtime_chunk_coalescing_pressure_class"] = _pressure_class(
+        critical=(
+            _as_int(governance["vfs_runtime_chunk_coalescing_waits_miss"]) >= 5
+            or _as_float(governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"]) >= 250.0
+        ),
+        warning=bool(chunk_pressure_reasons),
+    )
+    governance["vfs_runtime_chunk_coalescing_pressure_reasons"] = chunk_pressure_reasons
+
+    upstream_wait_reasons: list[str] = []
+    if _as_int(governance["vfs_runtime_provider_pressure_incidents"]) > 0:
+        upstream_wait_reasons.append("provider_pressure_incidents")
+    if _as_int(governance["vfs_runtime_upstream_retryable_network"]) > 0:
+        upstream_wait_reasons.append("retryable_network_wait")
+    if _as_int(governance["vfs_runtime_upstream_retryable_read_body"]) > 0:
+        upstream_wait_reasons.append("retryable_read_body_wait")
+    if _as_int(governance["vfs_runtime_upstream_fetch_average_duration_ms"]) >= 50:
+        upstream_wait_reasons.append("average_fetch_latency_high")
+    if _as_int(governance["vfs_runtime_upstream_fetch_max_duration_ms"]) >= 250:
+        upstream_wait_reasons.append("max_fetch_latency_high")
+    governance["vfs_runtime_upstream_wait_class"] = _pressure_class(
+        critical=(
+            _as_int(governance["vfs_runtime_provider_pressure_incidents"]) >= 10
+            or _as_int(governance["vfs_runtime_upstream_fetch_average_duration_ms"]) >= 100
+            or _as_int(governance["vfs_runtime_upstream_fetch_max_duration_ms"]) >= 500
+        ),
+        warning=bool(upstream_wait_reasons),
+    )
+    governance["vfs_runtime_upstream_wait_reasons"] = upstream_wait_reasons
+
+    refresh_pressure_reasons: list[str] = []
+    if _as_int(governance["vfs_runtime_backend_fallback_failure"]) > 0:
+        refresh_pressure_reasons.append("backend_fallback_failures")
+    if _as_int(governance["vfs_runtime_inline_refresh_error"]) > 0:
+        refresh_pressure_reasons.append("inline_refresh_errors")
+    if _as_int(governance["vfs_runtime_inline_refresh_timeout"]) > 0:
+        refresh_pressure_reasons.append("inline_refresh_timeouts")
+    if _as_int(governance["vfs_runtime_backend_fallback_attempts"]) > 0:
+        refresh_pressure_reasons.append("backend_fallback_activity")
+    governance["vfs_runtime_refresh_pressure_class"] = _pressure_class(
+        critical=(
+            _as_int(governance["vfs_runtime_backend_fallback_failure"]) > 0
+            or _as_int(governance["vfs_runtime_inline_refresh_timeout"]) >= 3
+        ),
+        warning=bool(refresh_pressure_reasons),
+    )
+    governance["vfs_runtime_refresh_pressure_reasons"] = refresh_pressure_reasons
     rollout_reasons: list[str] = []
     if _as_int(governance["vfs_runtime_backend_fallback_failure"]) > 0:
         rollout_reasons.append("backend_fallback_failures")

@@ -156,7 +156,7 @@ What Filmu already does better:
 
 - one cross-surface serving model spanning HTTP direct-play, HLS, and the mounted control plane
 - first-class session, handle, and path accounting instead of scattered per-handler maps
-- operator-visible runtime and governance state on `/api/v1/stream/status`
+- operator-visible runtime and governance state on `/api/v1/stream/status`, now including mounted cache/chunk-coalescing/upstream-wait/refresh pressure classes on top of the earlier rollout ratios/reasons
 - cross-platform mount architecture with Linux and native Windows adapters
 - a cleaner separation between control plane and byte-serving plane
 

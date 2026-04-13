@@ -9860,6 +9860,30 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
     assert governance["vfs_runtime_prefetch_pressure_ratio"] == 0.75
     assert governance["vfs_runtime_provider_pressure_incidents"] == 22
     assert governance["vfs_runtime_fairness_pressure_incidents"] == 2
+    assert governance["vfs_runtime_cache_pressure_class"] == "critical"
+    assert governance["vfs_runtime_cache_pressure_reasons"] == [
+        "disk_write_errors",
+        "disk_evictions_observed",
+    ]
+    assert governance["vfs_runtime_chunk_coalescing_pressure_class"] == "warning"
+    assert governance["vfs_runtime_chunk_coalescing_pressure_reasons"] == [
+        "coalescing_wait_misses",
+        "coalescing_wait_latency_high",
+        "coalescing_wait_spike",
+    ]
+    assert governance["vfs_runtime_upstream_wait_class"] == "critical"
+    assert governance["vfs_runtime_upstream_wait_reasons"] == [
+        "provider_pressure_incidents",
+        "retryable_network_wait",
+        "retryable_read_body_wait",
+    ]
+    assert governance["vfs_runtime_refresh_pressure_class"] == "critical"
+    assert governance["vfs_runtime_refresh_pressure_reasons"] == [
+        "backend_fallback_failures",
+        "inline_refresh_errors",
+        "inline_refresh_timeouts",
+        "backend_fallback_activity",
+    ]
     assert governance["vfs_runtime_rollout_readiness"] == "blocked"
     assert governance["vfs_runtime_rollout_reasons"] == [
         "backend_fallback_failures",
@@ -10074,6 +10098,10 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     assert governance["vfs_runtime_rollout_canary_decision"] == "promote_to_next_environment_class"
     assert governance["vfs_runtime_rollout_merge_gate"] == "ready"
     assert governance["vfs_runtime_rollout_environment_class"] == "windows-native:enterprise"
+    assert governance["vfs_runtime_cache_pressure_class"] == "healthy"
+    assert governance["vfs_runtime_chunk_coalescing_pressure_class"] == "healthy"
+    assert governance["vfs_runtime_upstream_wait_class"] == "healthy"
+    assert governance["vfs_runtime_refresh_pressure_class"] == "healthy"
 
 
 def test_hls_route_failure_governance_counts_generation_timeout(
