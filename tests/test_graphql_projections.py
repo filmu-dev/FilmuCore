@@ -20,7 +20,9 @@ from filmu_py.services.media import (
     CalendarProjectionRecord,
     CalendarReleaseDataRecord,
     MediaItemRecord,
+    MediaItemSpecializationRecord,
     MediaItemSummaryRecord,
+    ParentIdsRecord,
     RecoveryMechanism,
     RecoveryPlanRecord,
     RecoveryTargetStage,
@@ -234,8 +236,19 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
         title="Example Movie",
         state="Completed",
         tmdb_id="123",
+        tvdb_id="456",
         created_at="2026-03-15T10:00:00+00:00",
         updated_at="2026-03-15T11:00:00+00:00",
+        specialization=MediaItemSpecializationRecord(
+            item_type="episode",
+            tmdb_id="123",
+            tvdb_id="456",
+            imdb_id="tt1234567",
+            parent_ids=ParentIdsRecord(tmdb_id="999", tvdb_id="555"),
+            show_title="Example Show",
+            season_number=2,
+            episode_number=7,
+        ),
     )
     selected_stream = StreamORM(
         id="stream-1",
@@ -277,7 +290,7 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
     response = client.post(
         "/graphql",
         json={
-            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } } }'
+            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } } }'
         },
     )
 
@@ -292,6 +305,13 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
         "recoveryAttemptCount": 2,
         "isInCooldown": False,
     }
+    assert payload["tvdbId"] == 456
+    assert payload["imdbId"] == "tt1234567"
+    assert payload["parentTmdbId"] == 999
+    assert payload["parentTvdbId"] == 555
+    assert payload["showTitle"] == "Example Show"
+    assert payload["seasonNumber"] == 2
+    assert payload["episodeNumber"] == 7
     assert len(payload["streamCandidates"]) == 2
     assert payload["selectedStream"]["id"] == "stream-1"
     assert payload["streamCandidates"][0]["rawTitle"] == "Example.Movie.1080p.WEB-DL"

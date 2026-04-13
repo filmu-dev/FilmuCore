@@ -187,6 +187,7 @@ async def _build_media_item_detail(
     selected_stream = next(
         (candidate for candidate in stream_candidates if candidate.selected), None
     )
+    specialization = record.specialization
     return GQLMediaItemDetail(
         id=strawberry.ID(record.id),
         title=record.title,
@@ -196,6 +197,20 @@ async def _build_media_item_detail(
         media_kind=_media_kind(record.type),
         tmdb_id=_to_optional_int(record.tmdb_id),
         tvdb_id=_to_optional_int(record.tvdb_id),
+        imdb_id=(specialization.imdb_id if specialization is not None else None),
+        parent_tmdb_id=(
+            _to_optional_int(specialization.parent_ids.tmdb_id)
+            if specialization is not None and specialization.parent_ids is not None
+            else None
+        ),
+        parent_tvdb_id=(
+            _to_optional_int(specialization.parent_ids.tvdb_id)
+            if specialization is not None and specialization.parent_ids is not None
+            else None
+        ),
+        show_title=(specialization.show_title if specialization is not None else None),
+        season_number=(specialization.season_number if specialization is not None else None),
+        episode_number=(specialization.episode_number if specialization is not None else None),
         created_at=record.created_at or "",
         updated_at=record.updated_at or "",
         stream_candidates=stream_candidates,
