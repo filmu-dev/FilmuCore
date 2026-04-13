@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import attributes as orm_attributes
 from sqlalchemy.orm import selectinload
 
+import filmu_py.services.media_path_inference as _media_path_inference
 from filmu_py.api.playback_resolution import PlaybackAttachment
 from filmu_py.config import Settings, get_settings
 from filmu_py.core.cache import CacheManager
@@ -3040,79 +3041,9 @@ def _build_requested_episode_scope(
 
 
 
-_SEASON_NUMBER_RE: tuple[re.Pattern[str], ...] = (
-    re.compile(r"[Ss]eason\s*(\d+)", re.IGNORECASE),  # "Season 1", "season 01"
-    re.compile(r"[Ss](\d{1,2})[Ee]\d{1,2}"),           # S01E02
-    re.compile(r"(\d{1,2})x\d{1,2}"),                  # 1x02
-)
-_EPISODE_NUMBER_RE: tuple[re.Pattern[str], ...] = (
-    re.compile(r"[Ss]\d{1,2}[Ee](\d{1,3})", re.IGNORECASE),
-    re.compile(r"\b\d{1,2}x(\d{1,3})\b", re.IGNORECASE),
-    re.compile(r"\b[Ee]p?(?:isode)?\s*(\d{1,3})\b", re.IGNORECASE),
-)
-
-# Range patterns: "S01-S08", "S01-08", "Seasons 1-4", "Season 1-4"
-_SEASON_RANGE_RE: tuple[re.Pattern[str], ...] = (
-    re.compile(r"[Ss](?:eason)?s?\s*(\d{1,2})[-\u2013](\d{1,2})\b", re.IGNORECASE),  # S01-S08 / Seasons 1-4
-    re.compile(r"[Ss](\d{1,2})[-\u2013][Ss](\d{1,2})\b"),                               # S01-S08 strict
-)
-_MAX_SEASON_RANGE = 20  # cap to avoid false positives on episode ranges
-
-
-def _infer_season_number_from_path(path: str | None) -> int | None:
-    """Return a season number inferred from common file-naming patterns, or None."""
-    if not path:
-        return None
-    for pattern in _SEASON_NUMBER_RE:
-        match = pattern.search(path)
-        if match:
-            try:
-                return int(match.group(1))
-            except (ValueError, IndexError):
-                pass
-    return None
-
-
-def _infer_season_range_from_path(path: str | None) -> list[int]:
-    """Return all season numbers inferred from a path, including pack ranges.
-
-    Handles single-season patterns (returns ``[n]``) and range patterns such as
-    ``S01-S08``, ``Seasons 1-4``, or ``S1-8`` (returns the full range list).
-    Results are sorted ascending so earlier seasons are prioritised in callers.
-    An empty list is returned when no season can be inferred.
-    """
-    if not path:
-        return []
-    # Try range patterns first (more specific)
-    for pattern in _SEASON_RANGE_RE:
-        match = pattern.search(path)
-        if match:
-            try:
-                start, end = int(match.group(1)), int(match.group(2))
-                if start <= end and (end - start) < _MAX_SEASON_RANGE:
-                    return list(range(start, end + 1))
-            except (ValueError, IndexError):
-                pass
-    # Fall back to single-season detection
-    single = _infer_season_number_from_path(path)
-    if single is not None:
-        return [single]
-    return []
-
-
-def _infer_episode_number_from_path(path: str | None) -> int | None:
-    """Return one episode number inferred from common file-naming patterns, or None."""
-
-    if not path:
-        return None
-    for pattern in _EPISODE_NUMBER_RE:
-        match = pattern.search(path)
-        if match:
-            try:
-                return int(match.group(1))
-            except (ValueError, IndexError):
-                pass
-    return None
+_infer_season_number_from_path = _media_path_inference.infer_season_number_from_path
+_infer_season_range_from_path = _media_path_inference.infer_season_range_from_path
+_infer_episode_number_from_path = _media_path_inference.infer_episode_number_from_path
 
 
 async def _evaluate_show_completion(

@@ -57,6 +57,8 @@ export EMBY_URL="${EMBY_URL:-http://localhost:8097}"
 export FILMU_REQUIRE_PROVIDER_GATE="${FILMU_REQUIRE_PROVIDER_GATE:-1}"
 export FILMU_PLAYBACK_REQUIRED_CHECK_NAME="${FILMU_PLAYBACK_REQUIRED_CHECK_NAME:-Playback Gate / Playback Gate}"
 export FILMU_PLAYBACK_DRY_RUN="${FILMU_PLAYBACK_DRY_RUN:-0}"
+export FILMU_PLAYBACK_STABILITY_HISTORY_ROOT="${FILMU_PLAYBACK_STABILITY_HISTORY_ROOT:-}"
+export FILMU_PLAYBACK_ALLOW_STABILITY_BOOTSTRAP="${FILMU_PLAYBACK_ALLOW_STABILITY_BOOTSTRAP:-0}"
 export FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE="${FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE:-}"
 
 if [[ -z "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE" ]]; then
@@ -159,6 +161,17 @@ pwsh -NoProfile -File ./scripts/run_playback_proof_stability.ps1 \
   -FrontendUsername "$FILMU_FRONTEND_USERNAME" \
   -FrontendPassword "$FILMU_FRONTEND_PASSWORD" \
   -PreferredClientBrowserExecutable "$FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE"
+
+stability_trend_args=(-NoProfile -File ./scripts/check_playback_stability_trends.ps1 -ArtifactsRoot ./playback-proof-artifacts)
+if [[ -n "$FILMU_PLAYBACK_STABILITY_HISTORY_ROOT" ]]; then
+  stability_trend_args+=(-HistoryRoot "$FILMU_PLAYBACK_STABILITY_HISTORY_ROOT")
+else
+  stability_trend_args+=(-HistoryRoot ./playback-proof-artifacts/stability-trend-history -AllowBootstrap)
+fi
+if [[ "$FILMU_PLAYBACK_ALLOW_STABILITY_BOOTSTRAP" == "1" ]]; then
+  stability_trend_args+=(-AllowBootstrap)
+fi
+pwsh "${stability_trend_args[@]}"
 
 if [[ -n "${PLEX_TOKEN:-}" && -n "${EMBY_API_KEY:-}" ]]; then
   echo "[playback-gate-ci] running provider parity gate"

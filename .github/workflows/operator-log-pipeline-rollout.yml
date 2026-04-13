@@ -22,6 +22,8 @@ jobs:
       FILMU_LOG_PIPELINE_HEALTH_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_HEALTH_ENDPOINT }}
       FILMU_LOG_PIPELINE_SEARCH_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_SEARCH_ENDPOINT }}
       FILMU_LOG_PIPELINE_ALERT_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_ALERT_ENDPOINT }}
+      FILMU_LOG_PIPELINE_HISTORY_ROOT: ${{ vars.FILMU_LOG_PIPELINE_HISTORY_ROOT }}
+      FILMU_LOG_PIPELINE_MAX_ACTIVE_ALERTS: ${{ vars.FILMU_LOG_PIPELINE_MAX_ACTIVE_ALERTS }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -35,7 +37,18 @@ jobs:
               [string]::IsNullOrWhiteSpace([string] $env:FILMU_LOG_PIPELINE_ALERT_ENDPOINT)) {
             throw 'FILMU_LOG_PIPELINE_HEALTH_ENDPOINT, FILMU_LOG_PIPELINE_SEARCH_ENDPOINT, and FILMU_LOG_PIPELINE_ALERT_ENDPOINT must be configured.'
           }
-          ./scripts/check_operator_log_pipeline_rollout.ps1
+          $args = @(
+            '-HistoryRoot',
+            $(if ([string]::IsNullOrWhiteSpace([string] $env:FILMU_LOG_PIPELINE_HISTORY_ROOT)) {
+                'artifacts/operations/log-pipeline/history'
+            } else {
+                $env:FILMU_LOG_PIPELINE_HISTORY_ROOT
+            })
+          )
+          if (-not [string]::IsNullOrWhiteSpace([string] $env:FILMU_LOG_PIPELINE_MAX_ACTIVE_ALERTS)) {
+            $args += @('-MaxActiveAlerts', [int]$env:FILMU_LOG_PIPELINE_MAX_ACTIVE_ALERTS)
+          }
+          ./scripts/check_operator_log_pipeline_rollout.ps1 @args
 
       - name: Upload rollout artifacts
         if: always()

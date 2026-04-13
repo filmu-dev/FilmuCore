@@ -40,6 +40,7 @@ from filmu_py.services.playback_deferral_governance import (
     record_direct_playback_refresh_deferral,
     record_selected_hls_refresh_deferral,
 )
+from filmu_py.services.playback_refresh_dispatch import resolve_refresh_controller
 
 if TYPE_CHECKING:
     from filmu_py.resources import AppResources
@@ -5308,18 +5309,12 @@ async def trigger_direct_playback_refresh_from_resources(
 ) -> AppScopedDirectPlaybackRefreshTriggerResult:
     """Trigger direct-play refresh work through the app-scoped controller when configured."""
 
-    default_use_queued = resources.settings.stream.refresh_dispatch_mode == "queued"
-    use_queued = default_use_queued if prefer_queued is None else prefer_queued
-    controller = (
-        resources.queued_direct_playback_refresh_controller
-        if use_queued
-        else resources.playback_refresh_controller
+    controller = resolve_refresh_controller(
+        resources,
+        prefer_queued=prefer_queued,
+        in_process_attr="playback_refresh_controller",
+        queued_attr="queued_direct_playback_refresh_controller",
     )
-    if controller is None:
-        controller = (
-            resources.playback_refresh_controller
-            or resources.queued_direct_playback_refresh_controller
-        )
     if controller is None:
         return AppScopedDirectPlaybackRefreshTriggerResult(
             item_identifier=item_identifier,
@@ -5345,18 +5340,12 @@ async def trigger_hls_failed_lease_refresh_from_resources(
 ) -> AppScopedHlsFailedLeaseRefreshTriggerResult:
     """Trigger selected-HLS failed-lease refresh work through the app-scoped controller when configured."""
 
-    default_use_queued = resources.settings.stream.refresh_dispatch_mode == "queued"
-    use_queued = default_use_queued if prefer_queued is None else prefer_queued
-    controller = (
-        resources.queued_hls_failed_lease_refresh_controller
-        if use_queued
-        else resources.hls_failed_lease_refresh_controller
+    controller = resolve_refresh_controller(
+        resources,
+        prefer_queued=prefer_queued,
+        in_process_attr="hls_failed_lease_refresh_controller",
+        queued_attr="queued_hls_failed_lease_refresh_controller",
     )
-    if controller is None:
-        controller = (
-            resources.hls_failed_lease_refresh_controller
-            or resources.queued_hls_failed_lease_refresh_controller
-        )
     if controller is None:
         return AppScopedHlsFailedLeaseRefreshTriggerResult(
             item_identifier=item_identifier,
@@ -5382,18 +5371,12 @@ async def trigger_hls_restricted_fallback_refresh_from_resources(
 ) -> AppScopedHlsRestrictedFallbackRefreshTriggerResult:
     """Trigger selected-HLS restricted-fallback refresh work through the app-scoped controller when configured."""
 
-    default_use_queued = resources.settings.stream.refresh_dispatch_mode == "queued"
-    use_queued = default_use_queued if prefer_queued is None else prefer_queued
-    controller = (
-        resources.queued_hls_restricted_fallback_refresh_controller
-        if use_queued
-        else resources.hls_restricted_fallback_refresh_controller
+    controller = resolve_refresh_controller(
+        resources,
+        prefer_queued=prefer_queued,
+        in_process_attr="hls_restricted_fallback_refresh_controller",
+        queued_attr="queued_hls_restricted_fallback_refresh_controller",
     )
-    if controller is None:
-        controller = (
-            resources.hls_restricted_fallback_refresh_controller
-            or resources.queued_hls_restricted_fallback_refresh_controller
-        )
     if controller is None:
         return AppScopedHlsRestrictedFallbackRefreshTriggerResult(
             item_identifier=item_identifier,
