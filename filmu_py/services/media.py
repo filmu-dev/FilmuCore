@@ -1189,26 +1189,7 @@ def _build_detail_record(
         for entry in sorted(item.subtitle_entries, key=lambda entry: (entry.created_at, entry.id))
     ]
 
-    # Always infer covered season numbers from media entries for show-type items,
-    # regardless of the `extended` flag (media_entries are always selectinloaded).
-    covered_season_numbers: list[int] | None = None
-    if summary.type in {"show", "tv"}:
-        season_set: set[int] = set()
-        for entry in item.media_entries:
-            if (
-                getattr(entry, "refresh_state", None)
-                not in _SATISFYING_MEDIA_ENTRY_REFRESH_STATES
-                or getattr(entry, "entry_type", None) != "media"
-            ):
-                continue
-            # Use range-aware inference so pack torrents named "S01-S04"
-            # expand to [1,2,3,4] rather than just [1].
-            for sn in _infer_season_range_from_path(
-                entry.provider_file_path or entry.original_filename
-            ):
-                season_set.add(sn)
-        if season_set:
-            covered_season_numbers = sorted(season_set)
+    covered_season_numbers = _resolve_covered_season_numbers(item, summary_type=summary.type)
 
     return MediaItemSummaryRecord(
         id=summary.id,
@@ -1235,6 +1216,45 @@ def _build_detail_record(
         subtitles=subtitles,
         covered_season_numbers=covered_season_numbers,
     )
+
+
+def _resolve_covered_season_numbers(
+    item: MediaItemORM,
+    *,
+    summary_type: str,
+) -> list[int] | None:
+    """Return show season coverage, preferring persisted specialization hierarchy."""
+
+    if summary_type not in {"show", "tv"}:
+        return None
+
+    if item.show is not None and item.show.seasons:
+        persisted_seasons = sorted(
+            {
+                season.season_number
+                for season in item.show.seasons
+                if season.season_number is not None
+            }
+        )
+        if persisted_seasons:
+            return persisted_seasons
+
+    inferred_seasons: set[int] = set()
+    for entry in item.media_entries:
+        if (
+            getattr(entry, "refresh_state", None) not in _SATISFYING_MEDIA_ENTRY_REFRESH_STATES
+            or getattr(entry, "entry_type", None) != "media"
+        ):
+            continue
+        # Use range-aware inference so pack torrents named "S01-S04"
+        # expand to [1,2,3,4] rather than just [1].
+        for season_number in _infer_season_range_from_path(
+            entry.provider_file_path or entry.original_filename
+        ):
+            inferred_seasons.add(season_number)
+    if inferred_seasons:
+        return sorted(inferred_seasons)
+    return None
 
 
 def _matches_item_type(item: MediaItemSummaryRecord, requested_types: list[str] | None) -> bool:
@@ -5121,6 +5141,7 @@ class MediaService:
                 select(MediaItemORM)
                 .options(
                     *_projection_item_load_options(),
+                    selectinload(MediaItemORM.show).selectinload(ShowORM.seasons),
                     selectinload(MediaItemORM.item_requests),
                     selectinload(MediaItemORM.playback_attachments),
                     selectinload(MediaItemORM.media_entries).selectinload(

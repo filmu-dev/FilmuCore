@@ -18,7 +18,14 @@ from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
-from filmu_py.db.models import ActiveStreamORM, MediaEntryORM, MediaItemORM, PlaybackAttachmentORM
+from filmu_py.db.models import (
+    ActiveStreamORM,
+    MediaEntryORM,
+    MediaItemORM,
+    PlaybackAttachmentORM,
+    SeasonORM,
+    ShowORM,
+)
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.media import (
@@ -765,6 +772,49 @@ def test_build_detail_record_prefers_persisted_active_stream_relation() -> None:
     assert detail.media_entries[0].is_active_stream is False
     assert detail.media_entries[1].active_for_direct is True
     assert detail.media_entries[1].is_active_stream is True
+
+
+def test_build_detail_record_prefers_specialization_season_coverage_over_path_inference() -> None:
+    item = MediaItemORM(
+        id="item-specialization-season-coverage",
+        external_ref="tvdb:12345",
+        title="Canonical Show",
+        state="completed",
+        attributes={
+            "item_type": "show",
+            "show_title": "Wrong Metadata Show",
+        },
+    )
+    show = ShowORM(
+        media_item_id=item.id,
+        tmdb_id="12345",
+        tvdb_id="54321",
+        imdb_id="tt9988776",
+    )
+    show.media_item = item
+    show.seasons = [
+        SeasonORM(media_item_id="season-item-2", show_id=show.id, season_number=2),
+        SeasonORM(media_item_id="season-item-4", show_id=show.id, season_number=4),
+    ]
+    item.show = show
+    item.media_entries = [
+        MediaEntryORM(
+            id="media-entry-specialization-season-coverage",
+            item_id=item.id,
+            entry_type="media",
+            kind="remote-direct",
+            original_filename="Wrong Metadata Show S09-S10 Pack.mkv",
+            provider_file_path="Wrong Metadata Show S09-S10 Pack.mkv",
+            refresh_state="ready",
+            created_at=datetime(2026, 3, 12, 10, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 12, 12, tzinfo=UTC),
+        )
+    ]
+
+    detail = _build_detail_record(item, extended=False)
+
+    assert detail.type == "show"
+    assert detail.covered_season_numbers == [2, 4]
 
 
 def test_get_item_route_returns_404_for_missing_item() -> None:
