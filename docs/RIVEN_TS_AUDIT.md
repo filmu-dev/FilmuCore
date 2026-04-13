@@ -102,7 +102,7 @@ Current local baseline details that matter for Filmu planning:
 - plugin trust, publisher, quarantine, and tenancy governance
 - enterprise posture surface on `/api/v1/operations/governance`
 - broader REST and SSE compatibility surface
-- graph-first specialization-backed calendar/detail/list lineage on the shared media-domain service seam, plus specialization-backed mounted catalog path shaping on the FilmuVFS supplier boundary
+- graph-first specialization-backed calendar/detail/list lineage on the shared media-domain service seam, plus specialization-backed mounted catalog path shaping on the FilmuVFS supplier boundary and specialization-backed REST detail season coverage
 
 ## Where FilmuCore still trails
 
@@ -115,7 +115,7 @@ Current local baseline details that matter for Filmu planning:
 - broader plugin and integration ecosystem breadth, including Seerr/Listrr intake, Comet scraping, Plex post-download hooks, and pluginized TMDB/TVDB indexing
 - GraphQL-first cached control-plane breadth with Redis-backed response caching and dataloader-shaped ORM access
 - GraphQL VFS/control-plane breadth, including VFS-backed directory/stat queries and stream-url persistence mutation
-- broader compatibility-tail read-model adoption beyond the now-landed graph/VFS-first specialization projections
+- broader compatibility-tail read-model adoption beyond the now-landed graph/VFS/detail-first specialization projections
 - database seed/factory tooling in the main app
 - environment-owned searchable log and trace infrastructure
 - more complete HA and distributed control-plane operating model
