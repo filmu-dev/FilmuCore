@@ -26,6 +26,7 @@ node_modules/
 
 playback-proof-artifacts/
 ci-artifacts/
+artifacts/
 logs/
 
 # Local comparison and research docs that should stay out of the shared repo.
