@@ -101,7 +101,7 @@ What does **not** exist yet:
 - broader long-running soak/backpressure hardening of the Unix-only `fuse3` runtime now that reconnect deltas, inline stale-link refresh, and mounted semantic path metadata are in place
 - later HLS governance deepening beyond the new production-grade HTTP baseline, especially any Rust/mount-side reuse and broader resource-policy tuning
 - deeper governance around remote-direct-backed HLS generation remains necessary even after the new transcode fallback baseline, especially around ffmpeg failure policy and end-to-end player validation
-- richer mounted soak-artifact parity for the new pressure classes and cross-process correlation once the shared chunk engine is driving real mounted reads
+- broader multi-environment mounted soak evidence and cross-process correlation once the shared chunk engine is driving real mounted reads
 - repeatable Docker Plex playback-proof coverage on top of the now-working `/mnt/filmuvfs` path, with the new `plex-wsl-evidence.json` artifact and per-check summary fields driven to green
 - keep native Windows Plex parity evidence green against `C:\FilmuCoreVFS` through repeatable reruns now that the local PMS path is live-green
 
@@ -141,7 +141,7 @@ This is the implementation breadth Python still needs to plan toward if the goal
 | **Chunk caching strategy**             | Implemented in-memory shared cache + HTTP route reuse | TS has chunk caches and read-type detection          | Needed to outperform TS rather than just match it                                                         | **P1** (mount wiring + disk cache) |
 | **Cancellation / abort behavior**      | Stronger baseline              | TS explicitly handles aborted read requests                   | Foreground mount reads now cancel cleanly on handle release/ProjFS command cancellation, but broader soak coverage and more Windows parity evidence still remain | **P1**   |
 | **FilmuVFS control-plane events**      | Implemented baseline via reconnect deltas + `RefreshCatalogEntry` + inline stale-read recovery | TS integrates plugin queues for stream-link requests          | Needed for lease refresh, invalidation, provider pressure handling                                        | Done baseline |
-| **Stream/VFS metrics**                 | Strong HTTP + joined cross-process baseline; mount telemetry now also yields cache/chunk-coalescing/upstream-wait/refresh pressure classes on API governance surfaces | TS has richer operational behavior even if metrics are uneven | Needed for performance tuning and proving superiority                                                     | **P1** (mount telemetry + artifact parity) |
+| **Stream/VFS metrics**                 | Strong HTTP + joined cross-process baseline; mount telemetry now also yields cache/chunk-coalescing/upstream-wait/refresh pressure classes on API governance surfaces and Windows soak artifacts | TS has richer operational behavior even if metrics are uneven | Needed for performance tuning and proving superiority                                                     | **P1** (mount telemetry + wider evidence breadth) |
 | **Canary/rollback controls**           | Missing                        | Needed regardless of TS                                       | Required before rollout to real users                                                                     | **P2**   |
 
 ---

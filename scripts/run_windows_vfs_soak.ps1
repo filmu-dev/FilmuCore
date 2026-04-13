@@ -884,6 +884,58 @@ function Get-NestedRuntimeText {
     return $text.Trim()
 }
 
+function Get-SafeRatio {
+    param(
+        [double] $Numerator,
+        [double] $Denominator
+    )
+
+    if ($Denominator -le 0) {
+        return 0.0
+    }
+    return [math]::Round(($Numerator / $Denominator), 4)
+}
+
+function Get-PressureClass {
+    param(
+        [bool] $Critical,
+        [bool] $Warning
+    )
+
+    if ($Critical) {
+        return 'critical'
+    }
+    if ($Warning) {
+        return 'warning'
+    }
+    return 'healthy'
+}
+
+function Get-BackendVfsPressureSnapshot {
+    param($Governance)
+
+    if ($null -eq $Governance) {
+        return $null
+    }
+
+    $result = [ordered]@{}
+    foreach ($name in @(
+        'vfs_runtime_cache_pressure_class',
+        'vfs_runtime_cache_pressure_reasons',
+        'vfs_runtime_chunk_coalescing_pressure_class',
+        'vfs_runtime_chunk_coalescing_pressure_reasons',
+        'vfs_runtime_upstream_wait_class',
+        'vfs_runtime_upstream_wait_reasons',
+        'vfs_runtime_refresh_pressure_class',
+        'vfs_runtime_refresh_pressure_reasons'
+    )) {
+        if ($Governance.PSObject.Properties.Match($name).Count -gt 0) {
+            $result[$name] = $Governance.$name
+        }
+    }
+    return $result
+}
+
 function Get-FilmuvfsRuntimeDelta {
     param(
         $BeforeSnapshot,
@@ -1003,6 +1055,14 @@ function Get-RuntimeDiagnostics {
             provider_pressure_incidents = $null
             unrecovered_stale_refresh_incidents = $null
             fatal_error_incidents = $null
+            cache_pressure_class = $null
+            cache_pressure_reasons = $null
+            chunk_coalescing_pressure_class = $null
+            chunk_coalescing_pressure_reasons = $null
+            upstream_wait_class = $null
+            upstream_wait_reasons = $null
+            refresh_pressure_class = $null
+            refresh_pressure_reasons = $null
             failure_classifications = $null
         }
     }
@@ -1043,6 +1103,60 @@ function Get-RuntimeDiagnostics {
         [int64]$RuntimeDelta.prefetch_background_backpressure +
         [int64]$RuntimeDelta.prefetch_background_error
     )
+    $cacheMemoryPressureRatio = Get-SafeRatio -Numerator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_bytes')) -Denominator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_max_bytes'))
+    $cacheDiskPressureRatio = Get-SafeRatio -Numerator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'disk_bytes')) -Denominator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'disk_max_bytes'))
+    $cachePressureReasons = [System.Collections.Generic.List[string]]::new()
+    if ([int64]$RuntimeDelta.chunk_cache_disk_write_errors -gt 0) {
+        [void]$cachePressureReasons.Add('disk_write_errors')
+    }
+    if ([math]::Max($cacheMemoryPressureRatio, $cacheDiskPressureRatio) -ge 0.85) {
+        [void]$cachePressureReasons.Add('cache_capacity_high')
+    }
+    if ([int64]$RuntimeDelta.chunk_cache_disk_evictions -gt 0) {
+        [void]$cachePressureReasons.Add('disk_evictions_observed')
+    }
+
+    $chunkCoalescingPressureReasons = [System.Collections.Generic.List[string]]::new()
+    if ([int64]$RuntimeDelta.chunk_coalescing_waits_miss -gt 0) {
+        [void]$chunkCoalescingPressureReasons.Add('coalescing_wait_misses')
+    }
+    if ([double]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms -ge 10.0) {
+        [void]$chunkCoalescingPressureReasons.Add('coalescing_wait_latency_high')
+    }
+    if ([double]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms -ge 75.0) {
+        [void]$chunkCoalescingPressureReasons.Add('coalescing_wait_spike')
+    }
+
+    $upstreamWaitReasons = [System.Collections.Generic.List[string]]::new()
+    if ($providerPressureIncidents -gt 0) {
+        [void]$upstreamWaitReasons.Add('provider_pressure_incidents')
+    }
+    if ([int64]$RuntimeDelta.upstream_retryable_network -gt 0) {
+        [void]$upstreamWaitReasons.Add('retryable_network_wait')
+    }
+    if ([int64]$RuntimeDelta.upstream_retryable_read_body -gt 0) {
+        [void]$upstreamWaitReasons.Add('retryable_read_body_wait')
+    }
+    if ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -ge 50) {
+        [void]$upstreamWaitReasons.Add('average_fetch_latency_high')
+    }
+    if ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'max_duration_ms')) -ge 250) {
+        [void]$upstreamWaitReasons.Add('max_fetch_latency_high')
+    }
+
+    $refreshPressureReasons = [System.Collections.Generic.List[string]]::new()
+    if ([int64]$RuntimeDelta.backend_fallback_failure -gt 0) {
+        [void]$refreshPressureReasons.Add('backend_fallback_failures')
+    }
+    if ([int64]$RuntimeDelta.inline_refresh_error -gt 0) {
+        [void]$refreshPressureReasons.Add('inline_refresh_errors')
+    }
+    if ([int64]$RuntimeDelta.inline_refresh_timeout -gt 0) {
+        [void]$refreshPressureReasons.Add('inline_refresh_timeouts')
+    }
+    if ([int64]$RuntimeDelta.backend_fallback_attempts -gt 0) {
+        [void]$refreshPressureReasons.Add('backend_fallback_activity')
+    }
 
     return [ordered]@{
         captured = $true
@@ -1084,6 +1198,14 @@ function Get-RuntimeDiagnostics {
         backend_fallback_success = [int64]$RuntimeDelta.backend_fallback_success
         backend_fallback_failure = [int64]$RuntimeDelta.backend_fallback_failure
         fatal_error_incidents = $fatalIncidents
+        cache_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.chunk_cache_disk_write_errors -gt 0) -or ([math]::Max($cacheMemoryPressureRatio, $cacheDiskPressureRatio) -ge 0.95)) -Warning ($cachePressureReasons.Count -gt 0)
+        cache_pressure_reasons = @($cachePressureReasons)
+        chunk_coalescing_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.chunk_coalescing_waits_miss -ge 5) -or ([double]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms -ge 250.0)) -Warning ($chunkCoalescingPressureReasons.Count -gt 0)
+        chunk_coalescing_pressure_reasons = @($chunkCoalescingPressureReasons)
+        upstream_wait_class = Get-PressureClass -Critical (($providerPressureIncidents -ge 10) -or ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -ge 100) -or ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'max_duration_ms')) -ge 500)) -Warning ($upstreamWaitReasons.Count -gt 0)
+        upstream_wait_reasons = @($upstreamWaitReasons)
+        refresh_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.backend_fallback_failure -gt 0) -or ([int64]$RuntimeDelta.inline_refresh_timeout -ge 3)) -Warning ($refreshPressureReasons.Count -gt 0)
+        refresh_pressure_reasons = @($refreshPressureReasons)
         failure_classifications = $failureClassifications
     }
 }
@@ -1246,6 +1368,14 @@ $runtimeDiagnostics = [ordered]@{
     backend_fallback_success = $null
     backend_fallback_failure = $null
     fatal_error_incidents = $null
+    cache_pressure_class = $null
+    cache_pressure_reasons = $null
+    chunk_coalescing_pressure_class = $null
+    chunk_coalescing_pressure_reasons = $null
+    upstream_wait_class = $null
+    upstream_wait_reasons = $null
+    refresh_pressure_class = $null
+    refresh_pressure_reasons = $null
     failure_classifications = $null
 }
 $stdoutSnapshot = [ordered]@{ path = (Get-LogPath -Name 'filmuvfs-windows-stdout.log'); exists = $false; line_count = 0; tail = @() }
@@ -1416,6 +1546,16 @@ finally {
             Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_fatal_error_incidents' -Passed ([bool]($runtimeDiagnostics.fatal_error_incidents -le $MaxFatalErrorIncidents)) -Observed $runtimeDiagnostics.fatal_error_incidents -Threshold $MaxFatalErrorIncidents
         }
     }
+    if ($runtimeDiagnostics.captured) {
+        foreach ($pressureCheck in @(
+            @{ Name = 'runtime_cache_pressure_class'; Observed = $runtimeDiagnostics.cache_pressure_class },
+            @{ Name = 'runtime_chunk_coalescing_pressure_class'; Observed = $runtimeDiagnostics.chunk_coalescing_pressure_class },
+            @{ Name = 'runtime_upstream_wait_class'; Observed = $runtimeDiagnostics.upstream_wait_class },
+            @{ Name = 'runtime_refresh_pressure_class'; Observed = $runtimeDiagnostics.refresh_pressure_class }
+        )) {
+            Add-ThresholdCheck -Checks $thresholdChecks -Name $pressureCheck.Name -Passed ([string]$pressureCheck.Observed -ne 'critical') -Observed $pressureCheck.Observed -Threshold 'not_critical'
+        }
+    }
     $thresholdFailures = @($thresholdChecks | Where-Object { -not $_.passed })
 
     $summary = [ordered]@{
@@ -1435,6 +1575,16 @@ finally {
         backend_stream_status_after = $backendStatusAfter
         backend_vfs_governance_delta = if ($backendStatusBefore.captured -and $backendStatusAfter.captured) {
             Get-VfsGovernanceDelta -BeforeGovernance $backendStatusBefore.governance -AfterGovernance $backendStatusAfter.governance
+        } else {
+            $null
+        }
+        backend_vfs_pressure_before = if ($backendStatusBefore.captured) {
+            Get-BackendVfsPressureSnapshot -Governance $backendStatusBefore.governance
+        } else {
+            $null
+        }
+        backend_vfs_pressure_after = if ($backendStatusAfter.captured) {
+            Get-BackendVfsPressureSnapshot -Governance $backendStatusAfter.governance
         } else {
             $null
         }

@@ -322,7 +322,7 @@ No undocumented requirements are assumed.
 - Live validation on the mounted WSL path now confirms season-grouped output for real shows such as `Stranger Things (2016)` instead of a flat root-level file dump.
 - Link resolution is implemented through built-in Real-Debrid / AllDebrid / Debrid-Link clients with persisted media-entry leases and provider-backed refresh orchestration.
 - Linux-target compile validation, WSL/Linux mount lifecycle validation, manual mounted-read smoke, and Plex/Emby playback validation all pass for the current Rust sidecar path.
-- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics now also feed operator-facing pressure classes on the API surfaces; the remaining gap is broader soak-artifact parity and multi-environment runtime breadth rather than raw mounted counters alone.
+- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics now also feed operator-facing pressure classes on the API surfaces and the Windows soak artifacts; the remaining gap is multi-environment runtime breadth rather than raw mounted counters or artifact vocabulary alone.
 
 ### Main missing pieces
 
@@ -330,7 +330,7 @@ No undocumented requirements are assumed.
 - Mount/HTTP convergence on the shared chunk engine semantics for mounted reads.
 - Decide whether the current canonical-plus-alias mounted browse policy should stop here or grow into a fully separate id-keyed tree, and what broader queue-backed/orchestrated resolver workflow should exist above the current mount-side inline refresh dedup.
 - Optional disk/persistent cache and smarter prefetch evolution above the now-async Rust cache.
-- Broader long-running soak/backpressure validation, soak-artifact parity for the new mounted pressure classes, and multi-environment mounted data-plane breadth.
+- Broader long-running soak/backpressure validation and multi-environment mounted data-plane breadth.
 - VFS rollout controls.
 
 ### Exit criteria

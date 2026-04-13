@@ -123,6 +123,10 @@ foreach ($profile in $Profiles) {
         $fatalErrorIncidents = $null
         $runtimeCaptured = $false
         $backendCaptured = $false
+        $runtimeCachePressureClass = $null
+        $runtimeChunkCoalescingPressureClass = $null
+        $runtimeUpstreamWaitClass = $null
+        $runtimeRefreshPressureClass = $null
         if (-not [string]::IsNullOrWhiteSpace([string] $artifactDir)) {
             $artifactSummaryPath = Join-Path $artifactDir 'summary.json'
             if (Test-Path -LiteralPath $artifactSummaryPath) {
@@ -140,6 +144,10 @@ foreach ($profile in $Profiles) {
                 $fatalErrorIncidents = [int]($artifactSummary.runtime_diagnostics.fatal_error_incidents ?? 0)
                 $runtimeCaptured = [bool]($artifactSummary.runtime_diagnostics.captured)
                 $backendCaptured = [bool]($artifactSummary.backend_stream_status_after.captured)
+                $runtimeCachePressureClass = [string]($artifactSummary.runtime_diagnostics.cache_pressure_class ?? '')
+                $runtimeChunkCoalescingPressureClass = [string]($artifactSummary.runtime_diagnostics.chunk_coalescing_pressure_class ?? '')
+                $runtimeUpstreamWaitClass = [string]($artifactSummary.runtime_diagnostics.upstream_wait_class ?? '')
+                $runtimeRefreshPressureClass = [string]($artifactSummary.runtime_diagnostics.refresh_pressure_class ?? '')
             }
         }
 
@@ -172,6 +180,10 @@ foreach ($profile in $Profiles) {
             reconnect_incidents = $reconnectIncidents
             provider_pressure_incidents = $providerPressureIncidents
             fatal_error_incidents = $fatalErrorIncidents
+            runtime_cache_pressure_class = $runtimeCachePressureClass
+            runtime_chunk_coalescing_pressure_class = $runtimeChunkCoalescingPressureClass
+            runtime_upstream_wait_class = $runtimeUpstreamWaitClass
+            runtime_refresh_pressure_class = $runtimeRefreshPressureClass
             runtime_captured = $runtimeCaptured
             backend_status_captured = $backendCaptured
             runtime_capture_ok = $runtimeCaptureOk
@@ -209,6 +221,10 @@ $summary = [ordered]@{
     max_reconnect_incidents = @($results | ForEach-Object { [int]($_.reconnect_incidents ?? 0) } | Measure-Object -Maximum).Maximum
     max_provider_pressure_incidents = @($results | ForEach-Object { [int]($_.provider_pressure_incidents ?? 0) } | Measure-Object -Maximum).Maximum
     max_fatal_error_incidents = @($results | ForEach-Object { [int]($_.fatal_error_incidents ?? 0) } | Measure-Object -Maximum).Maximum
+    critical_cache_pressure_runs = @($results | Where-Object { $_.runtime_cache_pressure_class -eq 'critical' }).Count
+    critical_chunk_coalescing_pressure_runs = @($results | Where-Object { $_.runtime_chunk_coalescing_pressure_class -eq 'critical' }).Count
+    critical_upstream_wait_runs = @($results | Where-Object { $_.runtime_upstream_wait_class -eq 'critical' }).Count
+    critical_refresh_pressure_runs = @($results | Where-Object { $_.runtime_refresh_pressure_class -eq 'critical' }).Count
     results = $results
 }
 $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $summaryPath -Encoding UTF8
