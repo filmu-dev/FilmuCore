@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/filmu-dev/FilmuCore/compare/v0.14.0...v0.15.0) (2026-04-13)
+
+
+### Features
+
+* Codex/scheduled metadata reconciliation hardening 20260413 ([#43](https://github.com/filmu-dev/FilmuCore/issues/43)) ([fcd8faa](https://github.com/filmu-dev/FilmuCore/commit/fcd8faafb85b7720f6046b158c49ed3b708763ec))
+
 ## [0.14.0](https://github.com/filmu-dev/FilmuCore/compare/v0.13.0...v0.14.0) (2026-04-12)
 
 
