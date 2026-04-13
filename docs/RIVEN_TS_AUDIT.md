@@ -86,7 +86,7 @@ Current local baseline details that matter for Filmu planning:
 | VFS mount | Running `fuse-native` VFS on `main` | Real Rust sidecar mount runtime with Linux `fuse3`, Windows ProjFS/WinFSP adapters, and validated playback proof paths |
 | HTTP playback | Compatibility path secondary to mount | Real `/api/v1/stream/*` path with direct-file, HLS, and status/governance surfaces |
 | Plugin ecosystem | Broader package/plugin breadth | Narrower breadth, but stronger trust, publisher, tenancy, and quarantine policy |
-| Queue durability | BullMQ with richer long-running workflow breadth | ARQ with real job graph, retry/dead-letter behavior, transactional outbox, replay baseline, and recovery seams |
+| Queue durability | BullMQ with richer long-running workflow breadth | ARQ with real job graph, retry/dead-letter behavior, transactional outbox, DLQ age/reason operator rollups, bounded replay filters, and recovery seams |
 | Observability | Stronger monorepo-local observability stack and Elastic local baseline | Stronger operator-facing policy/governance APIs, but environment-owned search/export still remains |
 
 ## Where FilmuCore is already ahead

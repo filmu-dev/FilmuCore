@@ -53,6 +53,7 @@ from ..models import (
     PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
     QueueAlertResponse,
+    QueueStatusHistoryFiltersResponse,
     QueueStatusHistoryPointResponse,
     QueueStatusHistoryResponse,
     QueueStatusHistorySummaryResponse,
@@ -316,11 +317,35 @@ def _summarize_queue_history(
     """Return operator rollups for one bounded queue-history response."""
 
     latest = history[0].alert_level if history else "ok"
+    total_dead_letter_reason_counts: dict[str, int] = {}
+    dead_letter_reason_points: dict[str, int] = {}
+    for item in history:
+        for reason_code, count in item.dead_letter_reason_counts.items():
+            total_dead_letter_reason_counts[reason_code] = (
+                total_dead_letter_reason_counts.get(reason_code, 0) + count
+            )
+            dead_letter_reason_points[reason_code] = (
+                dead_letter_reason_points.get(reason_code, 0) + 1
+            )
+    latest_dead_letter_reason_counts = (
+        dict(history[0].dead_letter_reason_counts) if history else {}
+    )
+    latest_dead_letter_reason = None
+    if latest_dead_letter_reason_counts:
+        latest_dead_letter_reason = min(
+            (
+                reason_code
+                for reason_code, count in latest_dead_letter_reason_counts.items()
+                if count == max(latest_dead_letter_reason_counts.values())
+            ),
+            default=None,
+        )
     return QueueStatusHistorySummaryResponse(
         points=len(history),
         latest_alert_level=latest,
         critical_points=sum(1 for item in history if item.alert_level == "critical"),
         warning_points=sum(1 for item in history if item.alert_level == "warning"),
+        dead_letter_points=sum(1 for item in history if item.dead_letter_jobs > 0),
         max_ready_jobs=max((item.ready_jobs for item in history), default=0),
         max_dead_letter_jobs=max((item.dead_letter_jobs for item in history), default=0),
         max_oldest_ready_age_seconds=max(
@@ -331,9 +356,21 @@ def _summarize_queue_history(
             ),
             default=None,
         ),
-        latest_dead_letter_reason_counts=(
-            dict(history[0].dead_letter_reason_counts) if history else {}
+        latest_dead_letter_oldest_age_seconds=(
+            history[0].dead_letter_oldest_age_seconds if history else None
         ),
+        max_dead_letter_oldest_age_seconds=max(
+            (
+                item.dead_letter_oldest_age_seconds
+                for item in history
+                if item.dead_letter_oldest_age_seconds is not None
+            ),
+            default=None,
+        ),
+        latest_dead_letter_reason=latest_dead_letter_reason,
+        latest_dead_letter_reason_counts=latest_dead_letter_reason_counts,
+        total_dead_letter_reason_counts=dict(sorted(total_dead_letter_reason_counts.items())),
+        dead_letter_reason_points=dict(sorted(dead_letter_reason_points.items())),
     )
 
 
@@ -1105,6 +1142,7 @@ async def _enterprise_operations_governance(
                 f"arq_enabled={settings.arq_enabled}",
                 f"queue_name={resources.arq_queue_name or settings.arq_queue_name}",
                 "GET /api/v1/operations/control-plane/subscribers exposes durable replay ownership",
+                "GET /api/v1/workers/queue/history exposes dead-letter age/reason rollups and bounded replay filters",
             ],
             required_actions=[
                 "promote_redis_stream_consumer_groups_into_active_subscribers",
@@ -1968,6 +2006,7 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
         ],
         oldest_ready_age_seconds=snapshot.oldest_ready_age_seconds,
         next_scheduled_in_seconds=snapshot.next_scheduled_in_seconds,
+        dead_letter_oldest_age_seconds=snapshot.dead_letter_oldest_age_seconds,
         dead_letter_reason_counts=dict(snapshot.dead_letter_reason_counts),
     )
 
@@ -1980,6 +2019,9 @@ async def get_worker_queue_status(request: Request) -> QueueStatusResponse:
 async def get_worker_queue_history(
     request: Request,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    alert_level: Annotated[Literal["ok", "warning", "critical"] | None, Query()] = None,
+    min_dead_letter_jobs: Annotated[int, Query(ge=0, le=10_000)] = 0,
+    reason_code: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
 ) -> QueueStatusHistoryResponse:
     """Return bounded queue trend history captured during queue observations."""
 
@@ -1999,12 +2041,28 @@ async def get_worker_queue_history(
             oldest_ready_age_seconds=item.oldest_ready_age_seconds,
             next_scheduled_in_seconds=item.next_scheduled_in_seconds,
             alert_level=item.alert_level,
+            dead_letter_oldest_age_seconds=item.dead_letter_oldest_age_seconds,
             dead_letter_reason_counts=dict(item.dead_letter_reason_counts),
         )
         for item in history
     ]
+    if alert_level is not None:
+        history_points = [item for item in history_points if item.alert_level == alert_level]
+    if min_dead_letter_jobs > 0:
+        history_points = [
+            item for item in history_points if item.dead_letter_jobs >= min_dead_letter_jobs
+        ]
+    if reason_code is not None:
+        history_points = [
+            item for item in history_points if item.dead_letter_reason_counts.get(reason_code, 0) > 0
+        ]
     return QueueStatusHistoryResponse(
         queue_name=queue_name,
+        applied_filters=QueueStatusHistoryFiltersResponse(
+            alert_level=alert_level,
+            min_dead_letter_jobs=min_dead_letter_jobs,
+            reason_code=reason_code,
+        ),
         summary=_summarize_queue_history(history_points),
         history=history_points,
     )
