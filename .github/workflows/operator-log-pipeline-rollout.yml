@@ -1,0 +1,47 @@
+name: Operator Log Pipeline Rollout
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 * * * *"
+
+concurrency:
+  group: operator-log-pipeline-rollout-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  operator-log-pipeline-rollout:
+    name: Operator Log Pipeline Rollout
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FILMU_LOG_PIPELINE_ENVIRONMENT: ${{ vars.FILMU_LOG_PIPELINE_ENVIRONMENT }}
+      FILMU_LOG_PIPELINE_HEALTH_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_HEALTH_ENDPOINT }}
+      FILMU_LOG_PIPELINE_SEARCH_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_SEARCH_ENDPOINT }}
+      FILMU_LOG_PIPELINE_ALERT_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_ALERT_ENDPOINT }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Validate environment log shipping/search/alerts contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace([string] $env:FILMU_LOG_PIPELINE_HEALTH_ENDPOINT) -or
+              [string]::IsNullOrWhiteSpace([string] $env:FILMU_LOG_PIPELINE_SEARCH_ENDPOINT) -or
+              [string]::IsNullOrWhiteSpace([string] $env:FILMU_LOG_PIPELINE_ALERT_ENDPOINT)) {
+            throw 'FILMU_LOG_PIPELINE_HEALTH_ENDPOINT, FILMU_LOG_PIPELINE_SEARCH_ENDPOINT, and FILMU_LOG_PIPELINE_ALERT_ENDPOINT must be configured.'
+          }
+          ./scripts/check_operator_log_pipeline_rollout.ps1
+
+      - name: Upload rollout artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: operator-log-pipeline-rollout-${{ github.run_id }}
+          path: artifacts/operations/log-pipeline/**
+          if-no-files-found: warn
+          retention-days: 14

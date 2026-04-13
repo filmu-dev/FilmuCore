@@ -27,6 +27,7 @@ Today the Python backend has:
 
 - real provider-backed worker pipeline in [`filmu_py/workers/tasks.py`](../../filmu_py/workers/tasks.py)
 - retry/dead-letter baseline in [`filmu_py/workers/retry.py`](../../filmu_py/workers/retry.py)
+- distributed replay/control-plane baseline now includes consumer claim/fence semantics with heartbeat-expiry ownership transfer hooks in [`../../filmu_py/services/control_plane.py`](../../filmu_py/services/control_plane.py) and replay sink integration in [`../../filmu_py/core/replay.py`](../../filmu_py/core/replay.py)
 
 ### Implemented stages
 
@@ -94,7 +95,7 @@ This is the reference breadth the Python roadmap should explicitly account for.
 | **Download fan-out / orchestration** | ✅ `debrid_item` calls enabled provider download-pipeline client, persists `MediaEntryORM` rows | TS has broader fan-out behavior                        | Supports partial success and richer downloader selection                   | ✅ Done (single-provider) |
 | **Retry-library recovery**           | ✅ Scheduled `recover_incomplete_library` cron (15 min), stage-aware re-entry, deduplication | TS has explicit actor/flow                             | Crucial for restart recovery and incomplete-library progression           | ✅ Done                |
 | **Scheduled reindex / reconciliation** | `index_item` exists, but there is no first-class scheduled reindex program or operator-facing reconciliation surface yet | TS `schedule-reindex` actor exists                     | Keeps metadata fresh without relying only on ad hoc item-triggered indexing | 🔶 Partial             |
-| **Queue-backed stream-link resolution** | Mount-side inline stale-link refresh and dedup still exist in Rust, and the Python control plane now has an optional queued refresh dispatch path for direct-play and HLS refresh work | TS VFS `open` publishes `stream-link-requested` and dedups at queue level | Matters if link resolution pressure needs to be separated from read/open latency | ✅ Done baseline / deepen |
+| **Queue-backed stream-link resolution** | Mount-side inline stale-link refresh and dedup still exist in Rust, and the Python control plane now has a policy-aware queued refresh dispatch path for direct-play and HLS refresh work (forced queued under pressure, explicit fallback accounting, latency-SLO breach counters) | TS VFS `open` publishes `stream-link-requested` and dedups at queue level | Matters if link resolution pressure needs to be separated from read/open latency | ✅ Done baseline / operational hardening |
 | **Plugin hook workers**              | Implemented baseline (in-process typed hook dispatch with timeout isolation) | TS has queue-backed plugin hook workers                | Required for plugin platform parity beyond capability-protocol contributions | Done baseline / deepen |
 | **Publishable-event governance**     | Implemented baseline                                  | TS tracks publishable events explicitly                | Prevents queue buildup and undefined plugin-event fan-out                 | Done baseline          |
 | **Transactional outbox**             | ✅ `OutboxEventORM` + scheduled `publish_outbox_events` cron (30 sec) | Not identical in TS, but needed for Python correctness | Needed for publish consistency and replay-safe growth                     | ✅ Done                |
@@ -246,7 +247,9 @@ Current update:
 - failure isolation and timeout handling now exist in [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py)
 - explicit publishability rules now exist in [`../../filmu_py/core/event_bus.py`](../../filmu_py/core/event_bus.py)
 
-The remaining orchestration question is no longer first hook execution or first event governance; it is whether plugin-event execution needs a durable queued model beyond the current in-process runtime.
+The remaining orchestration question is no longer first hook execution, first event governance, or first queued stream-link path.
+The queue-backed resolver path is now policy-driven under load with explicit fallback telemetry.
+The remaining orchestration question is whether plugin-event execution needs a durable queued model beyond the current in-process runtime.
 
 ---
 

@@ -37,7 +37,7 @@ Use the docs below as the current source of truth for done/partial/missing state
 - [`TODOS/PLUGIN_CAPABILITY_MODEL_MATRIX.md`](TODOS/PLUGIN_CAPABILITY_MODEL_MATRIX.md) - plugin/runtime capability depth; Wave 4 is repo-closed and remaining work is recurring rollout evidence plus broader future plugin breadth
 - [`TODOS/FILMUVFS_BYTE_SERVING_PLATFORM_MATRIX.md`](TODOS/FILMUVFS_BYTE_SERVING_PLATFORM_MATRIX.md) - VFS/runtime maturity; mounted path is real, rollout/telemetry/canary hardening remains
 - [`TODOS/OBSERVABILITY_MATURITY_MATRIX.md`](TODOS/OBSERVABILITY_MATURITY_MATRIX.md) - observability maturity; local reference stack is done, environment rollout and deeper correlation remain
-- [`TODOS/PLAYBACK_PROOF_IMPLEMENTATION_PLAN.md`](TODOS/PLAYBACK_PROOF_IMPLEMENTATION_PLAN.md) - playback proof and gate posture; proof baseline is done, live GitHub policy validation and repeated soak hardening remain
+- [`TODOS/PLAYBACK_PROOF_IMPLEMENTATION_PLAN.md`](TODOS/PLAYBACK_PROOF_IMPLEMENTATION_PLAN.md) - playback proof and gate posture; proof baseline plus live GitHub policy validation are done, with repeated soak/provider hardening as the active remaining work
 
 Historical audits and dated comparison notes remain useful context, but they are not the canonical current-state checklist unless a current-state doc explicitly points to them.
 

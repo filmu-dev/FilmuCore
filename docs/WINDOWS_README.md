@@ -92,6 +92,7 @@ It does **not** start the native Windows FilmuVFS mount automatically. The compo
 Optional verification:
 
 ```powershell
+pnpm run stack:status
 .\status_windows_stack.ps1
 .\check_windows_stack.ps1
 pnpm run stack:validate
@@ -126,7 +127,7 @@ The helper and the binary accept these Windows adapter values:
 
 - `winfsp` (recommended)
 - `auto` (resolves to `winfsp`)
-- `projfs` (diagnostic/compatibility path)
+- `projfs` (diagnostic/compatibility path; hydrated reads consume local disk space)
 
 By default, use `winfsp` (or `auto`). `projfs` should only be used when you specifically need to debug the Projected File System path, because hydrated reads persist data under the mount root and do not behave like the bounded temporary chunk cache used by the Linux path.
 
@@ -158,6 +159,14 @@ Or use the helper script:
 ```powershell
 .\start_windows_stack.ps1 -MountPath C:\FilmuCoreVFS
 ```
+
+Or use the unified launcher with Windows selected automatically:
+
+```powershell
+pnpm run stack:start
+```
+
+To force the choice from config, set `FILMU_STACK_VFS_MODE=windows` in `.env` or the host environment.
 
 That records both the requested adapter (`auto` by default) and the effective adapter selected by policy/runtime.
 
@@ -207,7 +216,7 @@ Jellyfin note:
 - If playback fails with `h264_amf` / AMF initialization errors, disable hardware transcoding first and re-test with software encoding. That encoder failure is separate from the FilmuVFS read path; software transcode is the currently verified Windows-host playback gate.
 - If Jellyfin direct-stream fails with a bitstream-filter mismatch such as `h264_mp4toannexb` against a file that ffmpeg probes as a different codec (for example `av1`), force a full metadata refresh for that item before treating it as VFS corruption. The proof harness reports this as `metadata_mismatch`.
 
-## 6. Stop the stack
+## 5. Stop the stack
 
 If you started the native mount through the helper script, stop it with:
 

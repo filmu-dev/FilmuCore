@@ -124,10 +124,17 @@ _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE = {
     "backoff_pending": 0,
     "failures": 0,
 }
+_STREAM_REFRESH_POLICY_GOVERNANCE = {
+    "forced_queued": 0,
+    "forced_in_process": 0,
+    "fallback_in_process": 0,
+    "latency_slo_breaches": 0,
+}
 _REMOTE_HLS_COOLDOWNS: dict[str, tuple[float, int, str]] = {}
 _REMOTE_HLS_COOLDOWN_LOCK = Lock()
 _REMOTE_HLS_RETRY_ATTEMPTS = 2
 _REMOTE_HLS_COOLDOWN_SECONDS = 15.0
+_STREAM_REFRESH_LATENCY_SLO_MS = 250
 _BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
 _HLS_FAILED_LEASE_BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
 _HLS_RESTRICTED_FALLBACK_BACKGROUND_ROUTE_TASKS: set[asyncio.Task[None]] = set()
@@ -402,6 +409,24 @@ def _direct_playback_trigger_governance_snapshot() -> dict[str, int]:
     }
 
 
+def _stream_refresh_policy_governance_snapshot() -> dict[str, int]:
+    """Return route-adjacent stream refresh dispatch policy counters."""
+
+    return {
+        "stream_refresh_latency_slo_ms": _STREAM_REFRESH_LATENCY_SLO_MS,
+        "stream_refresh_policy_forced_queued": _STREAM_REFRESH_POLICY_GOVERNANCE["forced_queued"],
+        "stream_refresh_policy_forced_in_process": _STREAM_REFRESH_POLICY_GOVERNANCE[
+            "forced_in_process"
+        ],
+        "stream_refresh_policy_fallback_in_process": _STREAM_REFRESH_POLICY_GOVERNANCE[
+            "fallback_in_process"
+        ],
+        "stream_refresh_policy_latency_slo_breaches": _STREAM_REFRESH_POLICY_GOVERNANCE[
+            "latency_slo_breaches"
+        ],
+    }
+
+
 def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str]]:
     """Return the default Rust runtime governance payload for /stream/status."""
 
@@ -513,6 +538,10 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | li
         "vfs_runtime_rollout_canary_decision": "capture_runtime_status",
         "vfs_runtime_rollout_merge_gate": "blocked",
         "vfs_runtime_rollout_environment_class": "",
+        "vfs_runtime_active_handles_visible": 0,
+        "vfs_runtime_active_handles_hidden": 0,
+        "vfs_runtime_active_handle_tenant_count": 0,
+        "vfs_runtime_active_handle_tenants": [],
         "vfs_runtime_active_handle_summaries": [],
     }
 
@@ -612,6 +641,80 @@ def _nested_mapping_value(payload: object, *keys: str) -> object | None:
             return None
         current = current.get(key)
     return current
+
+
+def _normalize_active_handle_summary(summary: str) -> tuple[str, str]:
+    """Return tenant id plus a tenant-safe active-handle summary line."""
+
+    parts = summary.split("|")
+    if len(parts) >= 5 and parts[-1].startswith("invalidated="):
+        tenant_id = (parts[0].strip() or "unknown").lower()
+        session_id = parts[1].strip()
+        handle_key = parts[2].strip()
+        invalidated = parts[-1].strip()
+    elif len(parts) >= 4 and parts[-1].startswith("invalidated="):
+        tenant_id = "unknown"
+        session_id = parts[0].strip()
+        handle_key = parts[1].strip()
+        invalidated = parts[-1].strip()
+    else:
+        tenant_id = "unknown"
+        session_id = ""
+        handle_key = hashlib.sha256(summary.encode("utf-8")).hexdigest()[:16]
+        invalidated = "invalidated=unknown"
+    safe_line = f"{tenant_id}|{session_id}|{handle_key}|{invalidated}"
+    return tenant_id, safe_line
+
+
+def _tenant_safe_runtime_handle_summaries(
+    raw_summaries: object,
+    *,
+    request_tenant_id: str | None = None,
+    authorized_tenant_ids: set[str] | None = None,
+) -> tuple[list[str], int, int, list[str]]:
+    """Filter active-handle summaries to tenant-safe, request-scoped telemetry."""
+
+    normalized = _as_str_list(raw_summaries)
+    allowed_tenants = {tenant.strip().lower() for tenant in (authorized_tenant_ids or set()) if tenant}
+    if request_tenant_id is not None and request_tenant_id.strip():
+        allowed_tenants.add(request_tenant_id.strip().lower())
+    allow_all = not allowed_tenants
+
+    visible: list[str] = []
+    hidden = 0
+    visible_tenants: set[str] = set()
+    for summary in normalized:
+        tenant_id, safe_line = _normalize_active_handle_summary(summary)
+        if allow_all or tenant_id in allowed_tenants or tenant_id == "unknown":
+            visible.append(safe_line)
+            visible_tenants.add(tenant_id)
+        else:
+            hidden += 1
+
+    return visible[:10], len(visible), hidden, sorted(visible_tenants)
+
+
+def _runtime_pressure_requires_queued_dispatch(
+    governance: dict[str, int | float | str | list[str]],
+) -> tuple[bool, bool]:
+    """Return queued-dispatch recommendation and latency-SLO breach flag."""
+
+    avg_latency_ms = _as_int(governance.get("vfs_runtime_upstream_fetch_average_duration_ms"))
+    max_latency_ms = _as_int(governance.get("vfs_runtime_upstream_fetch_max_duration_ms"))
+    latency_slo_breached = avg_latency_ms > _STREAM_REFRESH_LATENCY_SLO_MS or max_latency_ms > (
+        _STREAM_REFRESH_LATENCY_SLO_MS * 2
+    )
+    pressure_requires_queue = (
+        _as_str(governance.get("vfs_runtime_refresh_pressure_class"), default="healthy")
+        in {"warning", "critical"}
+        or _as_str(governance.get("vfs_runtime_upstream_wait_class"), default="healthy")
+        in {"warning", "critical"}
+        or _as_str(governance.get("vfs_runtime_chunk_coalescing_pressure_class"), default="healthy")
+        in {"warning", "critical"}
+        or _as_int(governance.get("vfs_runtime_provider_pressure_incidents")) > 0
+        or latency_slo_breached
+    )
+    return pressure_requires_queue, latency_slo_breached
 
 
 def _candidate_vfs_runtime_status_paths() -> list[Path]:
@@ -962,6 +1065,9 @@ def _apply_vfs_rollout_policy(
 
 def _vfs_runtime_governance_snapshot(
     playback_gate_governance: dict[str, int | str | list[str]] | None = None,
+    *,
+    request_tenant_id: str | None = None,
+    authorized_tenant_ids: set[str] | None = None,
 ) -> dict[str, int | float | str | list[str]]:
     """Return additive governance counters extracted from the Rust runtime snapshot."""
 
@@ -1408,9 +1514,21 @@ def _vfs_runtime_governance_snapshot(
         governance["vfs_runtime_rollout_next_action"] = "promote_to_next_environment_class"
         rollout_reasons.append("no_blocking_runtime_signals")
     governance["vfs_runtime_rollout_reasons"] = rollout_reasons
-    governance["vfs_runtime_active_handle_summaries"] = _as_str_list(
-        _nested_mapping_value(payload, "runtime", "active_handle_summaries")
+    (
+        tenant_safe_summaries,
+        visible_handles,
+        hidden_handles,
+        visible_tenants,
+    ) = _tenant_safe_runtime_handle_summaries(
+        _nested_mapping_value(payload, "runtime", "active_handle_summaries"),
+        request_tenant_id=request_tenant_id,
+        authorized_tenant_ids=authorized_tenant_ids,
     )
+    governance["vfs_runtime_active_handle_summaries"] = tenant_safe_summaries
+    governance["vfs_runtime_active_handles_visible"] = visible_handles
+    governance["vfs_runtime_active_handles_hidden"] = hidden_handles
+    governance["vfs_runtime_active_handle_tenant_count"] = len(visible_tenants)
+    governance["vfs_runtime_active_handle_tenants"] = visible_tenants
     return _apply_vfs_rollout_policy(
         governance,
         playback_gate_governance=playback_gate_governance,
@@ -1744,7 +1862,8 @@ async def _run_app_scoped_refresh_trigger(
     request: Request,
     item_identifier: str,
     governance: dict[str, int],
-    trigger: Callable[[Any, str], Awaitable[Any]],
+    trigger: Callable[..., Awaitable[Any]],
+    prefer_queued: bool | None = None,
 ) -> None:
     """Trigger one app-scoped refresh controller and record shared route governance."""
 
@@ -1755,7 +1874,11 @@ async def _run_app_scoped_refresh_trigger(
         return
 
     try:
-        result = await trigger(resources, item_identifier)
+        result = await trigger(
+            resources,
+            item_identifier,
+            prefer_queued=prefer_queued,
+        )
     except Exception:
         governance["failures"] += 1
         return
@@ -1780,7 +1903,38 @@ async def _run_app_scoped_refresh_trigger(
         governance["no_action"] += 1
 
 
-async def _run_direct_playback_refresh_trigger(*, request: Request, item_identifier: str) -> None:
+def _select_refresh_dispatch_preference(
+    *,
+    resources: AppResources,
+    queued_controller_available: bool,
+) -> bool:
+    """Return whether route-adjacent refresh work should prefer queued dispatch."""
+
+    if resources.settings.stream.refresh_dispatch_mode == "queued":
+        if queued_controller_available:
+            return True
+        _STREAM_REFRESH_POLICY_GOVERNANCE["fallback_in_process"] += 1
+        return False
+
+    runtime_governance = _vfs_runtime_governance_snapshot()
+    requires_queue, latency_slo_breached = _runtime_pressure_requires_queued_dispatch(runtime_governance)
+    if latency_slo_breached:
+        _STREAM_REFRESH_POLICY_GOVERNANCE["latency_slo_breaches"] += 1
+    if requires_queue and queued_controller_available:
+        _STREAM_REFRESH_POLICY_GOVERNANCE["forced_queued"] += 1
+        return True
+    _STREAM_REFRESH_POLICY_GOVERNANCE["forced_in_process"] += 1
+    if requires_queue and not queued_controller_available:
+        _STREAM_REFRESH_POLICY_GOVERNANCE["fallback_in_process"] += 1
+    return False
+
+
+async def _run_direct_playback_refresh_trigger(
+    *,
+    request: Request,
+    item_identifier: str,
+    prefer_queued: bool | None = None,
+) -> None:
     """Trigger app-scoped direct-play refresh work without blocking the route response path."""
 
     if not await _allow_tenant_refresh_trigger(
@@ -1794,6 +1948,7 @@ async def _run_direct_playback_refresh_trigger(*, request: Request, item_identif
         item_identifier=item_identifier,
         governance=_DIRECT_PLAYBACK_TRIGGER_GOVERNANCE,
         trigger=trigger_direct_playback_refresh_from_resources,
+        prefer_queued=prefer_queued,
     )
 
 
@@ -1806,7 +1961,12 @@ def _is_selected_hls_failed_lease_error(exc: HTTPException) -> bool:
     )
 
 
-async def _run_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier: str) -> None:
+async def _run_hls_failed_lease_refresh_trigger(
+    *,
+    request: Request,
+    item_identifier: str,
+    prefer_queued: bool | None = None,
+) -> None:
     """Trigger app-scoped selected-HLS failed-lease refresh work without blocking the route response path."""
 
     if not await _allow_tenant_refresh_trigger(
@@ -1820,11 +1980,15 @@ async def _run_hls_failed_lease_refresh_trigger(*, request: Request, item_identi
         item_identifier=item_identifier,
         governance=_HLS_FAILED_LEASE_TRIGGER_GOVERNANCE,
         trigger=trigger_hls_failed_lease_refresh_from_resources,
+        prefer_queued=prefer_queued,
     )
 
 
 async def _run_hls_restricted_fallback_refresh_trigger(
-    *, request: Request, item_identifier: str
+    *,
+    request: Request,
+    item_identifier: str,
+    prefer_queued: bool | None = None,
 ) -> None:
     """Trigger app-scoped selected-HLS restricted-fallback refresh work without blocking the route response path."""
 
@@ -1839,6 +2003,7 @@ async def _run_hls_restricted_fallback_refresh_trigger(
         item_identifier=item_identifier,
         governance=_HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE,
         trigger=trigger_hls_restricted_fallback_refresh_from_resources,
+        prefer_queued=prefer_queued,
     )
 
 
@@ -1853,8 +2018,18 @@ def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier
 
     controller = (
         resources.queued_hls_failed_lease_refresh_controller
-        or resources.hls_failed_lease_refresh_controller
+        if _select_refresh_dispatch_preference(
+            resources=resources,
+            queued_controller_available=resources.queued_hls_failed_lease_refresh_controller
+            is not None,
+        )
+        else resources.hls_failed_lease_refresh_controller
     )
+    if controller is None:
+        controller = (
+            resources.hls_failed_lease_refresh_controller
+            or resources.queued_hls_failed_lease_refresh_controller
+        )
     if controller is None:
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1868,7 +2043,13 @@ def _start_hls_failed_lease_refresh_trigger(*, request: Request, item_identifier
 
     try:
         task = asyncio.create_task(
-            _run_hls_failed_lease_refresh_trigger(request=request, item_identifier=item_identifier),
+            _run_hls_failed_lease_refresh_trigger(
+                request=request,
+                item_identifier=item_identifier,
+                prefer_queued=(
+                    controller is resources.queued_hls_failed_lease_refresh_controller
+                ),
+            ),
             name=f"hls-failed-lease-refresh-trigger:{item_identifier}",
         )
         _HLS_FAILED_LEASE_TRIGGER_GOVERNANCE["starts"] += 1
@@ -1892,8 +2073,19 @@ def _start_hls_restricted_fallback_refresh_trigger(
 
     controller = (
         resources.queued_hls_restricted_fallback_refresh_controller
-        or resources.hls_restricted_fallback_refresh_controller
+        if _select_refresh_dispatch_preference(
+            resources=resources,
+            queued_controller_available=(
+                resources.queued_hls_restricted_fallback_refresh_controller is not None
+            ),
+        )
+        else resources.hls_restricted_fallback_refresh_controller
     )
+    if controller is None:
+        controller = (
+            resources.hls_restricted_fallback_refresh_controller
+            or resources.queued_hls_restricted_fallback_refresh_controller
+        )
     if controller is None:
         _HLS_RESTRICTED_FALLBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1910,6 +2102,9 @@ def _start_hls_restricted_fallback_refresh_trigger(
             _run_hls_restricted_fallback_refresh_trigger(
                 request=request,
                 item_identifier=item_identifier,
+                prefer_queued=(
+                    controller is resources.queued_hls_restricted_fallback_refresh_controller
+                ),
             ),
             name=f"hls-restricted-fallback-refresh-trigger:{item_identifier}",
         )
@@ -1932,8 +2127,17 @@ def _start_direct_playback_refresh_trigger(*, request: Request, item_identifier:
 
     controller = (
         resources.queued_direct_playback_refresh_controller
-        or resources.playback_refresh_controller
+        if _select_refresh_dispatch_preference(
+            resources=resources,
+            queued_controller_available=resources.queued_direct_playback_refresh_controller
+            is not None,
+        )
+        else resources.playback_refresh_controller
     )
+    if controller is None:
+        controller = (
+            resources.playback_refresh_controller or resources.queued_direct_playback_refresh_controller
+        )
     if controller is None:
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["controller_unavailable"] += 1
         return
@@ -1947,7 +2151,11 @@ def _start_direct_playback_refresh_trigger(*, request: Request, item_identifier:
 
     try:
         task = asyncio.create_task(
-            _run_direct_playback_refresh_trigger(request=request, item_identifier=item_identifier),
+            _run_direct_playback_refresh_trigger(
+                request=request,
+                item_identifier=item_identifier,
+                prefer_queued=(controller is resources.queued_direct_playback_refresh_controller),
+            ),
             name=f"direct-play-refresh-trigger:{item_identifier}",
         )
         _DIRECT_PLAYBACK_TRIGGER_GOVERNANCE["starts"] += 1
@@ -2397,6 +2605,7 @@ async def get_event_types(
 
 @router.get("/status", operation_id="stream.status", response_model=ServingStatusResponse)
 async def get_stream_status(
+    request: Request,
     db: Annotated[DatabaseRuntime, Depends(get_db)],
     resources: Annotated[AppResources, Depends(get_resources)],
 ) -> ServingStatusResponse:
@@ -2410,8 +2619,11 @@ async def get_stream_status(
         else build_empty_vfs_catalog_governance_snapshot()
     )
     playback_gate_governance = _playback_gate_governance_snapshot()
+    auth_context = get_auth_context(request)
     vfs_runtime_governance = _vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
+        request_tenant_id=auth_context.tenant_id,
+        authorized_tenant_ids=set(auth_context.authorized_tenant_ids),
     )
     sessions = [
         ServingSessionResponse(
@@ -2480,6 +2692,7 @@ async def get_stream_status(
                 **_direct_playback_trigger_governance_snapshot(),
                 **_hls_failed_lease_trigger_governance_snapshot(),
                 **_hls_restricted_fallback_trigger_governance_snapshot(),
+                **_stream_refresh_policy_governance_snapshot(),
                 **playback_governance,
                 **vfs_governance,
                 **vfs_runtime_governance,
