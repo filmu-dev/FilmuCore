@@ -3,14 +3,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from filmu_py.workers import stage_observability
+from filmu_py.workers import stage_job_ids, stage_observability
 
 
 def _project_file(*parts: str) -> Path:
     return Path(__file__).resolve().parents[1].joinpath(*parts)
 
 
-def test_worker_tasks_imports_stage_observability_module() -> None:
+def test_worker_tasks_imports_stage_modules() -> None:
     source = _project_file("filmu_py", "workers", "tasks.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
@@ -26,6 +26,9 @@ def test_worker_tasks_imports_stage_observability_module() -> None:
     assert "filmu_py.workers.stage_observability" in import_modules or (
         "filmu_py.workers" in from_import_modules and "stage_observability" in source
     )
+    assert "filmu_py.workers.stage_job_ids" in import_modules or (
+        "filmu_py.workers" in from_import_modules and "stage_job_ids" in source
+    )
 
     # Keep compatibility: worker tasks should re-export these symbols from the shared module.
     assert "WORKER_ENQUEUE_DECISIONS_TOTAL =" in source
@@ -38,6 +41,17 @@ def test_worker_tasks_imports_stage_observability_module() -> None:
     assert "_record_cleanup_action =" in source
     assert "_record_stage_idempotency =" in source
     assert "_record_enqueue_defer =" in source
+    assert "worker_stage_idempotency_key =" in source
+    assert "index_item_job_id =" in source
+    assert "parse_scrape_results_job_id =" in source
+    assert "process_scraped_item_job_id =" in source
+    assert "rank_streams_job_id =" in source
+    assert "scrape_item_job_id =" in source
+    assert "debrid_item_job_id =" in source
+    assert "finalize_item_job_id =" in source
+    assert "refresh_direct_playback_link_job_id =" in source
+    assert "refresh_selected_hls_failed_lease_job_id =" in source
+    assert "refresh_selected_hls_restricted_fallback_job_id =" in source
 
 
 def test_worker_stage_observability_module_exports_contract() -> None:
@@ -52,3 +66,30 @@ def test_worker_stage_observability_module_exports_contract() -> None:
     assert callable(stage_observability.record_cleanup_action)
     assert callable(stage_observability.record_stage_idempotency)
     assert callable(stage_observability.record_enqueue_defer)
+
+
+def test_worker_stage_job_ids_module_exports_contract() -> None:
+    assert stage_job_ids.worker_stage_idempotency_key("rank", "item-1") == "rank:item-1"
+    assert (
+        stage_job_ids.worker_stage_idempotency_key("rank", "item-1", discriminator="a")
+        == "rank:item-1:a"
+    )
+    assert stage_job_ids.index_item_job_id("item-1") == "index-item:item-1"
+    assert stage_job_ids.parse_scrape_results_job_id("item-1") == "parse-scrape-results:item-1"
+    assert stage_job_ids.process_scraped_item_job_id("item-1") == "parse-scrape-results:item-1"
+    assert stage_job_ids.rank_streams_job_id("item-1") == "rank-streams:item-1"
+    assert stage_job_ids.scrape_item_job_id("item-1") == "scrape-item:item-1"
+    assert stage_job_ids.debrid_item_job_id("item-1") == "debrid-item:item-1"
+    assert stage_job_ids.finalize_item_job_id("item-1") == "finalize-item:item-1"
+    assert (
+        stage_job_ids.refresh_direct_playback_link_job_id("item-1")
+        == "refresh-direct-playback:item-1"
+    )
+    assert (
+        stage_job_ids.refresh_selected_hls_failed_lease_job_id("item-1")
+        == "refresh-selected-hls-failed-lease:item-1"
+    )
+    assert (
+        stage_job_ids.refresh_selected_hls_restricted_fallback_job_id("item-1")
+        == "refresh-selected-hls-restricted-fallback:item-1"
+    )

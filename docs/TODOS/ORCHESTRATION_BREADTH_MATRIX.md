@@ -246,6 +246,7 @@ Current update:
 - datasource/context injection now exists through [`../../filmu_py/plugins/context.py`](../../filmu_py/plugins/context.py)
 - failure isolation and timeout handling now exist in [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py)
 - explicit publishability rules now exist in [`../../filmu_py/core/event_bus.py`](../../filmu_py/core/event_bus.py)
+- no-behavior-change worker decomposition now also extracted stage observability counters into [`../../filmu_py/workers/stage_observability.py`](../../filmu_py/workers/stage_observability.py) and stable stage/job-id helpers into [`../../filmu_py/workers/stage_job_ids.py`](../../filmu_py/workers/stage_job_ids.py), with compatibility re-exports retained in [`../../filmu_py/workers/tasks.py`](../../filmu_py/workers/tasks.py)
 
 The remaining orchestration question is no longer first hook execution, first event governance, or first queued stream-link path.
 The queue-backed resolver path is now policy-driven under load with explicit fallback telemetry.
@@ -256,7 +257,7 @@ The remaining orchestration question is whether plugin-event execution needs a d
 ## Minimum next implementation sequence for Priority 3
 
 1. Define request-intake stage semantics
-2. Deepen parse/rank/select stage observability and worker decomposition if needed
+2. Continue shrinking `workers/tasks.py` with no-behavior-change extractions after the landed observability and stage/job-id helper slices
 3. Add idempotency boundaries and outbox strategy around the now-real recovery path
 4. Widen retry-library recovery beyond the scraped-item stage into broader pipeline breadth
 5. Only then decide whether plugin hook execution needs a durable queue-backed model beyond the current in-process baseline

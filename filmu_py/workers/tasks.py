@@ -66,6 +66,7 @@ from filmu_py.services.playback import (
 )
 from filmu_py.services.settings_service import load_settings
 from filmu_py.state.item import InvalidItemTransition, ItemEvent, ItemState
+from filmu_py.workers import stage_job_ids as _stage_job_ids
 from filmu_py.workers import stage_observability as _stage_observability
 from filmu_py.workers.retry import (
     RetryPolicy,
@@ -98,6 +99,19 @@ _record_enqueue_decision = _stage_observability.record_enqueue_decision
 _record_enqueue_defer = _stage_observability.record_enqueue_defer
 _record_job_status = _stage_observability.record_job_status
 _record_stage_idempotency = _stage_observability.record_stage_idempotency
+debrid_item_job_id = _stage_job_ids.debrid_item_job_id
+finalize_item_job_id = _stage_job_ids.finalize_item_job_id
+index_item_job_id = _stage_job_ids.index_item_job_id
+parse_scrape_results_job_id = _stage_job_ids.parse_scrape_results_job_id
+process_scraped_item_job_id = _stage_job_ids.process_scraped_item_job_id
+rank_streams_job_id = _stage_job_ids.rank_streams_job_id
+refresh_direct_playback_link_job_id = _stage_job_ids.refresh_direct_playback_link_job_id
+refresh_selected_hls_failed_lease_job_id = _stage_job_ids.refresh_selected_hls_failed_lease_job_id
+refresh_selected_hls_restricted_fallback_job_id = (
+    _stage_job_ids.refresh_selected_hls_restricted_fallback_job_id
+)
+scrape_item_job_id = _stage_job_ids.scrape_item_job_id
+worker_stage_idempotency_key = _stage_job_ids.worker_stage_idempotency_key
 _HEAVY_STAGE_EXECUTORS: dict[tuple[str, str, int, int, int, int], Executor] = {}
 
 
@@ -476,25 +490,6 @@ async def _try_transition(
         return None
 
 
-def worker_stage_idempotency_key(
-    stage_name: str,
-    item_id: str,
-    *,
-    discriminator: str | None = None,
-) -> str:
-    """Return a stable idempotency key for one stage/item combination."""
-
-    if discriminator is None or discriminator == "":
-        return f"{stage_name}:{item_id}"
-    return f"{stage_name}:{item_id}:{discriminator}"
-
-
-def index_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for index-stage processing."""
-
-    return f"index-item:{item_id}"
-
-
 def index_item_followup_job_id(
     item_id: str,
     *,
@@ -520,30 +515,6 @@ def index_item_followup_job_id(
     return ":".join([index_item_job_id(item_id), *suffix_parts])
 
 
-def parse_scrape_results_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for parse-scrape-results processing."""
-
-    return f"parse-scrape-results:{item_id}"
-
-
-def process_scraped_item_job_id(item_id: str) -> str:
-    """Backward-compatible alias for the parse-scrape-results stage identifier."""
-
-    return parse_scrape_results_job_id(item_id)
-
-
-def rank_streams_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for rank-streams processing."""
-
-    return f"rank-streams:{item_id}"
-
-
-def scrape_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for scrape-stage processing."""
-
-    return f"scrape-item:{item_id}"
-
-
 def scrape_item_followup_job_id(
     item_id: str,
     *,
@@ -566,36 +537,6 @@ def scrape_item_followup_job_id(
         )
         suffix_parts.append(f"episodes:{normalized}")
     return ":".join(suffix_parts)
-
-
-def debrid_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for debrid-stage processing."""
-
-    return f"debrid-item:{item_id}"
-
-
-def finalize_item_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for finalize-stage processing."""
-
-    return f"finalize-item:{item_id}"
-
-
-def refresh_direct_playback_link_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for queued direct-play refresh work."""
-
-    return f"refresh-direct-playback:{item_id}"
-
-
-def refresh_selected_hls_failed_lease_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for queued failed-HLS refresh work."""
-
-    return f"refresh-selected-hls-failed-lease:{item_id}"
-
-
-def refresh_selected_hls_restricted_fallback_job_id(item_id: str) -> str:
-    """Return a stable ARQ job identifier for queued restricted-fallback refresh work."""
-
-    return f"refresh-selected-hls-restricted-fallback:{item_id}"
 
 
 def _worker_stage_logger() -> Any:
