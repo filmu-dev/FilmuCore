@@ -26,7 +26,6 @@ from filmu_py.db.models import (
 )
 from filmu_py.plugins import ExternalIdentifiers, ScraperSearchInput
 from filmu_py.plugins import ScraperResult as PluginScraperResult
-from filmu_py.rtn import RankedTorrent
 from filmu_py.services.media import (
     CompletionStatus,
     EnrichmentResult,
@@ -45,7 +44,7 @@ from filmu_py.services.media import (
     validate_parsed_stream_candidate,
 )
 from filmu_py.state.item import ItemEvent, ItemState, ItemStateMachine
-from filmu_py.workers import tasks
+from filmu_py.workers import stage_isolation, tasks
 
 
 class _PluginRegistryStub:
@@ -1779,38 +1778,31 @@ def test_rank_streams_passes_persisted_aliases_to_rtn(monkeypatch: Any) -> None:
 
     captured: dict[str, object] = {}
 
-    class _FakeRTN:
-        def __init__(self, profile: object) -> None:
-            captured["profile"] = profile
+    def _fake_rank_stream_batch(
+        *,
+        item_title: str,
+        item_aliases: list[str],
+        profile: object,
+        bucket_limit: int | None,
+        stream_inputs: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        captured["profile"] = profile
+        captured["correct_title"] = item_title
+        captured["aliases"] = list(item_aliases)
+        captured["bucket_limit"] = bucket_limit
+        return [
+            {
+                "stream_id": str(stream_input["stream_id"]),
+                "rank_score": 300,
+                "lev_ratio": 1.0,
+                "fetch": True,
+                "passed": True,
+                "rejection_reason": None,
+            }
+            for stream_input in stream_inputs
+        ]
 
-        def rank_torrent(
-            self,
-            torrent: object,
-            *,
-            correct_title: str,
-            aliases: list[str] | None = None,
-        ) -> RankedTorrent:
-            captured["correct_title"] = correct_title
-            captured["aliases"] = list(aliases or [])
-            return RankedTorrent(
-                data=torrent,
-                rank=300,
-                lev_ratio=1.0,
-                fetch=True,
-                failed_checks=(),
-                score_parts={},
-            )
-
-        def sort_torrents(
-            self,
-            torrents: list[RankedTorrent],
-            *,
-            bucket_limit: int | None = None,
-        ) -> list[RankedTorrent]:
-            captured["bucket_limit"] = bucket_limit
-            return torrents
-
-    monkeypatch.setattr(tasks, "RTN", _FakeRTN)
+    monkeypatch.setattr(tasks, "_rank_stream_batch", _fake_rank_stream_batch)
     settings = _build_worker_settings()
     settings.scraping = {"dubbed_anime_only": False, "bucket_limit": 5, "enable_aliases": True}
 
@@ -1919,48 +1911,31 @@ def test_rank_streams_prefers_complete_season_pack_over_single_episode_for_parti
     settings = _build_worker_settings()
     settings.scraping = {"dubbed_anime_only": False, "bucket_limit": 5}
 
-    class _FakeRTN:
-        def __init__(self, profile: object) -> None:
-            _ = profile
-
-        def rank_torrent(
-            self,
-            torrent: object,
-            *,
-            correct_title: str,
-            aliases: list[str] | None = None,
-        ) -> RankedTorrent:
-            _ = (correct_title, aliases)
-            parsed_data = torrent
-            raw_title = parsed_data.raw_title
-            if "COMPLETE" in raw_title:
-                return RankedTorrent(
-                    data=parsed_data,
-                    rank=0,
-                    lev_ratio=1.0,
-                    fetch=True,
-                    failed_checks=(),
-                    score_parts={},
-                )
-            return RankedTorrent(
-                data=parsed_data,
-                rank=12800,
-                lev_ratio=1.0,
-                fetch=True,
-                failed_checks=(),
-                score_parts={},
+    def _fake_rank_stream_batch(
+        *,
+        item_title: str,
+        item_aliases: list[str],
+        profile: object,
+        bucket_limit: int | None,
+        stream_inputs: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        _ = (item_title, item_aliases, profile, bucket_limit)
+        ranked_records: list[dict[str, object]] = []
+        for stream_input in stream_inputs:
+            raw_title = str(stream_input["raw_title"])
+            ranked_records.append(
+                {
+                    "stream_id": str(stream_input["stream_id"]),
+                    "rank_score": 12800 if "COMPLETE" in raw_title else 0,
+                    "lev_ratio": 1.0,
+                    "fetch": True,
+                    "passed": True,
+                    "rejection_reason": None,
+                }
             )
+        return ranked_records
 
-        def sort_torrents(
-            self,
-            torrents: list[RankedTorrent],
-            *,
-            bucket_limit: int | None = None,
-        ) -> list[RankedTorrent]:
-            _ = bucket_limit
-            return sorted(torrents, key=lambda ranked: ranked.rank, reverse=True)
-
-    monkeypatch.setattr(tasks, "RTN", _FakeRTN)
+    monkeypatch.setattr(tasks, "_rank_stream_batch", _fake_rank_stream_batch)
 
     result = asyncio.run(tasks.rank_streams({"settings": settings}, item_id))
 
@@ -3272,8 +3247,8 @@ def test_enqueue_index_item_supports_custom_job_id_and_defer(monkeypatch: Any) -
 
 
 def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) -> None:
-    original_cache = dict(tasks._HEAVY_STAGE_EXECUTORS)
-    tasks._HEAVY_STAGE_EXECUTORS.clear()
+    original_cache = dict(stage_isolation._HEAVY_STAGE_EXECUTORS)
+    stage_isolation._HEAVY_STAGE_EXECUTORS.clear()
 
     class FakeExecutor:
         def __init__(self, max_workers: int) -> None:
@@ -3315,8 +3290,8 @@ def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) ->
     )
     current_settings = first_settings
 
-    monkeypatch.setattr(tasks, "ThreadPoolExecutor", fake_thread_pool_executor)
-    monkeypatch.setattr(tasks, "get_settings", lambda: current_settings)
+    monkeypatch.setattr(stage_isolation, "ThreadPoolExecutor", fake_thread_pool_executor)
+    monkeypatch.setattr(stage_isolation, "get_settings", lambda: current_settings)
 
     try:
         first_executor = tasks._heavy_stage_executor("index_item")
@@ -3324,12 +3299,12 @@ def test_heavy_stage_executor_evicts_stale_policy_executors(monkeypatch: Any) ->
         second_executor = tasks._heavy_stage_executor("index_item")
         assert first_executor is not second_executor
         assert created[0].shutdown_calls == [(False, True)]
-        assert len(tasks._HEAVY_STAGE_EXECUTORS) == 1
+        assert len(stage_isolation._HEAVY_STAGE_EXECUTORS) == 1
     finally:
-        for executor in tasks._HEAVY_STAGE_EXECUTORS.values():
+        for executor in stage_isolation._HEAVY_STAGE_EXECUTORS.values():
             executor.shutdown(wait=False, cancel_futures=True)
-        tasks._HEAVY_STAGE_EXECUTORS.clear()
-        tasks._HEAVY_STAGE_EXECUTORS.update(original_cache)
+        stage_isolation._HEAVY_STAGE_EXECUTORS.clear()
+        stage_isolation._HEAVY_STAGE_EXECUTORS.update(original_cache)
 
 
 def test_heavy_stage_executor_rejects_policy_violations(monkeypatch: Any) -> None:
@@ -3350,7 +3325,7 @@ def test_heavy_stage_executor_rejects_policy_violations(monkeypatch: Any) -> Non
             )
         }
     )
-    monkeypatch.setattr(tasks, "get_settings", lambda: invalid_settings)
+    monkeypatch.setattr(stage_isolation, "get_settings", lambda: invalid_settings)
 
     with pytest.raises(RuntimeError) as exc_info:
         tasks._heavy_stage_executor("index_item")
