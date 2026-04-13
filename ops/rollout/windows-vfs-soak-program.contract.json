@@ -1,0 +1,11 @@
+{
+  "minimum_environment_count": 2,
+  "required_environment_classes": [],
+  "required_profiles": ["continuous", "seek", "concurrent", "full"],
+  "repeat_count": 1,
+  "require_runtime_capture": true,
+  "require_backend_status_capture": true,
+  "max_reconnect_incidents": 0,
+  "max_provider_pressure_incidents": 0,
+  "max_fatal_error_incidents": 0
+}

@@ -3,6 +3,7 @@ param(
     [string] $HealthEndpoint = '',
     [string] $SearchEndpoint = '',
     [string] $AlertEndpoint = '',
+    [string] $ContractPath = '',
     [string] $ArtifactDir = 'artifacts/operations/log-pipeline',
     [int] $MaxHealthLatencyMs = 5000,
     [int] $MaxSearchLatencyMs = 5000,
@@ -29,21 +30,51 @@ if ([string]::IsNullOrWhiteSpace($AlertEndpoint)) {
     $AlertEndpoint = [string] $env:FILMU_LOG_PIPELINE_ALERT_ENDPOINT
 }
 
+if ([string]::IsNullOrWhiteSpace($ContractPath)) {
+    $ContractPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'ops\rollout\operator-log-pipeline.contract.json'
+}
+$contract = $null
+if (Test-Path -LiteralPath $ContractPath) {
+    $ContractPath = [System.IO.Path]::GetFullPath($ContractPath)
+    $contract = Get-Content -LiteralPath $ContractPath -Raw | ConvertFrom-Json
+}
+
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 if ([string]::IsNullOrWhiteSpace($HistoryRoot)) {
     $HistoryRoot = Join-Path $ArtifactDir 'history'
 }
 New-Item -ItemType Directory -Force -Path $HistoryRoot | Out-Null
 
-$requiredFields = @(
-    '@timestamp',
-    'log.level',
-    'message',
-    'service.name',
-    'trace.id',
-    'span.id',
-    'labels.tenant_id'
-)
+$requiredFields = if (
+    $null -ne $contract -and
+    ($contract.PSObject.Properties.Name -contains 'required_fields')
+) {
+    @($contract.required_fields)
+} else {
+    @(
+        '@timestamp',
+        'log.level',
+        'message',
+        'service.name',
+        'trace.id',
+        'span.id',
+        'labels.tenant_id'
+    )
+}
+if ($null -ne $contract) {
+    if ($contract.PSObject.Properties.Name -contains 'max_health_latency_ms') {
+        $MaxHealthLatencyMs = [int]$contract.max_health_latency_ms
+    }
+    if ($contract.PSObject.Properties.Name -contains 'max_search_latency_ms') {
+        $MaxSearchLatencyMs = [int]$contract.max_search_latency_ms
+    }
+    if ($contract.PSObject.Properties.Name -contains 'max_alert_latency_ms') {
+        $MaxAlertLatencyMs = [int]$contract.max_alert_latency_ms
+    }
+    if ($MaxActiveAlerts -lt 0 -and ($contract.PSObject.Properties.Name -contains 'max_active_alerts')) {
+        $MaxActiveAlerts = [int]$contract.max_active_alerts
+    }
+}
 
 function Test-JsonFieldPresent {
     param([object] $Json, [string] $Field)
@@ -73,10 +104,16 @@ function Add-Check {
 }
 $reachableExpected = if ($AllowOffline) { 'reachable_or_allowed_offline' } else { 'reachable' }
 $recordsExpected = if ($AllowOffline) { '>=0' } else { '>=1' }
+$contractObservedPath = if ($null -ne $contract) { $ContractPath } else { $null }
+$maxActiveAlertsObserved = if ($MaxActiveAlerts -ge 0) { $MaxActiveAlerts } else { $null }
 
 Add-Check -Name 'environment_name_present' `
     -Passed:(-not [string]::IsNullOrWhiteSpace($EnvironmentName)) `
     -Observed:$EnvironmentName -Expected:'non-empty'
+Add-Check -Name 'contract_present' `
+    -Passed:($null -ne $contract) `
+    -Observed:$contractObservedPath `
+    -Expected:'existing contract path'
 Add-Check -Name 'health_endpoint_present' `
     -Passed:(-not [string]::IsNullOrWhiteSpace($HealthEndpoint)) `
     -Observed:$HealthEndpoint -Expected:'non-empty'
@@ -196,9 +233,26 @@ if (-not [string]::IsNullOrWhiteSpace($AlertEndpoint)) {
 }
 
 $failedChecks = @($checks | Where-Object { -not $_.passed })
+$historyRecords = @(
+    Get-ChildItem -LiteralPath $HistoryRoot -Filter 'log-pipeline-rollout-record-*.json' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending
+)
+$greenStreak = 0
+foreach ($recordFile in $historyRecords) {
+    $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json
+    if ([string]($record.status ?? '') -ne 'passed') {
+        break
+    }
+    $greenStreak += 1
+}
+$currentStatus = if ($failedChecks.Count -eq 0) { 'passed' } else { 'failed' }
+if ($currentStatus -eq 'passed') {
+    $greenStreak += 1
+}
 $summary = [ordered]@{
     generated_at       = (Get-Date).ToUniversalTime().ToString('o')
     environment        = $EnvironmentName
+    contract_path      = $contractObservedPath
     health_endpoint    = $HealthEndpoint
     search_endpoint    = $SearchEndpoint
     alert_endpoint     = $AlertEndpoint
@@ -208,12 +262,14 @@ $summary = [ordered]@{
         alert  = $alertLatencyMs
     }
     active_alert_count = $activeAlertCount
-    max_active_alerts  = if ($MaxActiveAlerts -ge 0) { $MaxActiveAlerts } else { $null }
+    max_active_alerts  = $maxActiveAlertsObserved
+    history_record_count = $historyRecords.Count
+    green_streak      = $greenStreak
     allow_offline      = [bool] $AllowOffline
     required_fields    = $requiredFields
     checks             = $checks
     failed_checks      = $failedChecks
-    status             = if ($failedChecks.Count -eq 0) { 'passed' } else { 'failed' }
+    status             = $currentStatus
 }
 
 $summaryPath = Join-Path $ArtifactDir 'log-pipeline-rollout-summary.json'
@@ -234,12 +290,8 @@ $recordPath = Join-Path $HistoryRoot $recordName
 } | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
 
 if ($HistoryKeepLatest -gt 0) {
-    $records = @(
-        Get-ChildItem -LiteralPath $HistoryRoot -Filter 'log-pipeline-rollout-record-*.json' -File |
-            Sort-Object LastWriteTimeUtc -Descending
-    )
-    if ($records.Count -gt $HistoryKeepLatest) {
-        $records | Select-Object -Skip $HistoryKeepLatest | Remove-Item -Force
+    if ($historyRecords.Count -gt $HistoryKeepLatest) {
+        $historyRecords | Select-Object -Skip $HistoryKeepLatest | Remove-Item -Force
     }
 }
 

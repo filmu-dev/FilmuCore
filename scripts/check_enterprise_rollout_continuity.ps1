@@ -2,10 +2,12 @@ param(
     [string] $RepoRoot = '',
     [string] $WindowsSoakArtifactsRoot = '',
     [string] $WindowsSoakHistoryRoot = '',
+    [string] $WindowsSoakContractPath = '',
     [string] $PlaybackArtifactsRoot = '',
     [string] $PlaybackHistoryRoot = '',
     [string] $OperatorArtifactDir = '',
     [string] $OperatorHistoryRoot = '',
+    [string] $OperatorRolloutContractPath = '',
     [int] $MaxEvidenceAgeHours = 72,
     [int] $MinimumSoakTrendRecords = 3,
     [int] $MinimumPlaybackTrendRecords = 3,
@@ -42,6 +44,13 @@ if ([string]::IsNullOrWhiteSpace($WindowsSoakHistoryRoot)) {
 }
 $WindowsSoakHistoryRoot = [System.IO.Path]::GetFullPath($WindowsSoakHistoryRoot)
 
+if ([string]::IsNullOrWhiteSpace($WindowsSoakContractPath)) {
+    $WindowsSoakContractPath = Join-Path $RepoRoot 'ops\rollout\windows-vfs-soak-program.contract.json'
+}
+if (Test-Path -LiteralPath $WindowsSoakContractPath) {
+    $WindowsSoakContractPath = [System.IO.Path]::GetFullPath($WindowsSoakContractPath)
+}
+
 if ([string]::IsNullOrWhiteSpace($PlaybackHistoryRoot)) {
     $PlaybackHistoryRoot = [string]$env:FILMU_PLAYBACK_STABILITY_HISTORY_ROOT
 }
@@ -62,6 +71,23 @@ if ([string]::IsNullOrWhiteSpace($OperatorHistoryRoot)) {
     $OperatorHistoryRoot = Join-Path $OperatorArtifactDir 'history'
 }
 $OperatorHistoryRoot = [System.IO.Path]::GetFullPath($OperatorHistoryRoot)
+
+if ([string]::IsNullOrWhiteSpace($OperatorRolloutContractPath)) {
+    $OperatorRolloutContractPath = Join-Path $RepoRoot 'ops\rollout\operator-log-pipeline.contract.json'
+}
+$operatorRolloutContract = $null
+if (Test-Path -LiteralPath $OperatorRolloutContractPath) {
+    $OperatorRolloutContractPath = [System.IO.Path]::GetFullPath($OperatorRolloutContractPath)
+    $operatorRolloutContract = Get-Content -LiteralPath $OperatorRolloutContractPath -Raw | ConvertFrom-Json
+}
+$requiredOperatorGreenStreak = if (
+    $null -ne $operatorRolloutContract -and
+    ($operatorRolloutContract.PSObject.Properties.Name -contains 'minimum_green_streak')
+) {
+    [int]$operatorRolloutContract.minimum_green_streak
+} else {
+    $MinimumOperatorTrendRecords
+}
 
 $checks = [System.Collections.Generic.List[object]]::new()
 function Add-Check {
@@ -163,10 +189,10 @@ function Get-LatestPlaybackStabilitySummaryPaths {
 }
 
 $decompositionBudgets = [ordered]@{
-    (Join-Path $RepoRoot 'filmu_py/services/media.py') = 6280
-    (Join-Path $RepoRoot 'filmu_py/services/playback.py') = 5405
-    (Join-Path $RepoRoot 'filmu_py/workers/tasks.py') = 4145
-    (Join-Path $RepoRoot 'filmu_py/api/routes/stream.py') = 1685
+    (Join-Path $RepoRoot 'filmu_py/services/media.py') = 5800
+    (Join-Path $RepoRoot 'filmu_py/services/playback.py') = 4900
+    (Join-Path $RepoRoot 'filmu_py/workers/tasks.py') = 3800
+    (Join-Path $RepoRoot 'filmu_py/api/routes/stream.py') = 1600
 }
 
 foreach ($entry in $decompositionBudgets.GetEnumerator()) {
@@ -194,6 +220,12 @@ $boundaryImports = @(
     }
     [pscustomobject]@{
         section = 'decomposition'
+        file = Join-Path $RepoRoot 'filmu_py/services/media.py'
+        token = 'media_stream_candidates'
+        name = 'media_stream_candidates_boundary'
+    }
+    [pscustomobject]@{
+        section = 'decomposition'
         file = Join-Path $RepoRoot 'filmu_py/services/playback.py'
         token = 'resolve_refresh_controller'
         name = 'playback_refresh_dispatch_boundary'
@@ -206,9 +238,21 @@ $boundaryImports = @(
     }
     [pscustomobject]@{
         section = 'decomposition'
+        file = Join-Path $RepoRoot 'filmu_py/workers/tasks.py'
+        token = 'stage_scope'
+        name = 'worker_stage_scope_boundary'
+    }
+    [pscustomobject]@{
+        section = 'decomposition'
         file = Join-Path $RepoRoot 'filmu_py/api/routes/stream.py'
         token = 'runtime_status_payload'
         name = 'stream_runtime_status_boundary'
+    }
+    [pscustomobject]@{
+        section = 'decomposition'
+        file = Join-Path $RepoRoot 'filmu_py/api/routes/stream.py'
+        token = 'stream_direct_serving'
+        name = 'stream_direct_serving_boundary'
     }
 )
 foreach ($check in $boundaryImports) {
@@ -222,12 +266,23 @@ foreach ($check in $boundaryImports) {
     Add-Check -Section $check.section -Name $check.name -Passed:$present -Observed:$present -Expected:$true
 }
 
+Add-Check -Section 'soak_trends' -Name 'rollout_contract_present' `
+    -Passed:(Test-Path -LiteralPath $WindowsSoakContractPath) `
+    -Observed:$WindowsSoakContractPath `
+    -Expected:'existing soak rollout contract'
+Add-Check -Section 'operator_rollout' -Name 'rollout_contract_present' `
+    -Passed:(Test-Path -LiteralPath $OperatorRolloutContractPath) `
+    -Observed:$OperatorRolloutContractPath `
+    -Expected:'existing operator rollout contract'
+
 if ($ProbeOperatorNow) {
     $operatorScript = Join-Path $PSScriptRoot 'check_operator_log_pipeline_rollout.ps1'
     $operatorArgs = @(
         '-NoProfile',
         '-File',
         $operatorScript,
+        '-ContractPath',
+        $OperatorRolloutContractPath,
         '-ArtifactDir',
         $OperatorArtifactDir,
         '-HistoryRoot',
@@ -253,10 +308,19 @@ Add-Check -Section 'soak_trends' -Name 'program_summary_present' `
 if ($null -ne $soakProgramSummaryPath) {
     $soakProgramSummary = Read-JsonFile -Path $soakProgramSummaryPath
     $soakProgramAgeHours = Get-FileAgeHours -Path $soakProgramSummaryPath
+    $programContractPath = if ($soakProgramSummary.PSObject.Properties.Name -contains 'contract_path') {
+        [string]$soakProgramSummary.contract_path
+    } else {
+        ''
+    }
     Add-Check -Section 'soak_trends' -Name 'program_summary_status' `
         -Passed:([string]$soakProgramSummary.status -eq 'passed') `
         -Observed:([string]$soakProgramSummary.status) `
         -Expected:'passed'
+    Add-Check -Section 'soak_trends' -Name 'program_contract_path_match' `
+        -Passed:($programContractPath -eq $WindowsSoakContractPath -or $AllowBootstrap) `
+        -Observed:$programContractPath `
+        -Expected:$WindowsSoakContractPath
     Add-Check -Section 'soak_trends' -Name 'program_summary_freshness_hours' `
         -Passed:($null -ne $soakProgramAgeHours -and $soakProgramAgeHours -le $MaxEvidenceAgeHours) `
         -Observed:$soakProgramAgeHours `
@@ -371,10 +435,19 @@ Add-Check -Section 'operator_rollout' -Name 'rollout_summary_present' `
 if (Test-Path -LiteralPath $operatorSummaryPath) {
     $operatorSummary = Read-JsonFile -Path $operatorSummaryPath
     $operatorAgeHours = Get-FileAgeHours -Path $operatorSummaryPath
+    $operatorContractPath = if ($operatorSummary.PSObject.Properties.Name -contains 'contract_path') {
+        [string]$operatorSummary.contract_path
+    } else {
+        ''
+    }
     Add-Check -Section 'operator_rollout' -Name 'rollout_summary_status' `
         -Passed:([string]$operatorSummary.status -eq 'passed') `
         -Observed:([string]$operatorSummary.status) `
         -Expected:'passed'
+    Add-Check -Section 'operator_rollout' -Name 'rollout_contract_path_match' `
+        -Passed:($operatorContractPath -eq $OperatorRolloutContractPath -or $AllowBootstrap) `
+        -Observed:$operatorContractPath `
+        -Expected:$OperatorRolloutContractPath
     Add-Check -Section 'operator_rollout' -Name 'rollout_summary_freshness_hours' `
         -Passed:($null -ne $operatorAgeHours -and $operatorAgeHours -le $MaxEvidenceAgeHours) `
         -Observed:$operatorAgeHours `
@@ -383,9 +456,9 @@ if (Test-Path -LiteralPath $operatorSummaryPath) {
         $operatorGreenStreak = [int]($operatorSummary.green_streak ?? $operatorGreenStreak)
     }
     Add-Check -Section 'operator_rollout' -Name 'rollout_green_streak' `
-        -Passed:($operatorGreenStreak -ge $MinimumOperatorTrendRecords -or $AllowBootstrap) `
+        -Passed:($operatorGreenStreak -ge $requiredOperatorGreenStreak -or $AllowBootstrap) `
         -Observed:$operatorGreenStreak `
-        -Expected:(">={0}" -f $MinimumOperatorTrendRecords)
+        -Expected:(">={0}" -f $requiredOperatorGreenStreak)
 }
 $operatorHistoryCount = if (Test-Path -LiteralPath $OperatorHistoryRoot) {
     @(
@@ -406,10 +479,12 @@ $summary = [ordered]@{
     repo_root = $RepoRoot
     windows_soak_artifacts_root = $WindowsSoakArtifactsRoot
     windows_soak_history_root = $WindowsSoakHistoryRoot
+    windows_soak_contract_path = $WindowsSoakContractPath
     playback_artifacts_root = $PlaybackArtifactsRoot
     playback_history_root = $PlaybackHistoryRoot
     operator_artifact_dir = $OperatorArtifactDir
     operator_history_root = $OperatorHistoryRoot
+    operator_rollout_contract_path = $OperatorRolloutContractPath
     max_evidence_age_hours = $MaxEvidenceAgeHours
     minimum_soak_trend_records = $MinimumSoakTrendRecords
     minimum_playback_trend_records = $MinimumPlaybackTrendRecords

@@ -38,6 +38,8 @@ jobs:
             throw 'FILMU_LOG_PIPELINE_HEALTH_ENDPOINT, FILMU_LOG_PIPELINE_SEARCH_ENDPOINT, and FILMU_LOG_PIPELINE_ALERT_ENDPOINT must be configured.'
           }
           $args = @(
+            '-ContractPath',
+            './ops/rollout/operator-log-pipeline.contract.json',
             '-HistoryRoot',
             $(if ([string]::IsNullOrWhiteSpace([string] $env:FILMU_LOG_PIPELINE_HISTORY_ROOT)) {
                 'artifacts/operations/log-pipeline/history'

@@ -46,6 +46,8 @@ jobs:
             '-NoProfile',
             '-File',
             './scripts/run_windows_vfs_soak_program.ps1',
+            '-ContractPath',
+            './ops/rollout/windows-vfs-soak-program.contract.json',
             '-RepeatCount',
             '${{ inputs.repeat_count != '' && inputs.repeat_count || '1' }}',
             '-RequireRuntimeCapture',

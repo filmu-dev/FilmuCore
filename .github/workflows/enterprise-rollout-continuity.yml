@@ -21,6 +21,7 @@ on:
       - main
     paths:
       - "filmu_py/services/media.py"
+      - "filmu_py/services/media_stream_candidates.py"
       - "filmu_py/services/playback.py"
       - "filmu_py/workers/tasks.py"
       - "filmu_py/api/routes/stream.py"
@@ -28,10 +29,14 @@ on:
       - "scripts/check_enterprise_rollout_continuity.ps1"
       - "scripts/check_playback_stability_trends.ps1"
       - "scripts/check_operator_log_pipeline_rollout.ps1"
+      - "scripts/run_windows_vfs_multi_environment_gate.ps1"
+      - "scripts/run_windows_vfs_soak_program.ps1"
       - "run_playback_gate_ci.sh"
+      - "ops/rollout/**"
       - "tests/test_service_module_boundaries.py"
       - "tests/test_worker_module_boundaries.py"
       - "tests/test_route_module_boundaries.py"
+      - "tests/test_rollout_continuity_contract.py"
       - "docs/STATUS.md"
       - "docs/EXECUTION_PLAN.md"
       - "docs/TODOS/**"
@@ -71,6 +76,10 @@ jobs:
             '-File',
             './scripts/check_enterprise_rollout_continuity.ps1',
             '-ProbeOperatorNow',
+            '-WindowsSoakContractPath',
+            './ops/rollout/windows-vfs-soak-program.contract.json',
+            '-OperatorRolloutContractPath',
+            './ops/rollout/operator-log-pipeline.contract.json',
             '-MaxEvidenceAgeHours',
             '${{ inputs.max_evidence_age_hours != '' && inputs.max_evidence_age_hours || '72' }}',
             '-MinimumSoakTrendRecords',
