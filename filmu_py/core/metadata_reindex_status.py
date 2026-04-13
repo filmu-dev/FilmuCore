@@ -51,7 +51,13 @@ class MetadataReindexHistoryPoint:
     reconciled: int
     skipped_active: int
     failed: int
-    outcome: MetadataReindexOutcome
+    outcome: MetadataReindexOutcome = "ok"
+    repair_attempted: int = 0
+    repair_enriched: int = 0
+    repair_skipped_no_tmdb_id: int = 0
+    repair_failed: int = 0
+    repair_requeued: int = 0
+    repair_skipped_active: int = 0
     run_failed: bool = False
     last_error: str | None = None
 
@@ -79,13 +85,14 @@ class MetadataReindexStatusStore:
     def classify_outcome(
         *,
         failed: int,
+        repair_failed: int,
         run_failed: bool,
     ) -> MetadataReindexOutcome:
         """Return the operator-facing severity for one run."""
 
         if run_failed:
             return "critical"
-        if failed > 0:
+        if failed > 0 or repair_failed > 0:
             return "warning"
         return "ok"
 
@@ -100,6 +107,12 @@ class MetadataReindexStatusStore:
             "reconciled": point.reconciled,
             "skipped_active": point.skipped_active,
             "failed": point.failed,
+            "repair_attempted": point.repair_attempted,
+            "repair_enriched": point.repair_enriched,
+            "repair_skipped_no_tmdb_id": point.repair_skipped_no_tmdb_id,
+            "repair_failed": point.repair_failed,
+            "repair_requeued": point.repair_requeued,
+            "repair_skipped_active": point.repair_skipped_active,
         }.items():
             METADATA_REINDEX_LAST_COUNTS.labels(
                 queue_name=self.queue_name,
@@ -121,6 +134,12 @@ class MetadataReindexStatusStore:
         reconciled: int,
         skipped_active: int,
         failed: int,
+        repair_attempted: int = 0,
+        repair_enriched: int = 0,
+        repair_skipped_no_tmdb_id: int = 0,
+        repair_failed: int = 0,
+        repair_requeued: int = 0,
+        repair_skipped_active: int = 0,
         run_failed: bool = False,
         last_error: str | None = None,
         now_seconds: float | None = None,
@@ -128,7 +147,11 @@ class MetadataReindexStatusStore:
         """Persist one bounded metadata reindex/reconciliation run record."""
 
         current_time_seconds = time.time() if now_seconds is None else now_seconds
-        outcome = self.classify_outcome(failed=failed, run_failed=run_failed)
+        outcome = self.classify_outcome(
+            failed=failed,
+            repair_failed=repair_failed,
+            run_failed=run_failed,
+        )
         point = MetadataReindexHistoryPoint(
             observed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current_time_seconds)),
             processed=processed,
@@ -136,6 +159,12 @@ class MetadataReindexStatusStore:
             reconciled=reconciled,
             skipped_active=skipped_active,
             failed=failed,
+            repair_attempted=repair_attempted,
+            repair_enriched=repair_enriched,
+            repair_skipped_no_tmdb_id=repair_skipped_no_tmdb_id,
+            repair_failed=repair_failed,
+            repair_requeued=repair_requeued,
+            repair_skipped_active=repair_skipped_active,
             outcome=outcome,
             run_failed=run_failed,
             last_error=last_error,
@@ -151,6 +180,12 @@ class MetadataReindexStatusStore:
                     "reconciled": point.reconciled,
                     "skipped_active": point.skipped_active,
                     "failed": point.failed,
+                    "repair_attempted": point.repair_attempted,
+                    "repair_enriched": point.repair_enriched,
+                    "repair_skipped_no_tmdb_id": point.repair_skipped_no_tmdb_id,
+                    "repair_failed": point.repair_failed,
+                    "repair_requeued": point.repair_requeued,
+                    "repair_skipped_active": point.repair_skipped_active,
                     "outcome": point.outcome,
                     "run_failed": point.run_failed,
                     "last_error": point.last_error,
@@ -224,6 +259,16 @@ class MetadataReindexStatusStore:
                     reconciled=self._coerce_int(payload.get("reconciled", 0)),
                     skipped_active=self._coerce_int(payload.get("skipped_active", 0)),
                     failed=self._coerce_int(payload.get("failed", 0)),
+                    repair_attempted=self._coerce_int(payload.get("repair_attempted", 0)),
+                    repair_enriched=self._coerce_int(payload.get("repair_enriched", 0)),
+                    repair_skipped_no_tmdb_id=self._coerce_int(
+                        payload.get("repair_skipped_no_tmdb_id", 0)
+                    ),
+                    repair_failed=self._coerce_int(payload.get("repair_failed", 0)),
+                    repair_requeued=self._coerce_int(payload.get("repair_requeued", 0)),
+                    repair_skipped_active=self._coerce_int(
+                        payload.get("repair_skipped_active", 0)
+                    ),
                     outcome=self._coerce_outcome(payload.get("outcome")),
                     run_failed=self._coerce_bool(payload.get("run_failed", False)),
                     last_error=self._coerce_optional_str(payload.get("last_error")),

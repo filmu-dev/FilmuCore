@@ -2780,6 +2780,12 @@ def test_scheduled_metadata_reindex_reconciliation_runs_reindex_and_completed_re
         "reconciled": 1,
         "skipped_active": 1,
         "failed": 0,
+        "repair_attempted": 0,
+        "repair_enriched": 0,
+        "repair_skipped_no_tmdb_id": 0,
+        "repair_failed": 0,
+        "repair_requeued": 0,
+        "repair_skipped_active": 0,
     }
     assert redis.calls == [
         (
@@ -2803,6 +2809,9 @@ def test_scheduled_metadata_reindex_reconciliation_runs_reindex_and_completed_re
     assert history[0].reconciled == 1
     assert history[0].skipped_active == 1
     assert history[0].failed == 0
+    assert history[0].repair_attempted == 0
+    assert history[0].repair_enriched == 0
+    assert history[0].repair_failed == 0
     assert history[0].outcome == "ok"
     assert media_service.calls.count("enrich_item_metadata") == 1
 
@@ -2883,9 +2892,120 @@ def test_scheduled_metadata_reindex_reconciliation_records_critical_run_failures
     assert len(history) == 1
     assert history[0].processed == 0
     assert history[0].failed == 0
+    assert history[0].repair_attempted == 0
     assert history[0].outcome == "critical"
     assert history[0].run_failed is True
     assert history[0].last_error == "metadata source unavailable"
+
+
+def test_scheduled_metadata_reindex_reconciliation_repairs_failed_items_and_reenqueues_index(
+    monkeypatch: Any,
+) -> None:
+    failed = MediaItemRecord(
+        id="item-failed-repair",
+        external_ref="tmdb:item-failed-repair",
+        title="Failed Item",
+        state=ItemState.FAILED,
+        attributes={"item_type": "movie", "tmdb_id": "550"},
+    )
+    media_service = FakePipelineMediaService(
+        item_id="unused",
+        listed_items=[failed],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    class _FakeSession:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+            _ = (exc_type, exc_val, exc_tb)
+
+    class _FakeDB:
+        def session(self) -> Any:
+            return _FakeSession()
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def get_item(item_id: str) -> MediaItemRecord | None:
+        if item_id != "item-failed-repair":
+            return None
+        return MediaItemRecord(
+            id=item_id,
+            external_ref="tmdb:item-failed-repair",
+            title="Failed Item",
+            state=ItemState.REQUESTED,
+            attributes={"item_type": "movie", "tmdb_id": "550", "imdb_id": "tt0137523"},
+        )
+
+    async def backfill_missing_imdb_ids(_session: Any) -> dict[str, int]:
+        media_service.calls.append("backfill_missing_imdb_ids")
+        return {"attempted": 1, "enriched": 1, "skipped_no_tmdb_id": 0, "failed": 0}
+
+    async def index_job_inactive(_: object, *, item_id: str, job_id: str | None = None) -> bool:
+        assert item_id == "item-failed-repair"
+        assert job_id == tasks.index_item_followup_job_id(
+            "item-failed-repair",
+            discriminator="metadata-repair",
+        )
+        return False
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_index_item_job_active", index_job_inactive)
+    monkeypatch.setattr(media_service, "get_item", get_item)
+    monkeypatch.setattr(
+        media_service,
+        "backfill_missing_imdb_ids",
+        backfill_missing_imdb_ids,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        tasks.scheduled_metadata_reindex_reconciliation(
+            {
+                "settings": _build_worker_settings(),
+                "queue_name": "filmu-py",
+                "db": _FakeDB(),
+            }
+        )
+    )
+
+    assert result == {
+        "processed": 1,
+        "queued": 0,
+        "reconciled": 0,
+        "skipped_active": 0,
+        "failed": 0,
+        "repair_attempted": 1,
+        "repair_enriched": 1,
+        "repair_skipped_no_tmdb_id": 0,
+        "repair_failed": 0,
+        "repair_requeued": 1,
+        "repair_skipped_active": 0,
+    }
+    assert redis.calls == [
+        (
+            "index_item",
+            ("item-failed-repair",),
+            {
+                "_job_id": tasks.index_item_followup_job_id(
+                    "item-failed-repair",
+                    discriminator="metadata-repair",
+                ),
+                "_queue_name": "filmu-py",
+            },
+        )
+    ]
+    history = asyncio.run(
+        MetadataReindexStatusStore(redis, queue_name="filmu-py").history(limit=5)
+    )
+    assert len(history) == 1
+    assert history[0].repair_attempted == 1
+    assert history[0].repair_enriched == 1
+    assert history[0].repair_requeued == 1
+    assert history[0].outcome == "ok"
 
 
 # --- SHOW COMPLETION TESTS ---

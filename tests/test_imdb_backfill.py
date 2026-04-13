@@ -250,7 +250,7 @@ async def test_request_item_secondary_imdb_lookup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_item_warns_on_missing_imdb_id(capsys: pytest.CaptureFixture[str]) -> None:
+async def test_request_item_warns_on_missing_imdb_id(caplog: pytest.LogCaptureFixture) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/3/movie/550":
             return httpx.Response(
@@ -286,14 +286,14 @@ async def test_request_item_warns_on_missing_imdb_id(capsys: pytest.CaptureFixtu
 
     service._upsert_item_request = cast(Any, _stub_upsert_item_request)
 
-    await service.request_item(
+    with caplog.at_level("WARNING"):
+        await service.request_item(
         external_ref="tmdb:550",
         title="Fight Club",
         attributes={"item_type": "movie", "tmdb_id": "550"},
-    )
+        )
 
-    captured = capsys.readouterr()
-    assert "item.intake.imdb_id_missing" in captured.out
+    assert "item.intake.imdb_id_missing" in caplog.text
 
 
 @pytest.mark.asyncio
