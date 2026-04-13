@@ -38,6 +38,14 @@ class GQLRecoveryTargetStage(StrEnum):
     FINALIZE = "finalize"
 
 
+@strawberry.enum
+class GQLActiveStreamRole(StrEnum):
+    """Selectable persisted active-stream roles for graph control-plane mutations."""
+
+    DIRECT = "direct"
+    HLS = "hls"
+
+
 @strawberry.type
 class GQLHealthCheck:
     """Structured health status for GraphQL clients."""
@@ -600,6 +608,33 @@ class GQLMarkSelectedHlsMediaEntryStaleResult:
     item_id: str = strawberry.field(name="itemId")
     success: bool
     error: str | None = None
+
+
+@strawberry.input
+class PersistMediaEntryControlInput:
+    """Bounded persisted media-entry URL/state mutation input for graph control-plane writes."""
+
+    item_id: strawberry.ID = strawberry.field(name="itemId")
+    media_entry_id: strawberry.ID = strawberry.field(name="mediaEntryId")
+    active_role: GQLActiveStreamRole | None = strawberry.field(name="activeRole", default=None)
+    local_path: str | None = strawberry.field(name="localPath", default=None)
+    download_url: str | None = strawberry.field(name="downloadUrl", default=None)
+    unrestricted_url: str | None = strawberry.field(name="unrestrictedUrl", default=None)
+    refresh_state: str | None = strawberry.field(name="refreshState", default=None)
+    last_refresh_error: str | None = strawberry.field(name="lastRefreshError", default=None)
+    expires_at: str | None = strawberry.field(name="expiresAt", default=None)
+
+
+@strawberry.type
+class GQLPersistMediaEntryControlResult:
+    """GraphQL result for one persisted media-entry control-plane mutation."""
+
+    item_id: str = strawberry.field(name="itemId")
+    media_entry_id: str = strawberry.field(name="mediaEntryId")
+    success: bool
+    error: str | None = None
+    applied_role: str | None = strawberry.field(name="appliedRole", default=None)
+    media_entry: GQLMediaEntry | None = strawberry.field(name="mediaEntry", default=None)
 
 
 @strawberry.type
