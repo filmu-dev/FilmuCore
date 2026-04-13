@@ -30,6 +30,12 @@ $forbiddenPatterns = @(
     'logs/**',
     'ci-artifacts/**',
     'playback-proof-artifacts/**',
+    'docs/**',
+    'README.md',
+    'CHANGELOG.md',
+    'QUICK_START.md',
+    'WINDOWS_README.md',
+    'LINUX_UNIX_README.md',
     'login_page.html'
 )
 
@@ -85,5 +91,5 @@ foreach ($entry in $entries) {
 
 if ($violations.Count -gt 0) {
     $joined = ($violations | Sort-Object -Unique) -join ', '
-    throw "Push blocked: outbound commits include generated/runtime artifacts that must never be published: $joined"
+    throw "Push blocked: outbound commits include local-only tracking or generated/runtime paths that must never be published: $joined"
 }

@@ -14,9 +14,9 @@ Do not use `\\wsl.localhost\...\mnt\filmuvfs` as the intended playback path for 
 Current build status:
 
 - the local Docker/WSL stack now also provisions isolated real Plex at `http://localhost:32401/web` and real Emby at `http://localhost:8097` for parity testing against the same mounted library tree
-- `winfsp` is now the preferred Windows-native adapter for playback because it avoids ProjFS file hydration on the mount path.
-- `auto` resolves to `winfsp` on Windows in the current runtime.
-- `projfs` remains available for diagnostics and compatibility, but it hydrates file data into the virtualization root and can therefore consume host disk space over time.
+- `projfs` remains the policy/default Windows-native adapter.
+- `auto` is the default helper mode and still resolves to `projfs` on Windows.
+- `winfsp` still requires explicit opt-in with `FILMUVFS_ENABLE_EXPERIMENTAL_WINFSP=1`.
 - The raw WinFSP folder-mount path in [`rust/filmuvfs/src/windows_winfsp.rs`](/E:/Dev/Filmu/FilmuCore/rust/filmuvfs/src/windows_winfsp.rs) is now validated beyond first bring-up: root enumeration works, direct `ffprobe` works, the native Windows soak/remux gate passes on `C:\FilmuCoreVFS`, Jellyfin reaches sustained mounted reads and software transcode, and sampled native Emby playback/probe/stream-open checks now succeed across multiple titles.
 - Recent Windows read-path hardening also includes in-flight foreground chunk-fetch coalescing in [`rust/filmuvfs/src/chunk_engine.rs`](/E:/Dev/Filmu/FilmuCore/rust/filmuvfs/src/chunk_engine.rs), which reduced duplicate upstream fetches and noticeably improved Emby buffering behavior.
 - Native Windows Plex should still be treated as a separate parity target unless a real local Plex Media Server is installed against `C:\FilmuCoreVFS`. Docker Plex on `32401` is valuable parity evidence, but it is the Linux/WSL validation topology rather than native Windows PMS evidence.
@@ -61,33 +61,15 @@ At minimum, make sure your `.env` has:
 
 `TMDB_API_KEY` is strongly recommended.
 
-## 2. Preferred startup path: auto-detect the host OS
+## 2. Start the Docker backend stack
 
-From [FilmuCore](/E:/Dev/Filmu/FilmuCore), the preferred startup command is:
-
-```powershell
-pnpm run stack:start
-```
-
-That launcher resolves `FILMU_STACK_VFS_MODE=auto` against the host OS and dispatches to the Windows-native startup path on Windows hosts. On Windows, that means it:
-
-- starts the backend services from `docker-compose.windows.yml`
-- waits for the backend API and gRPC catalog supplier
-- starts the native `filmuvfs.exe` host process for the configured mount path
-
-If you set `FILMU_STACK_VFS_MODE=windows`, the same launcher is forced onto the Windows-native path explicitly.
-
-## 3. Backend-only compose path
-
-If you run Compose manually:
+From [FilmuCore](/E:/Dev/Filmu/FilmuCore), start the backend services with the Windows-specific Compose file:
 
 ```powershell
 docker compose -f docker-compose.windows.yml up -d
 ```
 
-that starts only the backend containers and exposes the FilmuVFS gRPC catalog supplier on `localhost:50051`.
-
-It does **not** start the native Windows FilmuVFS mount automatically. The compose file is backend-only by design on Windows because the mount must run as a host-native `filmuvfs.exe` process, not as a Linux container.
+This starts the normal backend stack and exposes the FilmuVFS gRPC catalog supplier on `localhost:50051`.
 
 Optional verification:
 
@@ -99,7 +81,7 @@ pnpm run stack:validate
 
 You should see the backend on `http://localhost:8000`, the frontend on `http://localhost:3000`, and the catalog supplier on `localhost:50051`.
 
-## 4. Start the native Windows FilmuVFS mount
+## 3. Start the native Windows FilmuVFS mount
 
 Build the host binary if you do not already have it:
 
@@ -124,11 +106,11 @@ Then start the Windows-native FilmuVFS adapter:
 
 The helper and the binary accept these Windows adapter values:
 
-- `winfsp` (recommended)
-- `auto` (resolves to `winfsp`)
-- `projfs` (diagnostic/compatibility path)
+- `projfs` (recommended)
+- `auto` (resolves to `projfs`)
+- `winfsp` (experimental, explicit opt-in only)
 
-By default, use `winfsp` (or `auto`). `projfs` should only be used when you specifically need to debug the Projected File System path, because hydrated reads persist data under the mount root and do not behave like the bounded temporary chunk cache used by the Linux path.
+By default, use `projfs` (or `auto`). If you are specifically validating the current native Windows playback path, use `winfsp` explicitly and keep the mount on `C:\FilmuCoreVFS` so the helper scripts, state files, and native Jellyfin/Emby/Plex tests all line up on the same canonical folder path.
 
 Optional operator tuning:
 
@@ -145,6 +127,7 @@ Equivalent environment variables are also supported:
 
 - `FILMUVFS_MOUNTPOINT`
 - `FILMUVFS_MOUNT_ADAPTER=projfs|winfsp|auto`
+- `FILMUVFS_ENABLE_EXPERIMENTAL_WINFSP=1` (required to allow `-MountAdapter winfsp`)
 - `FILMUVFS_WINFSP_USE_WRAPPER=1` (forces the `winfsp_wrs` wrapper backend for diagnostics)
 - `FILMUVFS_WINFSP_ALLOW_WRAPPER_FALLBACK=1` (re-enables fallback to wrapper if raw WinFSP startup fails; default is disabled)
 - `FILMUVFS_WINDOWS_PROJFS_SUMMARY_INTERVAL_SECONDS`
@@ -184,7 +167,7 @@ If `auto`/`projfs` is selected and Client-ProjFS is missing, that helper will:
 - request elevation automatically and attempt to enable `Client-ProjFS`
 - stop with an explicit reboot-required message when Windows applies the feature
 
-## 5. Configure your media server
+## 4. Configure your media server
 
 Use normal Windows folder paths. Replace `C:\FilmuCoreVFS` with whatever mount folder you configured:
 
@@ -207,12 +190,11 @@ Jellyfin note:
 - If playback fails with `h264_amf` / AMF initialization errors, disable hardware transcoding first and re-test with software encoding. That encoder failure is separate from the FilmuVFS read path; software transcode is the currently verified Windows-host playback gate.
 - If Jellyfin direct-stream fails with a bitstream-filter mismatch such as `h264_mp4toannexb` against a file that ffmpeg probes as a different codec (for example `av1`), force a full metadata refresh for that item before treating it as VFS corruption. The proof harness reports this as `metadata_mismatch`.
 
-## 6. Stop the stack
+## 5. Stop the stack
 
 If you started the native mount through the helper script, stop it with:
 
 ```powershell
-pnpm run stack:stop
 .\stop_windows_stack.ps1
 ```
 

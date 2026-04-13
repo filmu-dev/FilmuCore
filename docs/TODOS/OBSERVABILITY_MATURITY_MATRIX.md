@@ -35,8 +35,6 @@ Already present in the Python backend:
 - abort and request-shape (range/seek/EOF) counters
 - session-level read amplification proxies
 - enterprise governance consumption of live mounted-runtime rollout posture, so the higher-level operator slice now reflects `vfs_runtime_rollout_readiness`, rollout reasons, cache/fallback/prefetch ratios, and pressure incidents rather than only static VFS capability posture
-- environment-owned operator log-pipeline rollout checks via [`../../scripts/check_operator_log_pipeline_rollout.ps1`](../../scripts/check_operator_log_pipeline_rollout.ps1) and workflow [`../../.github/workflows/operator-log-pipeline-rollout.yml`](../../.github/workflows/operator-log-pipeline-rollout.yml), enforcing health/search/alert endpoint reachability, latency budgets, alert-budget posture, correlation-field contracts, and per-run trend-history records
-- enterprise continuity evidence gate via [`../../scripts/check_enterprise_rollout_continuity.ps1`](../../scripts/check_enterprise_rollout_continuity.ps1) and workflow [`../../.github/workflows/enterprise-rollout-continuity.yml`](../../.github/workflows/enterprise-rollout-continuity.yml), enforcing sustained soak/playback/operator evidence freshness and minimum trend depth
 - logs/history SSE compatibility path
 - bounded in-memory log broker for `/api/v1/logs`, SSE logging, and GraphQL `logStream`
 
@@ -57,7 +55,7 @@ What this baseline is good at:
 
 What it does **not** yet provide sufficiently:
 
-- full environment fleet rollout depth for log shipping/search/alerting beyond the now-landed endpoint/contract/latency/history gate
+- environment-executed log shipping and search parity comparable to the current `riven-ts` Elastic/Filebeat path
 - richer trace/span adoption across every log-producing path
 - mounted Rust data-plane telemetry and cross-process traceability
 - deeper queue replay-taxonomy visibility and longer-lived backlog history beyond the now-landed alert/history baseline
@@ -99,8 +97,8 @@ To check progressively and update as we go.
 | **GraphQL observability**             | Implemented baseline           | richer error taxonomy, schema diff governance, and subscription/control-plane visibility                                        | Needed for strategic parity and regression detection                 | **P1**   |
 | **Cache observability**               | Implemented baseline           | hit/miss split by layer, richer invalidation reasons, and longer-lived stale-serve ratios                                      | Needed for correctness and provider safety                           | **P1**   |
 | **Rate limiter observability**        | Implemented baseline           | provider-refresh/control-plane correlation and alerting thresholds                                                              | Needed for provider safety and FilmuVFS control-plane tuning         | **P1**   |
-| **Stream/VFS observability**          | Strong HTTP baseline + tenant-safe mount baseline | deepen the current chunk-engine metrics into route/mount-driven amplification, plus richer lease-refresh and prefetch time series | Needed to outperform TS in FilmuVFS/product streaming                | **P1**   |
-| **Control-plane/event observability** | Improved baseline + fencing semantics | event publish lag, bridge lag, replay metrics, lease refresh events, broader queue-history/alert automation, and active-owner fencing telemetry | Needed for future backplane work                                     | **P1**   |
+| **Stream/VFS observability**          | Strong HTTP baseline + limited mount baseline | deepen the current chunk-engine metrics into route/mount-driven amplification, plus richer lease-refresh and prefetch time series | Needed to outperform TS in FilmuVFS/product streaming                | **P1**   |
+| **Control-plane/event observability** | Improved baseline              | event publish lag, bridge lag, replay metrics, lease refresh events, and broader queue-history/alert automation                 | Needed for future backplane work                                     | **P1**   |
 | **Durable workflow observability**    | Not started                    | workflow progress, signal/query visibility, compensation/failure telemetry                                                    | Needed only once D2 begins                                           | **P3**   |
 
 ---
@@ -303,8 +301,6 @@ Priority 6 should be considered meaningfully advanced when:
 - Plugin observability now lives in [`../../filmu_py/plugins/loader.py`](../../filmu_py/plugins/loader.py) and [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py), including load outcomes plus hook invocation/duration telemetry with success/error/timeout outcomes.
 - GraphQL observability now lives in [`../../filmu_py/graphql/observability.py`](../../filmu_py/graphql/observability.py), including operation counters and duration histograms by operation type and bounded root-field labels.
 - Queue/control-plane visibility now lives in [`../../filmu_py/core/queue_status.py`](../../filmu_py/core/queue_status.py) plus [`../../filmu_py/api/routes/default.py`](../../filmu_py/api/routes/default.py), including queue depth, ready-vs-deferred lag, retry/result counts, dead-letter counts, bounded history, alert-level classification, dead-letter oldest-age visibility, aggregate dead-letter reason rollups, bounded queue-history filters, and exported gauges.
-- Replay/control-plane visibility now also includes durable consumer claim/fence semantics and heartbeat-expiry ownership transfer hooks through [`../../filmu_py/services/control_plane.py`](../../filmu_py/services/control_plane.py) and [`../../filmu_py/core/replay.py`](../../filmu_py/core/replay.py), with fenced/stale subscriber counts surfaced on the enterprise governance route.
-- Stream/VFS governance now also emits tenant-safe mounted active-handle posture (`visible`, `hidden`, and tenant rollup fields) from [`../../filmu_py/api/routes/stream.py`](../../filmu_py/api/routes/stream.py).
 - Auth/control-plane correlation now also binds additive actor/tenant/role/scope context on authenticated API requests and emits structured audit records for privileged settings/API-key mutations.
 - Structured logging now also has a durable file-backed baseline in [`../../filmu_py/logging.py`](../../filmu_py/logging.py), with rotating ECS/NDJSON-style output, correlation filters, and operator-ready local retention settings.
 - Dedicated coverage now exists in [`../../tests/test_observability.py`](../../tests/test_observability.py).
