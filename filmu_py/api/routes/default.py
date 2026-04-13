@@ -1304,7 +1304,7 @@ async def _enterprise_operations_governance(
             name="SRE / Production Operations Program",
             status="partial",
             evidence=[
-                "docs/OPERATIONS_PROGRAM.md defines SLOs, DR, rollback, incident, rollout, and capacity policy",
+                "local operations notes define SLOs, DR, rollback, incident, rollout, and capacity policy",
                 "scripts/run_backup_restore_proof.ps1 produces restore-proof artifacts",
                 "playback and VFS proof scripts provide operational evidence inputs",
                 "queue and VFS status APIs expose operator readiness signals",
@@ -1347,7 +1347,7 @@ async def _enterprise_operations_governance(
                     + ",".join(observability_policy.required_correlation_fields)
                 ),
                 f"observability_proof_ref_count={len(observability_policy.proof_refs)}",
-                "docs/OPERATOR_LOG_PIPELINE.md defines shipping/search/replay taxonomy",
+                "local log-pipeline notes define shipping/search/replay taxonomy",
             ],
             required_actions=(
                 []
@@ -1545,7 +1545,7 @@ async def _enterprise_operations_governance(
             evidence=[
                 "release workflow requires PAT-authenticated release-please updates",
                 "package.json exposes security:audit, security:bandit, and perf:bench",
-                "STATUS.md plus the active TODO matrix set track release, metadata, and chaos gaps explicitly",
+                "local tracking notes cover release, metadata, and chaos gaps explicitly",
                 "scripts/run_backup_restore_proof.ps1 and playback/VFS proof gates already produce promotion evidence inputs",
                 "scheduled metadata reindex/reconciliation now runs as a first-class worker cron program",
                 "repairable failed items now receive identifier repair plus immediate index re-entry inside the scheduled metadata program",

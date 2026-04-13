@@ -12,12 +12,7 @@ def test_forbidden_publish_paths_blocks_docs_and_local_tracking_surfaces() -> No
         "'logs/**'",
         "'ci-artifacts/**'",
         "'playback-proof-artifacts/**'",
-        "'docs/**'",
-        "'README.md'",
-        "'CHANGELOG.md'",
-        "'QUICK_START.md'",
-        "'WINDOWS_README.md'",
-        "'LINUX_UNIX_README.md'",
+        "'*.md'",
         "'login_page.html'",
         "'.release-please-manifest.json'",
     ):
@@ -41,3 +36,16 @@ def test_verify_python_lint_runs_publish_hygiene_guard() -> None:
     )
 
     assert "pwsh -NoProfile -File ./scripts/check_publish_hygiene.ps1" in verify_workflow
+
+
+def test_publish_hygiene_keeps_docs_forbidden_even_on_release_branches() -> None:
+    script = (REPO_ROOT / "scripts" / "check_publish_hygiene.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$alwaysForbiddenPatterns" in script
+    assert "'*.md'" in script
+    assert "$releaseManagedPaths" in script
+    assert "'package.json'" in script
+    assert "'pyproject.toml'" in script
+    assert "'rust/filmuvfs/Cargo.toml'" in script

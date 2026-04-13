@@ -37,9 +37,6 @@ on:
       - "tests/test_worker_module_boundaries.py"
       - "tests/test_route_module_boundaries.py"
       - "tests/test_rollout_continuity_contract.py"
-      - "docs/STATUS.md"
-      - "docs/EXECUTION_PLAN.md"
-      - "docs/TODOS/**"
   schedule:
     - cron: "45 * * * *"
 
