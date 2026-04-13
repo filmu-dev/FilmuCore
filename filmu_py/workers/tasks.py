@@ -616,6 +616,12 @@ async def _record_metadata_reindex_run(
     reconciled: int,
     skipped_active: int,
     failed: int,
+    repair_attempted: int = 0,
+    repair_enriched: int = 0,
+    repair_skipped_no_tmdb_id: int = 0,
+    repair_failed: int = 0,
+    repair_requeued: int = 0,
+    repair_skipped_active: int = 0,
     run_failed: bool = False,
     last_error: str | None = None,
 ) -> None:
@@ -631,6 +637,12 @@ async def _record_metadata_reindex_run(
             reconciled=reconciled,
             skipped_active=skipped_active,
             failed=failed,
+            repair_attempted=repair_attempted,
+            repair_enriched=repair_enriched,
+            repair_skipped_no_tmdb_id=repair_skipped_no_tmdb_id,
+            repair_failed=repair_failed,
+            repair_requeued=repair_requeued,
+            repair_skipped_active=repair_skipped_active,
             run_failed=run_failed,
             last_error=last_error,
         )
@@ -3502,6 +3514,30 @@ def _resolve_item_type(item: MediaItemRecord) -> str:
     return "show"
 
 
+def _extract_string_attribute(attributes: dict[str, object], key: str) -> str | None:
+    value = attributes.get(key)
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None
+
+
+def _needs_failed_metadata_repair(item: MediaItemRecord) -> bool:
+    """Return whether a failed item still has identifier repair work worth retrying."""
+
+    if item.state is not ItemState.FAILED:
+        return False
+
+    attributes = item.attributes
+    tmdb_id = _extract_string_attribute(attributes, "tmdb_id")
+    imdb_id = _extract_string_attribute(attributes, "imdb_id")
+    tvdb_id = _extract_string_attribute(attributes, "tvdb_id")
+    needs_tvdb_metadata_repair = tmdb_id is None and (
+        tvdb_id is not None or item.external_ref.startswith("tvdb:")
+    )
+    return imdb_id is None or needs_tvdb_metadata_repair
+
+
 def _build_search_query(
     *,
     title: str,
@@ -4052,13 +4088,27 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
     reconciled_count = 0
     skipped_active_count = 0
     failed_count = 0
+    repair_attempted_count = 0
+    repair_enriched_count = 0
+    repair_skipped_no_tmdb_id_count = 0
+    repair_failed_count = 0
+    repair_requeued_count = 0
+    repair_skipped_active_count = 0
     arq_redis: ArqRedis | None = None
 
     try:
         arq_redis = await _resolve_arq_redis(mutable_ctx)
         items = await media_service.list_items_in_states(
-            states=[ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING, ItemState.COMPLETED]
+            states=[
+                ItemState.PARTIALLY_COMPLETED,
+                ItemState.ONGOING,
+                ItemState.COMPLETED,
+                ItemState.FAILED,
+            ]
         )
+        failed_repair_candidate_ids = [
+            item.id for item in items if _needs_failed_metadata_repair(item)
+        ]
 
         for item in items:
             processed_count += 1
@@ -4097,6 +4147,43 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
                     exc_info=True,
                 )
 
+        if failed_repair_candidate_ids:
+            db = cast(
+                DatabaseRuntime,
+                mutable_ctx.get("db") or DatabaseRuntime(get_settings().postgres_dsn),
+            )
+            mutable_ctx["db"] = db
+            async with db.session() as session:
+                repair_summary = await media_service.backfill_missing_imdb_ids(session)
+            repair_attempted_count = int(repair_summary.get("attempted", 0))
+            repair_enriched_count = int(repair_summary.get("enriched", 0))
+            repair_skipped_no_tmdb_id_count = int(repair_summary.get("skipped_no_tmdb_id", 0))
+            repair_failed_count = int(repair_summary.get("failed", 0))
+
+            for item_id in failed_repair_candidate_ids:
+                refreshed_item = await media_service.get_item(item_id)
+                if refreshed_item is None or refreshed_item.state is not ItemState.REQUESTED:
+                    continue
+                followup_job_id = index_item_followup_job_id(
+                    item_id,
+                    discriminator="metadata-repair",
+                )
+                if await is_index_item_job_active(
+                    arq_redis,
+                    item_id=item_id,
+                    job_id=followup_job_id,
+                ):
+                    repair_skipped_active_count += 1
+                    continue
+                if await enqueue_index_item(
+                    arq_redis,
+                    item_id=item_id,
+                    queue_name=queue_name,
+                    tenant_id=refreshed_item.tenant_id,
+                    job_id=followup_job_id,
+                ):
+                    repair_requeued_count += 1
+
         await _record_metadata_reindex_run(
             redis=arq_redis,
             queue_name=queue_name,
@@ -4105,6 +4192,12 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
             reconciled=reconciled_count,
             skipped_active=skipped_active_count,
             failed=failed_count,
+            repair_attempted=repair_attempted_count,
+            repair_enriched=repair_enriched_count,
+            repair_skipped_no_tmdb_id=repair_skipped_no_tmdb_id_count,
+            repair_failed=repair_failed_count,
+            repair_requeued=repair_requeued_count,
+            repair_skipped_active=repair_skipped_active_count,
         )
         return {
             "processed": processed_count,
@@ -4112,6 +4205,12 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
             "reconciled": reconciled_count,
             "skipped_active": skipped_active_count,
             "failed": failed_count,
+            "repair_attempted": repair_attempted_count,
+            "repair_enriched": repair_enriched_count,
+            "repair_skipped_no_tmdb_id": repair_skipped_no_tmdb_id_count,
+            "repair_failed": repair_failed_count,
+            "repair_requeued": repair_requeued_count,
+            "repair_skipped_active": repair_skipped_active_count,
         }
     except Exception as exc:
         attempt = task_try_count(mutable_ctx)
@@ -4131,6 +4230,12 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
             reconciled=reconciled_count,
             skipped_active=skipped_active_count,
             failed=failed_count,
+            repair_attempted=repair_attempted_count,
+            repair_enriched=repair_enriched_count,
+            repair_skipped_no_tmdb_id=repair_skipped_no_tmdb_id_count,
+            repair_failed=repair_failed_count,
+            repair_requeued=repair_requeued_count,
+            repair_skipped_active=repair_skipped_active_count,
             run_failed=True,
             last_error=str(exc),
         )

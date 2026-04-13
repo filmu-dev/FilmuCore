@@ -1528,6 +1528,10 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
         in body["release_metadata_performance"]["evidence"]
     )
     assert (
+        "repairable failed items now receive identifier repair plus immediate index re-entry inside the scheduled metadata program"
+        in body["release_metadata_performance"]["evidence"]
+    )
+    assert (
         "metadata reindex/reconciliation trends are not yet exposed on a dedicated operator summary surface"
         not in body["release_metadata_performance"]["remaining_gaps"]
     )
@@ -2054,6 +2058,12 @@ def test_worker_metadata_reindex_route_returns_latest_run_summary() -> None:
         "reconciled": 1,
         "skipped_active": 1,
         "failed": 0,
+        "repair_attempted": 0,
+        "repair_enriched": 0,
+        "repair_skipped_no_tmdb_id": 0,
+        "repair_failed": 0,
+        "repair_requeued": 0,
+        "repair_skipped_active": 0,
         "outcome": "ok",
         "run_failed": False,
         "last_error": None,
@@ -2072,6 +2082,12 @@ def test_worker_metadata_reindex_history_route_returns_bounded_summary() -> None
                 "reconciled": 0,
                 "skipped_active": 0,
                 "failed": 0,
+                "repair_attempted": 1,
+                "repair_enriched": 1,
+                "repair_skipped_no_tmdb_id": 0,
+                "repair_failed": 0,
+                "repair_requeued": 1,
+                "repair_skipped_active": 0,
                 "outcome": "critical",
                 "run_failed": True,
                 "last_error": "metadata source unavailable",
@@ -2085,6 +2101,12 @@ def test_worker_metadata_reindex_history_route_returns_bounded_summary() -> None
                 "reconciled": 1,
                 "skipped_active": 1,
                 "failed": 1,
+                "repair_attempted": 0,
+                "repair_enriched": 0,
+                "repair_skipped_no_tmdb_id": 1,
+                "repair_failed": 1,
+                "repair_requeued": 0,
+                "repair_skipped_active": 0,
                 "outcome": "warning",
                 "run_failed": False,
                 "last_error": None,
@@ -2109,6 +2131,12 @@ def test_worker_metadata_reindex_history_route_returns_bounded_summary() -> None
         "total_reconciled": 1,
         "total_skipped_active": 1,
         "total_failed": 1,
+        "total_repair_attempted": 1,
+        "total_repair_enriched": 1,
+        "total_repair_skipped_no_tmdb_id": 1,
+        "total_repair_failed": 1,
+        "total_repair_requeued": 1,
+        "total_repair_skipped_active": 0,
         "max_processed": 3,
         "max_failed": 1,
         "latest_run_failed": True,

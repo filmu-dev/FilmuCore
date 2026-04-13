@@ -454,6 +454,12 @@ class MetadataReindexStatusResponse(BaseModel):
     reconciled: int
     skipped_active: int
     failed: int
+    repair_attempted: int = 0
+    repair_enriched: int = 0
+    repair_skipped_no_tmdb_id: int = 0
+    repair_failed: int = 0
+    repair_requeued: int = 0
+    repair_skipped_active: int = 0
     outcome: Literal["ok", "warning", "critical"] = "ok"
     run_failed: bool = False
     last_error: str | None = None
@@ -468,6 +474,12 @@ class MetadataReindexHistoryPointResponse(BaseModel):
     reconciled: int
     skipped_active: int
     failed: int
+    repair_attempted: int = 0
+    repair_enriched: int = 0
+    repair_skipped_no_tmdb_id: int = 0
+    repair_failed: int = 0
+    repair_requeued: int = 0
+    repair_skipped_active: int = 0
     outcome: Literal["ok", "warning", "critical"] = "ok"
     run_failed: bool = False
     last_error: str | None = None
@@ -485,6 +497,12 @@ class MetadataReindexHistorySummaryResponse(BaseModel):
     total_reconciled: int
     total_skipped_active: int
     total_failed: int
+    total_repair_attempted: int
+    total_repair_enriched: int
+    total_repair_skipped_no_tmdb_id: int
+    total_repair_failed: int
+    total_repair_requeued: int
+    total_repair_skipped_active: int
     max_processed: int
     max_failed: int
     latest_run_failed: bool = False

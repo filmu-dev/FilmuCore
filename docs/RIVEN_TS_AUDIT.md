@@ -80,7 +80,7 @@ Current local baseline details that matter for Filmu planning:
 | Area | `riven-ts` | FilmuCore |
 | --- | --- | --- |
 | Request intake | Overseerr/Plex/Listrr plugin flows into DB | Real request pipeline with persisted item and request rows plus downstream triggers |
-| Index and metadata | Dedicated indexing flow with plugin-backed metadata sources | Dedicated `index_item` worker stage now exists, but metadata-provider breadth and reindex governance are still narrower |
+| Index and metadata | Dedicated indexing flow with plugin-backed metadata sources | Dedicated `index_item` worker stage now exists, scheduled metadata reconciliation now covers partial/ongoing/completed plus repairable failed items, but metadata-provider breadth is still narrower |
 | Scrape and ranking | Mature BullMQ scrape plus parse plus ranking flow | Real `scrape_item` -> `parse_scrape_results` -> `rank_streams` path with built-in Torrentio and RTN-compatible ranking |
 | Debrid and download | Newer plugin lineup plus sandboxed validation jobs | Built-in Real-Debrid, AllDebrid, and Debrid-Link clients for both pipeline and playback refresh |
 | VFS mount | Running `fuse-native` VFS on `main` | Real Rust sidecar mount runtime with Linux `fuse3`, Windows ProjFS/WinFSP adapters, and validated playback proof paths |
