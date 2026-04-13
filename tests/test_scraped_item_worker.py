@@ -490,6 +490,20 @@ def _worker_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks, "load_settings", _no_persisted_settings)
 
 
+def _pin_worker_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    settings = _build_worker_settings()
+
+    async def _resolved_runtime_settings(_: dict[str, object]) -> Settings:
+        return settings
+
+    def _unexpected_get_settings() -> Settings:
+        raise AssertionError("worker pipeline tests must use ctx/runtime settings, not global settings")
+
+    monkeypatch.setattr(tasks, "_resolve_runtime_settings", _resolved_runtime_settings)
+    monkeypatch.setattr(tasks, "get_settings", _unexpected_get_settings)
+    return settings
+
+
 class _FakeDebridClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
@@ -642,6 +656,7 @@ def _build_recovery_service(items: list[MediaItemORM]) -> tuple[MediaService, _R
 def test_process_scraped_item_runs_parse_rank_and_select_in_sequence(
     monkeypatch: Any,
 ) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-sequence"
     unparsed = _build_stream(stream_id="stream-unparsed", item_id=item_id, parsed=False)
     selected = _build_stream(stream_id="stream-selected", item_id=item_id, parsed=True)
@@ -653,7 +668,7 @@ def test_process_scraped_item_runs_parse_rank_and_select_in_sequence(
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
     result = asyncio.run(
-        tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id)
+        tasks.process_scraped_item({"settings": settings}, item_id)
     )
 
     assert result == item_id
@@ -677,6 +692,7 @@ def test_process_scraped_item_runs_parse_rank_and_select_in_sequence(
 
 
 def test_process_scraped_item_is_idempotent_on_rerun(monkeypatch: Any) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-idempotent"
     selected = _build_stream(stream_id="stream-selected", item_id=item_id, parsed=True)
     media_service = FakePipelineMediaService(
@@ -686,8 +702,8 @@ def test_process_scraped_item_is_idempotent_on_rerun(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
-    asyncio.run(tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id))
-    asyncio.run(tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id))
+    asyncio.run(tasks.process_scraped_item({"settings": settings}, item_id))
+    asyncio.run(tasks.process_scraped_item({"settings": settings}, item_id))
 
     assert media_service.calls == [
         "get_item",
@@ -711,6 +727,7 @@ def test_process_scraped_item_is_idempotent_on_rerun(monkeypatch: Any) -> None:
 def test_process_scraped_item_transitions_to_failed_when_no_selection_possible(
     monkeypatch: Any,
 ) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-failed-selection"
     rejected = _build_stream(stream_id="stream-rejected", item_id=item_id, parsed=True)
     media_service = FakePipelineMediaService(
@@ -721,7 +738,7 @@ def test_process_scraped_item_transitions_to_failed_when_no_selection_possible(
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
     result = asyncio.run(
-        tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id)
+        tasks.process_scraped_item({"settings": settings}, item_id)
     )
 
     assert result == item_id
@@ -732,6 +749,7 @@ def test_process_scraped_item_transitions_to_failed_when_no_selection_possible(
 
 
 def test_process_scraped_item_transitions_to_downloaded_on_success(monkeypatch: Any) -> None:
+    settings = _pin_worker_runtime_settings(monkeypatch)
     item_id = "item-downloaded"
     selected = _build_stream(stream_id="stream-selected", item_id=item_id, parsed=True)
     media_service = FakePipelineMediaService(
@@ -742,7 +760,7 @@ def test_process_scraped_item_transitions_to_downloaded_on_success(monkeypatch: 
     monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
 
     result = asyncio.run(
-        tasks.process_scraped_item({"settings": _build_worker_settings()}, item_id)
+        tasks.process_scraped_item({"settings": settings}, item_id)
     )
 
     assert result == item_id
