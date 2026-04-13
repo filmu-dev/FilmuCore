@@ -31,6 +31,7 @@ from sqlalchemy import select
 from filmu_py.config import Settings, TenantQuotaLimitSettings, get_settings, set_runtime_settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.db.models import MediaItemORM, StreamORM
 from filmu_py.db.runtime import DatabaseRuntime
@@ -604,6 +605,40 @@ def _job_status_name(status: JobStatus) -> str:
 
 def _worker_stage_logger() -> Any:
     return structlog.get_logger(__name__)
+
+
+async def _record_metadata_reindex_run(
+    *,
+    redis: object | None,
+    queue_name: str,
+    processed: int,
+    queued: int,
+    reconciled: int,
+    skipped_active: int,
+    failed: int,
+    run_failed: bool = False,
+    last_error: str | None = None,
+) -> None:
+    """Persist one bounded metadata reindex/reconciliation run record."""
+
+    if redis is None:
+        return
+
+    try:
+        await MetadataReindexStatusStore(redis, queue_name=queue_name).record_run(
+            processed=processed,
+            queued=queued,
+            reconciled=reconciled,
+            skipped_active=skipped_active,
+            failed=failed,
+            run_failed=run_failed,
+            last_error=last_error,
+        )
+    except Exception:
+        _worker_stage_logger().warning(
+            "scheduled_metadata_reindex_reconciliation.status_record_failed",
+            exc_info=True,
+        )
 
 
 def _record_enqueue_decision(stage_name: str, decision: str) -> None:
@@ -4012,17 +4047,18 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
     media_service = _resolve_media_service(mutable_ctx)
     settings = await _resolve_runtime_settings(mutable_ctx)
     queue_name = str(mutable_ctx.get("queue_name", _queue_name(settings)))
+    processed_count = 0
+    queued_count = 0
+    reconciled_count = 0
+    skipped_active_count = 0
+    failed_count = 0
+    arq_redis: ArqRedis | None = None
 
     try:
         arq_redis = await _resolve_arq_redis(mutable_ctx)
         items = await media_service.list_items_in_states(
             states=[ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING, ItemState.COMPLETED]
         )
-        processed_count = 0
-        queued_count = 0
-        reconciled_count = 0
-        skipped_active_count = 0
-        failed_count = 0
 
         for item in items:
             processed_count += 1
@@ -4061,6 +4097,15 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
                     exc_info=True,
                 )
 
+        await _record_metadata_reindex_run(
+            redis=arq_redis,
+            queue_name=queue_name,
+            processed=processed_count,
+            queued=queued_count,
+            reconciled=reconciled_count,
+            skipped_active=skipped_active_count,
+            failed=failed_count,
+        )
         return {
             "processed": processed_count,
             "queued": queued_count,
@@ -4078,6 +4123,17 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
                 reason=str(exc),
             )
             raise
+        await _record_metadata_reindex_run(
+            redis=arq_redis,
+            queue_name=queue_name,
+            processed=processed_count,
+            queued=queued_count,
+            reconciled=reconciled_count,
+            skipped_active=skipped_active_count,
+            failed=failed_count,
+            run_failed=True,
+            last_error=str(exc),
+        )
         raise Retry(
             defer=METADATA_REINDEX_RETRY_POLICY.next_delay_seconds(attempt)
         ) from exc

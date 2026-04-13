@@ -442,6 +442,64 @@ class QueueStatusHistoryResponse(BaseModel):
     history: list[QueueStatusHistoryPointResponse]
 
 
+class MetadataReindexStatusResponse(BaseModel):
+    """Latest metadata reindex/reconciliation run summary."""
+
+    queue_name: str
+    schedule_offset_minutes: int
+    has_history: bool = False
+    observed_at: str
+    processed: int
+    queued: int
+    reconciled: int
+    skipped_active: int
+    failed: int
+    outcome: Literal["ok", "warning", "critical"] = "ok"
+    run_failed: bool = False
+    last_error: str | None = None
+
+
+class MetadataReindexHistoryPointResponse(BaseModel):
+    """One persisted metadata reindex/reconciliation run record."""
+
+    observed_at: str
+    processed: int
+    queued: int
+    reconciled: int
+    skipped_active: int
+    failed: int
+    outcome: Literal["ok", "warning", "critical"] = "ok"
+    run_failed: bool = False
+    last_error: str | None = None
+
+
+class MetadataReindexHistorySummaryResponse(BaseModel):
+    """Derived operator rollup for one bounded metadata reindex history response."""
+
+    points: int
+    latest_outcome: Literal["ok", "warning", "critical"] = "ok"
+    critical_points: int
+    warning_points: int
+    total_processed: int
+    total_queued: int
+    total_reconciled: int
+    total_skipped_active: int
+    total_failed: int
+    max_processed: int
+    max_failed: int
+    latest_run_failed: bool = False
+    latest_error: str | None = None
+
+
+class MetadataReindexHistoryResponse(BaseModel):
+    """Bounded metadata reindex/reconciliation run history for operator views."""
+
+    queue_name: str
+    schedule_offset_minutes: int
+    summary: MetadataReindexHistorySummaryResponse
+    history: list[MetadataReindexHistoryPointResponse]
+
+
 class ApiKeyRotationResponse(BaseModel):
     """Response payload returned after a real backend API-key rotation."""
 

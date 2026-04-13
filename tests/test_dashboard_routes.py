@@ -1523,6 +1523,14 @@ def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
     assert "heavy_stage_proof_ref_count=0" in body["heavy_stage_workload_isolation"]["evidence"]
     assert body["heavy_stage_workload_isolation"]["status"] == "partial"
     assert body["release_metadata_performance"]["status"] == "partial"
+    assert (
+        "GET /api/v1/workers/metadata-reindex and /api/v1/workers/metadata-reindex/history expose bounded operator rollups"
+        in body["release_metadata_performance"]["evidence"]
+    )
+    assert (
+        "metadata reindex/reconciliation trends are not yet exposed on a dedicated operator summary surface"
+        not in body["release_metadata_performance"]["remaining_gaps"]
+    )
 
 
 def test_operations_governance_route_marks_identity_ready_when_wave2_exit_gates_are_satisfied() -> None:
@@ -2011,6 +2019,100 @@ def test_worker_queue_history_route_returns_bounded_snapshots() -> None:
         "max_dead_letter_jobs": 0,
         "max_oldest_ready_age_seconds": history[0]["oldest_ready_age_seconds"],
         "latest_dead_letter_reason_counts": {},
+    }
+
+
+def test_worker_metadata_reindex_route_returns_latest_run_summary() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    redis.lists["arq:metadata-reindex-history:filmu-py"] = [
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T00:30:00Z",
+                "processed": 3,
+                "queued": 1,
+                "reconciled": 1,
+                "skipped_active": 1,
+                "failed": 0,
+                "outcome": "ok",
+                "run_failed": False,
+                "last_error": None,
+            }
+        ).encode("utf-8")
+    ]
+
+    response = client.get("/api/v1/workers/metadata-reindex", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "queue_name": "filmu-py",
+        "schedule_offset_minutes": 30,
+        "has_history": True,
+        "observed_at": "2026-04-13T00:30:00Z",
+        "processed": 3,
+        "queued": 1,
+        "reconciled": 1,
+        "skipped_active": 1,
+        "failed": 0,
+        "outcome": "ok",
+        "run_failed": False,
+        "last_error": None,
+    }
+
+
+def test_worker_metadata_reindex_history_route_returns_bounded_summary() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    redis.lists["arq:metadata-reindex-history:filmu-py"] = [
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T00:35:00Z",
+                "processed": 0,
+                "queued": 0,
+                "reconciled": 0,
+                "skipped_active": 0,
+                "failed": 0,
+                "outcome": "critical",
+                "run_failed": True,
+                "last_error": "metadata source unavailable",
+            }
+        ).encode("utf-8"),
+        json.dumps(
+            {
+                "observed_at": "2026-04-13T00:30:00Z",
+                "processed": 3,
+                "queued": 1,
+                "reconciled": 1,
+                "skipped_active": 1,
+                "failed": 1,
+                "outcome": "warning",
+                "run_failed": False,
+                "last_error": None,
+            }
+        ).encode("utf-8"),
+    ]
+
+    response = client.get("/api/v1/workers/metadata-reindex/history", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queue_name"] == "filmu-py"
+    assert body["schedule_offset_minutes"] == 30
+    assert len(body["history"]) == 2
+    assert body["summary"] == {
+        "points": 2,
+        "latest_outcome": "critical",
+        "critical_points": 1,
+        "warning_points": 1,
+        "total_processed": 3,
+        "total_queued": 1,
+        "total_reconciled": 1,
+        "total_skipped_active": 1,
+        "total_failed": 1,
+        "max_processed": 3,
+        "max_failed": 1,
+        "latest_run_failed": True,
+        "latest_error": "metadata source unavailable",
     }
 
 

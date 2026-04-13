@@ -41,7 +41,7 @@ FilmuCore now has a real end-to-end request to playback path on validated local 
 
 The remaining gap is no longer first pipeline completeness or first mounted playback success. The active gap is enterprise hardening and breadth beyond the now-landed repo baseline:
 
-- metadata-reconciliation depth and operator-facing trend visibility above the now-landed scheduled reindex baseline
+- metadata-reconciliation depth and multi-environment/provider breadth above the now-landed scheduled reindex baseline
 - broader plugin and package breadth
 - stricter sandbox/process isolation beyond the current heavy-stage exit-gate baseline
 - environment-owned searchable observability
@@ -106,7 +106,7 @@ Current local baseline details that matter for Filmu planning:
 ## Where FilmuCore still trails
 
 - deeper multi-actor lifecycle orchestration comparable to the TS `program` / `bootstrap` / `plugin-registrar` / `main-runner` hierarchy
-- broader scheduled reindex / reconciliation depth, especially operator-facing trend surfacing and pluginized metadata-index breadth
+- broader scheduled reindex / reconciliation depth, especially pluginized metadata-index breadth and multi-environment/provider coverage
 - stricter sandbox/process isolation for heavy parse/map/validate stages beyond Filmu's bounded executor baseline
 - broader worker/database isolation around those background runtimes
 - queue-backed plugin execution breadth across more hook families
@@ -123,7 +123,7 @@ Current local baseline details that matter for Filmu planning:
 What current `riven-ts` still has that Filmu does not yet match:
 
 - deeper XState app lifecycle orchestration across startup, plugin registration, and steady-state execution
-- broader metadata reconciliation depth and operator-facing trend surfaces around scheduled reindexing
+- broader metadata reconciliation depth around scheduled reindexing, especially pluginized index breadth and multi-environment/provider coverage
 - broader BullMQ flow isolation, including sandboxed parse/map/validate workers beyond Filmu's bounded executor/process-policy baseline
 - broader worker/database isolation around those background runtimes
 - queue-backed plugin worker fan-out across a larger typed event surface

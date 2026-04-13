@@ -15,6 +15,7 @@ from filmu_py.api.deps import get_auth_context, require_permissions
 from filmu_py.audit import audit_action
 from filmu_py.authz import evaluate_permissions, permission_constraints_from_mapping
 from filmu_py.config import set_runtime_settings
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
 from filmu_py.services.debrid import DownloaderAccountService
@@ -41,6 +42,10 @@ from ..models import (
     HealthResponse,
     LogsResponse,
     MessageResponse,
+    MetadataReindexHistoryPointResponse,
+    MetadataReindexHistoryResponse,
+    MetadataReindexHistorySummaryResponse,
+    MetadataReindexStatusResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
     PluginGovernanceOverrideResponse,
@@ -329,6 +334,29 @@ def _summarize_queue_history(
         latest_dead_letter_reason_counts=(
             dict(history[0].dead_letter_reason_counts) if history else {}
         ),
+    )
+
+
+def _summarize_metadata_reindex_history(
+    history: list[MetadataReindexHistoryPointResponse],
+) -> MetadataReindexHistorySummaryResponse:
+    """Return operator rollups for one bounded metadata reindex history response."""
+
+    latest_outcome = history[0].outcome if history else "ok"
+    return MetadataReindexHistorySummaryResponse(
+        points=len(history),
+        latest_outcome=latest_outcome,
+        critical_points=sum(1 for item in history if item.outcome == "critical"),
+        warning_points=sum(1 for item in history if item.outcome == "warning"),
+        total_processed=sum(item.processed for item in history),
+        total_queued=sum(item.queued for item in history),
+        total_reconciled=sum(item.reconciled for item in history),
+        total_skipped_active=sum(item.skipped_active for item in history),
+        total_failed=sum(item.failed for item in history),
+        max_processed=max((item.processed for item in history), default=0),
+        max_failed=max((item.failed for item in history), default=0),
+        latest_run_failed=history[0].run_failed if history else False,
+        latest_error=history[0].last_error if history else None,
     )
 
 
@@ -1349,6 +1377,7 @@ async def _enterprise_operations_governance(
                 "STATUS.md plus the active TODO matrix set track release, metadata, and chaos gaps explicitly",
                 "scripts/run_backup_restore_proof.ps1 and playback/VFS proof gates already produce promotion evidence inputs",
                 "scheduled metadata reindex/reconciliation now runs as a first-class worker cron program",
+                "GET /api/v1/workers/metadata-reindex and /api/v1/workers/metadata-reindex/history expose bounded operator rollups",
             ],
             required_actions=[
                 "add_sbom_signing_and_artifact_promotion_policy",
@@ -1356,7 +1385,6 @@ async def _enterprise_operations_governance(
             ],
             remaining_gaps=[
                 "artifact provenance and SBOM policy are not yet first-class release gates",
-                "metadata reindex/reconciliation trends are not yet exposed on a dedicated operator summary surface",
                 "benchmark and chaos discipline are not yet enforced by regression thresholds",
             ],
         ),
@@ -1969,6 +1997,86 @@ async def get_worker_queue_history(
     return QueueStatusHistoryResponse(
         queue_name=queue_name,
         summary=_summarize_queue_history(history_points),
+        history=history_points,
+    )
+
+
+@router.get(
+    "/workers/metadata-reindex",
+    operation_id="default.worker_metadata_reindex",
+    response_model=MetadataReindexStatusResponse,
+)
+async def get_worker_metadata_reindex_status(request: Request) -> MetadataReindexStatusResponse:
+    """Return the latest metadata reindex/reconciliation run summary."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    latest = await MetadataReindexStatusStore(redis, queue_name=queue_name).latest()
+    if latest is None:
+        return MetadataReindexStatusResponse(
+            queue_name=queue_name,
+            schedule_offset_minutes=resources.settings.indexer.schedule_offset_minutes,
+            has_history=False,
+            observed_at="",
+            processed=0,
+            queued=0,
+            reconciled=0,
+            skipped_active=0,
+            failed=0,
+            outcome="ok",
+            run_failed=False,
+            last_error=None,
+        )
+    return MetadataReindexStatusResponse(
+        queue_name=queue_name,
+        schedule_offset_minutes=resources.settings.indexer.schedule_offset_minutes,
+        has_history=True,
+        observed_at=latest.observed_at,
+        processed=latest.processed,
+        queued=latest.queued,
+        reconciled=latest.reconciled,
+        skipped_active=latest.skipped_active,
+        failed=latest.failed,
+        outcome=latest.outcome,
+        run_failed=latest.run_failed,
+        last_error=latest.last_error,
+    )
+
+
+@router.get(
+    "/workers/metadata-reindex/history",
+    operation_id="default.worker_metadata_reindex_history",
+    response_model=MetadataReindexHistoryResponse,
+)
+async def get_worker_metadata_reindex_history(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> MetadataReindexHistoryResponse:
+    """Return bounded metadata reindex/reconciliation trend history."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    history = await MetadataReindexStatusStore(redis, queue_name=queue_name).history(limit=limit)
+    history_points = [
+        MetadataReindexHistoryPointResponse(
+            observed_at=item.observed_at,
+            processed=item.processed,
+            queued=item.queued,
+            reconciled=item.reconciled,
+            skipped_active=item.skipped_active,
+            failed=item.failed,
+            outcome=item.outcome,
+            run_failed=item.run_failed,
+            last_error=item.last_error,
+        )
+        for item in history
+    ]
+    return MetadataReindexHistoryResponse(
+        queue_name=queue_name,
+        schedule_offset_minutes=resources.settings.indexer.schedule_offset_minutes,
+        summary=_summarize_metadata_reindex_history(history_points),
         history=history_points,
     )
 
