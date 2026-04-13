@@ -314,7 +314,7 @@ No undocumented requirements are assumed.
 - [`/api/v1/stream/file/{item_id}`](../filmu_py/api/routes/stream.py) has an explicit byte-range direct-play baseline with governed sessions and lease-refresh integration.
 - [`/api/v1/stream/hls/{item_id}/*`](../filmu_py/api/routes/stream.py) has an implemented baseline for local generation, upstream proxying, and `remote-direct` transcode fallback with explicit lifecycle governance.
 - Playback attachment/source resolution now also lives behind [`filmu_py/api/playback_resolution.py`](../filmu_py/api/playback_resolution.py) rather than remaining route-local.
-- [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) exposes the current serving-runtime/governance state.
+- [`/api/v1/stream/status`](../filmu_py/api/routes/stream.py) exposes the current serving-runtime/governance state, including mounted cache/chunk-coalescing/upstream-wait/refresh pressure classes and machine-readable reasons derived from the Rust runtime snapshot.
 - An async gRPC catalog bridge now exists in [`filmu_py/services/vfs_server.py`](../filmu_py/services/vfs_server.py), accepting subscribe/ack/heartbeat traffic, serving initial snapshots, serving reconnect deltas when possible, and exposing `RefreshCatalogEntry` for forced provider-link refresh.
 - The Rust sidecar now has catalog client, in-memory state, and a mount-facing lifecycle layer with `getattr`/`readdir`/`open`/`read`/`release` behavior.
 - Mounted stale reads now retry inline through the refresh RPC, the Rust chunk cache now uses `moka::future::Cache`, and catalog state now preserves stable assigned inodes with fallback allocation on collisions.
@@ -322,7 +322,7 @@ No undocumented requirements are assumed.
 - Live validation on the mounted WSL path now confirms season-grouped output for real shows such as `Stranger Things (2016)` instead of a flat root-level file dump.
 - Link resolution is implemented through built-in Real-Debrid / AllDebrid / Debrid-Link clients with persisted media-entry leases and provider-backed refresh orchestration.
 - Linux-target compile validation, WSL/Linux mount lifecycle validation, manual mounted-read smoke, and Plex/Emby playback validation all pass for the current Rust sidecar path.
-- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics remain thinner.
+- Robust stream/VFS Prometheus metrics exist for the HTTP playback path, while mounted data-plane metrics now also feed operator-facing pressure classes on the API surfaces; the remaining gap is broader soak-artifact parity and multi-environment runtime breadth rather than raw mounted counters alone.
 
 ### Main missing pieces
 
@@ -330,7 +330,7 @@ No undocumented requirements are assumed.
 - Mount/HTTP convergence on the shared chunk engine semantics for mounted reads.
 - Decide whether the current canonical-plus-alias mounted browse policy should stop here or grow into a fully separate id-keyed tree, and what broader queue-backed/orchestrated resolver workflow should exist above the current mount-side inline refresh dedup.
 - Optional disk/persistent cache and smarter prefetch evolution above the now-async Rust cache.
-- Broader long-running soak/backpressure validation and mounted data-plane observability.
+- Broader long-running soak/backpressure validation, soak-artifact parity for the new mounted pressure classes, and multi-environment mounted data-plane breadth.
 - VFS rollout controls.
 
 ### Exit criteria

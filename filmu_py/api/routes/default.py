@@ -784,6 +784,22 @@ def _vfs_data_plane_evidence(
                     f"{runtime_governance['vfs_runtime_fairness_pressure_incidents']}"
                 ),
                 (
+                    "vfs_runtime_cache_pressure_class="
+                    f"{runtime_governance['vfs_runtime_cache_pressure_class']}"
+                ),
+                (
+                    "vfs_runtime_chunk_coalescing_pressure_class="
+                    f"{runtime_governance['vfs_runtime_chunk_coalescing_pressure_class']}"
+                ),
+                (
+                    "vfs_runtime_upstream_wait_class="
+                    f"{runtime_governance['vfs_runtime_upstream_wait_class']}"
+                ),
+                (
+                    "vfs_runtime_refresh_pressure_class="
+                    f"{runtime_governance['vfs_runtime_refresh_pressure_class']}"
+                ),
+                (
                     "vfs_runtime_mounted_reads_total="
                     f"{runtime_governance['vfs_runtime_mounted_reads_total']}"
                 ),
@@ -798,6 +814,50 @@ def _vfs_data_plane_evidence(
                 (
                     "vfs_runtime_prefetch_active_background_tasks="
                     f"{runtime_governance['vfs_runtime_prefetch_active_background_tasks']}"
+                ),
+                (
+                    "vfs_runtime_cache_pressure_reasons="
+                    + (
+                        ",".join(
+                            cast(list[str], runtime_governance["vfs_runtime_cache_pressure_reasons"])
+                        )
+                        or "none"
+                    )
+                ),
+                (
+                    "vfs_runtime_chunk_coalescing_pressure_reasons="
+                    + (
+                        ",".join(
+                            cast(
+                                list[str],
+                                runtime_governance[
+                                    "vfs_runtime_chunk_coalescing_pressure_reasons"
+                                ],
+                            )
+                        )
+                        or "none"
+                    )
+                ),
+                (
+                    "vfs_runtime_upstream_wait_reasons="
+                    + (
+                        ",".join(
+                            cast(list[str], runtime_governance["vfs_runtime_upstream_wait_reasons"])
+                        )
+                        or "none"
+                    )
+                ),
+                (
+                    "vfs_runtime_refresh_pressure_reasons="
+                    + (
+                        ",".join(
+                            cast(
+                                list[str],
+                                runtime_governance["vfs_runtime_refresh_pressure_reasons"],
+                            )
+                        )
+                        or "none"
+                    )
                 ),
             ]
         )

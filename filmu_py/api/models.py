@@ -823,6 +823,14 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_prefetch_pressure_ratio: float
     vfs_runtime_provider_pressure_incidents: int
     vfs_runtime_fairness_pressure_incidents: int
+    vfs_runtime_cache_pressure_class: str
+    vfs_runtime_cache_pressure_reasons: list[str]
+    vfs_runtime_chunk_coalescing_pressure_class: str
+    vfs_runtime_chunk_coalescing_pressure_reasons: list[str]
+    vfs_runtime_upstream_wait_class: str
+    vfs_runtime_upstream_wait_reasons: list[str]
+    vfs_runtime_refresh_pressure_class: str
+    vfs_runtime_refresh_pressure_reasons: list[str]
     vfs_runtime_rollout_readiness: str
     vfs_runtime_rollout_reasons: list[str]
     vfs_runtime_rollout_next_action: str
