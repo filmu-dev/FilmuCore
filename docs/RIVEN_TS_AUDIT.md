@@ -102,6 +102,7 @@ Current local baseline details that matter for Filmu planning:
 - plugin trust, publisher, quarantine, and tenancy governance
 - enterprise posture surface on `/api/v1/operations/governance`
 - broader REST and SSE compatibility surface
+- graph-first specialization-backed calendar/detail lineage on the shared media-domain service seam
 
 ## Where FilmuCore still trails
 

@@ -10,7 +10,13 @@ from typing import cast
 from filmu_py.core.event_bus import EventBus
 from filmu_py.db.models import EpisodeORM, MediaItemORM, MovieORM, SeasonORM, ShowORM
 from filmu_py.db.runtime import DatabaseRuntime
-from filmu_py.services.media import CalendarProjectionRecord, MediaService, StatsProjection
+from filmu_py.services.media import (
+    CalendarProjectionRecord,
+    MediaItemSpecializationRecord,
+    MediaService,
+    ParentIdsRecord,
+    StatsProjection,
+)
 from filmu_py.state.item import ItemState
 
 
@@ -187,6 +193,16 @@ def test_get_calendar_returns_episodes_sorted_by_air_date() -> None:
             air_date="2026-03-15T10:00:00+00:00",
             last_state="Completed",
             release_data=None,
+            specialization=MediaItemSpecializationRecord(
+                item_type="episode",
+                tmdb_id=None,
+                tvdb_id=None,
+                imdb_id=None,
+                parent_ids=None,
+                show_title="Earlier Episode",
+                season_number=1,
+                episode_number=2,
+            ),
         ),
         CalendarProjectionRecord(
             item_id="episode-later",
@@ -199,6 +215,16 @@ def test_get_calendar_returns_episodes_sorted_by_air_date() -> None:
             air_date="2026-03-16T10:00:00+00:00",
             last_state="Downloaded",
             release_data=None,
+            specialization=MediaItemSpecializationRecord(
+                item_type="episode",
+                tmdb_id=None,
+                tvdb_id=None,
+                imdb_id=None,
+                parent_ids=None,
+                show_title="Later Episode",
+                season_number=2,
+                episode_number=4,
+            ),
         ),
     ]
 
@@ -277,6 +303,36 @@ def test_search_items_returns_show_type_for_show_rows() -> None:
     assert page.items[0].type == "show"
 
 
+def test_search_items_prefers_specialization_identifiers_over_metadata() -> None:
+    show_item = _build_item(
+        item_id="show-1",
+        state=ItemState.REQUESTED,
+        item_type="movie",
+        title="Example Show",
+    )
+    show_item.attributes["tmdb_id"] = "metadata-tmdb"
+    show_item.attributes["tvdb_id"] = "metadata-tvdb"
+    show_item.show = ShowORM(
+        media_item_id=show_item.id,
+        tmdb_id="specialized-tmdb",
+        tvdb_id="specialized-tvdb",
+        imdb_id="tt7654321",
+    )
+    service = MediaService(
+        db=cast(DatabaseRuntime, _ProjectionRuntime([show_item])),
+        event_bus=EventBus(),
+    )
+
+    page = asyncio.run(service.search_items(item_types=["show"]))
+
+    assert len(page.items) == 1
+    assert page.items[0].type == "show"
+    assert page.items[0].tmdb_id == "specialized-tmdb"
+    assert page.items[0].tvdb_id == "specialized-tvdb"
+    assert page.items[0].specialization is not None
+    assert page.items[0].specialization.imdb_id == "tt7654321"
+
+
 def test_search_items_matches_show_and_tv_alias_filters() -> None:
     show_item = _build_item(
         item_id="show-1",
@@ -294,3 +350,47 @@ def test_search_items_matches_show_and_tv_alias_filters() -> None:
 
     assert len(show_page.items) == 1
     assert len(tv_page.items) == 1
+
+
+def test_get_calendar_prefers_specialization_hierarchy_over_metadata() -> None:
+    show_item = _build_item(
+        item_id="show-1",
+        state=ItemState.COMPLETED,
+        item_type="show",
+        title="Canonical Show",
+    )
+    show_item.show = ShowORM(media_item_id=show_item.id, tmdb_id="999", tvdb_id="555")
+
+    episode_item = _build_item(
+        item_id="episode-1",
+        state=ItemState.COMPLETED,
+        item_type="movie",
+        title="Wrong Episode Title",
+        aired_at="2026-03-15T10:00:00+00:00",
+    )
+    episode_item.attributes["show_title"] = "Metadata Show"
+    episode_item.attributes["parent_ids"] = {"tmdb_id": "111", "tvdb_id": "222"}
+    season = SeasonORM(media_item_id="season-1", season_number=3, show=show_item.show)
+    episode_item.episode = EpisodeORM(
+        media_item_id=episode_item.id,
+        episode_number=7,
+        tmdb_id="episode-tmdb",
+        tvdb_id="episode-tvdb",
+        season=season,
+    )
+
+    service = MediaService(
+        db=cast(DatabaseRuntime, _ProjectionRuntime([episode_item, show_item])),
+        event_bus=EventBus(),
+    )
+
+    projection = asyncio.run(service.get_calendar())
+
+    assert projection[0].item_type == "episode"
+    assert projection[0].title == "Canonical Show"
+    assert projection[0].tmdb_id == "999"
+    assert projection[0].tvdb_id == "555"
+    assert projection[0].season_number == 3
+    assert projection[0].episode_number == 7
+    assert projection[0].specialization is not None
+    assert projection[0].specialization.parent_ids == ParentIdsRecord(tmdb_id="999", tvdb_id="555")
