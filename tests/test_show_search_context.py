@@ -176,7 +176,7 @@ def _ranked(parsed_title: dict[str, object]) -> RankedTorrent:
     )
 
 
-def test_rank_streams_post_filter_rejects_wrong_season(monkeypatch: Any) -> None:
+def test_rank_streams_post_filter_rejects_wrong_season() -> None:
     item = MediaItemRecord(
         id="episode-1",
         external_ref="tvdb:1",
@@ -185,19 +185,6 @@ def test_rank_streams_post_filter_rejects_wrong_season(monkeypatch: Any) -> None
         attributes={"item_type": "episode", "season_number": 2, "episode_number": 1},
     )
     wrong = _FakeStream(id="stream-1", raw_title="Show.Title.S01E01", parsed_title={"season": 1, "episode": 1})
-
-    class _FakeRTN:
-        def __init__(self, _profile: Any) -> None:
-            pass
-
-        def rank_torrent(self, _parsed: Any, **_kwargs: Any) -> RankedTorrent:
-            return _ranked(wrong.parsed_title)
-
-        def sort_torrents(self, results: list[RankedTorrent], *, bucket_limit: int | None = None) -> list[RankedTorrent]:
-            _ = bucket_limit
-            return results
-
-    monkeypatch.setattr(tasks, "RTN", _FakeRTN)
 
     validation = tasks._post_rank_expected_scope_reason(item, wrong)
     assert validation == "season_mismatch"
