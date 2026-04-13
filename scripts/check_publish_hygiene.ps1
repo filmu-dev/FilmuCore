@@ -110,10 +110,7 @@ if ($isReleasePleaseBranch) {
 }
 else {
     foreach ($path in $changedPaths) {
-        if ($path -in $releaseManagedPaths[0..1]) {
-            $violations.Add($path)
-        }
-        elseif ($path -eq '.release-please-manifest.json') {
+        if ($path -eq '.release-please-manifest.json') {
             $violations.Add($path)
         }
     }
