@@ -422,6 +422,7 @@ def _build_settings() -> Settings:
         FILMU_PY_API_KEY=SecretStr("a" * 32),
         FILMU_PY_POSTGRES_DSN="postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
         FILMU_PY_REDIS_URL=AnyUrl("redis://localhost:6379/0"),
+        FILMU_PY_ARQ_ENABLED=False,
         FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
         FILMU_PY_LOG_LEVEL="INFO",
         FILMU_PY_SERVICE_NAME="filmu-python-test",
@@ -1274,7 +1275,7 @@ def test_graphql_operator_queries_expose_runtime_queue_and_metadata_history() ->
     }
     assert payload["workerQueueStatus"] == {
         "queueName": "filmu-py",
-        "arqEnabled": True,
+        "arqEnabled": False,
         "totalJobs": 2,
         "readyJobs": 1,
         "deferredJobs": 1,
