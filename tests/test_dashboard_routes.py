@@ -16,6 +16,8 @@ from pydantic import AnyUrl, SecretStr
 from redis.exceptions import ResponseError
 
 from filmu_py.api.router import create_api_router
+from filmu_py.api.routes import default as default_routes
+from filmu_py.api.routes import stream as stream_routes
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.chunk_engine import ChunkCache
@@ -1460,7 +1462,26 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
     assert "records" in audit_response.json()
 
 
-def test_operations_governance_route_returns_enterprise_slice_posture() -> None:
+def test_operations_governance_route_returns_enterprise_slice_posture(
+    monkeypatch: Any,
+) -> None:
+    playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
+    playback_gate_governance.update(
+        {
+            "playback_gate_snapshot_available": 1,
+            "playback_gate_gate_mode": "strict",
+            "playback_gate_rollout_readiness": "blocked",
+            "playback_gate_rollout_reasons": ["playback_gate_failed_or_incomplete"],
+            "playback_gate_rollout_next_action": "resolve_failed_playback_gate_proofs",
+            "playback_gate_policy_validation_status": "unverified",
+        }
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "_playback_gate_governance_snapshot",
+        lambda: dict(playback_gate_governance),
+    )
+
     client = _build_client(arq_enabled=True)
 
     response = client.get(
