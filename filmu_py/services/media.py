@@ -451,12 +451,45 @@ def _projection_item_load_options() -> tuple[object, ...]:
     )
 
 
+def _build_compatibility_metadata(
+    attributes: dict[str, object],
+    *,
+    specialization: MediaItemSpecializationRecord,
+) -> dict[str, object]:
+    """Return compatibility metadata normalized to the persisted specialization seam."""
+
+    metadata = dict(attributes)
+    metadata["item_type"] = specialization.item_type
+    if specialization.tmdb_id is not None:
+        metadata["tmdb_id"] = specialization.tmdb_id
+    if specialization.tvdb_id is not None:
+        metadata["tvdb_id"] = specialization.tvdb_id
+    if specialization.imdb_id is not None:
+        metadata["imdb_id"] = specialization.imdb_id
+    if specialization.parent_ids is not None:
+        metadata["parent_ids"] = {
+            "tmdb_id": specialization.parent_ids.tmdb_id,
+            "tvdb_id": specialization.parent_ids.tvdb_id,
+        }
+    if specialization.show_title is not None:
+        metadata["show_title"] = specialization.show_title
+    if specialization.season_number is not None:
+        metadata["season_number"] = specialization.season_number
+    if specialization.episode_number is not None:
+        metadata["episode_number"] = specialization.episode_number
+    return metadata
+
+
 def _build_summary_record(item: MediaItemORM, *, extended: bool) -> MediaItemSummaryRecord:
     """Map one ORM item into the current REST compatibility summary shape."""
 
     attributes = cast(dict[str, object], item.attributes or {})
     specialization = _build_specialization_record(item)
-    metadata = attributes if extended else None
+    metadata = (
+        _build_compatibility_metadata(attributes, specialization=specialization)
+        if extended
+        else None
+    )
     next_retry_at = _effective_next_retry_at(item.next_retry_at)
     return MediaItemSummaryRecord(
         id=item.id,
