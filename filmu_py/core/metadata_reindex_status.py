@@ -245,7 +245,7 @@ class MetadataReindexStatusStore:
             lrange(f"{_HISTORY_KEY_PREFIX}{self.queue_name}", 0, max(0, limit - 1))
         )
         history: list[MetadataReindexHistoryPoint] = []
-        for row in cast(list[object], rows):
+        for row in cast(list[object], rows or []):
             raw = row.decode("utf-8") if isinstance(row, bytes) else str(row)
             try:
                 payload = cast(dict[str, Any], json.loads(raw))

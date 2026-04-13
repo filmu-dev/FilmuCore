@@ -771,6 +771,17 @@ def test_metadata_reindex_status_store_updates_metrics() -> None:
     assert history[0].outcome == "warning"
 
 
+def test_metadata_reindex_status_store_history_tolerates_none_rows() -> None:
+    class _NoneHistoryRedis(DummyRedis):
+        async def lrange(self, key: str, start: int, stop: int) -> None:
+            _ = (key, start, stop)
+            return None
+
+    history = asyncio.run(MetadataReindexStatusStore(_NoneHistoryRedis(), queue_name="filmu-py").history(limit=5))
+
+    assert history == []
+
+
 def test_graphql_metrics_track_successful_operations() -> None:
     operations_before = _counter_value(
         GRAPHQL_OPERATIONS_TOTAL,
