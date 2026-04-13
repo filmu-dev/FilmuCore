@@ -13,6 +13,7 @@ import pytest
 from arq import Retry
 from arq.jobs import JobStatus
 
+from filmu_py import config as config_module
 from filmu_py.config import Settings, reset_runtime_settings
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
@@ -26,6 +27,7 @@ from filmu_py.db.models import (
 )
 from filmu_py.plugins import ExternalIdentifiers, ScraperSearchInput
 from filmu_py.plugins import ScraperResult as PluginScraperResult
+from filmu_py.services import media as media_service_module
 from filmu_py.services.media import (
     CompletionStatus,
     EnrichmentResult,
@@ -488,7 +490,11 @@ def _worker_test_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setenv("FILMU_PY_REDIS_URL", "redis://localhost:6379/0")
     reset_runtime_settings()
-    monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+    settings = _build_worker_settings()
+    monkeypatch.setattr(config_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(media_service_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(stage_isolation, "get_settings", lambda: settings)
+    monkeypatch.setattr(tasks, "get_settings", lambda: settings)
 
     async def _no_persisted_settings(_db: Any) -> None:
         return None
