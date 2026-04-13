@@ -2461,7 +2461,7 @@ async def get_stream_status(
         heavy_stage_policy.exit_ready(
             arq_enabled=resources.settings.arq_enabled,
             refresh_dispatch_mode=resources.settings.stream.refresh_dispatch_mode,
-            queued_refresh_ready=(
+            queued_refresh_ready=bool(
                 resources.settings.stream.refresh_dispatch_mode != "queued"
                 or (resources.arq_redis is not None and queued_refresh_controllers_attached)
             ),

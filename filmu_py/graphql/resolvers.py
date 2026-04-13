@@ -10,9 +10,10 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import PurePosixPath
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import strawberry
+from strawberry.scalars import JSON
 from strawberry.types import Info
 
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
@@ -22,7 +23,6 @@ from filmu_py.db.models import StreamORM
 from filmu_py.graphql.deps import GraphQLContext
 from filmu_py.graphql.types import (
     GQLActiveStream,
-    GQLActiveStreamRole,
     GQLActiveStreamOwner,
     GQLCalendarEntry,
     GQLFilmuSettings,
@@ -35,9 +35,9 @@ from filmu_py.graphql.types import (
     GQLMediaItemDetail,
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
-    GQLPlaybackAttachment,
-    GQLPersistPlaybackAttachmentControlResult,
     GQLPersistMediaEntryControlResult,
+    GQLPersistPlaybackAttachmentControlResult,
+    GQLPlaybackAttachment,
     GQLPlaybackRefreshTriggerResult,
     GQLQueueAlert,
     GQLRecoveryMechanism,
@@ -48,10 +48,10 @@ from filmu_py.graphql.types import (
     GQLRuntimeLifecycleSnapshot,
     GQLRuntimeLifecycleTransition,
     GQLStreamCandidate,
+    GQLVfsBlockedItem,
     GQLVfsCatalogEntry,
     GQLVfsCatalogStats,
     GQLVfsCorrelationKeys,
-    GQLVfsBlockedItem,
     GQLVfsDirectoryDetail,
     GQLVfsDirectoryListing,
     GQLVfsFileDetail,
@@ -61,8 +61,8 @@ from filmu_py.graphql.types import (
     ItemActionInput,
     ItemStateChangedEvent,
     MediaKind,
-    PersistPlaybackAttachmentControlInput,
     PersistMediaEntryControlInput,
+    PersistPlaybackAttachmentControlInput,
     RequestItemInput,
     RequestItemResult,
     ResetItemResult,
@@ -85,8 +85,8 @@ from filmu_py.services.playback import (
     AppScopedDirectPlaybackRefreshTriggerResult,
     AppScopedHlsFailedLeaseRefreshTriggerResult,
     AppScopedHlsRestrictedFallbackRefreshTriggerResult,
-    PersistedPlaybackAttachmentControlMutationResult,
     PersistedMediaEntryControlMutationResult,
+    PersistedPlaybackAttachmentControlMutationResult,
     trigger_direct_playback_refresh_from_resources,
     trigger_hls_failed_lease_refresh_from_resources,
     trigger_hls_restricted_fallback_refresh_from_resources,
@@ -265,11 +265,12 @@ def _build_vfs_catalog_stats(snapshot: VfsCatalogSnapshot) -> GQLVfsCatalogStats
 
 
 def _build_vfs_blocked_item(item: object) -> GQLVfsBlockedItem:
+    typed_item: Any = item
     return GQLVfsBlockedItem(
-        item_id=str(getattr(item, "item_id")),
-        external_ref=str(getattr(item, "external_ref")),
-        title=str(getattr(item, "title")),
-        reason=str(getattr(item, "reason")),
+        item_id=str(typed_item.item_id),
+        external_ref=str(typed_item.external_ref),
+        title=str(typed_item.title),
+        reason=str(typed_item.reason),
     )
 
 
@@ -338,48 +339,53 @@ def _queue_redis(info: Info[GraphQLContext, object]) -> object:
 
 
 def _build_queue_alert(alert: object) -> GQLQueueAlert:
+    typed_alert: Any = alert
     return GQLQueueAlert(
-        code=str(getattr(alert, "code")),
-        severity=str(getattr(alert, "severity")),
-        message=str(getattr(alert, "message")),
+        code=str(typed_alert.code),
+        severity=str(typed_alert.severity),
+        message=str(typed_alert.message),
     )
 
 
 def _build_worker_queue_status(info: Info[GraphQLContext, object], snapshot: object) -> GQLWorkerQueueStatus:
+    typed_snapshot: Any = snapshot
     return GQLWorkerQueueStatus(
-        queue_name=str(getattr(snapshot, "queue_name")),
+        queue_name=str(typed_snapshot.queue_name),
         arq_enabled=bool(info.context.resources.settings.arq_enabled),
-        observed_at=str(getattr(snapshot, "observed_at")),
-        total_jobs=int(getattr(snapshot, "total_jobs")),
-        ready_jobs=int(getattr(snapshot, "ready_jobs")),
-        deferred_jobs=int(getattr(snapshot, "deferred_jobs")),
-        in_progress_jobs=int(getattr(snapshot, "in_progress_jobs")),
-        retry_jobs=int(getattr(snapshot, "retry_jobs")),
-        result_jobs=int(getattr(snapshot, "result_jobs")),
-        dead_letter_jobs=int(getattr(snapshot, "dead_letter_jobs")),
-        alert_level=str(getattr(snapshot, "alert_level")),
-        alerts=[_build_queue_alert(alert) for alert in getattr(snapshot, "alerts")],
-        oldest_ready_age_seconds=getattr(snapshot, "oldest_ready_age_seconds"),
-        next_scheduled_in_seconds=getattr(snapshot, "next_scheduled_in_seconds"),
-        dead_letter_oldest_age_seconds=getattr(snapshot, "dead_letter_oldest_age_seconds"),
-        dead_letter_reason_counts=dict(getattr(snapshot, "dead_letter_reason_counts")),
+        observed_at=str(typed_snapshot.observed_at),
+        total_jobs=int(typed_snapshot.total_jobs),
+        ready_jobs=int(typed_snapshot.ready_jobs),
+        deferred_jobs=int(typed_snapshot.deferred_jobs),
+        in_progress_jobs=int(typed_snapshot.in_progress_jobs),
+        retry_jobs=int(typed_snapshot.retry_jobs),
+        result_jobs=int(typed_snapshot.result_jobs),
+        dead_letter_jobs=int(typed_snapshot.dead_letter_jobs),
+        alert_level=str(typed_snapshot.alert_level),
+        alerts=[_build_queue_alert(alert) for alert in typed_snapshot.alerts],
+        oldest_ready_age_seconds=typed_snapshot.oldest_ready_age_seconds,
+        next_scheduled_in_seconds=typed_snapshot.next_scheduled_in_seconds,
+        dead_letter_oldest_age_seconds=typed_snapshot.dead_letter_oldest_age_seconds,
+        dead_letter_reason_counts=cast(
+            JSON, dict(typed_snapshot.dead_letter_reason_counts)
+        ),
     )
 
 
 def _build_worker_queue_history_point(point: object) -> GQLWorkerQueueHistoryPoint:
+    typed_point: Any = point
     return GQLWorkerQueueHistoryPoint(
-        observed_at=str(getattr(point, "observed_at")),
-        total_jobs=int(getattr(point, "total_jobs")),
-        ready_jobs=int(getattr(point, "ready_jobs")),
-        deferred_jobs=int(getattr(point, "deferred_jobs")),
-        in_progress_jobs=int(getattr(point, "in_progress_jobs")),
-        retry_jobs=int(getattr(point, "retry_jobs")),
-        dead_letter_jobs=int(getattr(point, "dead_letter_jobs")),
-        oldest_ready_age_seconds=getattr(point, "oldest_ready_age_seconds"),
-        next_scheduled_in_seconds=getattr(point, "next_scheduled_in_seconds"),
-        alert_level=str(getattr(point, "alert_level")),
-        dead_letter_oldest_age_seconds=getattr(point, "dead_letter_oldest_age_seconds"),
-        dead_letter_reason_counts=dict(getattr(point, "dead_letter_reason_counts")),
+        observed_at=str(typed_point.observed_at),
+        total_jobs=int(typed_point.total_jobs),
+        ready_jobs=int(typed_point.ready_jobs),
+        deferred_jobs=int(typed_point.deferred_jobs),
+        in_progress_jobs=int(typed_point.in_progress_jobs),
+        retry_jobs=int(typed_point.retry_jobs),
+        dead_letter_jobs=int(typed_point.dead_letter_jobs),
+        oldest_ready_age_seconds=typed_point.oldest_ready_age_seconds,
+        next_scheduled_in_seconds=typed_point.next_scheduled_in_seconds,
+        alert_level=str(typed_point.alert_level),
+        dead_letter_oldest_age_seconds=typed_point.dead_letter_oldest_age_seconds,
+        dead_letter_reason_counts=cast(JSON, dict(typed_point.dead_letter_reason_counts)),
     )
 
 
@@ -387,154 +393,162 @@ def _build_metadata_reindex_status(
     info: Info[GraphQLContext, object],
     point: object | None,
 ) -> GQLMetadataReindexStatus:
+    typed_point: Any | None = point
     return GQLMetadataReindexStatus(
         queue_name=_queue_name(info),
         schedule_offset_minutes=info.context.resources.settings.indexer.schedule_offset_minutes,
-        has_history=point is not None,
-        observed_at="" if point is None else str(getattr(point, "observed_at")),
-        processed=0 if point is None else int(getattr(point, "processed")),
-        queued=0 if point is None else int(getattr(point, "queued")),
-        reconciled=0 if point is None else int(getattr(point, "reconciled")),
-        skipped_active=0 if point is None else int(getattr(point, "skipped_active")),
-        failed=0 if point is None else int(getattr(point, "failed")),
-        repair_attempted=0 if point is None else int(getattr(point, "repair_attempted")),
-        repair_enriched=0 if point is None else int(getattr(point, "repair_enriched")),
+        has_history=typed_point is not None,
+        observed_at="" if typed_point is None else str(typed_point.observed_at),
+        processed=0 if typed_point is None else int(typed_point.processed),
+        queued=0 if typed_point is None else int(typed_point.queued),
+        reconciled=0 if typed_point is None else int(typed_point.reconciled),
+        skipped_active=0 if typed_point is None else int(typed_point.skipped_active),
+        failed=0 if typed_point is None else int(typed_point.failed),
+        repair_attempted=0 if typed_point is None else int(typed_point.repair_attempted),
+        repair_enriched=0 if typed_point is None else int(typed_point.repair_enriched),
         repair_skipped_no_tmdb_id=(
-            0 if point is None else int(getattr(point, "repair_skipped_no_tmdb_id"))
+            0 if typed_point is None else int(typed_point.repair_skipped_no_tmdb_id)
         ),
-        repair_failed=0 if point is None else int(getattr(point, "repair_failed")),
-        repair_requeued=0 if point is None else int(getattr(point, "repair_requeued")),
-        repair_skipped_active=0 if point is None else int(getattr(point, "repair_skipped_active")),
-        outcome="ok" if point is None else str(getattr(point, "outcome")),
-        run_failed=False if point is None else bool(getattr(point, "run_failed")),
-        last_error=None if point is None else getattr(point, "last_error"),
+        repair_failed=0 if typed_point is None else int(typed_point.repair_failed),
+        repair_requeued=0 if typed_point is None else int(typed_point.repair_requeued),
+        repair_skipped_active=0 if typed_point is None else int(typed_point.repair_skipped_active),
+        outcome="ok" if typed_point is None else str(typed_point.outcome),
+        run_failed=False if typed_point is None else bool(typed_point.run_failed),
+        last_error=None if typed_point is None else typed_point.last_error,
     )
 
 
 def _build_metadata_reindex_history_point(point: object) -> GQLMetadataReindexHistoryPoint:
+    typed_point: Any = point
     return GQLMetadataReindexHistoryPoint(
-        observed_at=str(getattr(point, "observed_at")),
-        processed=int(getattr(point, "processed")),
-        queued=int(getattr(point, "queued")),
-        reconciled=int(getattr(point, "reconciled")),
-        skipped_active=int(getattr(point, "skipped_active")),
-        failed=int(getattr(point, "failed")),
-        repair_attempted=int(getattr(point, "repair_attempted")),
-        repair_enriched=int(getattr(point, "repair_enriched")),
-        repair_skipped_no_tmdb_id=int(getattr(point, "repair_skipped_no_tmdb_id")),
-        repair_failed=int(getattr(point, "repair_failed")),
-        repair_requeued=int(getattr(point, "repair_requeued")),
-        repair_skipped_active=int(getattr(point, "repair_skipped_active")),
-        outcome=str(getattr(point, "outcome")),
-        run_failed=bool(getattr(point, "run_failed")),
-        last_error=getattr(point, "last_error"),
+        observed_at=str(typed_point.observed_at),
+        processed=int(typed_point.processed),
+        queued=int(typed_point.queued),
+        reconciled=int(typed_point.reconciled),
+        skipped_active=int(typed_point.skipped_active),
+        failed=int(typed_point.failed),
+        repair_attempted=int(typed_point.repair_attempted),
+        repair_enriched=int(typed_point.repair_enriched),
+        repair_skipped_no_tmdb_id=int(typed_point.repair_skipped_no_tmdb_id),
+        repair_failed=int(typed_point.repair_failed),
+        repair_requeued=int(typed_point.repair_requeued),
+        repair_skipped_active=int(typed_point.repair_skipped_active),
+        outcome=str(typed_point.outcome),
+        run_failed=bool(typed_point.run_failed),
+        last_error=typed_point.last_error,
     )
 
 
 def _build_playback_attachment(attachment: object) -> GQLPlaybackAttachment:
+    typed_attachment: Any = attachment
     return GQLPlaybackAttachment(
-        id=str(getattr(attachment, "id")),
-        kind=str(getattr(attachment, "kind")),
-        locator=str(getattr(attachment, "locator")),
-        source_key=getattr(attachment, "source_key"),
-        provider=getattr(attachment, "provider"),
-        provider_download_id=getattr(attachment, "provider_download_id"),
-        provider_file_id=getattr(attachment, "provider_file_id"),
-        provider_file_path=getattr(attachment, "provider_file_path"),
-        original_filename=getattr(attachment, "original_filename"),
-        file_size=getattr(attachment, "file_size"),
-        local_path=getattr(attachment, "local_path"),
-        restricted_url=getattr(attachment, "restricted_url"),
-        unrestricted_url=getattr(attachment, "unrestricted_url"),
-        is_preferred=bool(getattr(attachment, "is_preferred")),
-        preference_rank=int(getattr(attachment, "preference_rank")),
-        refresh_state=str(getattr(attachment, "refresh_state")),
-        expires_at=getattr(attachment, "expires_at"),
-        last_refreshed_at=getattr(attachment, "last_refreshed_at"),
-        last_refresh_error=getattr(attachment, "last_refresh_error"),
+        id=str(typed_attachment.id),
+        kind=str(typed_attachment.kind),
+        locator=str(typed_attachment.locator),
+        source_key=typed_attachment.source_key,
+        provider=typed_attachment.provider,
+        provider_download_id=typed_attachment.provider_download_id,
+        provider_file_id=typed_attachment.provider_file_id,
+        provider_file_path=typed_attachment.provider_file_path,
+        original_filename=typed_attachment.original_filename,
+        file_size=typed_attachment.file_size,
+        local_path=typed_attachment.local_path,
+        restricted_url=typed_attachment.restricted_url,
+        unrestricted_url=typed_attachment.unrestricted_url,
+        is_preferred=bool(typed_attachment.is_preferred),
+        preference_rank=int(typed_attachment.preference_rank),
+        refresh_state=str(typed_attachment.refresh_state),
+        expires_at=typed_attachment.expires_at,
+        last_refreshed_at=typed_attachment.last_refreshed_at,
+        last_refresh_error=typed_attachment.last_refresh_error,
     )
 
 
 def _build_resolved_playback_attachment(attachment: object | None) -> GQLResolvedPlaybackAttachment | None:
     if attachment is None:
         return None
+    typed_attachment: Any = attachment
     return GQLResolvedPlaybackAttachment(
-        kind=str(getattr(attachment, "kind")),
-        locator=str(getattr(attachment, "locator")),
-        source_key=str(getattr(attachment, "source_key")),
-        provider=getattr(attachment, "provider"),
-        provider_download_id=getattr(attachment, "provider_download_id"),
-        provider_file_id=getattr(attachment, "provider_file_id"),
-        provider_file_path=getattr(attachment, "provider_file_path"),
-        original_filename=getattr(attachment, "original_filename"),
-        file_size=getattr(attachment, "file_size"),
-        local_path=getattr(attachment, "local_path"),
-        restricted_url=getattr(attachment, "restricted_url"),
-        unrestricted_url=getattr(attachment, "unrestricted_url"),
+        kind=str(typed_attachment.kind),
+        locator=str(typed_attachment.locator),
+        source_key=str(typed_attachment.source_key),
+        provider=typed_attachment.provider,
+        provider_download_id=typed_attachment.provider_download_id,
+        provider_file_id=typed_attachment.provider_file_id,
+        provider_file_path=typed_attachment.provider_file_path,
+        original_filename=typed_attachment.original_filename,
+        file_size=typed_attachment.file_size,
+        local_path=typed_attachment.local_path,
+        restricted_url=typed_attachment.restricted_url,
+        unrestricted_url=typed_attachment.unrestricted_url,
     )
 
 
 def _build_resolved_playback(snapshot: object | None) -> GQLResolvedPlayback | None:
     if snapshot is None:
         return None
+    typed_snapshot: Any = snapshot
     return GQLResolvedPlayback(
-        direct=_build_resolved_playback_attachment(getattr(snapshot, "direct")),
-        hls=_build_resolved_playback_attachment(getattr(snapshot, "hls")),
-        direct_ready=bool(getattr(snapshot, "direct_ready")),
-        hls_ready=bool(getattr(snapshot, "hls_ready")),
-        missing_local_file=bool(getattr(snapshot, "missing_local_file")),
+        direct=_build_resolved_playback_attachment(typed_snapshot.direct),
+        hls=_build_resolved_playback_attachment(typed_snapshot.hls),
+        direct_ready=bool(typed_snapshot.direct_ready),
+        hls_ready=bool(typed_snapshot.hls_ready),
+        missing_local_file=bool(typed_snapshot.missing_local_file),
     )
 
 
 def _build_active_stream_owner(owner: object | None) -> GQLActiveStreamOwner | None:
     if owner is None:
         return None
+    typed_owner: Any = owner
     return GQLActiveStreamOwner(
-        media_entry_index=int(getattr(owner, "media_entry_index")),
-        kind=str(getattr(owner, "kind")),
-        original_filename=getattr(owner, "original_filename"),
-        provider=getattr(owner, "provider"),
-        provider_download_id=getattr(owner, "provider_download_id"),
-        provider_file_id=getattr(owner, "provider_file_id"),
-        provider_file_path=getattr(owner, "provider_file_path"),
+        media_entry_index=int(typed_owner.media_entry_index),
+        kind=str(typed_owner.kind),
+        original_filename=typed_owner.original_filename,
+        provider=typed_owner.provider,
+        provider_download_id=typed_owner.provider_download_id,
+        provider_file_id=typed_owner.provider_file_id,
+        provider_file_path=typed_owner.provider_file_path,
     )
 
 
 def _build_active_stream(active_stream: object | None) -> GQLActiveStream | None:
     if active_stream is None:
         return None
+    typed_active_stream: Any = active_stream
     return GQLActiveStream(
-        direct_ready=bool(getattr(active_stream, "direct_ready")),
-        hls_ready=bool(getattr(active_stream, "hls_ready")),
-        missing_local_file=bool(getattr(active_stream, "missing_local_file")),
-        direct_owner=_build_active_stream_owner(getattr(active_stream, "direct_owner")),
-        hls_owner=_build_active_stream_owner(getattr(active_stream, "hls_owner")),
+        direct_ready=bool(typed_active_stream.direct_ready),
+        hls_ready=bool(typed_active_stream.hls_ready),
+        missing_local_file=bool(typed_active_stream.missing_local_file),
+        direct_owner=_build_active_stream_owner(typed_active_stream.direct_owner),
+        hls_owner=_build_active_stream_owner(typed_active_stream.hls_owner),
     )
 
 
 def _build_media_entry(entry: object) -> GQLMediaEntry:
+    typed_entry: Any = entry
     return GQLMediaEntry(
-        entry_type=str(getattr(entry, "entry_type")),
-        kind=str(getattr(entry, "kind")),
-        original_filename=getattr(entry, "original_filename"),
-        url=getattr(entry, "url"),
-        local_path=getattr(entry, "local_path"),
-        download_url=getattr(entry, "download_url"),
-        unrestricted_url=getattr(entry, "unrestricted_url"),
-        provider=getattr(entry, "provider"),
-        provider_download_id=getattr(entry, "provider_download_id"),
-        provider_file_id=getattr(entry, "provider_file_id"),
-        provider_file_path=getattr(entry, "provider_file_path"),
-        size=getattr(entry, "size"),
-        created=getattr(entry, "created"),
-        modified=getattr(entry, "modified"),
-        refresh_state=str(getattr(entry, "refresh_state")),
-        expires_at=getattr(entry, "expires_at"),
-        last_refreshed_at=getattr(entry, "last_refreshed_at"),
-        last_refresh_error=getattr(entry, "last_refresh_error"),
-        active_for_direct=bool(getattr(entry, "active_for_direct")),
-        active_for_hls=bool(getattr(entry, "active_for_hls")),
-        is_active_stream=bool(getattr(entry, "is_active_stream")),
+        entry_type=str(typed_entry.entry_type),
+        kind=str(typed_entry.kind),
+        original_filename=typed_entry.original_filename,
+        url=typed_entry.url,
+        local_path=typed_entry.local_path,
+        download_url=typed_entry.download_url,
+        unrestricted_url=typed_entry.unrestricted_url,
+        provider=typed_entry.provider,
+        provider_download_id=typed_entry.provider_download_id,
+        provider_file_id=typed_entry.provider_file_id,
+        provider_file_path=typed_entry.provider_file_path,
+        size=typed_entry.size,
+        created=typed_entry.created,
+        modified=typed_entry.modified,
+        refresh_state=str(typed_entry.refresh_state),
+        expires_at=typed_entry.expires_at,
+        last_refreshed_at=typed_entry.last_refreshed_at,
+        last_refresh_error=typed_entry.last_refresh_error,
+        active_for_direct=bool(typed_entry.active_for_direct),
+        active_for_hls=bool(typed_entry.active_for_hls),
+        is_active_stream=bool(typed_entry.is_active_stream),
     )
 
 
@@ -776,10 +790,11 @@ def _build_selected_hls_refresh_trigger_result(
 def _build_persisted_media_entry_control_result(
     result: PersistedMediaEntryControlMutationResult,
 ) -> GQLPersistMediaEntryControlResult:
+    typed_item: Any = result.item
     roles = {
-        str(getattr(active_stream, "role"))
-        for active_stream in getattr(result.item, "active_streams", [])
-        if str(getattr(active_stream, "media_entry_id", "")) == result.media_entry.id
+        str(active_stream.role)
+        for active_stream in typed_item.active_streams
+        if str(active_stream.media_entry_id) == result.media_entry.id
     }
     media_entry_projection = SimpleNamespace(
         entry_type=result.media_entry.entry_type,
@@ -1338,7 +1353,7 @@ class CoreMutationResolver:
                 str(input.item_id),
                 str(input.media_entry_id),
                 active_role=(
-                    cast(GQLActiveStreamRole, input.active_role).value
+                    input.active_role.value
                     if input.active_role is not None
                     else None
                 ),

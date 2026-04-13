@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
 import fnmatch
 import json
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -17,8 +17,6 @@ from pydantic import AnyUrl, SecretStr
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
-from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
-from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.core.runtime_lifecycle import (
     RuntimeLifecycleHealth,
@@ -41,7 +39,6 @@ from filmu_py.services.media import (
     StatsProjection,
 )
 from filmu_py.services.playback import (
-    PersistedPlaybackAttachmentControlMutationResult,
     DirectPlaybackRefreshControlPlaneTriggerResult,
     DirectPlaybackRefreshRecommendation,
     DirectPlaybackRefreshScheduleRequest,
@@ -52,6 +49,7 @@ from filmu_py.services.playback import (
     HlsRestrictedFallbackRefreshResult,
     MediaEntryLeaseRefreshExecution,
     PersistedMediaEntryControlMutationResult,
+    PersistedPlaybackAttachmentControlMutationResult,
 )
 from filmu_py.services.vfs_catalog import (
     VfsCatalogCorrelationKeys,
