@@ -1188,8 +1188,9 @@ async def _maybe_enqueue_next_stage(
             stage_name=cleanup_stage_name,
             job_id=cleanup_job_id,
         )
+    settings = await _resolve_runtime_settings(ctx)
     queue_name_value = ctx.get("queue_name")
-    queue_name = _queue_name(get_settings()) if queue_name_value is None else str(queue_name_value)
+    queue_name = _queue_name(settings) if queue_name_value is None else str(queue_name_value)
     tenant_id = await _resolve_item_tenant_id(ctx, item_id=item_id)
     enqueued = await enqueuer(redis_client, item_id, queue_name, tenant_id)
     _log_downstream_enqueue_result(
@@ -1233,8 +1234,9 @@ async def _maybe_enqueue_parse_stage(
             stage_name=cleanup_stage_name,
             job_id=cleanup_job_id,
         )
+    settings = await _resolve_runtime_settings(ctx)
     queue_name_value = ctx.get("queue_name")
-    queue_name = _queue_name(get_settings()) if queue_name_value is None else str(queue_name_value)
+    queue_name = _queue_name(settings) if queue_name_value is None else str(queue_name_value)
     tenant_id = await _resolve_item_tenant_id(ctx, item_id=item_id)
     enqueued = await enqueue_parse_scrape_results(
         redis_client,
