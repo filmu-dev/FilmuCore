@@ -1179,6 +1179,8 @@ class CalendarItemResponse(BaseModel):
     item_id: str
     tvdb_id: str | None = None
     tmdb_id: str | None = None
+    imdb_id: str | None = None
+    parent_ids: ItemParentIdsResponse | None = None
     show_title: str
     item_type: str
     aired_at: str

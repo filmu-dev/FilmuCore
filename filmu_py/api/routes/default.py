@@ -2682,6 +2682,15 @@ async def get_calendar(
                 item_id=item.item_id,
                 tvdb_id=item.tvdb_id,
                 tmdb_id=item.tmdb_id,
+                imdb_id=item.imdb_id,
+                parent_ids=(
+                    ItemParentIdsResponse(
+                        tmdb_id=item.parent_ids.tmdb_id,
+                        tvdb_id=item.parent_ids.tvdb_id,
+                    )
+                    if item.parent_ids is not None
+                    else None
+                ),
                 show_title=item.show_title,
                 item_type=item.item_type,
                 aired_at=item.aired_at,

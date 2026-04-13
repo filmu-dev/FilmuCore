@@ -55,6 +55,8 @@ class DummyMediaService:
                 item_id="item-1",
                 tmdb_id="123",
                 tvdb_id=None,
+                imdb_id="tt123",
+                parent_ids=None,
                 show_title="Example Movie",
                 item_type="episode",
                 aired_at="2024-01-01T00:00:00+00:00",
@@ -116,6 +118,7 @@ def test_calendar_route_returns_calendar_payload() -> None:
     assert body["data"]["item-1"]["show_title"] == "Example Movie"
     assert body["data"]["item-1"]["season"] == 1
     assert body["data"]["item-1"]["episode"] == 1
+    assert body["data"]["item-1"]["imdb_id"] == "tt123"
 
 
 def test_calendar_route_requires_api_key() -> None:

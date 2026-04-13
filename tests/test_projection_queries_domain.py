@@ -426,3 +426,49 @@ def test_get_calendar_prefers_specialization_hierarchy_over_metadata() -> None:
     assert projection[0].episode_number == 7
     assert projection[0].specialization is not None
     assert projection[0].specialization.parent_ids == ParentIdsRecord(tmdb_id="999", tvdb_id="555")
+
+
+def test_get_calendar_snapshot_exposes_specialization_identity_fields() -> None:
+    show_item = _build_item(
+        item_id="show-snapshot-1",
+        state=ItemState.COMPLETED,
+        item_type="show",
+        title="Canonical Show",
+    )
+    show_item.show = ShowORM(
+        media_item_id=show_item.id,
+        tmdb_id="999",
+        tvdb_id="555",
+        imdb_id="tt-show",
+    )
+
+    episode_item = _build_item(
+        item_id="episode-snapshot-1",
+        state=ItemState.COMPLETED,
+        item_type="movie",
+        title="Wrong Episode Title",
+        aired_at="2026-03-15T10:00:00+00:00",
+    )
+    season = SeasonORM(media_item_id="season-snapshot-1", season_number=3, show=show_item.show)
+    episode_item.episode = EpisodeORM(
+        media_item_id=episode_item.id,
+        episode_number=7,
+        tmdb_id="episode-tmdb",
+        tvdb_id="episode-tvdb",
+        imdb_id="tt-episode",
+        season=season,
+    )
+
+    service = MediaService(
+        db=cast(DatabaseRuntime, _ProjectionRuntime([episode_item, show_item])),
+        event_bus=EventBus(),
+    )
+
+    snapshot = asyncio.run(service.get_calendar_snapshot())
+
+    assert snapshot["episode-snapshot-1"].tmdb_id == "999"
+    assert snapshot["episode-snapshot-1"].tvdb_id == "555"
+    assert snapshot["episode-snapshot-1"].imdb_id == "tt-episode"
+    assert snapshot["episode-snapshot-1"].parent_ids == ParentIdsRecord(
+        tmdb_id="999", tvdb_id="555"
+    )
