@@ -52,8 +52,8 @@ def _assert_chunks_cover_request(
     request_end = min(offset + size, file_size) - 1
     first = chunks[0]
     last = chunks[-1]
-    first_start = int(getattr(first, "start"))
-    last_end = int(getattr(last, "end"))
+    first_start = int(first.start)
+    last_end = int(last.end)
     assert first_start <= offset
     assert last_end >= request_end
 

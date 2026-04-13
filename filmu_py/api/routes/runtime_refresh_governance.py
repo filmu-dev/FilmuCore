@@ -11,9 +11,11 @@ class _RouteRefreshPendingResult(Protocol):
 
 
 class _RouteRefreshController(Protocol):
-    def has_pending(self, item_identifier: str) -> bool: ...
+    def has_pending(self, item_identifier: str) -> bool:
+        pass
 
-    def get_last_result(self, item_identifier: str) -> _RouteRefreshPendingResult | None: ...
+    def get_last_result(self, item_identifier: str) -> _RouteRefreshPendingResult | None:
+        pass
 
 
 DIRECT_PLAYBACK_TRIGGER_GOVERNANCE = {

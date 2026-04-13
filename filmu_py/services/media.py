@@ -3041,7 +3041,6 @@ def _build_requested_episode_scope(
 
 
 
-_infer_season_number_from_path = _media_path_inference.infer_season_number_from_path
 _infer_season_range_from_path = _media_path_inference.infer_season_range_from_path
 _infer_episode_number_from_path = _media_path_inference.infer_episode_number_from_path
 

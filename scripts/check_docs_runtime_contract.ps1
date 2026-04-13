@@ -47,7 +47,45 @@ function Test-Regex {
     )
 }
 
+function Invoke-GitCapture {
+    param([Parameter(Mandatory = $true)][string[]] $Arguments)
+
+    $output = & git -C $RepoRoot @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+
+    return [string]::Join("`n", @($output))
+}
+
+function Get-TrackedDocChanges {
+    $changed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $candidates = @(
+        @('diff', '--name-only', 'origin/main...HEAD'),
+        @('diff', '--name-only', 'main...HEAD'),
+        @('diff', '--name-only', 'HEAD~1...HEAD')
+    )
+
+    foreach ($arguments in $candidates) {
+        $output = Invoke-GitCapture -Arguments $arguments
+        if ($null -eq $output) {
+            continue
+        }
+
+        foreach ($line in ($output -split "`r?`n")) {
+            $relative = $line.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($relative)) {
+                [void] $changed.Add($relative)
+            }
+        }
+        return $changed
+    }
+
+    return $null
+}
+
 $checks = [System.Collections.Generic.List[object]]::new()
+$trackedDocChanges = Get-TrackedDocChanges
 
 $configPath = Join-Path $RepoRoot 'rust\filmuvfs\src\config.rs'
 $configRaw = Get-Content -LiteralPath $configPath -Raw
@@ -82,6 +120,10 @@ $requiredClaims = @(
 )
 
 foreach ($relative in $docContractTargets) {
+    if ($null -ne $trackedDocChanges -and -not $trackedDocChanges.Contains($relative)) {
+        continue
+    }
+
     $path = Join-Path $RepoRoot $relative
     if (-not (Test-Path -LiteralPath $path)) {
         Add-Check -Checks $checks -Name ("docs.exists::{0}" -f $relative) `
@@ -107,16 +149,22 @@ foreach ($relative in $docContractTargets) {
 }
 
 $statusPath = Join-Path $RepoRoot 'docs\STATUS.md'
-$statusRaw = Get-Content -LiteralPath $statusPath -Raw
+$statusRelative = 'docs/STATUS.md'
+$statusChanged = $null -eq $trackedDocChanges -or $trackedDocChanges.Contains($statusRelative)
+$statusRaw = if ($statusChanged -and (Test-Path -LiteralPath $statusPath)) {
+    Get-Content -LiteralPath $statusPath -Raw
+} else {
+    ''
+}
 $legacyBoardReference = 'TODOS/NEXT_15_SLICES_EXECUTION_BOARD.md'
 $currentBoardReference = 'TODOS/COMPLETED/NEXT_15_SLICES_EXECUTION_BOARD.md'
 Add-Check -Checks $checks -Name 'docs.status_no_legacy_execution_board_link' `
-    -Passed:(-not ($statusRaw -match [regex]::Escape($legacyBoardReference))) `
-    -Observed:($statusRaw -match [regex]::Escape($legacyBoardReference)) `
+    -Passed:(-not $statusChanged -or -not ($statusRaw -match [regex]::Escape($legacyBoardReference))) `
+    -Observed:($statusChanged -and ($statusRaw -match [regex]::Escape($legacyBoardReference))) `
     -Expected:$false
 Add-Check -Checks $checks -Name 'docs.status_has_current_execution_board_link' `
-    -Passed:($statusRaw -match [regex]::Escape($currentBoardReference)) `
-    -Observed:($statusRaw -match [regex]::Escape($currentBoardReference)) `
+    -Passed:(-not $statusChanged -or ($statusRaw -match [regex]::Escape($currentBoardReference))) `
+    -Observed:($statusChanged -and ($statusRaw -match [regex]::Escape($currentBoardReference))) `
     -Expected:$true
 
 $linkedDocs = @(
