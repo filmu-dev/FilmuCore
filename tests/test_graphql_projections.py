@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import fnmatch
+import json
 from typing import Any, cast
 
+from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
@@ -13,7 +16,14 @@ from pydantic import AnyUrl, SecretStr
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
+from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.rate_limiter import DistributedRateLimiter
+from filmu_py.core.runtime_lifecycle import (
+    RuntimeLifecycleHealth,
+    RuntimeLifecyclePhase,
+    RuntimeLifecycleState,
+)
 from filmu_py.db.models import StreamORM
 from filmu_py.graphql import GraphQLPluginRegistry, create_graphql_router
 from filmu_py.resources import AppResources
@@ -48,6 +58,82 @@ class DummyRedis:
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
         return None
+
+
+@dataclass
+class FakeOperatorRedis(DummyRedis):
+    zsets: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
+    lists: dict[str, list[str]] = field(default_factory=dict)
+    keys: set[str] = field(default_factory=set)
+
+    def zcard(self, name: str) -> int:
+        return len(self.zsets.get(name, []))
+
+    def zcount(self, name: str, minimum: str | int, maximum: str | int) -> int:
+        return len(self._filter_scores(self.zsets.get(name, []), minimum, maximum))
+
+    def zrangebyscore(
+        self,
+        name: str,
+        minimum: str | int,
+        maximum: str | int,
+        *,
+        start: int = 0,
+        num: int = 1,
+        withscores: bool = True,
+    ) -> list[tuple[str, float]]:
+        _ = withscores
+        rows = self._filter_scores(self.zsets.get(name, []), minimum, maximum)
+        ordered = sorted(rows, key=lambda item: item[1])
+        return ordered[start : start + num]
+
+    def scan_iter(self, *, match: str) -> list[str]:
+        return [key for key in sorted(self.keys) if fnmatch.fnmatch(key, match)]
+
+    def llen(self, name: str) -> int:
+        return len(self.lists.get(name, []))
+
+    def lrange(self, name: str, start: int, stop: int) -> list[str]:
+        values = list(self.lists.get(name, []))
+        if not values:
+            return []
+        end = None if stop == -1 else stop + 1
+        return values[start:end]
+
+    def lpush(self, name: str, value: str) -> int:
+        values = self.lists.setdefault(name, [])
+        values.insert(0, value)
+        return len(values)
+
+    def ltrim(self, name: str, start: int, stop: int) -> bool:
+        values = list(self.lists.get(name, []))
+        end = None if stop == -1 else stop + 1
+        self.lists[name] = values[start:end]
+        return True
+
+    @staticmethod
+    def _filter_scores(
+        rows: list[tuple[str, float]],
+        minimum: str | int,
+        maximum: str | int,
+    ) -> list[tuple[str, float]]:
+        def _matches_lower(score: float, boundary: str | int) -> bool:
+            if boundary == "-inf":
+                return True
+            if isinstance(boundary, str) and boundary.startswith("("):
+                return score > float(boundary[1:])
+            return score >= float(boundary)
+
+        def _matches_upper(score: float, boundary: str | int) -> bool:
+            if boundary == "+inf":
+                return True
+            if isinstance(boundary, str) and boundary.startswith("("):
+                return score < float(boundary[1:])
+            return score <= float(boundary)
+
+        return [
+            row for row in rows if _matches_lower(row[1], minimum) and _matches_upper(row[1], maximum)
+        ]
 
 
 class DummyDatabaseRuntime:
@@ -243,19 +329,22 @@ def _build_client(
     media_service: FakeMediaService,
     *,
     vfs_catalog_supplier: FakeVfsCatalogSupplier | None = None,
+    redis: DummyRedis | None = None,
+    runtime_lifecycle: RuntimeLifecycleState | None = None,
 ) -> TestClient:
     settings = _build_settings()
-    redis = DummyRedis()
+    runtime_redis = redis or DummyRedis()
     app = FastAPI()
     resources = AppResources(
         settings=settings,
-        redis=redis,  # type: ignore[arg-type]
-        cache=CacheManager(redis=redis, namespace="test"),  # type: ignore[arg-type]
-        rate_limiter=DistributedRateLimiter(redis=redis),  # type: ignore[arg-type]
+        redis=runtime_redis,  # type: ignore[arg-type]
+        cache=CacheManager(redis=runtime_redis, namespace="test"),  # type: ignore[arg-type]
+        rate_limiter=DistributedRateLimiter(redis=runtime_redis),  # type: ignore[arg-type]
         event_bus=EventBus(),
         db=DummyDatabaseRuntime(),  # type: ignore[arg-type]
         media_service=media_service,  # type: ignore[arg-type]
         graphql_plugin_registry=GraphQLPluginRegistry(),
+        runtime_lifecycle=runtime_lifecycle or RuntimeLifecycleState(),
         vfs_catalog_supplier=vfs_catalog_supplier,  # type: ignore[arg-type]
     )
     app.state.resources = resources
@@ -374,6 +463,125 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
             season_number=2,
             episode_number=7,
         ),
+        playback_attachments=[
+            cast(
+                Any,
+                type(
+                    "Attachment",
+                    (),
+                    {
+                        "id": "attachment-1",
+                        "kind": "direct",
+                        "locator": "https://cdn.example.com/direct",
+                        "source_key": "persisted",
+                        "provider": "realdebrid",
+                        "provider_download_id": "torrent-123",
+                        "provider_file_id": "file-123",
+                        "provider_file_path": "/downloads/Example.Movie.mkv",
+                        "original_filename": "Example.Movie.mkv",
+                        "file_size": 123456789,
+                        "local_path": None,
+                        "restricted_url": "https://api.real-debrid.com/restricted",
+                        "unrestricted_url": "https://cdn.example.com/direct",
+                        "is_preferred": True,
+                        "preference_rank": 1,
+                        "refresh_state": "ready",
+                        "expires_at": "2026-03-15T12:00:00+00:00",
+                        "last_refreshed_at": "2026-03-15T11:00:00+00:00",
+                        "last_refresh_error": None,
+                    },
+                )(),
+            )
+        ],
+        resolved_playback=cast(
+            Any,
+            type(
+                "ResolvedPlayback",
+                (),
+                {
+                    "direct": type(
+                        "ResolvedAttachment",
+                        (),
+                        {
+                            "kind": "direct",
+                            "locator": "https://cdn.example.com/direct",
+                            "source_key": "persisted",
+                            "provider": "realdebrid",
+                            "provider_download_id": "torrent-123",
+                            "provider_file_id": "file-123",
+                            "provider_file_path": "/downloads/Example.Movie.mkv",
+                            "original_filename": "Example.Movie.mkv",
+                            "file_size": 123456789,
+                            "local_path": None,
+                            "restricted_url": None,
+                            "unrestricted_url": "https://cdn.example.com/direct",
+                        },
+                    )(),
+                    "hls": None,
+                    "direct_ready": True,
+                    "hls_ready": False,
+                    "missing_local_file": False,
+                },
+            )(),
+        ),
+        active_stream=cast(
+            Any,
+            type(
+                "ActiveStream",
+                (),
+                {
+                    "direct_ready": True,
+                    "hls_ready": False,
+                    "missing_local_file": False,
+                    "direct_owner": type(
+                        "ActiveOwner",
+                        (),
+                        {
+                            "media_entry_index": 0,
+                            "kind": "remote-direct",
+                            "original_filename": "Example.Movie.mkv",
+                            "provider": "realdebrid",
+                            "provider_download_id": "torrent-123",
+                            "provider_file_id": "file-123",
+                            "provider_file_path": "/downloads/Example.Movie.mkv",
+                        },
+                    )(),
+                    "hls_owner": None,
+                },
+            )(),
+        ),
+        media_entries=[
+            cast(
+                Any,
+                type(
+                    "MediaEntry",
+                    (),
+                    {
+                        "entry_type": "media",
+                        "kind": "remote-direct",
+                        "original_filename": "Example.Movie.mkv",
+                        "url": "https://cdn.example.com/direct",
+                        "local_path": None,
+                        "download_url": "https://api.real-debrid.com/restricted",
+                        "unrestricted_url": "https://cdn.example.com/direct",
+                        "provider": "realdebrid",
+                        "provider_download_id": "torrent-123",
+                        "provider_file_id": "file-123",
+                        "provider_file_path": "/downloads/Example.Movie.mkv",
+                        "size": 123456789,
+                        "created": "2026-03-15T10:30:00+00:00",
+                        "modified": "2026-03-15T11:00:00+00:00",
+                        "refresh_state": "ready",
+                        "expires_at": "2026-03-15T12:00:00+00:00",
+                        "last_refreshed_at": "2026-03-15T11:00:00+00:00",
+                        "last_refresh_error": None,
+                        "active_for_direct": True,
+                        "active_for_hls": False,
+                        "is_active_stream": True,
+                    },
+                )(),
+            )
+        ],
     )
     selected_stream = StreamORM(
         id="stream-1",
@@ -415,7 +623,7 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
     response = client.post(
         "/graphql",
         json={
-            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } } }'
+            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } playbackAttachments { id kind sourceKey provider providerDownloadId originalFilename fileSize refreshState } resolvedPlayback { directReady hlsReady missingLocalFile direct { kind locator sourceKey providerDownloadId originalFilename } } activeStream { directReady hlsReady missingLocalFile directOwner { mediaEntryIndex kind providerDownloadId originalFilename } } mediaEntries { entryType kind originalFilename providerDownloadId size refreshState activeForDirect activeForHls isActiveStream } } }'
         },
     )
 
@@ -440,6 +648,54 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
     assert len(payload["streamCandidates"]) == 2
     assert payload["selectedStream"]["id"] == "stream-1"
     assert payload["streamCandidates"][0]["rawTitle"] == "Example.Movie.1080p.WEB-DL"
+    assert payload["playbackAttachments"] == [
+        {
+            "id": "attachment-1",
+            "kind": "direct",
+            "sourceKey": "persisted",
+            "provider": "realdebrid",
+            "providerDownloadId": "torrent-123",
+            "originalFilename": "Example.Movie.mkv",
+            "fileSize": 123456789,
+            "refreshState": "ready",
+        }
+    ]
+    assert payload["resolvedPlayback"] == {
+        "directReady": True,
+        "hlsReady": False,
+        "missingLocalFile": False,
+        "direct": {
+            "kind": "direct",
+            "locator": "https://cdn.example.com/direct",
+            "sourceKey": "persisted",
+            "providerDownloadId": "torrent-123",
+            "originalFilename": "Example.Movie.mkv",
+        },
+    }
+    assert payload["activeStream"] == {
+        "directReady": True,
+        "hlsReady": False,
+        "missingLocalFile": False,
+        "directOwner": {
+            "mediaEntryIndex": 0,
+            "kind": "remote-direct",
+            "providerDownloadId": "torrent-123",
+            "originalFilename": "Example.Movie.mkv",
+        },
+    }
+    assert payload["mediaEntries"] == [
+        {
+            "entryType": "media",
+            "kind": "remote-direct",
+            "originalFilename": "Example.Movie.mkv",
+            "providerDownloadId": "torrent-123",
+            "size": 123456789,
+            "refreshState": "ready",
+            "activeForDirect": True,
+            "activeForHls": False,
+            "isActiveStream": True,
+        }
+    ]
 
 
 def test_graphql_items_exposes_media_type_and_media_kind() -> None:
@@ -686,3 +942,264 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
             "restrictedFallback": False,
         },
     }
+
+
+def test_graphql_vfs_snapshot_and_blocked_items_queries_use_catalog_snapshot() -> None:
+    snapshot = VfsCatalogSnapshot(
+        generation_id="12",
+        published_at=datetime(2026, 4, 13, 12, 30, tzinfo=UTC),
+        entries=(),
+        stats=VfsCatalogStats(directory_count=3, file_count=5, blocked_item_count=1),
+        blocked_items=(
+            cast(
+                Any,
+                type(
+                    "BlockedItem",
+                    (),
+                    {
+                        "item_id": "item-blocked",
+                        "external_ref": "tmdb:42",
+                        "title": "Blocked Example",
+                        "reason": "missing_media_entry",
+                    },
+                )(),
+            ),
+        ),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(snapshot=snapshot, snapshots_by_generation={12: snapshot}),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsSnapshot(generationId: "12") {
+                    generationId
+                    publishedAt
+                    stats { directoryCount fileCount blockedItemCount }
+                    blockedItems { itemId externalRef title reason }
+                  }
+                  vfsBlockedItems(generationId: "12") {
+                    itemId
+                    externalRef
+                    title
+                    reason
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["vfsSnapshot"] == {
+        "generationId": "12",
+        "publishedAt": "2026-04-13T12:30:00+00:00",
+        "stats": {
+            "directoryCount": 3,
+            "fileCount": 5,
+            "blockedItemCount": 1,
+        },
+        "blockedItems": [
+            {
+                "itemId": "item-blocked",
+                "externalRef": "tmdb:42",
+                "title": "Blocked Example",
+                "reason": "missing_media_entry",
+            }
+        ],
+    }
+    assert payload["vfsBlockedItems"] == [
+        {
+            "itemId": "item-blocked",
+            "externalRef": "tmdb:42",
+            "title": "Blocked Example",
+            "reason": "missing_media_entry",
+        }
+    ]
+
+
+def test_graphql_operator_queries_expose_runtime_queue_and_metadata_history() -> None:
+    current_ms = datetime.now(UTC).timestamp() * 1000
+    redis = FakeOperatorRedis(
+        zsets={
+            "filmu-py": [
+                ("job-ready", current_ms - 30_000),
+                ("job-deferred", current_ms + 45_000),
+            ],
+        },
+        lists={
+            "arq:queue-status-history:filmu-py": [
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-13T12:01:00Z",
+                        "total_jobs": 5,
+                        "ready_jobs": 2,
+                        "deferred_jobs": 1,
+                        "in_progress_jobs": 1,
+                        "retry_jobs": 1,
+                        "dead_letter_jobs": 2,
+                        "oldest_ready_age_seconds": 12.5,
+                        "next_scheduled_in_seconds": 42.0,
+                        "alert_level": "critical",
+                        "dead_letter_oldest_age_seconds": 420.0,
+                        "dead_letter_reason_counts": {"provider_timeout": 2},
+                    }
+                )
+            ],
+            "arq:metadata-reindex-history:filmu-py": [
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-13T12:02:00Z",
+                        "processed": 10,
+                        "queued": 3,
+                        "reconciled": 6,
+                        "skipped_active": 1,
+                        "failed": 1,
+                        "repair_attempted": 2,
+                        "repair_enriched": 1,
+                        "repair_skipped_no_tmdb_id": 0,
+                        "repair_failed": 1,
+                        "repair_requeued": 1,
+                        "repair_skipped_active": 0,
+                        "outcome": "warning",
+                        "run_failed": False,
+                        "last_error": "provider_timeout",
+                    }
+                )
+            ],
+            "arq:dead-letter:filmu-py": [
+                json.dumps({"queued_at": "2026-04-13T11:50:00Z", "reason_code": "provider_timeout"})
+            ],
+        },
+        keys={
+            f"{retry_key_prefix}filmu-py:1",
+            f"{in_progress_key_prefix}filmu-py:1",
+            f"{result_key_prefix}filmu-py:1",
+        },
+    )
+    lifecycle = RuntimeLifecycleState()
+    lifecycle.transition(
+        RuntimeLifecyclePhase.PLUGIN_REGISTRATION,
+        detail="plugins_registered",
+        health=RuntimeLifecycleHealth.HEALTHY,
+    )
+    lifecycle.transition(
+        RuntimeLifecyclePhase.STEADY_STATE,
+        detail="runtime_steady",
+        health=RuntimeLifecycleHealth.HEALTHY,
+    )
+    client = _build_client(FakeMediaService(), redis=redis, runtime_lifecycle=lifecycle)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  runtimeLifecycle {
+                    phase
+                    health
+                    detail
+                    transitions { phase health detail }
+                  }
+                  workerQueueStatus {
+                    queueName
+                    arqEnabled
+                    totalJobs
+                    readyJobs
+                    deferredJobs
+                    inProgressJobs
+                    retryJobs
+                    resultJobs
+                    deadLetterJobs
+                    alertLevel
+                    deadLetterReasonCounts
+                  }
+                  workerQueueHistory(limit: 5, alertLevel: "critical", minDeadLetterJobs: 2, reasonCode: "provider_timeout") {
+                    observedAt
+                    alertLevel
+                    deadLetterJobs
+                    deadLetterReasonCounts
+                  }
+                  workerMetadataReindexStatus {
+                    queueName
+                    hasHistory
+                    processed
+                    queued
+                    reconciled
+                    failed
+                    outcome
+                    lastError
+                  }
+                  workerMetadataReindexHistory(limit: 5) {
+                    observedAt
+                    processed
+                    queued
+                    reconciled
+                    failed
+                    repairAttempted
+                    repairFailed
+                    outcome
+                    lastError
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["runtimeLifecycle"]["phase"] == "steady_state"
+    assert payload["runtimeLifecycle"]["detail"] == "runtime_steady"
+    assert payload["runtimeLifecycle"]["transitions"][-1] == {
+        "phase": "steady_state",
+        "health": "healthy",
+        "detail": "runtime_steady",
+    }
+    assert payload["workerQueueStatus"] == {
+        "queueName": "filmu-py",
+        "arqEnabled": True,
+        "totalJobs": 2,
+        "readyJobs": 1,
+        "deferredJobs": 1,
+        "inProgressJobs": 1,
+        "retryJobs": 1,
+        "resultJobs": 1,
+        "deadLetterJobs": 1,
+        "alertLevel": "critical",
+        "deadLetterReasonCounts": {"provider_timeout": 1},
+    }
+    assert payload["workerQueueHistory"] == [
+        {
+            "observedAt": "2026-04-13T12:01:00Z",
+            "alertLevel": "critical",
+            "deadLetterJobs": 2,
+            "deadLetterReasonCounts": {"provider_timeout": 2},
+        }
+    ]
+    assert payload["workerMetadataReindexStatus"] == {
+        "queueName": "filmu-py",
+        "hasHistory": True,
+        "processed": 10,
+        "queued": 3,
+        "reconciled": 6,
+        "failed": 1,
+        "outcome": "warning",
+        "lastError": "provider_timeout",
+    }
+    assert payload["workerMetadataReindexHistory"] == [
+        {
+            "observedAt": "2026-04-13T12:02:00Z",
+            "processed": 10,
+            "queued": 3,
+            "reconciled": 6,
+            "failed": 1,
+            "repairAttempted": 2,
+            "repairFailed": 1,
+            "outcome": "warning",
+            "lastError": "provider_timeout",
+        }
+    ]

@@ -14,26 +14,44 @@ from typing import cast
 import strawberry
 from strawberry.types import Info
 
+from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
+from filmu_py.core.queue_status import QueueStatusReader
+from filmu_py.core.runtime_lifecycle import RuntimeLifecycleSnapshot
 from filmu_py.db.models import StreamORM
 from filmu_py.graphql.deps import GraphQLContext
 from filmu_py.graphql.types import (
+    GQLActiveStream,
+    GQLActiveStreamOwner,
     GQLCalendarEntry,
     GQLFilmuSettings,
     GQLHealthCheck,
     GQLItemEvent,
     GQLLibraryStats,
+    GQLMediaEntry,
     GQLMediaItem,
     GQLMediaItemDetail,
+    GQLMetadataReindexHistoryPoint,
+    GQLMetadataReindexStatus,
+    GQLPlaybackAttachment,
+    GQLQueueAlert,
     GQLRecoveryMechanism,
     GQLRecoveryPlan,
     GQLRecoveryTargetStage,
+    GQLResolvedPlayback,
+    GQLResolvedPlaybackAttachment,
+    GQLRuntimeLifecycleSnapshot,
+    GQLRuntimeLifecycleTransition,
     GQLStreamCandidate,
     GQLVfsCatalogEntry,
     GQLVfsCatalogStats,
     GQLVfsCorrelationKeys,
+    GQLVfsBlockedItem,
     GQLVfsDirectoryDetail,
     GQLVfsDirectoryListing,
     GQLVfsFileDetail,
+    GQLVfsSnapshot,
+    GQLWorkerQueueHistoryPoint,
+    GQLWorkerQueueStatus,
     ItemActionInput,
     ItemStateChangedEvent,
     MediaKind,
@@ -228,6 +246,15 @@ def _build_vfs_catalog_stats(snapshot: VfsCatalogSnapshot) -> GQLVfsCatalogStats
     )
 
 
+def _build_vfs_blocked_item(item: object) -> GQLVfsBlockedItem:
+    return GQLVfsBlockedItem(
+        item_id=str(getattr(item, "item_id")),
+        external_ref=str(getattr(item, "external_ref")),
+        title=str(getattr(item, "title")),
+        reason=str(getattr(item, "reason")),
+    )
+
+
 def _normalize_vfs_path(path: str) -> str:
     stripped = path.strip()
     if not stripped or stripped == "/":
@@ -253,6 +280,244 @@ async def _resolve_vfs_snapshot(
 def _find_vfs_entry(snapshot: VfsCatalogSnapshot, path: str) -> VfsCatalogEntry | None:
     normalized_path = _normalize_vfs_path(path)
     return next((entry for entry in snapshot.entries if entry.path == normalized_path), None)
+
+
+def _build_vfs_snapshot(snapshot: VfsCatalogSnapshot) -> GQLVfsSnapshot:
+    return GQLVfsSnapshot(
+        generation_id=snapshot.generation_id,
+        published_at=snapshot.published_at.isoformat(),
+        stats=_build_vfs_catalog_stats(snapshot),
+        blocked_items=[_build_vfs_blocked_item(item) for item in snapshot.blocked_items],
+    )
+
+
+def _build_runtime_lifecycle_snapshot(snapshot: RuntimeLifecycleSnapshot) -> GQLRuntimeLifecycleSnapshot:
+    return GQLRuntimeLifecycleSnapshot(
+        phase=snapshot.phase,
+        health=snapshot.health,
+        detail=snapshot.detail,
+        updated_at=snapshot.updated_at.isoformat(),
+        transitions=[
+            GQLRuntimeLifecycleTransition(
+                phase=transition.phase,
+                health=transition.health,
+                detail=transition.detail,
+                at=transition.at.isoformat(),
+            )
+            for transition in snapshot.transitions
+        ],
+    )
+
+
+def _queue_name(info: Info[GraphQLContext, object]) -> str:
+    resources = info.context.resources
+    return resources.arq_queue_name or resources.settings.arq_queue_name
+
+
+def _queue_redis(info: Info[GraphQLContext, object]) -> object:
+    resources = info.context.resources
+    return resources.arq_redis or resources.redis
+
+
+def _build_queue_alert(alert: object) -> GQLQueueAlert:
+    return GQLQueueAlert(
+        code=str(getattr(alert, "code")),
+        severity=str(getattr(alert, "severity")),
+        message=str(getattr(alert, "message")),
+    )
+
+
+def _build_worker_queue_status(info: Info[GraphQLContext, object], snapshot: object) -> GQLWorkerQueueStatus:
+    return GQLWorkerQueueStatus(
+        queue_name=str(getattr(snapshot, "queue_name")),
+        arq_enabled=bool(info.context.resources.settings.arq_enabled),
+        observed_at=str(getattr(snapshot, "observed_at")),
+        total_jobs=int(getattr(snapshot, "total_jobs")),
+        ready_jobs=int(getattr(snapshot, "ready_jobs")),
+        deferred_jobs=int(getattr(snapshot, "deferred_jobs")),
+        in_progress_jobs=int(getattr(snapshot, "in_progress_jobs")),
+        retry_jobs=int(getattr(snapshot, "retry_jobs")),
+        result_jobs=int(getattr(snapshot, "result_jobs")),
+        dead_letter_jobs=int(getattr(snapshot, "dead_letter_jobs")),
+        alert_level=str(getattr(snapshot, "alert_level")),
+        alerts=[_build_queue_alert(alert) for alert in getattr(snapshot, "alerts")],
+        oldest_ready_age_seconds=getattr(snapshot, "oldest_ready_age_seconds"),
+        next_scheduled_in_seconds=getattr(snapshot, "next_scheduled_in_seconds"),
+        dead_letter_oldest_age_seconds=getattr(snapshot, "dead_letter_oldest_age_seconds"),
+        dead_letter_reason_counts=dict(getattr(snapshot, "dead_letter_reason_counts")),
+    )
+
+
+def _build_worker_queue_history_point(point: object) -> GQLWorkerQueueHistoryPoint:
+    return GQLWorkerQueueHistoryPoint(
+        observed_at=str(getattr(point, "observed_at")),
+        total_jobs=int(getattr(point, "total_jobs")),
+        ready_jobs=int(getattr(point, "ready_jobs")),
+        deferred_jobs=int(getattr(point, "deferred_jobs")),
+        in_progress_jobs=int(getattr(point, "in_progress_jobs")),
+        retry_jobs=int(getattr(point, "retry_jobs")),
+        dead_letter_jobs=int(getattr(point, "dead_letter_jobs")),
+        oldest_ready_age_seconds=getattr(point, "oldest_ready_age_seconds"),
+        next_scheduled_in_seconds=getattr(point, "next_scheduled_in_seconds"),
+        alert_level=str(getattr(point, "alert_level")),
+        dead_letter_oldest_age_seconds=getattr(point, "dead_letter_oldest_age_seconds"),
+        dead_letter_reason_counts=dict(getattr(point, "dead_letter_reason_counts")),
+    )
+
+
+def _build_metadata_reindex_status(
+    info: Info[GraphQLContext, object],
+    point: object | None,
+) -> GQLMetadataReindexStatus:
+    return GQLMetadataReindexStatus(
+        queue_name=_queue_name(info),
+        schedule_offset_minutes=info.context.resources.settings.indexer.schedule_offset_minutes,
+        has_history=point is not None,
+        observed_at="" if point is None else str(getattr(point, "observed_at")),
+        processed=0 if point is None else int(getattr(point, "processed")),
+        queued=0 if point is None else int(getattr(point, "queued")),
+        reconciled=0 if point is None else int(getattr(point, "reconciled")),
+        skipped_active=0 if point is None else int(getattr(point, "skipped_active")),
+        failed=0 if point is None else int(getattr(point, "failed")),
+        repair_attempted=0 if point is None else int(getattr(point, "repair_attempted")),
+        repair_enriched=0 if point is None else int(getattr(point, "repair_enriched")),
+        repair_skipped_no_tmdb_id=(
+            0 if point is None else int(getattr(point, "repair_skipped_no_tmdb_id"))
+        ),
+        repair_failed=0 if point is None else int(getattr(point, "repair_failed")),
+        repair_requeued=0 if point is None else int(getattr(point, "repair_requeued")),
+        repair_skipped_active=0 if point is None else int(getattr(point, "repair_skipped_active")),
+        outcome="ok" if point is None else str(getattr(point, "outcome")),
+        run_failed=False if point is None else bool(getattr(point, "run_failed")),
+        last_error=None if point is None else getattr(point, "last_error"),
+    )
+
+
+def _build_metadata_reindex_history_point(point: object) -> GQLMetadataReindexHistoryPoint:
+    return GQLMetadataReindexHistoryPoint(
+        observed_at=str(getattr(point, "observed_at")),
+        processed=int(getattr(point, "processed")),
+        queued=int(getattr(point, "queued")),
+        reconciled=int(getattr(point, "reconciled")),
+        skipped_active=int(getattr(point, "skipped_active")),
+        failed=int(getattr(point, "failed")),
+        repair_attempted=int(getattr(point, "repair_attempted")),
+        repair_enriched=int(getattr(point, "repair_enriched")),
+        repair_skipped_no_tmdb_id=int(getattr(point, "repair_skipped_no_tmdb_id")),
+        repair_failed=int(getattr(point, "repair_failed")),
+        repair_requeued=int(getattr(point, "repair_requeued")),
+        repair_skipped_active=int(getattr(point, "repair_skipped_active")),
+        outcome=str(getattr(point, "outcome")),
+        run_failed=bool(getattr(point, "run_failed")),
+        last_error=getattr(point, "last_error"),
+    )
+
+
+def _build_playback_attachment(attachment: object) -> GQLPlaybackAttachment:
+    return GQLPlaybackAttachment(
+        id=str(getattr(attachment, "id")),
+        kind=str(getattr(attachment, "kind")),
+        locator=str(getattr(attachment, "locator")),
+        source_key=getattr(attachment, "source_key"),
+        provider=getattr(attachment, "provider"),
+        provider_download_id=getattr(attachment, "provider_download_id"),
+        provider_file_id=getattr(attachment, "provider_file_id"),
+        provider_file_path=getattr(attachment, "provider_file_path"),
+        original_filename=getattr(attachment, "original_filename"),
+        file_size=getattr(attachment, "file_size"),
+        local_path=getattr(attachment, "local_path"),
+        restricted_url=getattr(attachment, "restricted_url"),
+        unrestricted_url=getattr(attachment, "unrestricted_url"),
+        is_preferred=bool(getattr(attachment, "is_preferred")),
+        preference_rank=int(getattr(attachment, "preference_rank")),
+        refresh_state=str(getattr(attachment, "refresh_state")),
+        expires_at=getattr(attachment, "expires_at"),
+        last_refreshed_at=getattr(attachment, "last_refreshed_at"),
+        last_refresh_error=getattr(attachment, "last_refresh_error"),
+    )
+
+
+def _build_resolved_playback_attachment(attachment: object | None) -> GQLResolvedPlaybackAttachment | None:
+    if attachment is None:
+        return None
+    return GQLResolvedPlaybackAttachment(
+        kind=str(getattr(attachment, "kind")),
+        locator=str(getattr(attachment, "locator")),
+        source_key=str(getattr(attachment, "source_key")),
+        provider=getattr(attachment, "provider"),
+        provider_download_id=getattr(attachment, "provider_download_id"),
+        provider_file_id=getattr(attachment, "provider_file_id"),
+        provider_file_path=getattr(attachment, "provider_file_path"),
+        original_filename=getattr(attachment, "original_filename"),
+        file_size=getattr(attachment, "file_size"),
+        local_path=getattr(attachment, "local_path"),
+        restricted_url=getattr(attachment, "restricted_url"),
+        unrestricted_url=getattr(attachment, "unrestricted_url"),
+    )
+
+
+def _build_resolved_playback(snapshot: object | None) -> GQLResolvedPlayback | None:
+    if snapshot is None:
+        return None
+    return GQLResolvedPlayback(
+        direct=_build_resolved_playback_attachment(getattr(snapshot, "direct")),
+        hls=_build_resolved_playback_attachment(getattr(snapshot, "hls")),
+        direct_ready=bool(getattr(snapshot, "direct_ready")),
+        hls_ready=bool(getattr(snapshot, "hls_ready")),
+        missing_local_file=bool(getattr(snapshot, "missing_local_file")),
+    )
+
+
+def _build_active_stream_owner(owner: object | None) -> GQLActiveStreamOwner | None:
+    if owner is None:
+        return None
+    return GQLActiveStreamOwner(
+        media_entry_index=int(getattr(owner, "media_entry_index")),
+        kind=str(getattr(owner, "kind")),
+        original_filename=getattr(owner, "original_filename"),
+        provider=getattr(owner, "provider"),
+        provider_download_id=getattr(owner, "provider_download_id"),
+        provider_file_id=getattr(owner, "provider_file_id"),
+        provider_file_path=getattr(owner, "provider_file_path"),
+    )
+
+
+def _build_active_stream(active_stream: object | None) -> GQLActiveStream | None:
+    if active_stream is None:
+        return None
+    return GQLActiveStream(
+        direct_ready=bool(getattr(active_stream, "direct_ready")),
+        hls_ready=bool(getattr(active_stream, "hls_ready")),
+        missing_local_file=bool(getattr(active_stream, "missing_local_file")),
+        direct_owner=_build_active_stream_owner(getattr(active_stream, "direct_owner")),
+        hls_owner=_build_active_stream_owner(getattr(active_stream, "hls_owner")),
+    )
+
+
+def _build_media_entry(entry: object) -> GQLMediaEntry:
+    return GQLMediaEntry(
+        entry_type=str(getattr(entry, "entry_type")),
+        kind=str(getattr(entry, "kind")),
+        original_filename=getattr(entry, "original_filename"),
+        url=getattr(entry, "url"),
+        local_path=getattr(entry, "local_path"),
+        download_url=getattr(entry, "download_url"),
+        unrestricted_url=getattr(entry, "unrestricted_url"),
+        provider=getattr(entry, "provider"),
+        provider_download_id=getattr(entry, "provider_download_id"),
+        provider_file_id=getattr(entry, "provider_file_id"),
+        provider_file_path=getattr(entry, "provider_file_path"),
+        size=getattr(entry, "size"),
+        created=getattr(entry, "created"),
+        modified=getattr(entry, "modified"),
+        refresh_state=str(getattr(entry, "refresh_state")),
+        expires_at=getattr(entry, "expires_at"),
+        last_refreshed_at=getattr(entry, "last_refreshed_at"),
+        last_refresh_error=getattr(entry, "last_refresh_error"),
+        active_for_direct=bool(getattr(entry, "active_for_direct")),
+        active_for_hls=bool(getattr(entry, "active_for_hls")),
+        is_active_stream=bool(getattr(entry, "is_active_stream")),
+    )
 
 
 def _build_media_item_summary(record: MediaItemSummaryRecord) -> GQLMediaItem:
@@ -385,6 +650,12 @@ async def _build_media_item_detail(
                 is_in_cooldown=False,
             )
         ),
+        playback_attachments=[
+            _build_playback_attachment(attachment) for attachment in record.playback_attachments or []
+        ],
+        resolved_playback=_build_resolved_playback(record.resolved_playback),
+        active_stream=_build_active_stream(record.active_stream),
+        media_entries=[_build_media_entry(entry) for entry in record.media_entries or []],
     )
 
 
@@ -498,6 +769,108 @@ class CoreQueryResolver:
             directories=directories,
             files=files,
         )
+
+    @strawberry.field(
+        description="Return one mounted VFS snapshot summary from the shared catalog supplier"
+    )
+    async def vfs_snapshot(
+        self,
+        info: Info[GraphQLContext, object],
+        generation_id: str | None = None,
+    ) -> GQLVfsSnapshot | None:
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
+            return None
+        return _build_vfs_snapshot(snapshot)
+
+    @strawberry.field(
+        description="List blocked mounted catalog items from the current or requested snapshot"
+    )
+    async def vfs_blocked_items(
+        self,
+        info: Info[GraphQLContext, object],
+        generation_id: str | None = None,
+    ) -> list[GQLVfsBlockedItem]:
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
+            return []
+        return [_build_vfs_blocked_item(item) for item in snapshot.blocked_items]
+
+    @strawberry.field(description="Current runtime lifecycle graph and bounded transition history")
+    async def runtime_lifecycle(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLRuntimeLifecycleSnapshot:
+        return _build_runtime_lifecycle_snapshot(info.context.resources.runtime_lifecycle.snapshot())
+
+    @strawberry.field(description="Current operator queue snapshot from the shared Redis-backed reader")
+    async def worker_queue_status(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLWorkerQueueStatus:
+        snapshot = await QueueStatusReader(
+            _queue_redis(info),
+            queue_name=_queue_name(info),
+        ).snapshot()
+        return _build_worker_queue_status(info, snapshot)
+
+    @strawberry.field(description="Bounded operator queue history with optional replay-oriented filters")
+    async def worker_queue_history(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 20,
+        alert_level: str | None = None,
+        min_dead_letter_jobs: int = 0,
+        reason_code: str | None = None,
+    ) -> list[GQLWorkerQueueHistoryPoint]:
+        bounded_limit = max(1, min(limit, 100))
+        bounded_min_dead_letter_jobs = max(0, min(min_dead_letter_jobs, 10_000))
+        if alert_level is not None and alert_level not in {"ok", "warning", "critical"}:
+            raise ValueError("alert_level must be one of: ok, warning, critical")
+        history = await QueueStatusReader(
+            _queue_redis(info),
+            queue_name=_queue_name(info),
+        ).history(limit=bounded_limit)
+        points = [_build_worker_queue_history_point(item) for item in history]
+        if alert_level is not None:
+            points = [item for item in points if item.alert_level == alert_level]
+        if bounded_min_dead_letter_jobs > 0:
+            points = [
+                item
+                for item in points
+                if item.dead_letter_jobs >= bounded_min_dead_letter_jobs
+            ]
+        if reason_code is not None:
+            points = [
+                item
+                for item in points
+                if cast(dict[str, int], item.dead_letter_reason_counts).get(reason_code, 0) > 0
+            ]
+        return points
+
+    @strawberry.field(description="Latest metadata reindex/reconciliation run summary")
+    async def worker_metadata_reindex_status(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLMetadataReindexStatus:
+        latest = await MetadataReindexStatusStore(
+            _queue_redis(info),
+            queue_name=_queue_name(info),
+        ).latest()
+        return _build_metadata_reindex_status(info, latest)
+
+    @strawberry.field(description="Bounded metadata reindex/reconciliation history")
+    async def worker_metadata_reindex_history(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 20,
+    ) -> list[GQLMetadataReindexHistoryPoint]:
+        bounded_limit = max(1, min(limit, 100))
+        history = await MetadataReindexStatusStore(
+            _queue_redis(info),
+            queue_name=_queue_name(info),
+        ).history(limit=bounded_limit)
+        return [_build_metadata_reindex_history_point(item) for item in history]
 
     @strawberry.field(description="Intentional GraphQL library stats projection")
     async def library_stats(self, info: Info[GraphQLContext, object]) -> GQLLibraryStats:

@@ -167,6 +167,26 @@ class GQLVfsCatalogStats:
 
 
 @strawberry.type
+class GQLVfsBlockedItem:
+    """Blocked mounted item retained in one VFS snapshot."""
+
+    item_id: str = strawberry.field(name="itemId")
+    external_ref: str = strawberry.field(name="externalRef")
+    title: str
+    reason: str
+
+
+@strawberry.type
+class GQLVfsSnapshot:
+    """Snapshot-level mounted VFS control-plane view."""
+
+    generation_id: str = strawberry.field(name="generationId")
+    published_at: str = strawberry.field(name="publishedAt")
+    stats: GQLVfsCatalogStats
+    blocked_items: list[GQLVfsBlockedItem] = strawberry.field(name="blockedItems")
+
+
+@strawberry.type
 class GQLVfsDirectoryListing:
     """Immediate directory listing backed by the mounted VFS catalog snapshot."""
 
@@ -176,6 +196,137 @@ class GQLVfsDirectoryListing:
     stats: GQLVfsCatalogStats
     directories: list[GQLVfsCatalogEntry]
     files: list[GQLVfsCatalogEntry]
+
+
+@strawberry.type
+class GQLRuntimeLifecycleTransition:
+    """One runtime lifecycle transition entry."""
+
+    phase: str
+    health: str
+    detail: str
+    at: str
+
+
+@strawberry.type
+class GQLRuntimeLifecycleSnapshot:
+    """Current runtime lifecycle snapshot plus bounded transition history."""
+
+    phase: str
+    health: str
+    detail: str
+    updated_at: str = strawberry.field(name="updatedAt")
+    transitions: list[GQLRuntimeLifecycleTransition]
+
+
+@strawberry.type
+class GQLQueueAlert:
+    """One queue alert surfaced through the operator graph."""
+
+    code: str
+    severity: str
+    message: str
+
+
+@strawberry.type
+class GQLWorkerQueueStatus:
+    """Current worker queue status snapshot."""
+
+    queue_name: str = strawberry.field(name="queueName")
+    arq_enabled: bool = strawberry.field(name="arqEnabled")
+    observed_at: str = strawberry.field(name="observedAt")
+    total_jobs: int = strawberry.field(name="totalJobs")
+    ready_jobs: int = strawberry.field(name="readyJobs")
+    deferred_jobs: int = strawberry.field(name="deferredJobs")
+    in_progress_jobs: int = strawberry.field(name="inProgressJobs")
+    retry_jobs: int = strawberry.field(name="retryJobs")
+    result_jobs: int = strawberry.field(name="resultJobs")
+    dead_letter_jobs: int = strawberry.field(name="deadLetterJobs")
+    alert_level: str = strawberry.field(name="alertLevel")
+    alerts: list[GQLQueueAlert]
+    oldest_ready_age_seconds: float | None = strawberry.field(
+        name="oldestReadyAgeSeconds", default=None
+    )
+    next_scheduled_in_seconds: float | None = strawberry.field(
+        name="nextScheduledInSeconds", default=None
+    )
+    dead_letter_oldest_age_seconds: float | None = strawberry.field(
+        name="deadLetterOldestAgeSeconds", default=None
+    )
+    dead_letter_reason_counts: JSON = strawberry.field(
+        name="deadLetterReasonCounts", default_factory=dict
+    )
+
+
+@strawberry.type
+class GQLWorkerQueueHistoryPoint:
+    """One persisted queue history point."""
+
+    observed_at: str = strawberry.field(name="observedAt")
+    total_jobs: int = strawberry.field(name="totalJobs")
+    ready_jobs: int = strawberry.field(name="readyJobs")
+    deferred_jobs: int = strawberry.field(name="deferredJobs")
+    in_progress_jobs: int = strawberry.field(name="inProgressJobs")
+    retry_jobs: int = strawberry.field(name="retryJobs")
+    dead_letter_jobs: int = strawberry.field(name="deadLetterJobs")
+    oldest_ready_age_seconds: float | None = strawberry.field(
+        name="oldestReadyAgeSeconds", default=None
+    )
+    next_scheduled_in_seconds: float | None = strawberry.field(
+        name="nextScheduledInSeconds", default=None
+    )
+    alert_level: str = strawberry.field(name="alertLevel")
+    dead_letter_oldest_age_seconds: float | None = strawberry.field(
+        name="deadLetterOldestAgeSeconds", default=None
+    )
+    dead_letter_reason_counts: JSON = strawberry.field(
+        name="deadLetterReasonCounts", default_factory=dict
+    )
+
+
+@strawberry.type
+class GQLMetadataReindexStatus:
+    """Latest metadata reindex/reconciliation run summary."""
+
+    queue_name: str = strawberry.field(name="queueName")
+    schedule_offset_minutes: int = strawberry.field(name="scheduleOffsetMinutes")
+    has_history: bool = strawberry.field(name="hasHistory")
+    observed_at: str = strawberry.field(name="observedAt")
+    processed: int
+    queued: int
+    reconciled: int
+    skipped_active: int = strawberry.field(name="skippedActive")
+    failed: int
+    repair_attempted: int = strawberry.field(name="repairAttempted")
+    repair_enriched: int = strawberry.field(name="repairEnriched")
+    repair_skipped_no_tmdb_id: int = strawberry.field(name="repairSkippedNoTmdbId")
+    repair_failed: int = strawberry.field(name="repairFailed")
+    repair_requeued: int = strawberry.field(name="repairRequeued")
+    repair_skipped_active: int = strawberry.field(name="repairSkippedActive")
+    outcome: str
+    run_failed: bool = strawberry.field(name="runFailed")
+    last_error: str | None = strawberry.field(name="lastError", default=None)
+
+
+@strawberry.type
+class GQLMetadataReindexHistoryPoint:
+    """One persisted metadata reindex/reconciliation history point."""
+
+    observed_at: str = strawberry.field(name="observedAt")
+    processed: int
+    queued: int
+    reconciled: int
+    skipped_active: int = strawberry.field(name="skippedActive")
+    failed: int
+    repair_attempted: int = strawberry.field(name="repairAttempted")
+    repair_enriched: int = strawberry.field(name="repairEnriched")
+    repair_skipped_no_tmdb_id: int = strawberry.field(name="repairSkippedNoTmdbId")
+    repair_failed: int = strawberry.field(name="repairFailed")
+    repair_requeued: int = strawberry.field(name="repairRequeued")
+    repair_skipped_active: int = strawberry.field(name="repairSkippedActive")
+    outcome: str
+    run_failed: bool = strawberry.field(name="runFailed")
+    last_error: str | None = strawberry.field(name="lastError", default=None)
 
 
 @strawberry.type
@@ -224,6 +375,111 @@ class GQLRecoveryPlan:
 
 
 @strawberry.type
+class GQLPlaybackAttachment:
+    """Persisted playback attachment projection for graph item detail."""
+
+    id: str
+    kind: str
+    locator: str
+    source_key: str | None = strawberry.field(name="sourceKey", default=None)
+    provider: str | None = None
+    provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
+    provider_file_id: str | None = strawberry.field(name="providerFileId", default=None)
+    provider_file_path: str | None = strawberry.field(name="providerFilePath", default=None)
+    original_filename: str | None = strawberry.field(name="originalFilename", default=None)
+    file_size: int | None = strawberry.field(name="fileSize", default=None)
+    local_path: str | None = strawberry.field(name="localPath", default=None)
+    restricted_url: str | None = strawberry.field(name="restrictedUrl", default=None)
+    unrestricted_url: str | None = strawberry.field(name="unrestrictedUrl", default=None)
+    is_preferred: bool = strawberry.field(name="isPreferred")
+    preference_rank: int = strawberry.field(name="preferenceRank")
+    refresh_state: str = strawberry.field(name="refreshState")
+    expires_at: str | None = strawberry.field(name="expiresAt", default=None)
+    last_refreshed_at: str | None = strawberry.field(name="lastRefreshedAt", default=None)
+    last_refresh_error: str | None = strawberry.field(name="lastRefreshError", default=None)
+
+
+@strawberry.type
+class GQLResolvedPlaybackAttachment:
+    """Current resolved playback attachment for direct or HLS access."""
+
+    kind: str
+    locator: str
+    source_key: str = strawberry.field(name="sourceKey")
+    provider: str | None = None
+    provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
+    provider_file_id: str | None = strawberry.field(name="providerFileId", default=None)
+    provider_file_path: str | None = strawberry.field(name="providerFilePath", default=None)
+    original_filename: str | None = strawberry.field(name="originalFilename", default=None)
+    file_size: int | None = strawberry.field(name="fileSize", default=None)
+    local_path: str | None = strawberry.field(name="localPath", default=None)
+    restricted_url: str | None = strawberry.field(name="restrictedUrl", default=None)
+    unrestricted_url: str | None = strawberry.field(name="unrestrictedUrl", default=None)
+
+
+@strawberry.type
+class GQLResolvedPlayback:
+    """Resolved playback readiness snapshot for one item."""
+
+    direct: GQLResolvedPlaybackAttachment | None = None
+    hls: GQLResolvedPlaybackAttachment | None = None
+    direct_ready: bool = strawberry.field(name="directReady")
+    hls_ready: bool = strawberry.field(name="hlsReady")
+    missing_local_file: bool = strawberry.field(name="missingLocalFile")
+
+
+@strawberry.type
+class GQLActiveStreamOwner:
+    """Ownership link from an active playback role to one media entry."""
+
+    media_entry_index: int = strawberry.field(name="mediaEntryIndex")
+    kind: str
+    original_filename: str | None = strawberry.field(name="originalFilename", default=None)
+    provider: str | None = None
+    provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
+    provider_file_id: str | None = strawberry.field(name="providerFileId", default=None)
+    provider_file_path: str | None = strawberry.field(name="providerFilePath", default=None)
+
+
+@strawberry.type
+class GQLActiveStream:
+    """Current active-stream readiness and owner mapping."""
+
+    direct_ready: bool = strawberry.field(name="directReady")
+    hls_ready: bool = strawberry.field(name="hlsReady")
+    missing_local_file: bool = strawberry.field(name="missingLocalFile")
+    direct_owner: GQLActiveStreamOwner | None = strawberry.field(name="directOwner", default=None)
+    hls_owner: GQLActiveStreamOwner | None = strawberry.field(name="hlsOwner", default=None)
+
+
+@strawberry.type
+class GQLMediaEntry:
+    """Mounted/playback-facing media-entry projection for graph item detail."""
+
+    entry_type: str = strawberry.field(name="entryType")
+    kind: str
+    original_filename: str | None = strawberry.field(name="originalFilename", default=None)
+    url: str | None = None
+    local_path: str | None = strawberry.field(name="localPath", default=None)
+    download_url: str | None = strawberry.field(name="downloadUrl", default=None)
+    unrestricted_url: str | None = strawberry.field(name="unrestrictedUrl", default=None)
+    provider: str | None = None
+    provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
+    provider_file_id: str | None = strawberry.field(name="providerFileId", default=None)
+    provider_file_path: str | None = strawberry.field(name="providerFilePath", default=None)
+    size: int | None = None
+    created: str | None = None
+    modified: str | None = None
+    refresh_state: str = strawberry.field(name="refreshState")
+    expires_at: str | None = strawberry.field(name="expiresAt", default=None)
+    last_refreshed_at: str | None = strawberry.field(name="lastRefreshedAt", default=None)
+    last_refresh_error: str | None = strawberry.field(name="lastRefreshError", default=None)
+    active_for_direct: bool = strawberry.field(name="activeForDirect")
+    active_for_hls: bool = strawberry.field(name="activeForHls")
+    is_active_stream: bool = strawberry.field(name="isActiveStream")
+
+
+@strawberry.type
 class GQLMediaItemDetail:
     """Intentional GraphQL item detail type with stream-candidate visibility."""
 
@@ -248,6 +504,14 @@ class GQLMediaItemDetail:
         name="selectedStream", default=None
     )
     recovery_plan: GQLRecoveryPlan = strawberry.field(name="recoveryPlan")
+    playback_attachments: list[GQLPlaybackAttachment] = strawberry.field(
+        name="playbackAttachments", default_factory=list
+    )
+    resolved_playback: GQLResolvedPlayback | None = strawberry.field(
+        name="resolvedPlayback", default=None
+    )
+    active_stream: GQLActiveStream | None = strawberry.field(name="activeStream", default=None)
+    media_entries: list[GQLMediaEntry] = strawberry.field(name="mediaEntries", default_factory=list)
 
 
 @strawberry.type
