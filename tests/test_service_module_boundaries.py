@@ -37,7 +37,10 @@ def test_media_service_imports_path_inference_boundary_module() -> None:
         "filmu_py.services.media_path_inference",
         "_media_path_inference",
     )
-    assert "_infer_season_number_from_path = _media_path_inference.infer_season_number_from_path" in source
+    assert (
+        "_infer_season_number_from_path = _media_path_inference.infer_season_number_from_path"
+        not in source
+    )
     assert "_infer_season_range_from_path = _media_path_inference.infer_season_range_from_path" in source
     assert "_infer_episode_number_from_path = _media_path_inference.infer_episode_number_from_path" in source
 
