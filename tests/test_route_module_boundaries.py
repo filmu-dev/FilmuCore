@@ -7,6 +7,7 @@ from filmu_py.api.routes import (
     runtime_governance,
     runtime_hls_governance,
     runtime_refresh_governance,
+    runtime_status_payload,
 )
 
 
@@ -104,3 +105,33 @@ def test_runtime_refresh_governance_module_exports_contract() -> None:
     assert callable(runtime_refresh_governance.stream_refresh_policy_governance_snapshot)
     assert callable(runtime_refresh_governance.record_route_refresh_trigger_pending)
     assert callable(runtime_refresh_governance.select_refresh_dispatch_preference)
+
+
+def test_stream_route_imports_runtime_status_payload_module() -> None:
+    source = _project_file("filmu_py", "api", "routes", "stream.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    imported: set[str] = set()
+    imported_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level == 1 and node.module is None:
+            imported_modules.update(alias.name for alias in node.names)
+            continue
+        if node.level != 1:
+            continue
+        if node.module != "runtime_status_payload":
+            continue
+        imported.update(alias.name for alias in node.names)
+
+    assert "runtime_status_payload" in imported_modules or (
+        "build_serving_status_response" in imported
+    )
+
+
+def test_runtime_status_payload_module_exports_contract() -> None:
+    assert callable(runtime_status_payload.build_serving_status_response)

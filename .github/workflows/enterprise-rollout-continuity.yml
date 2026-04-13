@@ -1,0 +1,98 @@
+name: Enterprise Rollout Continuity
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_bootstrap:
+        description: "Allow first continuity run without historical baseline records"
+        required: false
+        type: boolean
+        default: false
+      max_evidence_age_hours:
+        description: "Maximum allowed age in hours for soak/playback/operator evidence"
+        required: false
+        default: "72"
+      minimum_trend_records:
+        description: "Minimum trend-history depth per evidence lane"
+        required: false
+        default: "3"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "filmu_py/services/media.py"
+      - "filmu_py/services/playback.py"
+      - "filmu_py/workers/tasks.py"
+      - "filmu_py/api/routes/stream.py"
+      - "filmu_py/**/runtime_*.py"
+      - "scripts/check_enterprise_rollout_continuity.ps1"
+      - "scripts/check_playback_stability_trends.ps1"
+      - "scripts/check_operator_log_pipeline_rollout.ps1"
+      - "run_playback_gate_ci.sh"
+      - "tests/test_service_module_boundaries.py"
+      - "tests/test_worker_module_boundaries.py"
+      - "tests/test_route_module_boundaries.py"
+      - "docs/STATUS.md"
+      - "docs/EXECUTION_PLAN.md"
+      - "docs/TODOS/**"
+  schedule:
+    - cron: "45 * * * *"
+
+concurrency:
+  group: enterprise-rollout-continuity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  enterprise-rollout-continuity:
+    name: Enterprise Rollout Continuity
+    runs-on: [self-hosted, windows, filmu-vfs]
+    timeout-minutes: 40
+    env:
+      FILMU_SOAK_HISTORY_ROOT: ${{ vars.FILMU_SOAK_HISTORY_ROOT }}
+      FILMU_PLAYBACK_STABILITY_HISTORY_ROOT: ${{ vars.FILMU_PLAYBACK_STABILITY_HISTORY_ROOT }}
+      FILMU_LOG_PIPELINE_HISTORY_ROOT: ${{ vars.FILMU_LOG_PIPELINE_HISTORY_ROOT }}
+      FILMU_LOG_PIPELINE_ENVIRONMENT: ${{ vars.FILMU_LOG_PIPELINE_ENVIRONMENT }}
+      FILMU_LOG_PIPELINE_HEALTH_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_HEALTH_ENDPOINT }}
+      FILMU_LOG_PIPELINE_SEARCH_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_SEARCH_ENDPOINT }}
+      FILMU_LOG_PIPELINE_ALERT_ENDPOINT: ${{ vars.FILMU_LOG_PIPELINE_ALERT_ENDPOINT }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Run enterprise continuity gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $args = @(
+            '-NoProfile',
+            '-File',
+            './scripts/check_enterprise_rollout_continuity.ps1',
+            '-ProbeOperatorNow',
+            '-MaxEvidenceAgeHours',
+            '${{ inputs.max_evidence_age_hours != '' && inputs.max_evidence_age_hours || '72' }}',
+            '-MinimumSoakTrendRecords',
+            '${{ inputs.minimum_trend_records != '' && inputs.minimum_trend_records || '3' }}',
+            '-MinimumPlaybackTrendRecords',
+            '${{ inputs.minimum_trend_records != '' && inputs.minimum_trend_records || '3' }}',
+            '-MinimumOperatorTrendRecords',
+            '${{ inputs.minimum_trend_records != '' && inputs.minimum_trend_records || '3' }}'
+          )
+          if ('${{ inputs.allow_bootstrap }}' -eq 'true') {
+            $args += '-AllowBootstrap'
+          }
+          & pwsh @args
+
+      - name: Upload continuity artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: enterprise-rollout-continuity-${{ github.run_id }}
+          path: |
+            artifacts/operations/**
+            playback-proof-artifacts/playback-stability-trend-summary-*.json
+            playback-proof-artifacts/windows-native-stack/soak-trend-summary-*.json
+          if-no-files-found: warn
+          retention-days: 21

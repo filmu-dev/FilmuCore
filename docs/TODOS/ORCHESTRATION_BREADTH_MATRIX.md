@@ -246,7 +246,7 @@ Current update:
 - datasource/context injection now exists through [`../../filmu_py/plugins/context.py`](../../filmu_py/plugins/context.py)
 - failure isolation and timeout handling now exist in [`../../filmu_py/plugins/hooks.py`](../../filmu_py/plugins/hooks.py)
 - explicit publishability rules now exist in [`../../filmu_py/core/event_bus.py`](../../filmu_py/core/event_bus.py)
-- no-behavior-change worker decomposition now also extracted stage observability counters into [`../../filmu_py/workers/stage_observability.py`](../../filmu_py/workers/stage_observability.py) and stable stage/job-id helpers into [`../../filmu_py/workers/stage_job_ids.py`](../../filmu_py/workers/stage_job_ids.py), with compatibility re-exports retained in [`../../filmu_py/workers/tasks.py`](../../filmu_py/workers/tasks.py)
+- no-behavior-change worker decomposition now also extracted stage observability counters into [`../../filmu_py/workers/stage_observability.py`](../../filmu_py/workers/stage_observability.py), stable stage/job-id helpers into [`../../filmu_py/workers/stage_job_ids.py`](../../filmu_py/workers/stage_job_ids.py), and heavy-stage isolation/runtime budgets into [`../../filmu_py/workers/stage_isolation.py`](../../filmu_py/workers/stage_isolation.py), with compatibility re-exports retained in [`../../filmu_py/workers/tasks.py`](../../filmu_py/workers/tasks.py)
 
 The remaining orchestration question is no longer first hook execution, first event governance, or first queued stream-link path.
 The queue-backed resolver path is now policy-driven under load with explicit fallback telemetry.

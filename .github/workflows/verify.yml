@@ -53,6 +53,11 @@ jobs:
             python: false
             rust: false
             fuse: false
+          - name: Decomposition Boundary Contracts
+            command: uv run pytest -q tests/test_worker_module_boundaries.py tests/test_route_module_boundaries.py tests/test_service_module_boundaries.py
+            python: true
+            rust: false
+            fuse: false
           - name: Mount HTTP Chunk Parity
             command: pwsh -NoProfile -File ./scripts/check_mount_http_chunk_parity.ps1
             python: true

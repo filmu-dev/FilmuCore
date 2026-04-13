@@ -35,7 +35,8 @@ Already present in the Python backend:
 - abort and request-shape (range/seek/EOF) counters
 - session-level read amplification proxies
 - enterprise governance consumption of live mounted-runtime rollout posture, so the higher-level operator slice now reflects `vfs_runtime_rollout_readiness`, rollout reasons, cache/fallback/prefetch ratios, and pressure incidents rather than only static VFS capability posture
-- environment-owned operator log-pipeline rollout checks via [`../../scripts/check_operator_log_pipeline_rollout.ps1`](../../scripts/check_operator_log_pipeline_rollout.ps1) and workflow [`../../.github/workflows/operator-log-pipeline-rollout.yml`](../../.github/workflows/operator-log-pipeline-rollout.yml), enforcing health/search/alert endpoint reachability and correlation-field contracts
+- environment-owned operator log-pipeline rollout checks via [`../../scripts/check_operator_log_pipeline_rollout.ps1`](../../scripts/check_operator_log_pipeline_rollout.ps1) and workflow [`../../.github/workflows/operator-log-pipeline-rollout.yml`](../../.github/workflows/operator-log-pipeline-rollout.yml), enforcing health/search/alert endpoint reachability, latency budgets, alert-budget posture, correlation-field contracts, and per-run trend-history records
+- enterprise continuity evidence gate via [`../../scripts/check_enterprise_rollout_continuity.ps1`](../../scripts/check_enterprise_rollout_continuity.ps1) and workflow [`../../.github/workflows/enterprise-rollout-continuity.yml`](../../.github/workflows/enterprise-rollout-continuity.yml), enforcing sustained soak/playback/operator evidence freshness and minimum trend depth
 - logs/history SSE compatibility path
 - bounded in-memory log broker for `/api/v1/logs`, SSE logging, and GraphQL `logStream`
 
@@ -56,7 +57,7 @@ What this baseline is good at:
 
 What it does **not** yet provide sufficiently:
 
-- full environment fleet rollout depth for log shipping/search/alerting beyond the now-landed endpoint/contract gate
+- full environment fleet rollout depth for log shipping/search/alerting beyond the now-landed endpoint/contract/latency/history gate
 - richer trace/span adoption across every log-producing path
 - mounted Rust data-plane telemetry and cross-process traceability
 - deeper queue replay-taxonomy visibility and longer-lived backlog history beyond the now-landed alert/history baseline

@@ -10,11 +10,16 @@
 * add mount-vs-HTTP chunk parity harness with Python/Rust contract coverage and CI gate integration
 * decompose worker task internals with extracted stage observability and stable stage/job-id helper modules
 * extract stream refresh-dispatch policy selection into runtime refresh governance module
+* add enterprise continuity gate across decomposition budgets and sustained soak/playback/operator evidence posture
+* add playback stability trend-regression checks with optional environment-owned history roots
+* extend operator log rollout checks with latency/active-alert budgets and persisted rollout-history records
+* continue oversized-module decomposition with extracted `runtime_status_payload`, `stage_isolation`, `playback_refresh_dispatch`, and `media_path_inference` boundaries
 
 ### Documentation
 
 * clarify platform-aware stack startup: `pnpm run stack:start` is now documented as the canonical auto-detect entrypoint, while `docker-compose.windows.yml` is explicitly documented as backend-only on Windows and not responsible for starting the native `filmuvfs.exe` mount
 * reconcile stale playback-proof/TODO posture after live branch-policy validation moved into required CI gate execution
+* update status/execution/TODO matrices for continuity-gate rollout and expanded large-file decomposition boundaries
 
 ## [0.14.0](https://github.com/filmu-dev/FilmuCore/compare/v0.13.0...v0.14.0) (2026-04-12)
 

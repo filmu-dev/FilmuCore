@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from filmu_py.workers import stage_job_ids, stage_observability
+from filmu_py.workers import stage_isolation, stage_job_ids, stage_observability
 
 
 def _project_file(*parts: str) -> Path:
@@ -28,6 +28,9 @@ def test_worker_tasks_imports_stage_modules() -> None:
     )
     assert "filmu_py.workers.stage_job_ids" in import_modules or (
         "filmu_py.workers" in from_import_modules and "stage_job_ids" in source
+    )
+    assert "filmu_py.workers.stage_isolation" in import_modules or (
+        "filmu_py.workers" in from_import_modules and "stage_isolation" in source
     )
 
     # Keep compatibility: worker tasks should re-export these symbols from the shared module.
@@ -93,3 +96,13 @@ def test_worker_stage_job_ids_module_exports_contract() -> None:
         stage_job_ids.refresh_selected_hls_restricted_fallback_job_id("item-1")
         == "refresh-selected-hls-restricted-fallback:item-1"
     )
+
+
+def test_worker_stage_isolation_module_exports_contract() -> None:
+    assert callable(stage_isolation.heavy_stage_executor)
+    assert callable(stage_isolation.heavy_stage_timeout_seconds)
+    assert callable(stage_isolation.rank_stream_batch)
+    assert callable(stage_isolation.coerce_rank_batch_parsed_title)
+    assert callable(stage_isolation.shutdown_heavy_stage_executors)
+    assert stage_isolation.coerce_rank_batch_parsed_title("{'a': 1}") == {"a": 1}
+    assert stage_isolation.coerce_rank_batch_parsed_title("[]") == {}
