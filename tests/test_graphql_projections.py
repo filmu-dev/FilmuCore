@@ -104,7 +104,91 @@ class FakeMediaService:
         class _Page:
             items: list[MediaItemSummaryRecord]
 
-        return _Page(items=[self.detail] if self.detail is not None else [])
+        if self.detail is not None:
+            return _Page(items=[self.detail])
+        return _Page(
+            items=[
+                MediaItemSummaryRecord(
+                    id=record.id,
+                    type=str(record.attributes.get("item_type", "unknown")),
+                    title=record.title,
+                    state=record.state.value,
+                    tmdb_id=(
+                        str(record.attributes["tmdb_id"])
+                        if record.attributes.get("tmdb_id") is not None
+                        else None
+                    ),
+                    tvdb_id=(
+                        str(record.attributes["tvdb_id"])
+                        if record.attributes.get("tvdb_id") is not None
+                        else None
+                    ),
+                    external_ref=record.external_ref,
+                    aired_at=(
+                        str(record.attributes["aired_at"])
+                        if record.attributes.get("aired_at") is not None
+                        else None
+                    ),
+                    poster_path=(
+                        str(record.attributes["poster_path"])
+                        if record.attributes.get("poster_path") is not None
+                        else None
+                    ),
+                    specialization=MediaItemSpecializationRecord(
+                        item_type=str(record.attributes.get("item_type", "unknown")),
+                        tmdb_id=(
+                            str(record.attributes["tmdb_id"])
+                            if record.attributes.get("tmdb_id") is not None
+                            else None
+                        ),
+                        tvdb_id=(
+                            str(record.attributes["tvdb_id"])
+                            if record.attributes.get("tvdb_id") is not None
+                            else None
+                        ),
+                        imdb_id=(
+                            str(record.attributes["imdb_id"])
+                            if record.attributes.get("imdb_id") is not None
+                            else None
+                        ),
+                        parent_ids=(
+                            ParentIdsRecord(
+                                tmdb_id=(
+                                    str(cast(dict[str, object], record.attributes["parent_ids"]).get("tmdb_id"))
+                                    if cast(dict[str, object], record.attributes["parent_ids"]).get("tmdb_id")
+                                    is not None
+                                    else None
+                                ),
+                                tvdb_id=(
+                                    str(cast(dict[str, object], record.attributes["parent_ids"]).get("tvdb_id"))
+                                    if cast(dict[str, object], record.attributes["parent_ids"]).get("tvdb_id")
+                                    is not None
+                                    else None
+                                ),
+                            )
+                            if isinstance(record.attributes.get("parent_ids"), dict)
+                            else None
+                        ),
+                        show_title=(
+                            str(record.attributes["show_title"])
+                            if record.attributes.get("show_title") is not None
+                            else None
+                        ),
+                        season_number=(
+                            int(record.attributes["season_number"])
+                            if record.attributes.get("season_number") is not None
+                            else None
+                        ),
+                        episode_number=(
+                            int(record.attributes["episode_number"])
+                            if record.attributes.get("episode_number") is not None
+                            else None
+                        ),
+                    ),
+                )
+                for record in self.item_records[:limit]
+            ]
+        )
 
     async def get_stream_candidates(self, *, media_item_id: str) -> list[StreamORM]:
         _ = media_item_id
@@ -326,7 +410,14 @@ def test_graphql_items_exposes_media_type_and_media_kind() -> None:
                     external_ref="tvdb:555",
                     title="Example Show",
                     state=ItemState.REQUESTED,
-                    attributes={"item_type": "show", "tvdb_id": "555"},
+                    attributes={
+                        "item_type": "show",
+                        "tmdb_id": "999",
+                        "tvdb_id": "555",
+                        "imdb_id": "tt5550001",
+                        "show_title": "Example Show",
+                        "poster_path": "/poster.jpg",
+                    },
                 )
             ]
         )
@@ -334,10 +425,21 @@ def test_graphql_items_exposes_media_type_and_media_kind() -> None:
 
     response = client.post(
         "/graphql",
-        json={"query": "query { items(limit: 1) { id mediaType mediaKind } }"},
+        json={
+            "query": "query { items(limit: 1) { id mediaType mediaKind tmdbId tvdbId imdbId showTitle posterPath } }"
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["items"] == [
-        {"id": "show-1", "mediaType": "show", "mediaKind": "SHOW"}
+        {
+            "id": "show-1",
+            "mediaType": "show",
+            "mediaKind": "SHOW",
+            "tmdbId": 999,
+            "tvdbId": 555,
+            "imdbId": "tt5550001",
+            "showTitle": "Example Show",
+            "posterPath": "/poster.jpg",
+        }
     ]

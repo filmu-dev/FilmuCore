@@ -127,6 +127,36 @@ def _build_calendar_entry(record: CalendarProjectionRecord) -> GQLCalendarEntry:
     )
 
 
+def _build_media_item_summary(record: MediaItemSummaryRecord) -> GQLMediaItem:
+    specialization = record.specialization
+    return GQLMediaItem(
+        id=strawberry.ID(record.id),
+        external_ref=record.external_ref or "",
+        title=record.title,
+        state=record.state or "Unknown",
+        media_type=_summary_media_type(record),
+        media_kind=_media_kind(record.type),
+        tmdb_id=_to_optional_int(record.tmdb_id),
+        tvdb_id=_to_optional_int(record.tvdb_id),
+        imdb_id=(specialization.imdb_id if specialization is not None else None),
+        parent_tmdb_id=(
+            _to_optional_int(specialization.parent_ids.tmdb_id)
+            if specialization is not None and specialization.parent_ids is not None
+            else None
+        ),
+        parent_tvdb_id=(
+            _to_optional_int(specialization.parent_ids.tvdb_id)
+            if specialization is not None and specialization.parent_ids is not None
+            else None
+        ),
+        show_title=(specialization.show_title if specialization is not None else None),
+        season_number=(specialization.season_number if specialization is not None else None),
+        episode_number=(specialization.episode_number if specialization is not None else None),
+        poster_path=record.poster_path,
+        aired_at=record.aired_at,
+    )
+
+
 def _build_library_stats(projection: StatsProjection) -> GQLLibraryStats:
     return GQLLibraryStats(
         total_items=projection.total_items,
@@ -250,18 +280,8 @@ class CoreQueryResolver:
         if limit < 1 or limit > 500:
             raise ValueError("limit must be within range [1, 500]")
 
-        records = await info.context.media_service.list_items(limit=limit)
-        return [
-            GQLMediaItem(
-                id=strawberry.ID(record.id),
-                external_ref=record.external_ref,
-                title=record.title,
-                state=record.state.value,
-                media_type=_record_media_type(record),
-                media_kind=_media_kind(_record_media_type(record)),
-            )
-            for record in records
-        ]
+        page = await info.context.media_service.search_items(limit=limit, page=1, extended=False)
+        return [_build_media_item_summary(record) for record in page.items]
 
     @strawberry.field(description="Fetch one media item by internal identifier")
     async def item(
