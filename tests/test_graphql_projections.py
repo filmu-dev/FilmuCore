@@ -41,6 +41,7 @@ from filmu_py.services.media import (
     StatsProjection,
 )
 from filmu_py.services.playback import (
+    PersistedPlaybackAttachmentControlMutationResult,
     DirectPlaybackRefreshControlPlaneTriggerResult,
     DirectPlaybackRefreshRecommendation,
     DirectPlaybackRefreshScheduleRequest,
@@ -342,6 +343,8 @@ class FakePlaybackTriggerController:
 class FakePlaybackService:
     stale_result: bool = True
     stale_item_ids: list[str] = field(default_factory=list)
+    attachment_persist_result: PersistedPlaybackAttachmentControlMutationResult | None = None
+    attachment_persist_calls: list[dict[str, object]] = field(default_factory=list)
     persist_result: PersistedMediaEntryControlMutationResult | None = None
     persist_calls: list[dict[str, object]] = field(default_factory=list)
 
@@ -384,6 +387,36 @@ class FakePlaybackService:
             }
         )
         return self.persist_result
+
+    async def persist_playback_attachment_control_state(
+        self,
+        item_identifier: str,
+        attachment_id: str,
+        *,
+        locator: str | None = None,
+        local_path: str | None = None,
+        restricted_url: str | None = None,
+        unrestricted_url: str | None = None,
+        refresh_state: str | None = None,
+        last_refresh_error: str | None = None,
+        expires_at: datetime | None = None,
+        at: datetime | None = None,
+    ) -> PersistedPlaybackAttachmentControlMutationResult | None:
+        _ = at
+        self.attachment_persist_calls.append(
+            {
+                "item_identifier": item_identifier,
+                "attachment_id": attachment_id,
+                "locator": locator,
+                "local_path": local_path,
+                "restricted_url": restricted_url,
+                "unrestricted_url": unrestricted_url,
+                "refresh_state": refresh_state,
+                "last_refresh_error": last_refresh_error,
+                "expires_at": expires_at,
+            }
+        )
+        return self.attachment_persist_result
 
 
 def _build_settings() -> Settings:
@@ -1614,6 +1647,172 @@ def test_graphql_persist_media_entry_control_state_rejects_empty_mutation() -> N
     assert response.json()["data"]["persistMediaEntryControlState"] == {
         "itemId": "item-1",
         "mediaEntryId": "entry-1",
+        "success": False,
+        "error": "no_changes_requested",
+    }
+
+
+def test_graphql_persist_playback_attachment_control_state_uses_shared_playback_service() -> None:
+    persisted_item = SimpleNamespace(id="item-1")
+    persisted_attachment = SimpleNamespace(
+        id="attachment-1",
+        kind="remote-direct",
+        locator="https://cdn.example.com/direct-fresh",
+        source_key="persisted",
+        provider="realdebrid",
+        provider_download_id="download-1",
+        provider_file_id="file-1",
+        provider_file_path="/downloads/Example.Movie.mkv",
+        original_filename="Example.Movie.mkv",
+        file_size=123456789,
+        local_path=None,
+        restricted_url="https://api.example.com/direct-fresh",
+        unrestricted_url="https://cdn.example.com/direct-fresh",
+        is_preferred=True,
+        preference_rank=1,
+        refresh_state="ready",
+        expires_at=datetime(2026, 4, 13, 13, 30, tzinfo=UTC),
+        last_refreshed_at=None,
+        last_refresh_error=None,
+    )
+    linked_entry = SimpleNamespace(
+        entry_type="media",
+        kind="remote-direct",
+        original_filename="Example.Movie.mkv",
+        url="https://cdn.example.com/direct-fresh",
+        local_path=None,
+        download_url="https://api.example.com/direct-fresh",
+        unrestricted_url="https://cdn.example.com/direct-fresh",
+        provider="realdebrid",
+        provider_download_id="download-1",
+        provider_file_id="file-1",
+        provider_file_path="/downloads/Example.Movie.mkv",
+        size=123456789,
+        created="2026-04-13T12:20:00+00:00",
+        modified="2026-04-13T12:25:00+00:00",
+        refresh_state="ready",
+        expires_at="2026-04-13T13:30:00+00:00",
+        last_refreshed_at=None,
+        last_refresh_error=None,
+        active_for_direct=False,
+        active_for_hls=False,
+        is_active_stream=False,
+    )
+    playback_service = FakePlaybackService(
+        attachment_persist_result=PersistedPlaybackAttachmentControlMutationResult(
+            item_identifier="item-1",
+            attachment_id="attachment-1",
+            item=persisted_item,
+            attachment=persisted_attachment,
+            linked_media_entries=(linked_entry,),
+        )
+    )
+    client = _build_client(FakeMediaService(), playback_service=playback_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistPlaybackAttachmentControlInput!) {
+                  persistPlaybackAttachmentControlState(input: $input) {
+                    itemId
+                    attachmentId
+                    success
+                    error
+                    attachment {
+                      locator
+                      restrictedUrl
+                      unrestrictedUrl
+                      refreshState
+                    }
+                    linkedMediaEntries {
+                      entryType
+                      downloadUrl
+                      unrestrictedUrl
+                      refreshState
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "attachmentId": "attachment-1",
+                    "locator": "https://cdn.example.com/direct-fresh",
+                    "restrictedUrl": "https://api.example.com/direct-fresh",
+                    "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+                    "refreshState": "ready",
+                    "expiresAt": "2026-04-13T13:30:00Z",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistPlaybackAttachmentControlState"] == {
+        "itemId": "item-1",
+        "attachmentId": "attachment-1",
+        "success": True,
+        "error": None,
+        "attachment": {
+            "locator": "https://cdn.example.com/direct-fresh",
+            "restrictedUrl": "https://api.example.com/direct-fresh",
+            "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+            "refreshState": "ready",
+        },
+        "linkedMediaEntries": [
+            {
+                "entryType": "media",
+                "downloadUrl": "https://api.example.com/direct-fresh",
+                "unrestrictedUrl": "https://cdn.example.com/direct-fresh",
+                "refreshState": "ready",
+            }
+        ],
+    }
+    assert playback_service.attachment_persist_calls == [
+        {
+            "item_identifier": "item-1",
+            "attachment_id": "attachment-1",
+            "locator": "https://cdn.example.com/direct-fresh",
+            "local_path": None,
+            "restricted_url": "https://api.example.com/direct-fresh",
+            "unrestricted_url": "https://cdn.example.com/direct-fresh",
+            "refresh_state": "ready",
+            "last_refresh_error": None,
+            "expires_at": datetime(2026, 4, 13, 13, 30, tzinfo=UTC),
+        }
+    ]
+
+
+def test_graphql_persist_playback_attachment_control_state_rejects_empty_mutation() -> None:
+    client = _build_client(FakeMediaService(), playback_service=FakePlaybackService())
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation Persist($input: PersistPlaybackAttachmentControlInput!) {
+                  persistPlaybackAttachmentControlState(input: $input) {
+                    itemId
+                    attachmentId
+                    success
+                    error
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "itemId": "item-1",
+                    "attachmentId": "attachment-1",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["persistPlaybackAttachmentControlState"] == {
+        "itemId": "item-1",
+        "attachmentId": "attachment-1",
         "success": False,
         "error": "no_changes_requested",
     }

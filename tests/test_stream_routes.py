@@ -11345,6 +11345,72 @@ def test_playback_source_service_persist_media_entry_control_state_updates_proje
     assert persisted_attachment.refresh_state == "ready"
 
 
+def test_playback_source_service_persist_playback_attachment_control_state_syncs_linked_media_entries() -> None:
+    item = _build_item(item_id="item-persist-playback-attachment-control-state")
+    attachment = _build_playback_attachment(
+        attachment_id="attachment-persist-playback-attachment-control-state",
+        item_id=item.id,
+        kind="remote-direct",
+        locator="https://cdn.example.com/direct-stale",
+        restricted_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-playback-attachment-control-state",
+    )
+    linked_entry = _build_media_entry(
+        media_entry_id="media-entry-persist-playback-attachment-control-state",
+        item_id=item.id,
+        source_attachment_id=attachment.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/direct-stale",
+        unrestricted_url="https://cdn.example.com/direct-stale",
+        refresh_state="stale",
+        provider="realdebrid",
+        provider_download_id="download-persist-playback-attachment-control-state",
+    )
+    linked_entry.source_attachment = attachment
+    item.playback_attachments = [attachment]
+    item.media_entries = [linked_entry]
+
+    database = PersistentDummyDatabaseRuntime(items=[item])
+    service = PlaybackSourceService(database)
+
+    result = asyncio.run(
+        service.persist_playback_attachment_control_state(
+            item.id,
+            attachment.id,
+            locator="https://cdn.example.com/direct-fresh",
+            restricted_url="https://api.example.com/direct-fresh",
+            unrestricted_url="https://cdn.example.com/direct-fresh",
+            refresh_state="ready",
+            expires_at=datetime(2099, 3, 14, 0, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result is not None
+    assert result.item_identifier == item.id
+    assert result.attachment_id == attachment.id
+    assert len(result.linked_media_entries) == 1
+
+    persisted_item = asyncio.run(PlaybackSourceService(database)._list_items())[0]
+    persisted_attachment = persisted_item.playback_attachments[0]
+    persisted_entry = persisted_item.media_entries[0]
+
+    assert persisted_attachment.locator == "https://cdn.example.com/direct-fresh"
+    assert persisted_attachment.restricted_url == "https://api.example.com/direct-fresh"
+    assert (
+        persisted_attachment.unrestricted_url
+        == "https://cdn.example.com/direct-fresh"
+    )
+    assert persisted_attachment.refresh_state == "ready"
+    assert persisted_attachment.expires_at == datetime(2099, 3, 14, 0, 0, tzinfo=UTC)
+    assert persisted_entry.download_url == "https://api.example.com/direct-fresh"
+    assert persisted_entry.unrestricted_url == "https://cdn.example.com/direct-fresh"
+    assert persisted_entry.refresh_state == "ready"
+    assert persisted_entry.provider_download_id == attachment.provider_download_id
+
+
 
 
 
