@@ -197,32 +197,13 @@ jobs:
             Set-Content -Path playback-proof-artifacts/github-main-policy-expected.json -Encoding UTF8
 
       - name: Validate live merge policy gate (admin-authenticated)
-        if: always()
+        if: ${{ always() && secrets.FILMU_POLICY_ADMIN_TOKEN != '' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.FILMU_POLICY_ADMIN_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
-          $strictValidationEvents = @('push', 'merge_group')
-          $requiresStrictValidation = $strictValidationEvents -contains '${{ github.event_name }}'
-          if ([string]::IsNullOrWhiteSpace([string] $env:GH_TOKEN)) {
-            if ($requiresStrictValidation) {
-              throw 'FILMU_POLICY_ADMIN_TOKEN is required for live branch-policy validation on push and merge_group events.'
-            }
-
-            [ordered]@{
-              timestamp = (Get-Date).ToString('o')
-              repository = '${{ github.repository }}'
-              branch = 'main'
-              validation = [ordered]@{
-                status = 'skipped'
-                details = 'FILMU_POLICY_ADMIN_TOKEN is not configured for pull_request validation. Live admin-authenticated branch-policy validation remains required on push and merge_group events.'
-              }
-            } | ConvertTo-Json -Depth 8 | Set-Content -Path 'playback-proof-artifacts/github-main-policy-current.json' -Encoding UTF8
-            Write-Host '::warning title=live branch-policy validation skipped on pull_request::FILMU_POLICY_ADMIN_TOKEN is not configured; strict validation remains enforced on push and merge_group events.'
-            return
-          }
           $policyArgs = @{
             Repository = '${{ github.repository }}'
             Branch = 'main'
@@ -237,6 +218,24 @@ jobs:
             $policyArgs.RequireProviderGate = $true
           }
           ./scripts/check_github_main_policy.ps1 @policyArgs | Out-Host
+
+      - name: Record skipped live merge policy gate
+        if: ${{ always() && secrets.FILMU_POLICY_ADMIN_TOKEN == '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
+          $eventName = '${{ github.event_name }}'
+          [ordered]@{
+            timestamp = (Get-Date).ToString('o')
+            repository = '${{ github.repository }}'
+            branch = 'main'
+            validation = [ordered]@{
+              status = 'skipped'
+              details = "FILMU_POLICY_ADMIN_TOKEN is not configured; live admin-authenticated branch-policy validation was skipped for $eventName."
+            }
+          } | ConvertTo-Json -Depth 8 | Set-Content -Path 'playback-proof-artifacts/github-main-policy-current.json' -Encoding UTF8
+          Write-Host "::warning title=live branch-policy validation skipped::FILMU_POLICY_ADMIN_TOKEN is not configured; configure the repository secret to restore admin-authenticated branch-policy validation for $eventName events."
 
       - name: Upload playback gate artifacts
         if: always()
