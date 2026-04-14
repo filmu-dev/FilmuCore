@@ -583,11 +583,12 @@ def test_worker_reads_updated_downloader_settings_after_put(monkeypatch: Any) ->
     response = client.put("/api/v1/settings", json=payload, headers=_headers())
 
     assert response.status_code == 200
-    provider, api_key = tasks._resolve_enabled_downloader(
+    provider = tasks._resolve_enabled_downloader(
         get_runtime_settings(),
         item_id="item-worker",
         item_request_id="request-worker",
     )
+    api_key = tasks._resolve_downloader_api_key(get_runtime_settings(), provider=provider)
     assert (provider, api_key) == ("alldebrid", "ad-token")
 
 

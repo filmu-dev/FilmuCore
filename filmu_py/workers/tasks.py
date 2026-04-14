@@ -1142,7 +1142,7 @@ def _resolve_enabled_downloader(
     *,
     item_id: str | None = None,
     item_request_id: str | None = None,
-) -> tuple[str, str]:
+) -> str:
     # Explicit compatibility-first provider priority: Real-Debrid, then AllDebrid, then Debrid-Link.
     provider_entries = (
         ("realdebrid", settings.downloaders.real_debrid),
@@ -1150,12 +1150,10 @@ def _resolve_enabled_downloader(
         ("debridlink", settings.downloaders.debrid_link),
     )
     enabled_providers: list[str] = []
-    api_key_by_provider: dict[str, str] = {}
     for provider, config in provider_entries:
         api_key = config.api_key.strip()
         if config.enabled and api_key:
             enabled_providers.append(provider)
-            api_key_by_provider[provider] = api_key
 
     if len(enabled_providers) > 1:
         logger.warning(
@@ -1167,9 +1165,25 @@ def _resolve_enabled_downloader(
             },
         )
     if enabled_providers:
-        selected_provider = enabled_providers[0]
-        return selected_provider, api_key_by_provider[selected_provider]
+        return enabled_providers[0]
     raise ValueError("no_enabled_downloader")
+
+
+def _resolve_downloader_api_key(settings: Settings, *, provider: str) -> str:
+    provider_entries = {
+        "realdebrid": settings.downloaders.real_debrid,
+        "alldebrid": settings.downloaders.all_debrid,
+        "debridlink": settings.downloaders.debrid_link,
+    }
+    try:
+        config = provider_entries[provider]
+    except KeyError as exc:
+        raise ValueError(f"unsupported_downloader_provider:{provider}") from exc
+
+    api_key = config.api_key.strip()
+    if not api_key:
+        raise ValueError(f"missing_downloader_api_key:{provider}")
+    return api_key
 
 
 async def _maybe_enqueue_next_stage(
@@ -2607,11 +2621,12 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         if selected_stream is None:
             raise ValueError("selected_stream_missing")
 
-        provider, api_key = _resolve_enabled_downloader(
+        provider = _resolve_enabled_downloader(
             settings,
             item_id=item_id,
             item_request_id=item_request_id,
         )
+        api_key = _resolve_downloader_api_key(settings, provider=provider)
         client = _build_provider_client(provider=provider, api_key=api_key, limiter=limiter)
         magnet_url = f"magnet:?xt=urn:btih:{selected_stream.infohash}".lower()
         logger.info(
