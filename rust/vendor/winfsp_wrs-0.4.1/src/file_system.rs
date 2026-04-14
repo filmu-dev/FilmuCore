@@ -15,6 +15,8 @@ use winfsp_wrs_sys::{
 
 use crate::{FileContextKind, FileSystemInterface, TrampolineInterface};
 
+const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000D_u32 as i32;
+
 #[repr(i32)]
 #[derive(Debug, Default, Clone, Copy)]
 /// User mode file system locking strategy.
@@ -380,6 +382,9 @@ impl FileSystem {
         if res != STATUS_SUCCESS {
             return Err(res);
         }
+        if p_inner.is_null() {
+            return Err(STATUS_INVALID_PARAMETER);
+        }
 
         #[cfg(feature = "debug")]
         unsafe {
@@ -483,6 +488,8 @@ impl FileSystem {
         let mut mountpoint = unsafe { U16CString::from_ptr_str((*self.p_inner).MountPoint) };
         // SAFETY: dereferencing pointer that have been initialized by `FspFileSystemCreate` call
         let p_user_context = unsafe { (*self.p_inner).UserContext };
+        // SAFETY: dereferencing pointer that have been initialized by `FspFileSystemCreate` call
+        let p_interface = unsafe { (*self.p_inner).Interface };
 
         // 2) Stop the running file system
 
@@ -503,7 +510,7 @@ impl FileSystem {
             FspFileSystemCreate(
                 device_name.as_ptr().cast_mut(),
                 &self.params.volume_params.0,
-                (*self.p_inner).Interface,
+                p_interface,
                 &mut p_inner,
             )
         };
@@ -511,9 +518,14 @@ impl FileSystem {
         if res != STATUS_SUCCESS {
             return Err(res);
         }
+        if p_inner.is_null() {
+            return Err(STATUS_INVALID_PARAMETER);
+        }
 
         // SAFETY: dereferencing pointer that have been initialized by `FspFileSystemCreate` call
-        unsafe { *p_inner }.UserContext = p_user_context;
+        unsafe {
+            (*p_inner).UserContext = p_user_context;
+        }
 
         #[cfg(feature = "debug")]
         {

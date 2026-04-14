@@ -35,7 +35,9 @@ def _clear_debrid_env(monkeypatch: Any) -> None:
 
 def _compatibility_fixture() -> dict[str, Any]:
     fixture_path = (
-        Path(__file__).resolve().parents[1] / "docs" / "original riven settings.json schema.MD"
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "original_riven_settings_schema.json"
     )
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 

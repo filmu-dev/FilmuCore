@@ -33,7 +33,7 @@ function Get-ChangedPaths {
         [Parameter(Mandatory = $true)][string] $Head
     )
 
-    $pathsText = Invoke-GitCapture -Arguments @('diff', '--name-only', "$Base...$Head")
+    $pathsText = Invoke-GitCapture -Arguments @('diff', '--name-only', '--diff-filter=ACMRTUXB', "$Base...$Head")
     if ([string]::IsNullOrWhiteSpace($pathsText)) {
         return @()
     }
@@ -43,41 +43,6 @@ function Get-ChangedPaths {
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
             ForEach-Object { $_.Trim() }
     )
-}
-
-function Assert-NoDuplicateChangelogSections {
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-
-    $versionCounts = @{}
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -match '^## \[(?<version>\d+\.\d+\.\d+)\]') {
-            $version = $Matches.version
-            if ($versionCounts.ContainsKey($version)) {
-                $versionCounts[$version] += 1
-            }
-            else {
-                $versionCounts[$version] = 1
-            }
-        }
-    }
-
-    $duplicates = @(
-        $versionCounts.GetEnumerator() |
-            Where-Object { $_.Value -gt 1 } |
-            Sort-Object Name
-    )
-    if ($duplicates.Count -gt 0) {
-        $formatted = @(
-            $duplicates | ForEach-Object {
-                "$($_.Name) ($($_.Value)x)"
-            }
-        ) -join ', '
-        throw "Duplicate release sections found in CHANGELOG.md: $formatted"
-    }
 }
 
 if ([string]::IsNullOrWhiteSpace($BaseRef)) {
@@ -97,43 +62,63 @@ $branchName = ''
 if (-not [string]::IsNullOrWhiteSpace([string] $env:GITHUB_HEAD_REF)) {
     $branchName = [string] $env:GITHUB_HEAD_REF
 }
+
+function Test-PathMatchesPattern {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Pattern
+    )
+
+    return ($Path -like $Pattern) -or ($Path -replace '\\', '/' -like $Pattern)
+}
 if ([string]::IsNullOrWhiteSpace($branchName)) {
     $branchName = (Invoke-GitCapture -Arguments @('branch', '--show-current')).Trim()
 }
 
 $isReleasePleaseBranch = $branchName -like 'release-please--*'
+$changedPaths = Get-ChangedPaths -Base $BaseRef -Head $HeadRef
+$alwaysForbiddenPatterns = @(
+    'logs/**',
+    'ci-artifacts/**',
+    'playback-proof-artifacts/**',
+    '*.md',
+    'login_page.html'
+)
+$releaseManagedPaths = @(
+    '.release-please-manifest.json',
+    'package.json',
+    'pyproject.toml',
+    'rust/filmuvfs/Cargo.toml'
+)
 
-if (-not $isReleasePleaseBranch) {
-    $forbiddenPatterns = @(
-        'logs/**',
-        'ci-artifacts/**',
-        'playback-proof-artifacts/**',
-        'docs/**',
-        'README.md',
-        'CHANGELOG.md',
-        'QUICK_START.md',
-        'WINDOWS_README.md',
-        'LINUX_UNIX_README.md',
-        'login_page.html',
-        '.release-please-manifest.json'
-    )
-
-    $changedPaths = Get-ChangedPaths -Base $BaseRef -Head $HeadRef
-    $violations = New-Object System.Collections.Generic.List[string]
-    foreach ($path in $changedPaths) {
-        foreach ($pattern in $forbiddenPatterns) {
-            if ($path -like $pattern) {
-                $violations.Add($path)
-                break
-            }
+$violations = New-Object System.Collections.Generic.List[string]
+foreach ($path in $changedPaths) {
+    foreach ($pattern in $alwaysForbiddenPatterns) {
+        if (Test-PathMatchesPattern -Path $path -Pattern $pattern) {
+            $violations.Add($path)
+            break
         }
-    }
-
-    if ($violations.Count -gt 0) {
-        $joined = ($violations | Sort-Object -Unique) -join ', '
-        throw "Publish hygiene failed for branch '$branchName': forbidden paths changed: $joined"
     }
 }
 
-Assert-NoDuplicateChangelogSections -Path (Join-Path $repoRoot 'CHANGELOG.md')
+if ($isReleasePleaseBranch) {
+    foreach ($path in $changedPaths) {
+        if ($path -notin $releaseManagedPaths) {
+            $violations.Add($path)
+        }
+    }
+}
+else {
+    foreach ($path in $changedPaths) {
+        if ($path -eq '.release-please-manifest.json') {
+            $violations.Add($path)
+        }
+    }
+}
+
+if ($violations.Count -gt 0) {
+    $joined = ($violations | Sort-Object -Unique) -join ', '
+    throw "Publish hygiene failed for branch '$branchName': forbidden paths changed: $joined"
+}
+
 Write-Output "[publish-hygiene] PASS (base=$BaseRef head=$HeadRef release_please=$isReleasePleaseBranch)"

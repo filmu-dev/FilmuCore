@@ -122,7 +122,6 @@ _missing_episode_scope_from_pairs = _stage_scope.missing_episode_scope_from_pair
 _partial_scope_rank_bonus = _stage_scope.partial_scope_rank_bonus
 _partial_scope_rejection_reason = _stage_scope.partial_scope_rejection_reason
 _post_rank_expected_scope_reason = _stage_scope.post_rank_expected_scope_reason
-_resolve_external_identifiers = _stage_scope.resolve_external_identifiers
 _build_scraper_search_input = _stage_scope.build_scraper_search_input
 _scrape_candidate_from_plugin_result = _stage_scope.scrape_candidate_from_plugin_result
 
@@ -1143,30 +1142,48 @@ def _resolve_enabled_downloader(
     *,
     item_id: str | None = None,
     item_request_id: str | None = None,
-) -> tuple[str, str]:
+) -> str:
     # Explicit compatibility-first provider priority: Real-Debrid, then AllDebrid, then Debrid-Link.
     provider_entries = (
         ("realdebrid", settings.downloaders.real_debrid),
         ("alldebrid", settings.downloaders.all_debrid),
         ("debridlink", settings.downloaders.debrid_link),
     )
-    enabled = [
-        (provider, config.api_key.strip())
-        for provider, config in provider_entries
-        if config.enabled and config.api_key.strip()
-    ]
-    if len(enabled) > 1:
+    enabled_providers: list[str] = []
+    for provider, config in provider_entries:
+        api_key = config.api_key.strip()
+        if config.enabled and api_key:
+            enabled_providers.append(provider)
+
+    if len(enabled_providers) > 1:
         logger.warning(
             "multiple downloaders enabled; selecting by fixed provider priority",
             extra={
                 "item_id": item_id,
                 "item_request_id": item_request_id,
-                "enabled_providers": [provider for provider, _ in enabled],
+                "enabled_providers": enabled_providers,
             },
         )
-    if enabled:
-        return enabled[0]
+    if enabled_providers:
+        return enabled_providers[0]
     raise ValueError("no_enabled_downloader")
+
+
+def _resolve_downloader_api_key(settings: Settings, *, provider: str) -> str:
+    provider_entries = {
+        "realdebrid": settings.downloaders.real_debrid,
+        "alldebrid": settings.downloaders.all_debrid,
+        "debridlink": settings.downloaders.debrid_link,
+    }
+    try:
+        config = provider_entries[provider]
+    except KeyError as exc:
+        raise ValueError(f"unsupported_downloader_provider:{provider}") from exc
+
+    api_key = config.api_key.strip()
+    if not api_key:
+        raise ValueError(f"missing_downloader_api_key:{provider}")
+    return api_key
 
 
 async def _maybe_enqueue_next_stage(
@@ -2604,11 +2621,12 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         if selected_stream is None:
             raise ValueError("selected_stream_missing")
 
-        provider, api_key = _resolve_enabled_downloader(
+        provider = _resolve_enabled_downloader(
             settings,
             item_id=item_id,
             item_request_id=item_request_id,
         )
+        api_key = _resolve_downloader_api_key(settings, provider=provider)
         client = _build_provider_client(provider=provider, api_key=api_key, limiter=limiter)
         magnet_url = f"magnet:?xt=urn:btih:{selected_stream.infohash}".lower()
         logger.info(

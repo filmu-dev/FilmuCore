@@ -29,12 +29,8 @@ ci-artifacts/
 artifacts/
 logs/
 
-# Local comparison and research docs that should stay out of the shared repo.
-docs/RIVEN_TS_*.md
-docs/filmcore_vs_*.md
-docs/riven-ts-*.md
-docs/original riven settings.json schema.MD
-docs/rtn_research_report.md
+# Local development docs must never be tracked in this repo.
+*.[mM][dD]
 
 rust/filmuvfs/target/
 target/

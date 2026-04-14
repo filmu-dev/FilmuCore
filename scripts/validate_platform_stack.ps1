@@ -59,19 +59,11 @@ $composeFiles = @(
     (Join-Path $repoRoot 'docker-compose.windows.yml')
 )
 
-$documentationFiles = @(
-    (Join-Path $repoRoot 'README.md'),
-    (Join-Path $repoRoot 'QUICK_START.md'),
-    (Join-Path $repoRoot 'WINDOWS_README.md'),
-    (Join-Path $repoRoot 'LINUX_UNIX_README.md'),
-    (Join-Path $repoRoot 'docs\LOCAL_DOCKER_STACK.md')
-)
-
 Write-Host '==> Validating FilmuCore platform stack split' -ForegroundColor Cyan
 Write-Host ''
 
 Write-Host '[1/4] Checking required files...' -ForegroundColor Yellow
-foreach ($path in ($powerShellScripts + $composeFiles + $documentationFiles + (Join-Path $repoRoot 'package.json'))) {
+foreach ($path in ($powerShellScripts + $composeFiles + (Join-Path $repoRoot 'package.json'))) {
     Assert-FileExists -Path $path
 }
 Write-Host '      ✓ Required files are present' -ForegroundColor Green

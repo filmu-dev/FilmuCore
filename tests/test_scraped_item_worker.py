@@ -1385,7 +1385,12 @@ def test_debrid_item_persists_entries_and_enqueues_finalize(monkeypatch: Any) ->
     monkeypatch.setattr(
         tasks,
         "_resolve_enabled_downloader",
-        lambda settings, item_id=None, item_request_id=None: ("realdebrid", "rd-token"),
+        lambda settings, item_id=None, item_request_id=None: "realdebrid",
+    )
+    monkeypatch.setattr(
+        tasks,
+        "_resolve_downloader_api_key",
+        lambda settings, provider: "rd-token",
     )
 
     result = asyncio.run(
@@ -1477,7 +1482,12 @@ def test_debrid_item_retries_rate_limit_without_transitioning_to_failed(
     monkeypatch.setattr(
         tasks,
         "_resolve_enabled_downloader",
-        lambda settings, item_id=None, item_request_id=None: ("realdebrid", "rd-token"),
+        lambda settings, item_id=None, item_request_id=None: "realdebrid",
+    )
+    monkeypatch.setattr(
+        tasks,
+        "_resolve_downloader_api_key",
+        lambda settings, provider: "rd-token",
     )
 
 
@@ -2346,11 +2356,12 @@ def test_resolve_enabled_downloader_uses_priority_order_and_logs_warning(
     settings.downloaders.debrid_link.api_key = "dl-token"
     caplog.set_level("WARNING")
 
-    provider, api_key = tasks._resolve_enabled_downloader(
+    provider = tasks._resolve_enabled_downloader(
         settings,
         item_id="item-priority",
         item_request_id="request-priority",
     )
+    api_key = tasks._resolve_downloader_api_key(settings, provider=provider)
 
     assert (provider, api_key) == ("realdebrid", "rd-token")
     assert any(
@@ -2384,11 +2395,12 @@ def test_worker_runtime_settings_resolution_prefers_persisted_blob_when_ctx_has_
 
     assert settings.downloaders.real_debrid.enabled is False
     assert settings.downloaders.all_debrid.enabled is True
-    provider, api_key = tasks._resolve_enabled_downloader(
+    provider = tasks._resolve_enabled_downloader(
         settings,
         item_id="item-persisted-worker",
         item_request_id="request-persisted-worker",
     )
+    api_key = tasks._resolve_downloader_api_key(settings, provider=provider)
     assert (provider, api_key) == ("alldebrid", "ad-token")
 
 

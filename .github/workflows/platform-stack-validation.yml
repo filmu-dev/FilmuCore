@@ -7,11 +7,6 @@ on:
       - "docker-compose.yml"
       - "docker-compose.windows.yml"
       - "package.json"
-      - "README.md"
-      - "QUICK_START.md"
-      - "WINDOWS_README.md"
-      - "LINUX_UNIX_README.md"
-      - "docs/LOCAL_DOCKER_STACK.md"
       - "scripts/start_local_stack.ps1"
       - "scripts/status_local_stack.ps1"
       - "scripts/stop_local_stack.ps1"
@@ -24,6 +19,9 @@ on:
 concurrency:
   group: platform-stack-validation-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   validate-platform-stack:

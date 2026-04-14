@@ -895,8 +895,13 @@ class DownloaderAccountService:
         provider_name, _api_key, client = providers[0]
         try:
             payload = await cast(Any, client).get_user_info()
-        except Exception as exc:
-            return {"provider": provider_name, "error": str(exc)}
+        except Exception:
+            logger.warning(
+                "downloader account info request failed",
+                extra={"provider": provider_name},
+                exc_info=True,
+            )
+            return {"provider": provider_name, "error": "provider_request_failed"}
 
         if provider_name == "real_debrid":
             return {

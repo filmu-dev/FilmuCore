@@ -85,7 +85,7 @@ function Test-AllMatch {
 }
 
 $inferredType = 'chore'
-if (Test-AllMatch -Items $stagedPaths -Predicate { param($path) $path -match '^(docs/|README\.md$|CHANGELOG\.md$|.*\.md$)' }) {
+if (Test-AllMatch -Items $stagedPaths -Predicate { param($path) $path -match '.*\.md$' }) {
     $inferredType = 'docs'
 }
 elseif (Test-AllMatch -Items $stagedPaths -Predicate { param($path) $path -match '^(tests/|.*test.*\.py$|.*_test\.rs$)' }) {
