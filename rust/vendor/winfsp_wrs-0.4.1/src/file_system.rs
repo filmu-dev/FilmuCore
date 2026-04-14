@@ -382,13 +382,15 @@ impl FileSystem {
         if res != STATUS_SUCCESS {
             return Err(res);
         }
-        if p_inner.is_null() {
+        let mut p_inner = if let Some(p_inner) = std::ptr::NonNull::new(p_inner) {
+            p_inner
+        } else {
             return Err(STATUS_INVALID_PARAMETER);
-        }
+        };
 
         #[cfg(feature = "debug")]
         unsafe {
-            let live_interface = (*p_inner).Interface;
+            let live_interface = p_inner.as_ref().Interface;
             if live_interface.is_null() {
                 eprintln!("winfsp_wrs.live_interface is null after FspFileSystemCreate");
             } else {
@@ -406,8 +408,10 @@ impl FileSystem {
         let user_context = Box::into_raw(Box::new(context)).cast();
         // SAFETY: Dereferencing pointer that have been initialized by `FspFileSystemCreate` call
         unsafe {
-            (*p_inner).UserContext = user_context;
+            p_inner.as_mut().UserContext = user_context;
         }
+
+        let p_inner = p_inner.as_ptr();
 
         let free_p_inner_custom_fields = Box::new(|fs: &FileSystem| {
             // SAFETY: Dereferencing pointer that have been initialized by `FspFileSystemCreate` call
