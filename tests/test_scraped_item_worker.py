@@ -1385,7 +1385,12 @@ def test_debrid_item_persists_entries_and_enqueues_finalize(monkeypatch: Any) ->
     monkeypatch.setattr(
         tasks,
         "_resolve_enabled_downloader",
-        lambda settings, item_id=None, item_request_id=None: ("realdebrid", "rd-token"),
+        lambda settings, item_id=None, item_request_id=None: "realdebrid",
+    )
+    monkeypatch.setattr(
+        tasks,
+        "_resolve_downloader_api_key",
+        lambda settings, provider: "rd-token",
     )
 
     result = asyncio.run(
@@ -1477,7 +1482,12 @@ def test_debrid_item_retries_rate_limit_without_transitioning_to_failed(
     monkeypatch.setattr(
         tasks,
         "_resolve_enabled_downloader",
-        lambda settings, item_id=None, item_request_id=None: ("realdebrid", "rd-token"),
+        lambda settings, item_id=None, item_request_id=None: "realdebrid",
+    )
+    monkeypatch.setattr(
+        tasks,
+        "_resolve_downloader_api_key",
+        lambda settings, provider: "rd-token",
     )
 
 
