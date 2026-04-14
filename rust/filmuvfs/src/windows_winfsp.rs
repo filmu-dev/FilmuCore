@@ -1639,7 +1639,9 @@ impl MountRuntime {
                     create_status as u32
                 )));
             }
-            if file_system.is_null() {
+            let mut file_system = if let Some(file_system) = std::ptr::NonNull::new(file_system) {
+                file_system
+            } else {
                 unsafe {
                     drop(Box::from_raw(context_ptr));
                     drop(Box::from_raw(interface));
@@ -1648,18 +1650,20 @@ impl MountRuntime {
                     "failed to create raw WinFSP filesystem at {}: WinFSP returned null filesystem pointer",
                     mount_path.display()
                 )));
-            }
+            };
 
             unsafe {
-                (*file_system).UserContext = context_ptr.cast();
+                let file_system_ptr = file_system.as_ptr();
+                file_system.as_mut().UserContext = context_ptr.cast();
                 FspDebugLogSetHandle(GetStdHandle(STD_ERROR_HANDLE));
-                FspFileSystemSetDebugLogF(file_system, u32::MAX);
+                FspFileSystemSetDebugLogF(file_system_ptr, u32::MAX);
                 FspFileSystemSetOperationGuardStrategyF(
-                    file_system,
+                    file_system_ptr,
                     FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY_FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY_FINE,
                 );
             }
 
+            let file_system = file_system.as_ptr();
             let mount_status =
                 unsafe { FspFileSystemSetMountPoint(file_system, mountpoint.as_ptr().cast_mut()) };
             if mount_status != STATUS_SUCCESS {

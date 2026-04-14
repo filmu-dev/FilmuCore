@@ -389,14 +389,18 @@ impl FileSystem {
         #[cfg(feature = "debug")]
         unsafe {
             let live_interface = (*p_inner).Interface;
-            eprintln!(
-                "winfsp_wrs.live_interface create={:?} create_ex={:?} open={:?} get_security_by_name={:?} read_directory={:?}",
-                (*live_interface).Create,
-                (*live_interface).CreateEx,
-                (*live_interface).Open,
-                (*live_interface).GetSecurityByName,
-                (*live_interface).ReadDirectory,
-            );
+            if live_interface.is_null() {
+                eprintln!("winfsp_wrs.live_interface is null after FspFileSystemCreate");
+            } else {
+                eprintln!(
+                    "winfsp_wrs.live_interface create={:?} create_ex={:?} open={:?} get_security_by_name={:?} read_directory={:?}",
+                    (*live_interface).Create,
+                    (*live_interface).CreateEx,
+                    (*live_interface).Open,
+                    (*live_interface).GetSecurityByName,
+                    (*live_interface).ReadDirectory,
+                );
+            }
         }
 
         let user_context = Box::into_raw(Box::new(context)).cast();
