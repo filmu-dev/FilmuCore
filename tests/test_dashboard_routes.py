@@ -15,11 +15,11 @@ from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 from redis.exceptions import ResponseError
 
-from filmuvfs.catalog.v1 import catalog_pb2
 from filmu_py.api.router import create_api_router
 from filmu_py.api.routes import default as default_routes
-from filmu_py.api.routes.internal_vfs import router as internal_vfs_router
+from filmu_py.api.routes import runtime_governance as runtime_governance_routes
 from filmu_py.api.routes import stream as stream_routes
+from filmu_py.api.routes.internal_vfs import router as internal_vfs_router
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.chunk_engine import ChunkCache
@@ -27,14 +27,15 @@ from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
 from filmu_py.plugins import TestPluginContext
+from filmu_py.plugins.builtins import register_builtin_plugins
+from filmu_py.plugins.interfaces import StreamControlInput, StreamControlResult
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
-from filmu_py.plugins.interfaces import StreamControlAction, StreamControlInput, StreamControlResult
-from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.resources import AppResources
 from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.media import StatsProjection, StatsYearReleaseRecord
+from filmuvfs.catalog.v1 import catalog_pb2
 
 
 class DummyRedis:
@@ -1714,6 +1715,11 @@ def test_operations_governance_route_returns_enterprise_slice_posture(
         default_routes,
         "_playback_gate_governance_snapshot",
         lambda: dict(playback_gate_governance),
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "_vfs_runtime_governance_snapshot",
+        lambda *args, **kwargs: runtime_governance_routes._empty_vfs_runtime_governance_snapshot(),
     )
 
     client = _build_client(arq_enabled=True)
