@@ -84,6 +84,16 @@ def test_check_branch_hygiene_defaults_to_local_source_of_truth_mode() -> None:
     assert "fresh single-use remote review branch from the current local source branch" in script
 
 
+def test_check_branch_hygiene_permanently_blocks_stale_review_branch_names() -> None:
+    script = (REPO_ROOT / "scripts" / "check_branch_hygiene.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$permanentlyBlockedReviewBranches" in script
+    assert "'codex/windows-vfs-rollout-20260415'" in script
+    assert "permanently blocked for this repository" in script
+
+
 def test_push_review_branch_blocks_direct_main_target_and_uses_local_source_of_truth() -> None:
     script = (REPO_ROOT / "scripts" / "push_review_branch.ps1").read_text(
         encoding="utf-8"
