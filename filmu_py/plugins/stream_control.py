@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 from filmu_py.core.byte_streaming import (
     get_active_handle_snapshot,
@@ -42,12 +43,13 @@ def _normalize_control_plane_outcome(
         if refresh_result is not None
         else "unavailable"
     )
-    retry_after = (
-        float(getattr(refresh_result, "retry_after_seconds"))
-        if getattr(refresh_result, "retry_after_seconds", None) is not None
+    retry_after_seconds = (
+        cast(Any, refresh_result).retry_after_seconds
+        if refresh_result is not None and hasattr(refresh_result, "retry_after_seconds")
         else None
     )
-    metadata = {
+    retry_after = float(retry_after_seconds) if retry_after_seconds is not None else None
+    metadata: dict[str, str | bool] = {
         "app_outcome": app_outcome,
         "control_plane_outcome": control_plane_outcome,
         "refresh_outcome": refresh_outcome,

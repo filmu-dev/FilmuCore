@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
+from typing import cast
+
 from filmu_py.plugins.context import PluginContext
 from filmu_py.plugins.interfaces import StreamControlInput, StreamControlPlugin, StreamControlResult
 
@@ -48,8 +51,8 @@ class HostStreamControlPlugin(StreamControlPlugin):
                 controller_attached=False,
             )
 
-        typed_gateway = getattr(stream_control_gateway, "control")
+        typed_gateway = stream_control_gateway.control
         result = typed_gateway(request)
         if hasattr(result, "__await__"):
-            return await result
+            return await cast(Awaitable[StreamControlResult], result)
         raise TypeError("stream_control gateway control(request) must return an awaitable")
