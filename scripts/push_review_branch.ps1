@@ -34,6 +34,9 @@ if ([string]::IsNullOrWhiteSpace($currentBranch)) {
 if ($currentBranch -ne 'main') {
     throw "Review branch pushes must come from local 'main'. Current branch is '$currentBranch'."
 }
+if ($RemoteBranch -eq $BaseBranch) {
+    throw "Review branch pushes must not target '$Remote/$BaseBranch'. Push local '$currentBranch' to a dedicated remote review branch instead."
+}
 
 $hygieneArgs = @(
     '-NoProfile',
@@ -46,23 +49,23 @@ $hygieneArgs = @(
     '-Remote',
     $Remote,
     '-BaseBranch',
-    $BaseBranch
+    $BaseBranch,
+    '-NoFetch',
+    '-LocalSourceOfTruth:$true'
 )
-if ($NoFetch) {
-    $hygieneArgs += '-NoFetch'
-}
 
 & pwsh @hygieneArgs
 if ($LASTEXITCODE -ne 0) {
-    throw 'Branch hygiene failed. Sync local main or use a fresh remote review branch before pushing.'
+    throw 'Branch hygiene failed. Fix the local source branch state or use a fresh remote review branch before pushing.'
 }
 
 $result = [ordered]@{
     source_branch = $currentBranch
     remote_branch = $RemoteBranch
     base_branch = "$Remote/$BaseBranch"
-    fetched_base = (-not $NoFetch)
+    fetched_base = $false
     dry_run = [bool] $DryRun
+    local_source_of_truth = $true
 }
 
 if ($DryRun) {

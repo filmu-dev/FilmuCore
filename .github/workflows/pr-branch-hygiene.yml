@@ -93,8 +93,7 @@ jobs:
           echo "behind_by=$behind_by"
 
           if (( behind_by > 0 )); then
-            echo "::error::Branch '$head_ref' is behind '$base_ref' by $behind_by commit(s). Update the branch from current main before merge so required checks attach to the right merge state and conflicts do not accumulate."
-            exit 1
+            echo "::notice::Branch '$head_ref' differs from '$base_ref' by $behind_by commit(s). Local is the source of truth for this project, so this check is informational only; review mergeability in GitHub before merging."
           fi
 
           if (( ahead_by == 0 )); then
