@@ -262,7 +262,7 @@ async def _grpc_observability_scope(
 
                 otel_context.detach(cast(Any, otel_token))
             except Exception:
-                pass
+                logger.debug("Ignoring OpenTelemetry context detach failure during gRPC cleanup", exc_info=True)
         structlog.contextvars.clear_contextvars()
 
 
