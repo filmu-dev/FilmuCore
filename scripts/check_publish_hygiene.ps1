@@ -81,7 +81,6 @@ $alwaysForbiddenPatterns = @(
     'logs/**',
     'ci-artifacts/**',
     'playback-proof-artifacts/**',
-    '*.md',
     'login_page.html'
 )
 $releaseManagedPaths = @(

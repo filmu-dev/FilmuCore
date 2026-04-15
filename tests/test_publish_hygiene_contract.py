@@ -4,7 +4,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_forbidden_publish_paths_blocks_docs_and_local_tracking_surfaces() -> None:
+def test_forbidden_publish_paths_blocks_local_tracking_surfaces() -> None:
     script = (REPO_ROOT / "scripts" / "check_forbidden_publish_paths.ps1").read_text(
         encoding="utf-8"
     )
@@ -13,7 +13,6 @@ def test_forbidden_publish_paths_blocks_docs_and_local_tracking_surfaces() -> No
         "'logs/**'",
         "'ci-artifacts/**'",
         "'playback-proof-artifacts/**'",
-        "'*.md'",
         "'login_page.html'",
         "'.release-please-manifest.json'",
     ):
@@ -46,7 +45,7 @@ def test_verify_python_lint_runs_publish_hygiene_guard() -> None:
     assert "pwsh -NoProfile -File ./scripts/check_publish_hygiene.ps1" in verify_workflow
 
 
-def test_publish_hygiene_keeps_docs_forbidden_even_on_release_branches() -> None:
+def test_publish_hygiene_keeps_release_manifest_forbidden_off_release_branches() -> None:
     script = (REPO_ROOT / "scripts" / "check_publish_hygiene.ps1").read_text(
         encoding="utf-8"
     )
@@ -67,11 +66,20 @@ def test_publish_hygiene_keeps_docs_forbidden_even_on_release_branches() -> None
     assert release_managed_match is not None
     release_managed = re.findall(r"'([^']+)'", release_managed_match.group("body"))
 
-    assert "*.md" in always_forbidden
-    assert "*.md" not in release_managed
+    assert "*.md" not in always_forbidden
     assert "package.json" in release_managed
     assert "pyproject.toml" in release_managed
     assert "rust/filmuvfs/Cargo.toml" in release_managed
+
+
+def test_publish_hygiene_allows_repo_docs_to_ship_on_feature_branches() -> None:
+    script = (REPO_ROOT / "scripts" / "check_publish_hygiene.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "'logs/**'" in script
+    assert "'login_page.html'" in script
+    assert "'*.md'" not in script
 
 
 def test_check_branch_hygiene_defaults_to_local_source_of_truth_mode() -> None:
