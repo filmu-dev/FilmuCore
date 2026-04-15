@@ -696,7 +696,7 @@ wheels = [
 
 [[package]]
 name = "filmu-python"
-version = "0.16.0"
+version = "0.16.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiocache" },

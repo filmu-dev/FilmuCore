@@ -94,7 +94,7 @@ class PluginDownloaderClientAdapter:
 
     async def add_magnet(self, magnet_url: str) -> str:
         result = await self.plugin.add_magnet(SimpleNamespace(magnet_url=magnet_url))
-        return result.download_id
+        return str(result.download_id)
 
     async def get_torrent_info(self, provider_torrent_id: str) -> TorrentInfo:
         status = await self.plugin.get_status(SimpleNamespace(download_id=provider_torrent_id))
@@ -247,7 +247,7 @@ def build_download_manifest(
         resolved_files.append(
             TorrentFile(
                 file_id=file.file_id,
-                file_name=file_name,
+                file_name=file_name or identity_path or file.file_id,
                 file_path=file_path,
                 file_size_bytes=file_size_bytes,
                 selected=selected,

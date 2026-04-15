@@ -3121,11 +3121,7 @@ mod tests {
     #[test]
     fn backend_stream_url_preserves_existing_api_prefix() {
         assert_eq!(
-            format_backend_stream_url(
-                "http://127.0.0.1:8000/api/v1",
-                "item-123",
-                "secret"
-            ),
+            format_backend_stream_url("http://127.0.0.1:8000/api/v1", "item-123", "secret"),
             "http://127.0.0.1:8000/api/v1/stream/file/item-123?api_key=secret"
         );
     }

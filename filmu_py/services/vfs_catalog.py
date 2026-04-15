@@ -316,13 +316,13 @@ def summarize_vfs_catalog_snapshot(snapshot: VfsCatalogSnapshot) -> VfsCatalogRo
         query_strategy = file_entry.query_strategy or "unspecified"
         query_strategy_counts[query_strategy] = query_strategy_counts.get(query_strategy, 0) + 1
 
-        provider_family = file_entry.provider_family or "none"
+        provider_family = file_entry.provider_family if file_entry.provider_family else "none"
         provider_family_counts[provider_family] = provider_family_counts.get(provider_family, 0) + 1
 
-        lease_state = file_entry.lease_state or "unknown"
+        lease_state = file_entry.lease_state if file_entry.lease_state else "unknown"
         lease_state_counts[lease_state] = lease_state_counts.get(lease_state, 0) + 1
 
-        locator_source = file_entry.locator_source or "locator"
+        locator_source = file_entry.locator_source if file_entry.locator_source else "locator"
         locator_source_counts[locator_source] = locator_source_counts.get(locator_source, 0) + 1
 
         if file_entry.restricted_fallback:

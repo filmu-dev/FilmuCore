@@ -68,9 +68,9 @@ from .settings import PluginSettingsRegistry
 from .testing import TestPluginContext
 
 __all__ = [
-    "MDBLIST_PLUGIN_NAME",
     "COMET_PLUGIN_NAME",
     "LISTRR_PLUGIN_NAME",
+    "MDBLIST_PLUGIN_NAME",
     "NOTIFICATIONS_PLUGIN_NAME",
     "PLEX_PLUGIN_NAME",
     "PROWLARR_PLUGIN_NAME",
@@ -118,10 +118,10 @@ __all__ = [
     "PluginSettingsRegistry",
     "ProwlarrScraper",
     "RarbgScraper",
-    "SeerrContentService",
     "ScraperPlugin",
     "ScraperResult",
     "ScraperSearchInput",
+    "SeerrContentService",
     "StreamControlAction",
     "StreamControlInput",
     "StreamControlPlugin",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import functools
 import json
 import logging
@@ -35,17 +34,7 @@ from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
 from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.rtn import RankingProfile
-from filmu_py.services.debrid import (
-    AllDebridPlaybackClient,
-    build_download_manifest,
-    DebridDownloadClient,
-    DebridLinkPlaybackClient,
-    PluginDownloaderClientAdapter,
-    DebridRateLimitError,
-    RealDebridPlaybackClient,
-    TorrentInfo,
-    filter_torrent_files,
-)
+from filmu_py.services.debrid import DebridDownloadClient, DebridRateLimitError, TorrentInfo
 from filmu_py.services.media import (
     MediaItemRecord,
     MediaService,
@@ -58,15 +47,27 @@ from filmu_py.services.media import (
     _parse_calendar_datetime,
 )
 from filmu_py.services.media_server import MediaServerNotifier
-from filmu_py.services.playback import (
-    PlaybackSourceService,
-)
+from filmu_py.services.playback import PlaybackSourceService
 from filmu_py.services.settings_service import load_settings
 from filmu_py.state.item import InvalidItemTransition, ItemEvent, ItemState
 from filmu_py.workers import stage_isolation as _stage_isolation
 from filmu_py.workers import stage_job_ids as _stage_job_ids
 from filmu_py.workers import stage_observability as _stage_observability
 from filmu_py.workers import stage_scope as _stage_scope
+from filmu_py.workers.downloader_orchestration import (
+    build_provider_client as orchestration_build_provider_client,
+)
+from filmu_py.workers.downloader_orchestration import (
+    build_rank_no_winner_diagnostics,
+    execute_debrid_download,
+    rank_failure_cooldown_seconds,
+    resolve_download_client,
+    resolve_download_clients,
+    resolve_downloader_api_key,
+    resolve_enabled_downloader,
+    selection_failure_reason,
+    should_failover_downloader,
+)
 from filmu_py.workers.retry import (
     RetryPolicy,
     bind_worker_contextvars,
@@ -108,9 +109,7 @@ process_scraped_item_job_id = _stage_job_ids.process_scraped_item_job_id
 rank_streams_job_id = _stage_job_ids.rank_streams_job_id
 refresh_direct_playback_link_job_id = _stage_job_ids.refresh_direct_playback_link_job_id
 refresh_selected_hls_failed_lease_job_id = _stage_job_ids.refresh_selected_hls_failed_lease_job_id
-refresh_selected_hls_restricted_fallback_job_id = (
-    _stage_job_ids.refresh_selected_hls_restricted_fallback_job_id
-)
+refresh_selected_hls_restricted_fallback_job_id = _stage_job_ids.refresh_selected_hls_restricted_fallback_job_id
 scrape_item_job_id = _stage_job_ids.scrape_item_job_id
 worker_stage_idempotency_key = _stage_job_ids.worker_stage_idempotency_key
 _RankBatchInput = _stage_isolation.RankBatchInput
@@ -1130,108 +1129,19 @@ def _dubbed_anime_only(settings: Settings) -> bool:
     return bool(raw)
 
 
-def _build_provider_client(
-    *, provider: str, api_key: str, limiter: DistributedRateLimiter
-) -> DebridDownloadClient:
-    if provider == "realdebrid":
-        return RealDebridPlaybackClient(api_token=api_key, limiter=limiter)
-    if provider == "alldebrid":
-        return AllDebridPlaybackClient(api_token=api_key, limiter=limiter)
-    if provider == "debridlink":
-        return DebridLinkPlaybackClient(api_token=api_key, limiter=limiter)
-    raise ValueError(f"unsupported downloader provider={provider}")
-
-
 def _resolve_enabled_downloader(
     settings: Settings,
     *,
     item_id: str | None = None,
     item_request_id: str | None = None,
 ) -> str:
-    # Explicit compatibility-first provider priority: Real-Debrid, then AllDebrid, then Debrid-Link.
-    provider_entries = (
-        ("realdebrid", settings.downloaders.real_debrid),
-        ("alldebrid", settings.downloaders.all_debrid),
-        ("debridlink", settings.downloaders.debrid_link),
-    )
-    enabled_providers: list[str] = []
-    for provider, config in provider_entries:
-        api_key = config.api_key.strip()
-        if config.enabled and api_key:
-            enabled_providers.append(provider)
-
-    if len(enabled_providers) > 1:
-        logger.warning(
-            "multiple downloaders enabled; selecting by fixed provider priority",
-            extra={
-                "item_id": item_id,
-                "item_request_id": item_request_id,
-                "enabled_providers": enabled_providers,
-            },
-        )
-    if enabled_providers:
-        return enabled_providers[0]
-    raise ValueError("no_enabled_downloader")
+    return resolve_enabled_downloader(settings, item_id=item_id, item_request_id=item_request_id)
 
 
-def _configured_builtin_downloader_providers(settings: Settings) -> list[str]:
-    """Return enabled builtin providers ordered by orchestration priority."""
-
-    provider_entries = {
-        "realdebrid": settings.downloaders.real_debrid,
-        "alldebrid": settings.downloaders.all_debrid,
-        "debridlink": settings.downloaders.debrid_link,
-    }
-    configured: list[str] = []
-    for provider in settings.orchestration.downloader_provider_priority:
-        config = provider_entries.get(provider)
-        if config is None:
-            continue
-        if config.enabled and config.api_key.strip():
-            configured.append(provider)
-    return configured
-
-
-def _configured_plugin_downloader_providers(
-    settings: Settings,
-    *,
-    plugin_registry: PluginRegistry,
-) -> list[tuple[str, DebridDownloadClient]]:
-    """Return enabled plugin downloader adapters ordered by orchestration policy."""
-
-    plugin_by_name = {
-        str(getattr(plugin, "plugin_name", type(plugin).__name__)): plugin
-        for plugin in plugin_registry.get_downloaders()
-    }
-    ordered_names: list[str] = []
-    for provider in settings.orchestration.downloader_provider_priority:
-        if provider in plugin_by_name and provider not in ordered_names:
-            ordered_names.append(provider)
-    for provider in plugin_by_name:
-        if provider not in ordered_names:
-            ordered_names.append(provider)
-
-    configured: list[tuple[str, DebridDownloadClient]] = []
-    for provider in ordered_names:
-        plugin = plugin_by_name[provider]
-        if provider == "stremthru":
-            stremthru_settings = settings.downloaders.stremthru
-            if not (
-                stremthru_settings.enabled
-                and bool(stremthru_settings.token.strip())
-                and bool(stremthru_settings.url.strip())
-            ):
-                continue
-        configured.append(
-            (
-                provider,
-                PluginDownloaderClientAdapter(
-                    provider=provider,
-                    plugin=plugin,
-                ),
-            )
-        )
-    return configured
+def _build_provider_client(
+    *, provider: str, api_key: str, limiter: DistributedRateLimiter
+) -> DebridDownloadClient:
+    return orchestration_build_provider_client(provider=provider, api_key=api_key, limiter=limiter)
 
 
 async def _resolve_download_clients(
@@ -1242,63 +1152,15 @@ async def _resolve_download_clients(
     item_id: str | None = None,
     item_request_id: str | None = None,
 ) -> list[tuple[str, DebridDownloadClient]]:
-    """Resolve ordered downloader candidates from builtin and plugin-backed providers."""
-
-    candidate_by_provider: dict[str, DebridDownloadClient] = {}
-    discovery_order: list[str] = []
-
-    for provider in _configured_builtin_downloader_providers(settings):
-        api_key = _resolve_downloader_api_key(settings, provider=provider)
-        candidate_by_provider[provider] = _build_provider_client(
-            provider=provider,
-            api_key=api_key,
-            limiter=limiter,
-        )
-        discovery_order.append(provider)
-
     plugin_registry = await _resolve_plugin_registry(ctx)
-    for provider, client in _configured_plugin_downloader_providers(
-        settings,
+    return resolve_download_clients(
+        settings=settings,
+        limiter=limiter,
         plugin_registry=plugin_registry,
-    ):
-        if provider in candidate_by_provider:
-            continue
-        candidate_by_provider[provider] = client
-        discovery_order.append(provider)
-
-    ordered_names: list[str] = []
-    for provider in settings.orchestration.downloader_provider_priority:
-        if provider in candidate_by_provider and provider not in ordered_names:
-            ordered_names.append(provider)
-    for provider in discovery_order:
-        if provider not in ordered_names:
-            ordered_names.append(provider)
-    candidates = [(provider, candidate_by_provider[provider]) for provider in ordered_names]
-
-    if len(candidates) > 1 and settings.orchestration.downloader_selection_mode == "fixed_priority":
-        logger.warning(
-            "multiple downloaders enabled; selecting by fixed provider priority",
-            extra={
-                "item_id": item_id,
-                "item_request_id": item_request_id,
-                "enabled_providers": [provider for provider, _client in candidates],
-            },
-        )
-        return [candidates[0]]
-
-    attempt_limit = settings.orchestration.downloader_provider_attempt_limit
-    bounded = candidates[:attempt_limit]
-    if len(bounded) > 1:
-        logger.info(
-            "resolved downloader candidates from orchestration policy",
-            extra={
-                "item_id": item_id,
-                "item_request_id": item_request_id,
-                "providers": [provider for provider, _client in bounded],
-                "selection_mode": settings.orchestration.downloader_selection_mode,
-            },
-        )
-    return bounded
+        provider_client_builder=_build_provider_client,
+        item_id=item_id,
+        item_request_id=item_request_id,
+    )
 
 
 async def _resolve_download_client(
@@ -1309,36 +1171,17 @@ async def _resolve_download_client(
     item_id: str | None = None,
     item_request_id: str | None = None,
 ) -> tuple[str, DebridDownloadClient]:
-    """Resolve the active debrid client, allowing plugin-backed fallback when no builtin is enabled."""
-
-    candidates = await _resolve_download_clients(
-        ctx,
-        settings=settings,
-        limiter=limiter,
+    plugin_registry = await _resolve_plugin_registry(ctx)
+    return resolve_download_client(
+        settings=settings, limiter=limiter, plugin_registry=plugin_registry,
+        provider_client_builder=_build_provider_client,
         item_id=item_id,
         item_request_id=item_request_id,
     )
-    if candidates:
-        return candidates[0]
-    raise ValueError("no_enabled_downloader")
 
 
 def _resolve_downloader_api_key(settings: Settings, *, provider: str) -> str:
-    provider_entries = {
-        "realdebrid": settings.downloaders.real_debrid,
-        "alldebrid": settings.downloaders.all_debrid,
-        "debridlink": settings.downloaders.debrid_link,
-    }
-    try:
-        config = provider_entries[provider]
-    except KeyError as exc:
-        raise ValueError(f"unsupported_downloader_provider:{provider}") from exc
-
-    api_key = config.api_key.strip()
-    if not api_key:
-        raise ValueError(f"missing_downloader_api_key:{provider}")
-    return api_key
-
+    return resolve_downloader_api_key(settings, provider=provider)
 
 async def _maybe_enqueue_next_stage(
     ctx: dict[str, Any],
@@ -1498,19 +1341,6 @@ async def _persist_unparsed_stream_candidates(
     return parsed_count
 
 
-def _selection_failure_reason(
-    ranked_streams: list[RankedStreamCandidateRecord],
-    selected_stream_id: str | None,
-) -> str:
-    """Return a stable failure reason for scraped-item selection failures."""
-
-    if selected_stream_id is not None:
-        return "selected_stream_unavailable"
-    if not ranked_streams:
-        return "no_stream_candidates"
-    return "no_passing_stream_candidates"
-
-
 async def _set_item_recovery_attempt_count(
     ctx: dict[str, Any],
     *,
@@ -1590,21 +1420,6 @@ async def _increment_item_recovery_attempt_count(ctx: dict[str, Any], *, item_id
         return next_count
 
 
-def _rank_failure_cooldown_seconds(
-    settings: Settings,
-    *,
-    attempt_count: int,
-    use_short_first_retry: bool = True,
-) -> int:
-    if use_short_first_retry and attempt_count < 2:
-        return 300
-    if attempt_count < 5:
-        return max(0, int(settings.scraping.after_2 * 3600))
-    if attempt_count < 10:
-        return max(0, int(settings.scraping.after_5 * 3600))
-    return max(0, int(settings.scraping.after_10 * 3600))
-
-
 async def _schedule_search_retry(
     *,
     ctx: dict[str, Any],
@@ -1635,7 +1450,7 @@ async def _schedule_search_retry(
         )
         return False
 
-    cooldown_seconds = _rank_failure_cooldown_seconds(
+    cooldown_seconds = rank_failure_cooldown_seconds(
         settings,
         attempt_count=attempt_count,
         use_short_first_retry=use_short_first_retry,
@@ -1676,142 +1491,6 @@ async def _schedule_search_retry(
         next_stage="scrape_item",
     )
     return enqueued
-
-
-async def _execute_debrid_download(
-    *,
-    client: DebridDownloadClient,
-    provider: str,
-    infohash: str,
-    settings: Settings,
-    item_id: str,
-    item_request_id: str | None,
- ) -> tuple[str, TorrentInfo, list[str]]:
-    """Run one downloader candidate through add/select/poll/link resolution."""
-
-    magnet_url = f"magnet:?xt=urn:btih:{infohash}".lower()
-    logger.info(
-        "debrid stage starting",
-        extra={"item_id": item_id, "item_request_id": item_request_id, "provider": provider},
-    )
-
-    provider_torrent_id = await client.add_magnet(magnet_url)
-    initial_info = await client.get_torrent_info(provider_torrent_id)
-    initial_selected = filter_torrent_files(initial_info.files, settings.downloaders)
-    if initial_selected:
-        try:
-            await client.select_files(provider_torrent_id, [file.file_id for file in initial_selected])
-        except Exception as exc:
-            _worker_stage_logger().debug(
-                "debrid_item.pre_poll_select_skipped",
-                item_id=item_id,
-                provider=provider,
-                reason=str(exc),
-            )
-
-    timeout_at = asyncio.get_running_loop().time() + 300.0
-    torrent_info = await client.get_torrent_info(provider_torrent_id)
-    while torrent_info.status not in {"downloaded", "ready", "download_ready"}:
-        if asyncio.get_running_loop().time() >= timeout_at:
-            raise TimeoutError("debrid_poll_timeout")
-        mid_selected = filter_torrent_files(torrent_info.files, settings.downloaders)
-        if mid_selected:
-            with contextlib.suppress(Exception):
-                await client.select_files(provider_torrent_id, [file.file_id for file in mid_selected])
-        await asyncio.sleep(2.0)
-        torrent_info = await client.get_torrent_info(provider_torrent_id)
-
-    selected_files = filter_torrent_files(torrent_info.files, settings.downloaders)
-    if not selected_files:
-        raise ValueError("no_downloadable_files")
-    await client.select_files(provider_torrent_id, [file.file_id for file in selected_files])
-    refreshed_info = await client.get_torrent_info(provider_torrent_id)
-    download_urls = await client.get_download_links(provider_torrent_id)
-    manifest = build_download_manifest(
-        refreshed_info.files,
-        download_urls=download_urls,
-        settings=settings.downloaders,
-    )
-    if not manifest.files:
-        raise ValueError("no_downloadable_files")
-    if manifest.unresolved_file_count > 0:
-        raise ValueError("download_manifest_incomplete")
-    if manifest.duplicate_path_count > 0:
-        raise ValueError("download_manifest_duplicate_paths")
-    validated_info = TorrentInfo(
-        provider_torrent_id=refreshed_info.provider_torrent_id,
-        status=refreshed_info.status,
-        name=getattr(refreshed_info, "name", None),
-        info_hash=getattr(refreshed_info, "info_hash", None),
-        files=manifest.files,
-        links=manifest.download_urls,
-    )
-    _worker_stage_logger().info(
-        "debrid_item.manifest_validated",
-        item_id=item_id,
-        item_request_id=item_request_id,
-        provider=provider,
-        file_count=len(manifest.files),
-        multi_container=manifest.multi_container,
-        container_roots=list(manifest.container_roots),
-    )
-    return provider_torrent_id, validated_info, manifest.download_urls
-
-
-def _should_failover_downloader(
-    settings: Settings,
-    *,
-    remaining_candidates: int,
-    error_kind: str,
-) -> bool:
-    """Return whether downloader orchestration should continue to the next candidate."""
-
-    if remaining_candidates <= 0:
-        return False
-    if settings.orchestration.downloader_selection_mode != "ordered_failover":
-        return False
-    if error_kind == "rate_limit":
-        return settings.orchestration.downloader_failover_on_rate_limit
-    return settings.orchestration.downloader_failover_on_provider_error
-
-
-def _build_rank_no_winner_diagnostics(
-    *,
-    scraped_candidate_count: int | None,
-    parsed_stream_count: int,
-    ranked_results: list[RankedStreamCandidateRecord],
-    rank_threshold: int,
-) -> dict[str, object]:
-    from collections import Counter
-    
-    passing_fetch_count = sum(1 for record in ranked_results if record.fetch)
-    above_threshold_count = sum(
-        1 for record in ranked_results if record.rank_score >= rank_threshold
-    )
-    
-    rejection_reasons = Counter(
-        record.rejection_reason for record in ranked_results if not record.fetch and record.rejection_reason
-    )
-
-    if scraped_candidate_count == 0:
-        failure_reason = "no_candidates_scraped"
-    elif parsed_stream_count == 0:
-        failure_reason = "no_candidates_parsed"
-    elif passing_fetch_count == 0:
-        failure_reason = "no_candidates_passing_fetch"
-    elif above_threshold_count == 0:
-        failure_reason = "no_candidates_above_threshold"
-    else:
-        failure_reason = "unknown"
-
-    return {
-        "scraped_candidate_count": scraped_candidate_count,
-        "parsed_stream_count": parsed_stream_count,
-        "passing_fetch_count": passing_fetch_count,
-        "above_threshold_count": above_threshold_count,
-        "failure_reason": failure_reason,
-        "rejection_reasons": dict(rejection_reasons.most_common()),
-    }
 
 
 def _scraper_provider_name(scraper: object) -> str:
@@ -2275,8 +1954,8 @@ async def rank_streams(
         )
         selected_stream_id = selected_stream.id if selected_stream is not None else None
         if selected_stream is None:
-            selection_reason = _selection_failure_reason(ranked_results, selected_stream_id)
-            diagnostics = _build_rank_no_winner_diagnostics(
+            selection_reason = selection_failure_reason(ranked_results, selected_stream_id)
+            diagnostics = build_rank_no_winner_diagnostics(
                 scraped_candidate_count=None,
                 parsed_stream_count=len(streams),
                 ranked_results=ranked_results,
@@ -2910,21 +2589,23 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         if not provider_candidates:
             raise ValueError("no_enabled_downloader")
 
+        provider = provider_candidates[0][0]
         provider_torrent_id: str | None = None
-        refreshed_info: object | None = None
+        refreshed_info: TorrentInfo | None = None
         download_urls: list[str] = []
         last_provider_error: Exception | None = None
         for index, (candidate_provider, client) in enumerate(provider_candidates):
             provider = candidate_provider
             remaining_candidates = len(provider_candidates) - index - 1
             try:
-                provider_torrent_id, refreshed_info, download_urls = await _execute_debrid_download(
+                provider_torrent_id, refreshed_info, download_urls = await execute_debrid_download(
                     client=client,
                     provider=provider,
                     infohash=selected_stream.infohash,
                     settings=settings,
                     item_id=item_id,
                     item_request_id=item_request_id,
+                    stage_logger=_worker_stage_logger(),
                 )
                 break
             except DebridRateLimitError as exc:
@@ -2941,7 +2622,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                     remaining_candidates=remaining_candidates,
                 )
                 last_provider_error = exc
-                if _should_failover_downloader(
+                if should_failover_downloader(
                     settings,
                     remaining_candidates=remaining_candidates,
                     error_kind="rate_limit",
@@ -2961,7 +2642,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                     },
                 )
                 last_provider_error = exc
-                if _should_failover_downloader(
+                if should_failover_downloader(
                     settings,
                     remaining_candidates=remaining_candidates,
                     error_kind="provider_error",
@@ -2984,7 +2665,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                         remaining_candidates=remaining_candidates,
                     )
                     last_provider_error = exc
-                    if _should_failover_downloader(
+                    if should_failover_downloader(
                         settings,
                         remaining_candidates=remaining_candidates,
                         error_kind="rate_limit",
@@ -3003,7 +2684,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                     },
                 )
                 last_provider_error = exc
-                if _should_failover_downloader(
+                if should_failover_downloader(
                     settings,
                     remaining_candidates=remaining_candidates,
                     error_kind="provider_error",
@@ -3023,7 +2704,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                     },
                 )
                 last_provider_error = exc
-                if _should_failover_downloader(
+                if should_failover_downloader(
                     settings,
                     remaining_candidates=remaining_candidates,
                     error_kind="provider_error",
