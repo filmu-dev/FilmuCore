@@ -10083,6 +10083,13 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
             {
                 "timestamp": "2026-04-12T01:01:04Z",
                 "environment_class": "windows-native:enterprise",
+                "repeat_count": 1,
+                "profiles": [
+                    "continuous",
+                    "seek",
+                    "concurrent",
+                    "full",
+                ],
                 "all_green": True,
             }
         ),

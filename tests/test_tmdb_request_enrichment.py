@@ -331,9 +331,18 @@ def test_request_items_by_identifiers_prefixes_tvdb_and_tmdb_inputs() -> None:
         attributes: dict[str, object] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        request_source: str = "api",
         tenant_id: str = "global",
     ) -> object:
-        _ = (title, media_type, attributes, requested_seasons, requested_episodes, tenant_id)
+        _ = (
+            title,
+            media_type,
+            attributes,
+            requested_seasons,
+            requested_episodes,
+            request_source,
+            tenant_id,
+        )
         seen_external_refs.append(external_ref)
         return type("ItemRecord", (), {"id": "item-1"})()
 
