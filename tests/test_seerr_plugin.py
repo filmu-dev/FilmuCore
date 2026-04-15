@@ -73,3 +73,24 @@ def test_seerr_poll_returns_normalized_content_requests() -> None:
         ),
     ]
     assert harness.rate_limiter.requests[0][0] == "ratelimit:seerr:poll"
+
+
+def test_seerr_plugin_accepts_overseerr_compatibility_settings() -> None:
+    plugin = SeerrContentService()
+    harness = TestPluginContext(
+        settings={
+            "content": {
+                "overseerr": {
+                    "enabled": True,
+                    "url": "https://seerr.example",
+                    "api_key": "seerr-key",
+                }
+            }
+        }
+    )
+
+    asyncio.run(plugin.initialize(harness.build("seerr")))
+
+    assert plugin.enabled is True
+    assert plugin.base_url == "https://seerr.example"
+    assert plugin.api_key == "seerr-key"

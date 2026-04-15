@@ -13,6 +13,25 @@ PLEX_PLUGIN_NAME = "plex"
 _PLEX_REFRESH_BUCKET = "plex:library_refresh"
 
 
+def resolve_plex_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Return the most specific Plex hook settings block available."""
+
+    if any(key in settings for key in {"enabled", "url", "token", "section_ids"}):
+        return settings
+    for candidate in (
+        settings.get(PLEX_PLUGIN_NAME),
+        settings.get("notifications", {}).get(PLEX_PLUGIN_NAME)
+        if isinstance(settings.get("notifications"), dict)
+        else None,
+        settings.get("updaters", {}).get(PLEX_PLUGIN_NAME)
+        if isinstance(settings.get("updaters"), dict)
+        else None,
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
 class PlexLibraryRefreshPlugin(PluginEventHookWorker):
     """Trigger Plex library refresh operations from completion-oriented host events."""
 
@@ -30,17 +49,18 @@ class PlexLibraryRefreshPlugin(PluginEventHookWorker):
 
     async def initialize(self, ctx: PluginContext) -> None:
         self.ctx = ctx
-        self.enabled = bool(ctx.settings.get("enabled", False))
-        self.base_url = str(ctx.settings.get("url") or ctx.settings.get("base_url") or "").rstrip("/")
-        self.token = str(ctx.settings.get("token") or "").strip()
-        raw_section_ids = ctx.settings.get("section_ids")
+        settings = resolve_plex_settings(dict(ctx.settings))
+        self.enabled = bool(settings.get("enabled", False))
+        self.base_url = str(settings.get("url") or settings.get("base_url") or "").rstrip("/")
+        self.token = str(settings.get("token") or "").strip()
+        raw_section_ids = settings.get("section_ids")
         if isinstance(raw_section_ids, list):
             self.section_ids = tuple(
                 str(value).strip()
                 for value in raw_section_ids
                 if str(value).strip()
             )
-        raw_notify_on = ctx.settings.get("notify_on")
+        raw_notify_on = settings.get("notify_on")
         if isinstance(raw_notify_on, list):
             normalized = tuple(
                 value.strip()

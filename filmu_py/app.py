@@ -42,6 +42,7 @@ from .resources import AppResources
 from .services.access_policy import AccessPolicyService
 from .services.authorization_audit import AuthorizationDecisionAuditService
 from .services.control_plane import ControlPlaneService
+from .services.control_plane_automation import ControlPlaneAutomationController
 from .services.identity import SecurityIdentityService
 from .services.media import MediaService
 from .services.playback import (
@@ -132,6 +133,19 @@ def build_control_plane_service(resources: AppResources) -> ControlPlaneService:
     """Build the persisted control-plane subscriber state service."""
 
     return ControlPlaneService(resources.db)
+
+
+def build_control_plane_automation(
+    resources: AppResources,
+) -> ControlPlaneAutomationController:
+    """Build the background replay/control-plane recovery controller."""
+
+    return ControlPlaneAutomationController(
+        service=resources.control_plane_service,
+        backplane=resources.replay_backplane,
+        consumer_group=resources.settings.control_plane.consumer_group,
+        automation=resources.settings.control_plane.automation,
+    )
 
 
 def build_authorization_audit_service(resources: AppResources) -> AuthorizationDecisionAuditService:
@@ -384,6 +398,8 @@ def _build_lifespan(
                 event_bus.attach_replay_backplane(
                     replay_backplane
                 )
+            resources.control_plane_automation = build_control_plane_automation(resources)
+            resources.control_plane_automation.start()
             runtime_lifecycle.transition(
                 RuntimeLifecyclePhase.PLUGIN_REGISTRATION,
                 detail="startup_registering_runtime_plugins",
@@ -482,6 +498,8 @@ def _build_lifespan(
                 hls_governance_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await hls_governance_task
+            if resources is not None and resources.control_plane_automation is not None:
+                await resources.control_plane_automation.shutdown()
             if resources is not None and resources.vfs_catalog_server is not None:
                 await resources.vfs_catalog_server.stop()
             detach_log_stream()

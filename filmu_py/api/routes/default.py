@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from secrets import token_hex
 from typing import Annotated, Any, Literal, cast
@@ -21,9 +22,13 @@ from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.replay import ReplayConsumerFencedError
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
+from filmu_py.plugins.builtin.listrr import resolve_listrr_settings
+from filmu_py.plugins.builtin.plex import resolve_plex_settings
+from filmu_py.plugins.builtin.seerr import resolve_seerr_settings
 from filmu_py.plugins.interfaces import StreamControlAction, StreamControlInput
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
+from filmu_py.services.vfs_catalog import summarize_vfs_catalog_snapshot
 from filmu_py.workers.stage_observability import (
     worker_blocker_snapshot as _stage_worker_blocker_snapshot,
 )
@@ -45,6 +50,7 @@ from ..models import (
     CalendarReleaseDataResponse,
     CalendarResponse,
     ControlPlaneAckRecoveryResponse,
+    ControlPlaneAutomationResponse,
     ControlPlanePendingRecoveryResponse,
     ControlPlaneRemediationResponse,
     ControlPlaneSubscriberResponse,
@@ -69,6 +75,8 @@ from ..models import (
     PluginGovernanceOverrideWriteRequest,
     PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
+    PluginIntegrationReadinessPluginResponse,
+    PluginIntegrationReadinessResponse,
     PluginStreamControlRequest,
     PluginStreamControlResponse,
     QueueAlertResponse,
@@ -82,6 +90,7 @@ from ..models import (
     StatsMediaYearRelease,
     StatsResponse,
     TenantQuotaPolicyResponse,
+    VfsCatalogRollupResponse,
     VfsRolloutControlRequest,
     VfsRolloutControlResponse,
 )
@@ -668,6 +677,259 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         fanout_ready=fanout_ready,
         multi_container_ready=multi_container_ready,
         providers=providers,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _plugin_settings_payload(resources: Any) -> Mapping[str, Any]:
+    """Return the plugin initialization settings payload used by the runtime."""
+
+    payload = resources.plugin_settings_payload
+    if isinstance(payload, Mapping):
+        return payload
+    return cast(Mapping[str, Any], resources.settings.to_compatibility_dict())
+
+
+def _plugin_integration_row(
+    *,
+    name: str,
+    capability_kind: Literal["scraper", "content_service", "event_hook"],
+    registered: bool,
+    enabled: bool,
+    config_source: str | None,
+    required_settings: list[str],
+    configured_values: Mapping[str, Any],
+) -> PluginIntegrationReadinessPluginResponse:
+    """Build one normalized builtin enterprise plugin readiness row."""
+
+    missing_settings = [
+        setting_name
+        for setting_name in required_settings
+        if not str(configured_values.get(setting_name) or "").strip()
+        and not (
+            setting_name == "list_ids"
+            and isinstance(configured_values.get(setting_name), list)
+            and bool(configured_values.get(setting_name))
+        )
+        and not (
+            setting_name == "section_ids"
+            and isinstance(configured_values.get(setting_name), list)
+            and bool(configured_values.get(setting_name))
+        )
+    ]
+    configured = enabled and not missing_settings
+    ready = registered and configured
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready" if ready else "partial" if enabled or registered else "blocked"
+    )
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if not registered:
+        required_actions.append(f"register_{name}_builtin_plugin")
+        remaining_gaps.append(f"{name} is not registered in the active plugin runtime")
+    if enabled and missing_settings:
+        required_actions.append(f"configure_{name}_plugin_contract")
+        remaining_gaps.append(
+            f"{name} is enabled but missing required settings: {', '.join(missing_settings)}"
+        )
+    if not enabled:
+        required_actions.append(f"enable_{name}_integration")
+        remaining_gaps.append(f"{name} integration is not enabled in runtime settings")
+    return PluginIntegrationReadinessPluginResponse(
+        name=name,
+        capability_kind=capability_kind,
+        status=status,
+        registered=registered,
+        enabled=enabled,
+        configured=configured,
+        ready=ready,
+        config_source=config_source,
+        required_settings=required_settings,
+        missing_settings=missing_settings,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _plugin_integration_readiness_response(request: Request) -> PluginIntegrationReadinessResponse:
+    """Return readiness and config-validation posture for builtin enterprise plugins."""
+
+    resources = request.app.state.resources
+    plugin_registry = resources.plugin_registry
+    payload = _plugin_settings_payload(resources)
+    scraper_names = (
+        {
+            str(getattr(plugin, "plugin_name", type(plugin).__name__)).strip()
+            for plugin in plugin_registry.get_scrapers()
+        }
+        if plugin_registry is not None
+        else set()
+    )
+    content_service_names = (
+        {
+            str(getattr(plugin, "plugin_name", type(plugin).__name__)).strip()
+            for plugin in plugin_registry.get_content_services()
+        }
+        if plugin_registry is not None
+        else set()
+    )
+    event_hook_names = (
+        {
+            str(getattr(plugin, "plugin_name", type(plugin).__name__)).strip()
+            for plugin in plugin_registry.get_event_hooks()
+        }
+        if plugin_registry is not None
+        else set()
+    )
+
+    seerr_source = (
+        "content.seerr"
+        if isinstance(payload.get("content"), Mapping)
+        and isinstance(cast(Mapping[str, Any], payload.get("content")).get("seerr"), Mapping)
+        else "content.overseerr"
+        if isinstance(payload.get("content"), Mapping)
+        and isinstance(cast(Mapping[str, Any], payload.get("content")).get("overseerr"), Mapping)
+        else None
+    )
+    seerr_settings = resolve_seerr_settings(payload)
+    listrr_source = (
+        "content.listrr"
+        if isinstance(payload.get("content"), Mapping)
+        and isinstance(cast(Mapping[str, Any], payload.get("content")).get("listrr"), Mapping)
+        else None
+    )
+    listrr_settings = resolve_listrr_settings(payload)
+    plex_source = (
+        "plex"
+        if isinstance(payload.get("plex"), dict)
+        else "notifications.plex"
+        if isinstance(payload.get("notifications"), dict)
+        and isinstance(cast(dict[str, Any], payload.get("notifications")).get("plex"), dict)
+        else "updaters.plex"
+        if isinstance(payload.get("updaters"), dict)
+        and isinstance(cast(dict[str, Any], payload.get("updaters")).get("plex"), dict)
+        else None
+    )
+    plex_settings = resolve_plex_settings(dict(payload))
+
+    rows = [
+        _plugin_integration_row(
+            name="comet",
+            capability_kind="scraper",
+            registered="comet" in scraper_names,
+            enabled=bool(resources.settings.scraping.comet.enabled),
+            config_source="scraping.comet",
+            required_settings=["url"],
+            configured_values={
+                "url": resources.settings.scraping.comet.url,
+            },
+        ),
+        _plugin_integration_row(
+            name="seerr",
+            capability_kind="content_service",
+            registered="seerr" in content_service_names,
+            enabled=bool(seerr_settings.get("enabled", False)),
+            config_source=seerr_source,
+            required_settings=["url", "api_key"],
+            configured_values={
+                "url": seerr_settings.get("url") or seerr_settings.get("base_url"),
+                "api_key": seerr_settings.get("api_key"),
+            },
+        ),
+        _plugin_integration_row(
+            name="listrr",
+            capability_kind="content_service",
+            registered="listrr" in content_service_names,
+            enabled=bool(listrr_settings.get("enabled", False)),
+            config_source=listrr_source,
+            required_settings=["url", "list_ids"],
+            configured_values={
+                "url": listrr_settings.get("url") or listrr_settings.get("base_url"),
+                "list_ids": listrr_settings.get("list_ids"),
+            },
+        ),
+        _plugin_integration_row(
+            name="plex",
+            capability_kind="event_hook",
+            registered="plex" in event_hook_names,
+            enabled=bool(plex_settings.get("enabled", False)),
+            config_source=plex_source,
+            required_settings=["url", "token"],
+            configured_values={
+                "url": plex_settings.get("url") or plex_settings.get("base_url"),
+                "token": plex_settings.get("token"),
+            },
+        ),
+    ]
+    required_actions = sorted({action for row in rows for action in row.required_actions})
+    remaining_gaps = [gap for row in rows for gap in row.remaining_gaps]
+    ready_rows = [row for row in rows if row.ready]
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready"
+        if len(ready_rows) == len(rows)
+        else "partial"
+        if ready_rows or any(row.enabled for row in rows)
+        else "blocked"
+    )
+    return PluginIntegrationReadinessResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=status,
+        plugins=rows,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _vfs_catalog_rollup_response(
+    request: Request,
+    *,
+    snapshot: Any | None,
+) -> VfsCatalogRollupResponse:
+    """Return one REST/operator rollup over the current VFS catalog snapshot."""
+
+    if snapshot is None:
+        return VfsCatalogRollupResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            generation_id=None,
+            published_at=None,
+            directory_count=0,
+            file_count=0,
+            blocked_item_count=0,
+            blocked_reason_counts={},
+            query_strategy_counts={},
+            provider_family_counts={},
+            lease_state_counts={},
+            locator_source_counts={},
+            restricted_fallback_file_count=0,
+            provider_path_preserved_file_count=0,
+            multi_role_file_count=0,
+            required_actions=["attach_vfs_catalog_supplier"],
+            remaining_gaps=["the proto-first VFS catalog supplier is not attached"],
+        )
+
+    rollup = summarize_vfs_catalog_snapshot(snapshot)
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if snapshot.stats.blocked_item_count > 0:
+        required_actions.append("investigate_vfs_blocked_items")
+        remaining_gaps.append("one or more media items are still blocked from the VFS catalog")
+
+    return VfsCatalogRollupResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        generation_id=snapshot.generation_id,
+        published_at=snapshot.published_at.isoformat(),
+        directory_count=snapshot.stats.directory_count,
+        file_count=snapshot.stats.file_count,
+        blocked_item_count=snapshot.stats.blocked_item_count,
+        blocked_reason_counts=rollup.blocked_reason_counts,
+        query_strategy_counts=rollup.query_strategy_counts,
+        provider_family_counts=rollup.provider_family_counts,
+        lease_state_counts=rollup.lease_state_counts,
+        locator_source_counts=rollup.locator_source_counts,
+        restricted_fallback_file_count=rollup.restricted_fallback_file_count,
+        provider_path_preserved_file_count=rollup.provider_path_preserved_file_count,
+        multi_role_file_count=rollup.multi_role_file_count,
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
     )
@@ -3171,6 +3433,20 @@ async def get_downloader_orchestration(
 
 
 @router.get(
+    "/operations/plugins/integration-readiness",
+    operation_id="default.plugin_integration_readiness",
+    response_model=PluginIntegrationReadinessResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def get_plugin_integration_readiness(
+    request: Request,
+) -> PluginIntegrationReadinessResponse:
+    """Return builtin enterprise plugin registration and config-validation posture."""
+
+    return _plugin_integration_readiness_response(request)
+
+
+@router.get(
     "/operations/control-plane/subscribers",
     operation_id="default.control_plane_subscribers",
     response_model=list[ControlPlaneSubscriberResponse],
@@ -3271,6 +3547,120 @@ async def get_control_plane_summary(
         )
     summary = await service.summarize_subscribers(active_within_seconds=active_within_seconds)
     return _control_plane_summary_response(summary)
+
+
+@router.get(
+    "/operations/control-plane/automation",
+    operation_id="default.control_plane_automation",
+    response_model=ControlPlaneAutomationResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def get_control_plane_automation(
+    request: Request,
+) -> ControlPlaneAutomationResponse:
+    """Return current background replay/control-plane automation posture."""
+
+    resources = request.app.state.resources
+    controller = resources.control_plane_automation
+    automation = resources.settings.control_plane.automation
+    if controller is not None:
+        snapshot = controller.snapshot()
+        summary = snapshot.summary or (
+            await resources.control_plane_service.summarize_subscribers(
+                active_within_seconds=snapshot.active_within_seconds
+            )
+            if resources.control_plane_service is not None
+            else None
+        )
+    else:
+        snapshot = None
+        summary = (
+            await resources.control_plane_service.summarize_subscribers(
+                active_within_seconds=automation.active_within_seconds
+            )
+            if resources.control_plane_service is not None
+            else None
+        )
+
+    normalized_summary = (
+        _control_plane_summary_response(summary)
+        if summary is not None
+        else ControlPlaneSummaryResponse(
+            total_subscribers=0,
+            active_subscribers=0,
+            stale_subscribers=0,
+            error_subscribers=0,
+            fenced_subscribers=0,
+            ack_pending_subscribers=0,
+            stream_count=0,
+            group_count=0,
+            node_count=0,
+            tenant_count=0,
+            oldest_heartbeat_age_seconds=None,
+            status_counts={},
+            required_actions=["attach_control_plane_service"],
+            remaining_gaps=["durable replay/control-plane ownership is not configured"],
+        )
+    )
+    required_actions = list(normalized_summary.required_actions)
+    remaining_gaps = list(normalized_summary.remaining_gaps)
+    runner_status: Literal["disabled", "running", "degraded", "stopped"] = (
+        snapshot.runner_status if snapshot is not None else "disabled" if not automation.enabled else "stopped"
+    )
+    if not automation.enabled:
+        required_actions.append("enable_control_plane_automation")
+        remaining_gaps.append("background replay/control-plane automation is disabled")
+    if resources.control_plane_service is None:
+        required_actions.append("attach_control_plane_service")
+        remaining_gaps.append("durable replay/control-plane ownership is not configured")
+    if resources.replay_backplane is None:
+        required_actions.append("attach_redis_replay_backplane")
+        remaining_gaps.append("durable replay pending-entry recovery is not attached")
+    return ControlPlaneAutomationResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        enabled=bool(snapshot.enabled) if snapshot is not None else automation.enabled,
+        runner_status=runner_status,
+        interval_seconds=snapshot.interval_seconds if snapshot is not None else automation.interval_seconds,
+        active_within_seconds=(
+            snapshot.active_within_seconds if snapshot is not None else automation.active_within_seconds
+        ),
+        pending_min_idle_ms=(
+            snapshot.pending_min_idle_ms if snapshot is not None else automation.pending_min_idle_ms
+        ),
+        claim_limit=snapshot.claim_limit if snapshot is not None else automation.claim_limit,
+        max_claim_passes=(
+            snapshot.max_claim_passes if snapshot is not None else automation.max_claim_passes
+        ),
+        consumer_group=(
+            snapshot.consumer_group if snapshot is not None else resources.settings.control_plane.consumer_group
+        ),
+        consumer_name=snapshot.consumer_name if snapshot is not None else automation.consumer_name,
+        service_attached=(
+            snapshot.service_attached if snapshot is not None else resources.control_plane_service is not None
+        ),
+        backplane_attached=(
+            snapshot.backplane_attached if snapshot is not None else resources.replay_backplane is not None
+        ),
+        last_run_at=snapshot.last_run_at.isoformat() if snapshot and snapshot.last_run_at else None,
+        last_success_at=(
+            snapshot.last_success_at.isoformat() if snapshot and snapshot.last_success_at else None
+        ),
+        last_failure_at=(
+            snapshot.last_failure_at.isoformat() if snapshot and snapshot.last_failure_at else None
+        ),
+        consecutive_failures=snapshot.consecutive_failures if snapshot is not None else 0,
+        last_error=snapshot.last_error if snapshot is not None else None,
+        remediation_updated_subscribers=(
+            snapshot.remediation_updated_subscribers if snapshot is not None else 0
+        ),
+        rewound_subscribers=snapshot.rewound_subscribers if snapshot is not None else 0,
+        claimed_pending_events=snapshot.claimed_pending_events if snapshot is not None else 0,
+        claim_passes=snapshot.claim_passes if snapshot is not None else 0,
+        pending_count_after=snapshot.pending_count_after if snapshot is not None else None,
+        summary=normalized_summary,
+        required_actions=sorted(set(required_actions)),
+        remaining_gaps=list(dict.fromkeys(remaining_gaps)),
+    )
 
 
 @router.post(
@@ -3514,6 +3904,32 @@ async def recover_control_plane_pending_entries(
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
     )
+
+
+@router.get(
+    "/operations/vfs-catalog/rollup",
+    operation_id="default.vfs_catalog_rollup",
+    response_model=VfsCatalogRollupResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def get_vfs_catalog_rollup(
+    request: Request,
+    generation_id: Annotated[int | None, Query(ge=1)] = None,
+) -> VfsCatalogRollupResponse:
+    """Return the current or requested-generation VFS catalog rollup over REST."""
+
+    supplier = request.app.state.resources.vfs_catalog_supplier
+    if supplier is None:
+        return _vfs_catalog_rollup_response(request, snapshot=None)
+
+    snapshot = (
+        await supplier.snapshot_for_generation(generation_id)
+        if generation_id is not None
+        else await supplier.build_snapshot()
+    )
+    if generation_id is not None and snapshot is None:
+        raise HTTPException(status_code=404, detail=f"Unknown VFS catalog generation '{generation_id}'")
+    return _vfs_catalog_rollup_response(request, snapshot=snapshot)
 
 
 @router.post(

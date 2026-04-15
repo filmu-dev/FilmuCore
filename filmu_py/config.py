@@ -374,6 +374,7 @@ class ListrrConfig(CompatibilityModel):
 
     update_interval: int = 86400
     enabled: bool = False
+    url: str = ""
     movie_lists: list[str] = Field(default_factory=list)
     show_lists: list[str] = Field(default_factory=list)
     api_key: str = ""
@@ -645,6 +646,18 @@ class TenantQuotaSettings(CompatibilityModel):
     tenants: dict[str, TenantQuotaLimitSettings] = Field(default_factory=dict)
 
 
+class ControlPlaneAutomationSettings(CompatibilityModel):
+    """Background replay/control-plane recovery settings."""
+
+    enabled: bool = False
+    interval_seconds: int = Field(default=300, ge=1, le=86_400)
+    active_within_seconds: int = Field(default=120, ge=1, le=3_600)
+    pending_min_idle_ms: int = Field(default=60_000, ge=1, le=86_400_000)
+    claim_limit: int = Field(default=100, ge=1, le=500)
+    max_claim_passes: int = Field(default=3, ge=1, le=20)
+    consumer_name: str = "recovery-automation"
+
+
 class ControlPlaneSettings(CompatibilityModel):
     """Distributed control-plane eventing settings."""
 
@@ -652,6 +665,9 @@ class ControlPlaneSettings(CompatibilityModel):
     event_stream_name: str = "filmu:events"
     event_replay_maxlen: int = 10_000
     consumer_group: str = "filmu-api"
+    automation: ControlPlaneAutomationSettings = Field(
+        default_factory=ControlPlaneAutomationSettings
+    )
 
 
 class LogShipperSettings(CompatibilityModel):
@@ -1087,6 +1103,22 @@ class Settings(BaseSettings):
     def _content_model(self) -> ContentSettings:
         return _coerce_model(self.content, ContentSettings)
 
+    def _compat_content_payload(self) -> dict[str, Any]:
+        """Return the legacy-compatible content payload without new-shape noise."""
+
+        payload = _compat_dump(self._content_model())
+        mdblist = cast(dict[str, Any], payload.get("mdblist", {}))
+        if mdblist:
+            if "list_ids" in mdblist:
+                mdblist["lists"] = list(cast(list[str], mdblist.pop("list_ids")))
+            if "poll_interval_minutes" in mdblist:
+                mdblist["update_interval"] = int(mdblist.pop("poll_interval_minutes")) * 60
+
+        listrr = cast(dict[str, Any], payload.get("listrr", {}))
+        if listrr.get("url") == "":
+            listrr.pop("url", None)
+        return payload
+
     def _scraping_model(self) -> ScrapingSettings:
         return _coerce_model(self.scraping, ScrapingSettings)
 
@@ -1126,13 +1158,7 @@ class Settings(BaseSettings):
     def to_compatibility_dict(self) -> dict[str, Any]:
         """Return the exact legacy `settings.json` compatibility shape."""
 
-        content = _compat_dump(self._content_model())
-        mdblist = cast(dict[str, Any], content.get("mdblist", {}))
-        if mdblist:
-            if "list_ids" in mdblist:
-                mdblist["lists"] = list(cast(list[str], mdblist.pop("list_ids")))
-            if "poll_interval_minutes" in mdblist:
-                mdblist["update_interval"] = int(mdblist.pop("poll_interval_minutes")) * 60
+        content = self._compat_content_payload()
 
         stream = _compat_dump(self._stream_model())
         if stream.get("refresh_dispatch_mode") == "in_process":

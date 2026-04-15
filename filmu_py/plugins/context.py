@@ -184,6 +184,10 @@ class PluginContextProvider:
             plugin_name.replace("-", "_"),
             plugin_name.replace("_", "-"),
         }
+        compatibility_aliases: dict[str, tuple[tuple[str, str], ...]] = {
+            "seerr": (("content", "overseerr"),),
+            "plex": (("updaters", "plex"),),
+        }
 
         for container_name in ("plugins", "scraping", "downloaders", "notifications", "content"):
             container = self.settings.get(container_name)
@@ -193,6 +197,14 @@ class PluginContextProvider:
                 scoped = container.get(key)
                 if isinstance(scoped, Mapping):
                     return deepcopy(dict(scoped))
+
+        for container_name, key in compatibility_aliases.get(plugin_name, ()):
+            container = self.settings.get(container_name)
+            if not isinstance(container, Mapping):
+                continue
+            scoped = container.get(key)
+            if isinstance(scoped, Mapping):
+                return deepcopy(dict(scoped))
 
         for key in candidate_keys:
             scoped = self.settings.get(key)
