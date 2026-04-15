@@ -56,3 +56,25 @@ def test_listrr_poll_returns_normalized_content_requests() -> None:
         ),
     ]
     assert harness.rate_limiter.requests[0][0] == "ratelimit:listrr:poll"
+
+
+def test_listrr_plugin_derives_list_ids_from_compatibility_lists() -> None:
+    plugin = ListrrContentService()
+    harness = TestPluginContext(
+        settings={
+            "content": {
+                "listrr": {
+                    "enabled": True,
+                    "url": "https://listrr.example",
+                    "movie_lists": ["movies-a"],
+                    "show_lists": ["shows-b"],
+                }
+            }
+        }
+    )
+
+    asyncio.run(plugin.initialize(harness.build("listrr")))
+
+    assert plugin.enabled is True
+    assert plugin.base_url == "https://listrr.example"
+    assert plugin.list_ids == ["movies-a", "shows-b"]

@@ -374,6 +374,7 @@ class ListrrConfig(CompatibilityModel):
 
     update_interval: int = 86400
     enabled: bool = False
+    url: str = ""
     movie_lists: list[str] = Field(default_factory=list)
     show_lists: list[str] = Field(default_factory=list)
     api_key: str = ""
@@ -645,6 +646,18 @@ class TenantQuotaSettings(CompatibilityModel):
     tenants: dict[str, TenantQuotaLimitSettings] = Field(default_factory=dict)
 
 
+class ControlPlaneAutomationSettings(CompatibilityModel):
+    """Background replay/control-plane recovery settings."""
+
+    enabled: bool = False
+    interval_seconds: int = Field(default=300, ge=1, le=86_400)
+    active_within_seconds: int = Field(default=120, ge=1, le=3_600)
+    pending_min_idle_ms: int = Field(default=60_000, ge=1, le=86_400_000)
+    claim_limit: int = Field(default=100, ge=1, le=500)
+    max_claim_passes: int = Field(default=3, ge=1, le=20)
+    consumer_name: str = "recovery-automation"
+
+
 class ControlPlaneSettings(CompatibilityModel):
     """Distributed control-plane eventing settings."""
 
@@ -652,6 +665,9 @@ class ControlPlaneSettings(CompatibilityModel):
     event_stream_name: str = "filmu:events"
     event_replay_maxlen: int = 10_000
     consumer_group: str = "filmu-api"
+    automation: ControlPlaneAutomationSettings = Field(
+        default_factory=ControlPlaneAutomationSettings
+    )
 
 
 class LogShipperSettings(CompatibilityModel):

@@ -399,6 +399,63 @@ class ControlPlanePendingRecoveryResponse(BaseModel):
     remaining_gaps: list[str]
 
 
+class ControlPlaneAutomationResponse(BaseModel):
+    """Current background replay/control-plane recovery automation posture."""
+
+    generated_at: str
+    enabled: bool
+    runner_status: Literal["disabled", "running", "degraded", "stopped"]
+    interval_seconds: int
+    active_within_seconds: int
+    pending_min_idle_ms: int
+    claim_limit: int
+    max_claim_passes: int
+    consumer_group: str
+    consumer_name: str
+    service_attached: bool
+    backplane_attached: bool
+    last_run_at: str | None = None
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+    consecutive_failures: int
+    last_error: str | None = None
+    remediation_updated_subscribers: int
+    rewound_subscribers: int
+    claimed_pending_events: int
+    claim_passes: int
+    pending_count_after: int | None = None
+    summary: ControlPlaneSummaryResponse
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class PluginIntegrationReadinessPluginResponse(BaseModel):
+    """One builtin enterprise plugin integration-readiness row."""
+
+    name: str
+    capability_kind: Literal["scraper", "content_service", "event_hook"]
+    status: Literal["ready", "partial", "blocked"]
+    registered: bool
+    enabled: bool
+    configured: bool
+    ready: bool
+    config_source: str | None = None
+    required_settings: list[str]
+    missing_settings: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class PluginIntegrationReadinessResponse(BaseModel):
+    """Operator-facing readiness for builtin enterprise plugin integrations."""
+
+    generated_at: str
+    status: Literal["ready", "partial", "blocked"]
+    plugins: list[PluginIntegrationReadinessPluginResponse]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
 class EnterpriseOperationsSliceResponse(BaseModel):
     """One enterprise-operations workstream posture summary."""
 
@@ -553,6 +610,27 @@ class DownloaderOrchestrationResponse(BaseModel):
     fanout_ready: bool
     multi_container_ready: bool
     providers: list[DownloaderProviderCandidateResponse]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class VfsCatalogRollupResponse(BaseModel):
+    """REST/operator view over the current VFS catalog rollup."""
+
+    generated_at: str
+    generation_id: str | None = None
+    published_at: str | None = None
+    directory_count: int
+    file_count: int
+    blocked_item_count: int
+    blocked_reason_counts: dict[str, int]
+    query_strategy_counts: dict[str, int]
+    provider_family_counts: dict[str, int]
+    lease_state_counts: dict[str, int]
+    locator_source_counts: dict[str, int]
+    restricted_fallback_file_count: int
+    provider_path_preserved_file_count: int
+    multi_role_file_count: int
     required_actions: list[str]
     remaining_gaps: list[str]
 

@@ -14,16 +14,28 @@ LISTRR_PLUGIN_NAME = "listrr"
 _LISTRR_POLL_BUCKET = "ratelimit:listrr:poll"
 
 
-def _listrr_settings(settings: Mapping[str, Any]) -> Mapping[str, Any]:
+def resolve_listrr_settings(settings: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload: dict[str, Any]
     if any(key in settings for key in {"enabled", "url", "list_ids", "api_key"}):
-        return settings
-    content = settings.get("content")
-    if not isinstance(content, Mapping):
-        return {}
-    listrr = content.get(LISTRR_PLUGIN_NAME)
-    if not isinstance(listrr, Mapping):
-        return {}
-    return listrr
+        payload = dict(settings)
+    else:
+        content = settings.get("content")
+        if not isinstance(content, Mapping):
+            return {}
+        listrr = content.get(LISTRR_PLUGIN_NAME)
+        if not isinstance(listrr, Mapping):
+            return {}
+        payload = dict(listrr)
+    if "list_ids" not in payload:
+        derived_list_ids = [
+            value.strip()
+            for key in ("movie_lists", "show_lists")
+            for value in payload.get(key, [])
+            if isinstance(value, str) and value.strip()
+        ]
+        if derived_list_ids:
+            payload["list_ids"] = derived_list_ids
+    return payload
 
 
 def _normalize_media_type(value: object) -> str:
@@ -78,7 +90,7 @@ class ListrrContentService:
 
     async def initialize(self, ctx: PluginContext) -> None:
         self.ctx = ctx
-        block = _listrr_settings(ctx.settings)
+        block = resolve_listrr_settings(ctx.settings)
         self.enabled = bool(block.get("enabled", False))
         self.base_url = str(block.get("url") or block.get("base_url") or "").rstrip("/")
         self.api_key = str(block.get("api_key") or "").strip()

@@ -14,7 +14,7 @@ SEERR_PLUGIN_NAME = "seerr"
 _SEERR_POLL_BUCKET = "ratelimit:seerr:poll"
 
 
-def _seerr_settings(settings: Mapping[str, Any]) -> Mapping[str, Any]:
+def resolve_seerr_settings(settings: Mapping[str, Any]) -> Mapping[str, Any]:
     if any(key in settings for key in {"enabled", "url", "api_key", "take"}):
         return settings
     content = settings.get("content")
@@ -22,7 +22,9 @@ def _seerr_settings(settings: Mapping[str, Any]) -> Mapping[str, Any]:
         return {}
     seerr = content.get(SEERR_PLUGIN_NAME)
     if not isinstance(seerr, Mapping):
-        return {}
+        seerr = content.get("overseerr")
+        if not isinstance(seerr, Mapping):
+            return {}
     return seerr
 
 
@@ -66,7 +68,7 @@ class SeerrContentService:
 
     async def initialize(self, ctx: PluginContext) -> None:
         self.ctx = ctx
-        block = _seerr_settings(ctx.settings)
+        block = resolve_seerr_settings(ctx.settings)
         self.enabled = bool(block.get("enabled", False))
         self.base_url = str(block.get("url") or block.get("base_url") or "").rstrip("/")
         self.api_key = str(block.get("api_key") or "").strip()

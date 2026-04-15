@@ -50,3 +50,24 @@ def test_plex_event_hook_refreshes_sections_on_completed_event() -> None:
         "https://plex.example/library/sections/8/refresh?X-Plex-Token=plex-token",
     ]
     assert harness.rate_limiter.requests[0][0] == "plex:library_refresh"
+
+
+def test_plex_plugin_accepts_updater_compatibility_settings() -> None:
+    plugin = PlexLibraryRefreshPlugin()
+    harness = TestPluginContext(
+        settings={
+            "updaters": {
+                "plex": {
+                    "enabled": True,
+                    "url": "https://plex.example",
+                    "token": "plex-token",
+                }
+            }
+        }
+    )
+
+    asyncio.run(plugin.initialize(harness.build("plex")))
+
+    assert plugin.enabled is True
+    assert plugin.base_url == "https://plex.example"
+    assert plugin.token == "plex-token"

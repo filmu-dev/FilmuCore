@@ -59,6 +59,7 @@ class AppResources:
     authorization_audit_service: AuthorizationDecisionAuditService | None = None
     control_plane_service: ControlPlaneService | None = None
     plugin_governance_service: PluginGovernanceService | None = None
+    control_plane_automation: Any | None = None
     plugin_settings_payload: Mapping[str, Any] | None = None
     playback_service: PlaybackSourceService | None = None
     playback_refresh_controller: InProcessDirectPlaybackRefreshController | None = None

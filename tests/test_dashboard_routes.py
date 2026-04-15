@@ -922,6 +922,57 @@ def test_vfs_catalog_refresh_entry_route_returns_protobuf_refresh_response() -> 
     assert proto_response.new_url == "https://cdn.example.test/fresh.mkv"
 
 
+def test_vfs_catalog_rollup_route_returns_rest_projection() -> None:
+    client = _build_client()
+
+    class FakeVfsCatalogSupplier:
+        async def build_snapshot(self) -> Any:
+            file_entry = type("VfsCatalogFileEntry", (), {})()
+            file_entry.query_strategy = "snapshot"
+            file_entry.provider_family = "realdebrid"
+            file_entry.lease_state = "ready"
+            file_entry.locator_source = "restricted_url"
+            file_entry.restricted_fallback = True
+            file_entry.provider_file_path = "Season 01/Episode 01.mkv"
+            file_entry.active_roles = ("direct", "hls")
+
+            entry = type("VfsCatalogEntry", (), {})()
+            entry.file = file_entry
+
+            blocked_item = type("VfsCatalogBlockedItem", (), {"reason": "missing_media_entry"})()
+            stats = type("VfsCatalogStats", (), {})()
+            stats.directory_count = 4
+            stats.file_count = 1
+            stats.blocked_item_count = 1
+
+            snapshot = type("VfsCatalogSnapshot", (), {})()
+            snapshot.generation_id = "7"
+            snapshot.published_at = datetime(2026, 4, 15, 12, 0, tzinfo=UTC)
+            snapshot.entries = (entry,)
+            snapshot.blocked_items = (blocked_item,)
+            snapshot.stats = stats
+            return snapshot
+
+        async def snapshot_for_generation(self, generation_id: int) -> Any:
+            _ = generation_id
+            return await self.build_snapshot()
+
+    resources = cast(Any, client.app.state.resources)
+    resources.vfs_catalog_supplier = FakeVfsCatalogSupplier()
+
+    response = client.get("/api/v1/operations/vfs-catalog/rollup", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generation_id"] == "7"
+    assert body["directory_count"] == 4
+    assert body["blocked_reason_counts"] == {"missing_media_entry": 1}
+    assert body["provider_family_counts"] == {"realdebrid": 1}
+    assert body["restricted_fallback_file_count"] == 1
+    assert body["provider_path_preserved_file_count"] == 1
+    assert body["multi_role_file_count"] == 1
+
+
 def test_services_route_reflects_runtime_flags() -> None:
     """Services route should expose the real provider enablement map."""
 
@@ -2896,6 +2947,113 @@ def test_control_plane_pending_recovery_route_claims_replay_backlog() -> None:
     assert body["required_actions"] == []
     assert replay_backplane.claims[0]["count"] == 25
     assert replay_backplane.claims[0]["tenant_id"] == "tenant-main"
+
+
+def test_control_plane_automation_route_surfaces_background_recovery_status() -> None:
+    client = _build_client()
+    resources = cast(Any, client.app.state.resources)
+    summary = type("ControlPlaneSummary", (), {})()
+    summary.total_subscribers = 0
+    summary.active_subscribers = 0
+    summary.stale_subscribers = 0
+    summary.error_subscribers = 0
+    summary.fenced_subscribers = 0
+    summary.ack_pending_subscribers = 0
+    summary.stream_count = 0
+    summary.group_count = 0
+    summary.node_count = 0
+    summary.tenant_count = 0
+    summary.oldest_heartbeat_age_seconds = None
+    summary.status_counts = {}
+    summary.required_actions = ()
+    summary.remaining_gaps = ()
+
+    class DummyAutomation:
+        def snapshot(self) -> Any:
+            snapshot = type("ControlPlaneAutomationSnapshot", (), {})()
+            snapshot.enabled = True
+            snapshot.runner_status = "running"
+            snapshot.interval_seconds = 300
+            snapshot.active_within_seconds = 120
+            snapshot.pending_min_idle_ms = 60_000
+            snapshot.claim_limit = 25
+            snapshot.max_claim_passes = 3
+            snapshot.consumer_group = "filmu-api"
+            snapshot.consumer_name = "recovery-automation"
+            snapshot.service_attached = True
+            snapshot.backplane_attached = True
+            snapshot.last_run_at = datetime(2026, 4, 15, 12, 0, tzinfo=UTC)
+            snapshot.last_success_at = datetime(2026, 4, 15, 12, 0, tzinfo=UTC)
+            snapshot.last_failure_at = None
+            snapshot.consecutive_failures = 0
+            snapshot.last_error = None
+            snapshot.remediation_updated_subscribers = 2
+            snapshot.rewound_subscribers = 1
+            snapshot.claimed_pending_events = 3
+            snapshot.claim_passes = 2
+            snapshot.pending_count_after = 0
+            snapshot.summary = summary
+            return snapshot
+
+    resources.control_plane_automation = DummyAutomation()
+
+    response = client.get("/api/v1/operations/control-plane/automation", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["runner_status"] == "running"
+    assert body["claimed_pending_events"] == 3
+    assert body["pending_count_after"] == 0
+    assert body["summary"]["total_subscribers"] == 0
+
+
+def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins() -> None:
+    plugin_settings = {
+        "scraping": {"comet": {"enabled": True, "url": "https://comet.example"}},
+        "content": {
+            "overseerr": {
+                "enabled": True,
+                "url": "https://seerr.example",
+                "api_key": "seerr-key",
+            },
+            "listrr": {
+                "enabled": True,
+                "url": "https://listrr.example",
+                "movie_lists": ["movies-a"],
+            },
+        },
+        "updaters": {
+            "plex": {
+                "enabled": True,
+                "url": "https://plex.example",
+                "token": "plex-token",
+            }
+        },
+    }
+    registry = PluginRegistry()
+    harness = TestPluginContext(settings=plugin_settings)
+    register_builtin_plugins(registry, context_provider=harness.provider())
+    client = _build_client(
+        plugin_registry=registry,
+        settings_overrides={
+            "FILMU_PY_SCRAPING": plugin_settings["scraping"],
+            "FILMU_PY_UPDATERS": plugin_settings["updaters"],
+        },
+    )
+    resources = cast(Any, client.app.state.resources)
+    resources.plugin_settings_payload = plugin_settings
+
+    response = client.get("/api/v1/operations/plugins/integration-readiness", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    by_name = {entry["name"]: entry for entry in body["plugins"]}
+    assert by_name["comet"]["ready"] is True
+    assert by_name["seerr"]["config_source"] == "content.overseerr"
+    assert by_name["listrr"]["missing_settings"] == []
+    assert by_name["plex"]["ready"] is True
 
 
 def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> None:
