@@ -2776,7 +2776,7 @@ def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> 
     assert body["remaining_gaps"] == []
 
 
-def test_downloader_orchestration_route_surfaces_fixed_priority_and_plugin_gap() -> None:
+def test_downloader_orchestration_route_surfaces_ordered_failover_and_plugin_gap() -> None:
     plugin_registry = PluginRegistry()
     harness = TestPluginContext(settings={"plugins": {}})
     register_builtin_plugins(plugin_registry, context_provider=harness.provider())
@@ -2800,14 +2800,14 @@ def test_downloader_orchestration_route_surfaces_fixed_priority_and_plugin_gap()
 
     assert response.status_code == 200
     body = response.json()
-    assert body["selection_mode"] == "fixed_priority_builtin_then_plugin_fallback"
+    assert body["selection_mode"] == "ordered_failover_with_plugin_fallback"
     assert body["selected_provider"] == "realdebrid"
     assert body["multi_provider_enabled"] is True
     assert body["plugin_downloaders_registered"] == 1
     assert body["worker_plugin_dispatch_ready"] is True
     assert body["fanout_ready"] is False
     assert body["multi_container_ready"] is False
-    assert "replace_fixed_priority_builtin_selection_with_policy_driven_fanout" in body[
+    assert "promote_ordered_failover_into_policy_driven_fanout" in body[
         "required_actions"
     ]
     assert "promote_plugin_downloader_dispatch_from_fallback_to_policy_fanout" in body[
@@ -2818,6 +2818,10 @@ def test_downloader_orchestration_route_surfaces_fixed_priority_and_plugin_gap()
     assert providers[("realdebrid", "builtin")]["selected"] is True
     assert providers[("alldebrid", "builtin")]["enabled"] is True
     assert providers[("stremthru", "plugin")]["configured"] is True
+    assert (
+        "multiple builtin downloaders now support ordered failover, but not policy-driven fan-out"
+        in body["remaining_gaps"]
+    )
     assert (
         "plugin-backed downloader execution now exists as fallback only and is not yet part of policy-driven fan-out"
         in body["remaining_gaps"]

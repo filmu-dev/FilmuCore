@@ -626,6 +626,7 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
     worker_plugin_dispatch_ready = plugin_dispatch_fallback_ready
     fanout_ready = False
     multi_container_ready = False
+    ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
 
     required_actions: list[str] = []
     remaining_gaps: list[str] = []
@@ -633,10 +634,16 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         required_actions.append("configure_at_least_one_builtin_downloader_provider")
         remaining_gaps.append("debrid worker execution has no configured builtin downloader provider")
     if multi_provider_enabled:
-        required_actions.append("replace_fixed_priority_builtin_selection_with_policy_driven_fanout")
-        remaining_gaps.append(
-            "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
-        )
+        if ordered_failover_ready:
+            required_actions.append("promote_ordered_failover_into_policy_driven_fanout")
+            remaining_gaps.append(
+                "multiple builtin downloaders now support ordered failover, but not policy-driven fan-out"
+            )
+        else:
+            required_actions.append("replace_fixed_priority_builtin_selection_with_policy_driven_fanout")
+            remaining_gaps.append(
+                "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
+            )
     if plugin_downloaders_registered > 0 and not worker_plugin_dispatch_ready:
         required_actions.append("wire_registered_downloader_plugins_into_debrid_worker")
         remaining_gaps.append(
@@ -655,7 +662,11 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
     return DownloaderOrchestrationResponse(
         generated_at=datetime.now(UTC).isoformat(),
         selection_mode=(
-            "fixed_priority_builtin_then_plugin_fallback"
+            "ordered_failover_with_plugin_fallback"
+            if ordered_failover_ready and worker_plugin_dispatch_ready
+            else "ordered_failover"
+            if ordered_failover_ready
+            else "fixed_priority_builtin_then_plugin_fallback"
             if worker_plugin_dispatch_ready
             else "fixed_priority_builtin_only"
         ),
