@@ -613,7 +613,6 @@ class DownloaderOrchestrationResponse(BaseModel):
     required_actions: list[str]
     remaining_gaps: list[str]
 
-
 class VfsCatalogCorrelationKeysResponse(BaseModel):
     """REST/operator correlation identifiers for one VFS catalog node."""
 
@@ -713,8 +712,6 @@ class VfsCatalogEntryDetailResponse(BaseModel):
     blocked_items: list[VfsCatalogBlockedItemResponse]
     required_actions: list[str]
     remaining_gaps: list[str]
-
-
 class VfsCatalogRollupResponse(BaseModel):
     """REST/operator view over the current VFS catalog rollup."""
 

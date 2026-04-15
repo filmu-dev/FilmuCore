@@ -972,7 +972,6 @@ def test_vfs_catalog_rollup_route_returns_rest_projection() -> None:
     assert body["provider_path_preserved_file_count"] == 1
     assert body["multi_role_file_count"] == 1
 
-
 def test_vfs_catalog_entry_detail_route_returns_rest_projection() -> None:
     client = _build_client()
 
@@ -1151,8 +1150,6 @@ def test_vfs_catalog_entry_detail_route_returns_rest_projection() -> None:
     assert body["stats"]["blocked_item_count"] == 1
     assert body["blocked_items"][0]["reason"] == "missing_media_entry"
     assert body["remaining_gaps"] == ["one or more media items are still blocked from the VFS catalog"]
-
-
 def test_services_route_reflects_runtime_flags() -> None:
     """Services route should expose the real provider enablement map."""
 

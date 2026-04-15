@@ -876,7 +876,6 @@ def _vfs_catalog_rollup_response(
         remaining_gaps=remaining_gaps,
     )
 
-
 def _format_optional_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -974,8 +973,6 @@ def _vfs_catalog_blocked_item_response(item: Any) -> VfsCatalogBlockedItemRespon
         title=str(item.title),
         reason=str(item.reason),
     )
-
-
 def _control_plane_summary_response(summary: Any) -> ControlPlaneSummaryResponse:
     """Normalize control-plane summary DTOs into the API response model."""
 
@@ -3972,7 +3969,6 @@ async def get_vfs_catalog_rollup(
         raise HTTPException(status_code=404, detail=f"Unknown VFS catalog generation '{generation_id}'")
     return _vfs_catalog_rollup_response(request, snapshot=snapshot)
 
-
 @router.get(
     "/operations/vfs-catalog/entry",
     operation_id="default.vfs_catalog_entry_detail",
@@ -4058,8 +4054,6 @@ async def get_vfs_catalog_entry_detail(
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
     )
-
-
 @router.post(
     "/plugins/stream-control",
     operation_id="default.plugin_stream_control",
