@@ -91,9 +91,11 @@ WORKER_JOB_STATUS_TOTAL = _stage_observability.WORKER_JOB_STATUS_TOTAL
 WORKER_STAGE_IDEMPOTENCY_TOTAL = _stage_observability.WORKER_STAGE_IDEMPOTENCY_TOTAL
 _job_status_name = _stage_observability.job_status_name
 _record_cleanup_action = _stage_observability.record_cleanup_action
+_record_debrid_rate_limited = _stage_observability.record_debrid_rate_limited
 _record_enqueue_decision = _stage_observability.record_enqueue_decision
 _record_enqueue_defer = _stage_observability.record_enqueue_defer
 _record_job_status = _stage_observability.record_job_status
+_record_rank_no_winner = _stage_observability.record_rank_no_winner
 _record_stage_idempotency = _stage_observability.record_stage_idempotency
 debrid_item_job_id = _stage_job_ids.debrid_item_job_id
 finalize_item_job_id = _stage_job_ids.finalize_item_job_id
@@ -1436,8 +1438,13 @@ async def _increment_item_recovery_attempt_count(ctx: dict[str, Any], *, item_id
         return next_count
 
 
-def _rank_failure_cooldown_seconds(settings: Settings, *, attempt_count: int) -> int:
-    if attempt_count < 2:
+def _rank_failure_cooldown_seconds(
+    settings: Settings,
+    *,
+    attempt_count: int,
+    use_short_first_retry: bool = True,
+) -> int:
+    if use_short_first_retry and attempt_count < 2:
         return 300
     if attempt_count < 5:
         return max(0, int(settings.scraping.after_2 * 3600))
@@ -1454,6 +1461,8 @@ async def _schedule_search_retry(
     item_id: str,
     failure_reason: str,
     stage_name: str,
+    blacklist_stream_ids: list[str] | None = None,
+    use_short_first_retry: bool = True,
 ) -> bool:
     """Requeue one item for a fresh scrape cycle instead of failing immediately."""
 
@@ -1474,13 +1483,18 @@ async def _schedule_search_retry(
         )
         return False
 
-    cooldown_seconds = _rank_failure_cooldown_seconds(settings, attempt_count=attempt_count)
+    cooldown_seconds = _rank_failure_cooldown_seconds(
+        settings,
+        attempt_count=attempt_count,
+        use_short_first_retry=use_short_first_retry,
+    )
     next_retry_at = (
         datetime.now(UTC) + timedelta(seconds=cooldown_seconds) if cooldown_seconds > 0 else None
     )
     await media_service.prepare_item_for_scrape_retry(
         item_id,
         message=f"{stage_name} retry scheduled: {failure_reason}",
+        blacklist_stream_ids=blacklist_stream_ids,
     )
     requeue_job_id = f"{scrape_item_job_id(item_id)}:{stage_name}:retry:{attempt_count}"
     enqueued = await _maybe_enqueue_next_stage(
@@ -1728,7 +1742,10 @@ async def parse_scrape_results(
                     message="parse_scrape_results failed: no_scrape_candidates",
                 )
             return item_id
-        streams = await media_service.get_stream_candidates(media_item_id=item_id)
+        streams = await media_service.get_stream_candidates(
+            media_item_id=item_id,
+            exclude_blacklisted=True,
+        )
         has_parsed_candidates = any(stream.parsed_title for stream in streams)
         parsed_count = await _persist_unparsed_stream_candidates(
             media_service=media_service,
@@ -1836,7 +1853,10 @@ async def rank_streams(
 
         log_context = await _worker_log_context(media_service, item_id=item_id)
         logger.info("rank_streams starting", extra=log_context)
-        streams = await media_service.get_stream_candidates(media_item_id=item_id)
+        streams = await media_service.get_stream_candidates(
+            media_item_id=item_id,
+            exclude_blacklisted=True,
+        )
         profile = _resolve_ranking_profile(settings)
         anime_only = _dubbed_anime_only(settings) and _is_anime_item(item.attributes)
         item_aliases = (
@@ -2014,6 +2034,7 @@ async def rank_streams(
                 rank_threshold=profile.options.remove_ranks_under,
             )
             failure_reason = cast(str, diagnostics["failure_reason"])
+            _record_rank_no_winner(failure_reason=failure_reason)
             _worker_stage_logger().warning(
                 "rank_streams.no_winner",
                 item_id=item_id,
@@ -2304,9 +2325,13 @@ async def poll_content_services(ctx: dict[str, object]) -> None:
         try:
             requests = await plugin.poll()
             for request in requests:
+                request_source = request.source
+                if request.source_list_id:
+                    request_source = f"{request_source}:{request.source_list_id}"
                 await media_service.request_items_by_identifiers(
                     identifiers=[request.external_ref],
                     media_type=request.media_type,
+                    request_source=request_source,
                 )
             structlog.get_logger().info(
                 "worker.content_poll.complete",
@@ -2599,6 +2624,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
     settings = await _resolve_runtime_settings(mutable_ctx)
     item_request_id: str | None = None
     provider: str | None = None
+    selected_stream_id: str | None = None
 
     try:
         item = await media_service.get_item(item_id)
@@ -2616,10 +2642,14 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             return item_id
 
         item_request_id = await media_service.get_latest_item_request_id(media_item_id=item_id)
-        streams = await media_service.get_stream_candidates(media_item_id=item_id)
+        streams = await media_service.get_stream_candidates(
+            media_item_id=item_id,
+            exclude_blacklisted=True,
+        )
         selected_stream = _selected_stream(streams)
         if selected_stream is None:
             raise ValueError("selected_stream_missing")
+        selected_stream_id = selected_stream.id
 
         provider = _resolve_enabled_downloader(
             settings,
@@ -2705,6 +2735,10 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         )
         return item_id
     except DebridRateLimitError as exc:
+        _record_debrid_rate_limited(
+            provider=provider or exc.provider,
+            retry_after_seconds=exc.retry_after_seconds,
+        )
         _worker_stage_logger().warning(
             "debrid_item.rate_limited",
             item_id=item_id,
@@ -2722,14 +2756,61 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
+    except TimeoutError as exc:
+        logger.warning(
+            "debrid stage timed out",
+            extra={
+                "item_id": item_id,
+                "item_request_id": item_request_id,
+                "provider": provider,
+                "selected_stream_id": selected_stream_id,
+                "error": str(exc),
+            },
+        )
+        arq_redis = mutable_ctx.get("arq_redis")
+        if arq_redis is not None and hasattr(arq_redis, "enqueue_job"):
+            requeued = await _schedule_search_retry(
+                ctx=mutable_ctx,
+                media_service=media_service,
+                settings=settings,
+                item_id=item_id,
+                failure_reason=str(exc),
+                stage_name="debrid_item",
+                blacklist_stream_ids=[selected_stream_id] if selected_stream_id is not None else None,
+                use_short_first_retry=False,
+            )
+            if requeued:
+                return item_id
+
+        await _try_transition(
+            media_service=media_service,
+            item_id=item_id,
+            event=ItemEvent.FAIL,
+            message=f"debrid failed: {exc}",
+        )
+        attempt = task_try_count(mutable_ctx)
+        if DEBRID_RETRY_POLICY.should_dead_letter(attempt):
+            await route_dead_letter(
+                ctx=mutable_ctx,
+                task_name="debrid_item",
+                item_id=item_id,
+                reason=str(exc),
+            )
+            raise
+        raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
+            retry_after_seconds = _retry_after_seconds_from_http_status_error(exc)
+            _record_debrid_rate_limited(
+                provider=provider or "unknown",
+                retry_after_seconds=retry_after_seconds,
+            )
             _worker_stage_logger().warning(
                 "debrid_item.rate_limited",
                 item_id=item_id,
                 item_request_id=item_request_id,
                 provider=provider or "unknown",
-                retry_after=_retry_after_seconds_from_http_status_error(exc),
+                retry_after=retry_after_seconds,
             )
             attempt = task_try_count(mutable_ctx)
             if DEBRID_RETRY_POLICY.should_dead_letter(attempt):

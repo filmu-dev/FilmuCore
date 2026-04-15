@@ -33,6 +33,7 @@ from filmu_py.services.media import (
     ActiveStreamDetailRecord,
     ActiveStreamOwnerRecord,
     ItemActionResult,
+    ItemRequestSummaryRecord,
     MediaEntryDetailRecord,
     MediaItemsPage,
     MediaItemSpecializationRecord,
@@ -247,6 +248,12 @@ class DummyMediaService:
                 episode_number=7 if media_type == "tv" else None,
             ),
             metadata={"item_type": "movie", "year": 2024},
+            request=ItemRequestSummaryRecord(
+                is_partial=True,
+                requested_seasons=[1, 2],
+                requested_episodes={"1": [1, 2]},
+                request_source="mdblist:list-a",
+            ),
             active_stream=active_stream,
             media_entries=media_entries,
             playback_attachments=playback_attachments,
@@ -387,6 +394,10 @@ def test_get_item_route_returns_detail_payload() -> None:
     body = response.json()
     assert body["id"] == "item-1"
     assert body["metadata"]["year"] == 2024
+    assert body["request"]["is_partial"] is True
+    assert body["request"]["requested_seasons"] == [1, 2]
+    assert body["request"]["requested_episodes"] == {"1": [1, 2]}
+    assert body["request"]["request_source"] == "mdblist:list-a"
     assert body["playback_attachments"][0]["provider"] == "realdebrid"
     assert body["playback_attachments"][0]["provider_file_id"] == "file-7"
     assert body["playback_attachments"][0]["refresh_state"] == "ready"

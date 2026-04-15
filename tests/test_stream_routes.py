@@ -10056,7 +10056,24 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
         json.dumps(
             {
                 "timestamp": "2026-04-12T01:01:03Z",
-                "results": [{"provider": "plex", "status": "passed"}],
+                "media_type": "movie",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103-tv.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:03Z",
+                "media_type": "tv",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
             }
         ),
         encoding="utf-8",
@@ -10066,6 +10083,13 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
             {
                 "timestamp": "2026-04-12T01:01:04Z",
                 "environment_class": "windows-native:enterprise",
+                "repeat_count": 1,
+                "profiles": [
+                    "continuous",
+                    "seek",
+                    "concurrent",
+                    "full",
+                ],
                 "all_green": True,
             }
         ),
@@ -10076,6 +10100,32 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
             {
                 "timestamp": "2026-04-12T01:01:05Z",
                 "validation": {"status": "ready"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "playback-gate-runner-readiness.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:06Z",
+                "status": "ready",
+                "checks": [
+                    {
+                        "name": "frontend_context",
+                        "required": True,
+                        "ok": True,
+                    },
+                    {
+                        "name": "browser_executable",
+                        "required": True,
+                        "ok": True,
+                    },
+                    {
+                        "name": "linux_fuse",
+                        "required": True,
+                        "ok": True,
+                    },
+                ],
             }
         ),
         encoding="utf-8",

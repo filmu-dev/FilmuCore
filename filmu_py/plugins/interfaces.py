@@ -179,6 +179,40 @@ class NotificationEvent:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
+class StreamControlAction(StrEnum):
+    """Supported stream-control actions on top of the serving/status substrate."""
+
+    SERVING_STATUS_SNAPSHOT = "serving_status_snapshot"
+    TRIGGER_DIRECT_PLAYBACK_REFRESH = "trigger_direct_playback_refresh"
+    TRIGGER_HLS_FAILED_LEASE_REFRESH = "trigger_hls_failed_lease_refresh"
+    TRIGGER_HLS_RESTRICTED_FALLBACK_REFRESH = "trigger_hls_restricted_fallback_refresh"
+    MARK_SELECTED_HLS_MEDIA_ENTRY_STALE = "mark_selected_hls_media_entry_stale"
+
+
+@dataclass(frozen=True, slots=True)
+class StreamControlInput:
+    """Typed stream-control request passed into one stream-control plugin."""
+
+    action: StreamControlAction
+    item_identifier: str | None = None
+    prefer_queued: bool | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class StreamControlResult:
+    """Normalized stream-control outcome returned by one stream-control plugin."""
+
+    action: StreamControlAction
+    item_identifier: str | None
+    accepted: bool
+    outcome: str
+    detail: str | None = None
+    controller_attached: bool | None = None
+    retry_after_seconds: float | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
 @runtime_checkable
 class PluginInitializer(Protocol):
     """Shared initialization contract for all plugin capability implementations."""
@@ -223,6 +257,14 @@ class NotificationPlugin(PluginInitializer, Protocol):
     """Capability interface for notification plugins."""
 
     async def send(self, event: NotificationEvent) -> None: ...
+
+
+@runtime_checkable
+class StreamControlPlugin(PluginInitializer, Protocol):
+    """Capability interface for controlled stream/status operations."""
+
+    async def control(self, request: StreamControlInput) -> StreamControlResult:
+        pass
 
 
 @runtime_checkable

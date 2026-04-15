@@ -17,19 +17,25 @@ from redis.exceptions import ResponseError
 
 from filmu_py.api.router import create_api_router
 from filmu_py.api.routes import default as default_routes
+from filmu_py.api.routes import runtime_governance as runtime_governance_routes
 from filmu_py.api.routes import stream as stream_routes
+from filmu_py.api.routes.internal_vfs import router as internal_vfs_router
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.chunk_engine import ChunkCache
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
+from filmu_py.plugins import TestPluginContext
+from filmu_py.plugins.builtins import register_builtin_plugins
+from filmu_py.plugins.interfaces import StreamControlInput, StreamControlResult
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.media import StatsProjection, StatsYearReleaseRecord
+from filmuvfs.catalog.v1 import catalog_pb2
 
 
 class DummyRedis:
@@ -521,6 +527,41 @@ def _build_settings(
         "FILMU_PY_REDIS_URL": AnyUrl("redis://localhost:6379/0"),
         "FILMU_PY_RUN_MIGRATIONS_ON_STARTUP": False,
         "FILMU_PY_LOG_LEVEL": "INFO",
+        "FILMU_PY_OTEL_ENABLED": False,
+        "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": None,
+        "FILMU_PY_OIDC": {
+            "enabled": False,
+            "rollout_stage": "disabled",
+            "rollout_evidence_refs": [],
+            "subject_mapping_ready": False,
+            "issuer": None,
+            "audience": None,
+            "jwks_url": None,
+            "jwks_json": None,
+            "allowed_algorithms": ["RS256", "ES256"],
+            "allow_api_key_fallback": True,
+        },
+        "FILMU_PY_LOG_SHIPPER": {
+            "enabled": False,
+            "type": "external_ndjson_tail",
+            "target": None,
+            "healthcheck_url": None,
+            "field_mapping_version": "filmu-ecs-v1",
+        },
+        "FILMU_PY_OBSERVABILITY": {
+            "environment_shipping_enabled": False,
+            "search_backend": "none",
+            "alerting_enabled": False,
+            "rust_trace_correlation_enabled": False,
+            "proof_refs": [],
+        },
+        "FILMU_PY_PLUGIN_RUNTIME": {
+            "enforcement_mode": "report_only",
+            "health_rollup_enabled": True,
+            "require_strict_signatures": False,
+            "require_source_digest": False,
+            "proof_refs": [],
+        },
         "FILMU_PY_ARQ_ENABLED": arq_enabled,
         "FILMU_PY_TEMPORAL_ENABLED": temporal_enabled,
     }
@@ -599,6 +640,7 @@ def _build_client(
     )
     app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
+    app.include_router(internal_vfs_router)
 
     return TestClient(app)
 
@@ -631,6 +673,92 @@ def test_stats_route_returns_dashboard_snapshot() -> None:
     assert body["states"]["Completed"] == 5
     assert body["activity"]["2026-03-09"] == 9
     assert body["media_year_releases"] == [{"year": 2024, "count": 4}]
+
+
+def test_vfs_catalog_watch_event_route_returns_protobuf_snapshot_and_delta() -> None:
+    client = _build_client()
+
+    class FakeVfsCatalogServer:
+        async def build_poll_event(
+            self,
+            *,
+            last_applied_generation_id: str | None = None,
+        ) -> catalog_pb2.WatchCatalogEvent:
+            event = catalog_pb2.WatchCatalogEvent(event_id=f"event:{last_applied_generation_id or 'snapshot'}")
+            if last_applied_generation_id is None:
+                event.snapshot.generation_id = "1"
+            else:
+                event.delta.generation_id = "2"
+                event.delta.base_generation_id = last_applied_generation_id
+            return event
+
+    resources = cast(Any, client.app.state.resources)
+    resources.vfs_catalog_server = FakeVfsCatalogServer()
+
+    first = client.get(
+        "/internal/vfs/watch-event.pb",
+        headers={"x-filmu-vfs-key": "a" * 32},
+    )
+    assert first.status_code == 200
+    assert first.headers["content-type"].startswith("application/x-protobuf")
+    first_event = catalog_pb2.WatchCatalogEvent()
+    first_event.ParseFromString(first.content)
+    assert first_event.snapshot.generation_id == "1"
+
+    second = client.get(
+        "/internal/vfs/watch-event.pb",
+        params={"last_applied_generation_id": "1"},
+        headers={"x-filmu-vfs-key": "a" * 32},
+    )
+    assert second.status_code == 200
+    second_event = catalog_pb2.WatchCatalogEvent()
+    second_event.ParseFromString(second.content)
+    assert second_event.delta.generation_id == "2"
+    assert second_event.delta.base_generation_id == "1"
+
+
+def test_vfs_catalog_refresh_entry_route_returns_protobuf_refresh_response() -> None:
+    client = _build_client()
+
+    class FakeVfsCatalogServer:
+        async def refresh_catalog_entry_message(
+            self,
+            *,
+            provider_file_id: str,
+            handle_key: str,
+            entry_id: str,
+        ) -> catalog_pb2.RefreshCatalogEntryResponse:
+            assert provider_file_id == "provider-file-1"
+            assert handle_key == "handle-1"
+            assert entry_id == "file:entry-1"
+            return catalog_pb2.RefreshCatalogEntryResponse(
+                success=True,
+                new_url="https://cdn.example.test/fresh.mkv",
+            )
+
+    resources = cast(Any, client.app.state.resources)
+    resources.vfs_catalog_server = FakeVfsCatalogServer()
+
+    payload = catalog_pb2.RefreshCatalogEntryRequest(
+        provider_file_id="provider-file-1",
+        handle_key="handle-1",
+        entry_id="file:entry-1",
+    ).SerializeToString()
+    response = client.post(
+        "/internal/vfs/refresh-entry.pb",
+        headers={
+            "x-filmu-vfs-key": "a" * 32,
+            "content-type": "application/x-protobuf",
+        },
+        content=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-protobuf")
+    proto_response = catalog_pb2.RefreshCatalogEntryResponse()
+    proto_response.ParseFromString(response.content)
+    assert proto_response.success is True
+    assert proto_response.new_url == "https://cdn.example.test/fresh.mkv"
 
 
 def test_services_route_reflects_runtime_flags() -> None:
@@ -806,6 +934,58 @@ def test_plugin_events_route_returns_declared_events_and_hook_subscriptions() ->
     ]
 
 
+def test_plugin_stream_control_route_executes_registered_plugin() -> None:
+    plugin_registry = PluginRegistry()
+
+    class ExampleStreamControl:
+        plugin_name = "stream-control-plugin"
+
+        async def initialize(self, ctx: object) -> None:
+            _ = ctx
+
+        async def control(self, request: StreamControlInput) -> StreamControlResult:
+            return StreamControlResult(
+                action=request.action,
+                item_identifier=request.item_identifier,
+                accepted=True,
+                outcome="handled",
+                controller_attached=True,
+                metadata={"source": "test"},
+            )
+
+    plugin_registry.register_capability(
+        plugin_name="stream-control-plugin",
+        kind=PluginCapabilityKind.STREAM_CONTROL,
+        implementation=ExampleStreamControl(),
+    )
+
+    client = _build_client(plugin_registry=plugin_registry)
+    response = client.post(
+        "/api/v1/plugins/stream-control",
+        headers=_headers(),
+        json={
+            "plugin_name": "stream-control-plugin",
+            "action": "trigger_direct_playback_refresh",
+            "item_identifier": "item-123",
+            "prefer_queued": True,
+            "metadata": {"reason": "operator-test"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "plugin_name": "stream-control-plugin",
+        "action": "trigger_direct_playback_refresh",
+        "item_identifier": "item-123",
+        "accepted": True,
+        "outcome": "handled",
+        "detail": None,
+        "controller_attached": True,
+        "retry_after_seconds": None,
+        "metadata": {"source": "test"},
+    }
+
+
 def test_plugin_governance_route_returns_operator_policy_summary() -> None:
     plugin_registry = PluginRegistry()
     plugin_registry.register_manifest(
@@ -887,6 +1067,35 @@ def test_plugin_governance_route_marks_wave4_runtime_policy_ready() -> None:
     assert body["summary"]["healthy_plugins"] == 0
     assert body["summary"]["degraded_plugins"] == 0
     assert body["summary"]["remaining_gaps"] == []
+
+
+def test_plugin_governance_route_ignores_unconfigured_builtin_plugins_for_runtime_exit() -> None:
+    registry = PluginRegistry()
+    harness = TestPluginContext(settings={"plugins": {}})
+    register_builtin_plugins(registry, context_provider=harness.provider())
+    client = _build_client(
+        plugin_registry=registry,
+        settings_overrides={
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "isolated_runtime_required",
+                "require_strict_signatures": True,
+                "require_source_digest": True,
+                "proof_refs": ["ops/wave4/plugin-runtime-isolation.md"],
+            }
+        },
+    )
+
+    response = client.get("/api/v1/plugins/governance", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["runtime_isolation_ready"] is True
+    assert body["summary"]["non_builtin_plugins"] == 0
+    assert body["summary"]["unready_plugins"] == 1
+    assert body["summary"]["degraded_plugins"] == 1
+    stremthru = next(plugin for plugin in body["plugins"] if plugin["name"] == "stremthru")
+    assert stremthru["ready"] is False
+    assert stremthru["configured"] is False
 
 
 def test_plugins_route_surfaces_manifest_compatibility_and_stremthru_readiness() -> None:
@@ -1507,6 +1716,11 @@ def test_operations_governance_route_returns_enterprise_slice_posture(
         "_playback_gate_governance_snapshot",
         lambda: dict(playback_gate_governance),
     )
+    monkeypatch.setattr(
+        default_routes,
+        "_vfs_runtime_governance_snapshot",
+        lambda *args, **kwargs: runtime_governance_routes._empty_vfs_runtime_governance_snapshot(),
+    )
 
     client = _build_client(arq_enabled=True)
 
@@ -1524,6 +1738,7 @@ def test_operations_governance_route_returns_enterprise_slice_posture(
     assert set(body) == {
         "generated_at",
         "playback_gate",
+        "operational_evidence",
         "identity_authz",
         "tenant_boundary",
         "vfs_data_plane",
@@ -1540,6 +1755,40 @@ def test_operations_governance_route_returns_enterprise_slice_posture(
         "playback_gate"
     ]["evidence"]
     assert "playback_gate_rollout_readiness=blocked" in body["playback_gate"]["evidence"]
+    assert body["operational_evidence"]["status"] == "partial"
+    assert (
+        "playback_gate_runner_status=unknown"
+        in body["operational_evidence"]["evidence"]
+    )
+    assert (
+        "playback_gate_windows_provider_movie_ready=0"
+        in body["operational_evidence"]["evidence"]
+    )
+    assert (
+        "playback_gate_windows_provider_tv_ready=0"
+        in body["operational_evidence"]["evidence"]
+    )
+    assert (
+        "rank_streams_no_winner_total=0" in body["operational_evidence"]["evidence"]
+    )
+    assert (
+        "debrid_rate_limited_total=0" in body["operational_evidence"]["evidence"]
+    )
+    assert "record_playback_gate_runner_readiness" in body["operational_evidence"][
+        "required_actions"
+    ]
+    assert "record_github_main_policy_validation" in body["operational_evidence"][
+        "required_actions"
+    ]
+    assert "rerun_native_windows_provider_proof_movie" in body["operational_evidence"][
+        "required_actions"
+    ]
+    assert "rerun_native_windows_provider_proof_tv" in body["operational_evidence"][
+        "required_actions"
+    ]
+    assert "run_windows_vfs_soak_enterprise_profiles" in body["operational_evidence"][
+        "required_actions"
+    ]
     assert body["identity_authz"]["status"] == "blocked"
     assert "authentication_mode=api_key" in body["identity_authz"]["evidence"]
     assert "oidc_claims_present=True" in body["identity_authz"]["evidence"]
@@ -1586,6 +1835,146 @@ def test_operations_governance_route_returns_enterprise_slice_posture(
     assert (
         "metadata reindex/reconciliation trends are not yet exposed on a dedicated operator summary surface"
         not in body["release_metadata_performance"]["remaining_gaps"]
+    )
+
+
+def test_operations_governance_route_blocks_operational_evidence_on_live_worker_blockers(
+    monkeypatch: Any,
+) -> None:
+    playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
+    playback_gate_governance.update(
+        {
+            "playback_gate_snapshot_available": 1,
+            "playback_gate_gate_mode": "strict",
+            "playback_gate_runner_status": "ready",
+            "playback_gate_runner_ready": 1,
+            "playback_gate_runner_required_failures": 0,
+            "playback_gate_provider_gate_required": 1,
+            "playback_gate_provider_gate_ran": 1,
+            "playback_gate_stability_ready": 1,
+            "playback_gate_provider_parity_ready": 1,
+            "playback_gate_windows_provider_ready": 1,
+            "playback_gate_windows_provider_movie_ready": 1,
+            "playback_gate_windows_provider_tv_ready": 1,
+            "playback_gate_windows_provider_coverage": [
+                "emby:movie",
+                "emby:tv",
+                "plex:movie",
+                "plex:tv",
+            ],
+            "playback_gate_windows_soak_ready": 1,
+            "playback_gate_windows_soak_repeat_count": 1,
+            "playback_gate_windows_soak_profile_coverage_complete": 1,
+            "playback_gate_windows_soak_profile_coverage": [
+                "concurrent",
+                "continuous",
+                "full",
+                "seek",
+            ],
+            "playback_gate_policy_validation_status": "ready",
+            "playback_gate_policy_ready": 1,
+            "playback_gate_rollout_readiness": "ready",
+            "playback_gate_rollout_reasons": ["enterprise_playback_gate_green"],
+            "playback_gate_rollout_next_action": "keep_required_checks_enforced",
+        }
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "_playback_gate_governance_snapshot",
+        lambda: dict(playback_gate_governance),
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "_worker_blocker_snapshot",
+        lambda: {
+            "rank_streams_no_winner_total": 2,
+            "rank_streams_no_winner_reason_counts": {"no_candidates_passing_fetch": 2},
+            "rank_streams_no_winner_last_reason": "no_candidates_passing_fetch",
+            "debrid_rate_limited_total": 1,
+            "debrid_rate_limited_provider_counts": {"realdebrid": 1},
+            "debrid_rate_limited_last_provider": "realdebrid",
+            "debrid_rate_limited_last_retry_after_seconds": 30.0,
+        },
+    )
+
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "rollout_stage": "enforced",
+                "rollout_evidence_refs": ["ops://oidc/prod-smoke-2026-04-12"],
+                "subject_mapping_ready": True,
+                "issuer": "https://issuer.example.test",
+                "audience": "filmu-api",
+                "jwks_json": {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "test"}]},
+                "allowed_algorithms": ["HS256"],
+                "allow_api_key_fallback": False,
+            },
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "isolated_runtime_required",
+                "require_strict_signatures": True,
+                "require_source_digest": True,
+                "proof_refs": ["ops/wave4/plugin-runtime-isolation.md"],
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "required_correlation_fields": [
+                    "@timestamp",
+                    "trace.id",
+                    "labels.tenant_id",
+                ],
+                "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
+            },
+        }
+    )
+    token = jwt.encode(
+        {"alg": "HS256", "kid": "test"},
+        {
+            "iss": "https://issuer.example.test",
+            "sub": "user-789",
+            "aud": "filmu-api",
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+            "tenant_id": "tenant-main",
+            "roles": [],
+            "scope": "library:write playback:operate settings:write security:policy.approve",
+        },
+        {"kty": "oct", "k": "c2VjcmV0", "kid": "test"},
+    )
+    token_value = token.decode("utf-8") if isinstance(token, bytes) else token
+
+    response = client.get(
+        "/api/v1/operations/governance",
+        headers={"authorization": f"Bearer {token_value}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["operational_evidence"]["status"] == "blocked"
+    assert "rank_streams_no_winner_total=2" in body["operational_evidence"]["evidence"]
+    assert (
+        "rank_streams_no_winner_reason_counts=no_candidates_passing_fetch:2"
+        in body["operational_evidence"]["evidence"]
+    )
+    assert "debrid_rate_limited_total=1" in body["operational_evidence"]["evidence"]
+    assert (
+        "debrid_rate_limited_provider_counts=realdebrid:1"
+        in body["operational_evidence"]["evidence"]
+    )
+    assert body["operational_evidence"]["required_actions"] == [
+        "reduce_rank_streams_fetch_rejections",
+        "mitigate_debrid_rate_limit_pressure",
+    ]
+    assert (
+        "rank_streams.no_winner is currently active with bounded reason counters"
+        in body["operational_evidence"]["remaining_gaps"]
+    )
+    assert (
+        "debrid_item.rate_limited is currently active against live providers"
+        in body["operational_evidence"]["remaining_gaps"]
     )
 
 
@@ -1983,15 +2372,57 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
         encoding="utf-8",
     )
     (artifacts_root / "windows-media-server-gate-20260412-020103.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T02:01:03Z", "results": [{"status": "passed"}]}),
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:03Z",
+                "media_type": "movie",
+                "results": [
+                    {"provider": "emby", "status": "passed"},
+                    {"provider": "plex", "status": "passed"},
+                ],
+            }
+        ),
         encoding="utf-8",
     )
-    (windows_artifacts_root / "soak-stability-20260412-020104.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T02:01:04Z", "all_green": True}),
+    (artifacts_root / "windows-media-server-gate-20260412-020104.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:04Z",
+                "media_type": "tv",
+                "results": [
+                    {"provider": "emby", "status": "passed"},
+                    {"provider": "plex", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (windows_artifacts_root / "soak-stability-20260412-020105.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:05Z",
+                "all_green": True,
+                "repeat_count": 1,
+                "profiles": ["continuous", "seek", "concurrent", "full"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "playback-gate-runner-readiness.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:05Z",
+                "status": "ready",
+                "checks": [
+                    {"name": "docker", "required": True, "ok": True},
+                    {"name": "pwsh", "required": True, "ok": True},
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     (artifacts_root / "github-main-policy-current.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T02:01:05Z", "validation": {"status": "ready"}}),
+        json.dumps({"timestamp": "2026-04-12T02:01:06Z", "validation": {"status": "ready"}}),
         encoding="utf-8",
     )
     monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))

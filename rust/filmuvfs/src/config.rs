@@ -134,10 +134,12 @@ pub struct SidecarConfig {
     pub grpc_endpoint: String,
     pub backend_http_base_url: Option<String>,
     pub backend_api_key: Option<String>,
+    pub windows_force_docker_bridge: bool,
     pub otlp_endpoint: Option<String>,
     pub log_filter: String,
     pub connect_timeout: Duration,
     pub rpc_timeout: Duration,
+    pub initial_catalog_sync_timeout: Duration,
     pub heartbeat_interval: Duration,
     pub reconnect_backoff_initial: Duration,
     pub reconnect_backoff_max: Duration,
@@ -181,6 +183,8 @@ impl SidecarConfig {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
+        let windows_force_docker_bridge =
+            parse_bool("FILMUVFS_WINDOWS_FORCE_DOCKER_BRIDGE", false)?;
         let mut otlp_endpoint = env::var("FILMUVFS_OTLP_ENDPOINT")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -403,10 +407,15 @@ impl SidecarConfig {
             grpc_endpoint: normalize_grpc_endpoint(&grpc_endpoint),
             backend_http_base_url,
             backend_api_key,
+            windows_force_docker_bridge,
             otlp_endpoint,
             log_filter,
             connect_timeout: parse_duration_seconds("FILMUVFS_CONNECT_TIMEOUT_SECONDS", 5)?,
             rpc_timeout: parse_duration_seconds("FILMUVFS_RPC_TIMEOUT_SECONDS", 30)?,
+            initial_catalog_sync_timeout: parse_duration_seconds(
+                "FILMUVFS_INITIAL_CATALOG_SYNC_TIMEOUT_SECONDS",
+                120,
+            )?,
             heartbeat_interval: parse_duration_seconds("FILMUVFS_HEARTBEAT_INTERVAL_SECONDS", 15)?,
             reconnect_backoff_initial: parse_duration_seconds(
                 "FILMUVFS_RECONNECT_BACKOFF_INITIAL_SECONDS",
@@ -546,7 +555,8 @@ fn mebibytes_to_bytes(value: usize) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_windows_projfs_summary_interval_seconds, MountAdapterKind, ResolvedMountAdapterKind,
+        default_windows_projfs_summary_interval_seconds, parse_bool, MountAdapterKind,
+        ResolvedMountAdapterKind,
     };
 
     #[test]
@@ -616,5 +626,13 @@ mod tests {
                 .expect("auto should resolve on Linux"),
             ResolvedMountAdapterKind::Fuse
         );
+    }
+
+    #[test]
+    fn parses_windows_force_docker_bridge_bool_values() {
+        let key = "FILMUVFS_WINDOWS_FORCE_DOCKER_BRIDGE_TEST";
+        unsafe { std::env::set_var(key, "true") };
+        assert_eq!(parse_bool(key, false).expect("bool env should parse"), true);
+        unsafe { std::env::remove_var(key) };
     }
 }

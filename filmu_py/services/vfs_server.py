@@ -454,6 +454,124 @@ class FilmuVfsCatalogGrpcServicer:
 
         return dict(self._governance)
 
+    async def build_poll_event(
+        self,
+        *,
+        last_applied_generation_id: str | None = None,
+    ) -> catalog_pb2.WatchCatalogEvent:
+        """Build one protobuf event for HTTP-side polling fallback clients."""
+
+        reconnect_generation_id = _parse_generation_id(last_applied_generation_id)
+        if reconnect_generation_id is not None:
+            self._record_governance_event("vfs_catalog_reconnect_requested")
+            reconnect_delta = await self._supplier.build_delta_since(reconnect_generation_id)
+            if reconnect_delta is not None:
+                self._record_governance_event("vfs_catalog_reconnect_delta_served")
+                self._record_governance_event("vfs_catalog_deltas_served")
+                return _delta_event(reconnect_delta)
+
+            active_snapshot = await self._supplier.snapshot_for_generation(reconnect_generation_id)
+            if active_snapshot is not None:
+                self._record_governance_event("vfs_catalog_reconnect_current_generation_reused")
+                self._record_governance_event("vfs_catalog_heartbeats_served")
+                return _heartbeat_event()
+
+            self._record_governance_event("vfs_catalog_reconnect_snapshot_fallback")
+
+        snapshot = await self._supplier.build_snapshot()
+        self._record_governance_event("vfs_catalog_snapshots_served")
+        return _snapshot_event(snapshot)
+
+    async def refresh_catalog_entry_message(
+        self,
+        *,
+        provider_file_id: str,
+        handle_key: str,
+        entry_id: str,
+    ) -> catalog_pb2.RefreshCatalogEntryResponse:
+        """Resolve one inline-refresh request without depending on gRPC transport state."""
+
+        entry_id = entry_id.strip()
+        provider_file_id = provider_file_id.strip()
+        handle_key = handle_key.strip()
+        if entry_id == "" and provider_file_id == "":
+            return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
+        self._record_governance_event("vfs_catalog_inline_refresh_requests")
+
+        try:
+            snapshot = await self._supplier.build_snapshot()
+        except Exception:  # pragma: no cover - defensive transport safety net
+            self._record_governance_event("vfs_catalog_snapshot_build_failures")
+            self._record_governance_event("vfs_catalog_problem_events")
+            logger.exception("vfs.catalog.grpc.entry.inline_refresh.snapshot.failed")
+            return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
+
+        matched_entry = None
+        if entry_id != "":
+            matched_entry = next(
+                (
+                    entry.file
+                    for entry in snapshot.entries
+                    if entry.kind == "file"
+                    and entry.file is not None
+                    and entry.entry_id == entry_id
+                ),
+                None,
+            )
+
+        if matched_entry is None and provider_file_id != "":
+            matched_entry = next(
+                (
+                    entry.file
+                    for entry in snapshot.entries
+                    if entry.kind == "file"
+                    and entry.file is not None
+                    and entry.file.provider_file_id == provider_file_id
+                ),
+                None,
+            )
+        if matched_entry is None:
+            logger.warning(
+                "vfs.catalog.grpc.entry.inline_refresh.not_found",
+                extra={
+                    "entry_id": entry_id or None,
+                    "provider_file_id": provider_file_id,
+                    "handle_key": handle_key or None,
+                },
+            )
+            self._record_governance_event("vfs_catalog_inline_refresh_not_found")
+            return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
+
+        refreshed_url = await self._resolve_inline_refresh(
+            matched_entry,
+            entry_id=entry_id,
+            provider_file_id=provider_file_id,
+        )
+        if refreshed_url is None:
+            logger.warning(
+                "vfs.catalog.grpc.entry.inline_refresh.failed",
+                extra={
+                    "entry_id": entry_id or None,
+                    "provider_file_id": provider_file_id,
+                    "handle_key": handle_key or None,
+                    "media_entry_id": matched_entry.media_entry_id,
+                },
+            )
+            self._record_governance_event("vfs_catalog_inline_refresh_failed")
+            return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
+
+        logger.info(
+            "vfs.catalog.grpc.entry.inline_refresh.succeeded",
+            extra={
+                "entry_id": entry_id or None,
+                "provider_file_id": provider_file_id,
+                "handle_key": handle_key or None,
+                "media_entry_id": matched_entry.media_entry_id,
+            },
+        )
+        self._record_governance_event("vfs_catalog_inline_refresh_succeeded")
+        return catalog_pb2.RefreshCatalogEntryResponse(success=True, new_url=refreshed_url)
+
     async def _resolve_fresh_url(
         self,
         entry: VfsCatalogFileEntry,
@@ -636,86 +754,12 @@ class FilmuVfsCatalogGrpcServicer:
             catalog_pb2.RefreshCatalogEntryResponse,
         ],
     ) -> catalog_pb2.RefreshCatalogEntryResponse:
-        entry_id = request.entry_id.strip()
-        provider_file_id = request.provider_file_id.strip()
-        if entry_id == "" and provider_file_id == "":
-            return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
-        self._record_governance_event("vfs_catalog_inline_refresh_requests")
-
-        try:
-            snapshot = await self._supplier.build_snapshot()
-        except Exception as exc:  # pragma: no cover - defensive transport safety net
-            self._record_governance_event("vfs_catalog_snapshot_build_failures")
-            self._record_governance_event("vfs_catalog_problem_events")
-            logger.exception("vfs.catalog.grpc.entry.inline_refresh.snapshot.failed")
-            await context.abort(grpc.StatusCode.INTERNAL, str(exc))
-            raise RuntimeError("unreachable after context.abort") from exc
-
-        matched_entry = None
-        if entry_id != "":
-            matched_entry = next(
-                (
-                    entry.file
-                    for entry in snapshot.entries
-                    if entry.kind == "file"
-                    and entry.file is not None
-                    and entry.entry_id == entry_id
-                ),
-                None,
-            )
-
-        if matched_entry is None and provider_file_id != "":
-            matched_entry = next(
-                (
-                    entry.file
-                    for entry in snapshot.entries
-                    if entry.kind == "file"
-                    and entry.file is not None
-                    and entry.file.provider_file_id == provider_file_id
-                ),
-                None,
-            )
-        if matched_entry is None:
-            logger.warning(
-                "vfs.catalog.grpc.entry.inline_refresh.not_found",
-                extra={
-                    "entry_id": entry_id or None,
-                    "provider_file_id": provider_file_id,
-                    "handle_key": request.handle_key or None,
-                },
-            )
-            self._record_governance_event("vfs_catalog_inline_refresh_not_found")
-            return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
-
-        refreshed_url = await self._resolve_inline_refresh(
-            matched_entry,
-            entry_id=entry_id,
-            provider_file_id=provider_file_id,
+        _ = context
+        return await self.refresh_catalog_entry_message(
+            provider_file_id=request.provider_file_id,
+            handle_key=request.handle_key,
+            entry_id=request.entry_id,
         )
-        if refreshed_url is None:
-            logger.warning(
-                "vfs.catalog.grpc.entry.inline_refresh.failed",
-                extra={
-                    "entry_id": entry_id or None,
-                    "provider_file_id": provider_file_id,
-                    "handle_key": request.handle_key or None,
-                    "media_entry_id": matched_entry.media_entry_id,
-                },
-            )
-            self._record_governance_event("vfs_catalog_inline_refresh_failed")
-            return catalog_pb2.RefreshCatalogEntryResponse(success=False, new_url="")
-
-        logger.info(
-            "vfs.catalog.grpc.entry.inline_refresh.succeeded",
-            extra={
-                "entry_id": entry_id or None,
-                "provider_file_id": provider_file_id,
-                "handle_key": request.handle_key or None,
-                "media_entry_id": matched_entry.media_entry_id,
-            },
-        )
-        self._record_governance_event("vfs_catalog_inline_refresh_succeeded")
-        return catalog_pb2.RefreshCatalogEntryResponse(success=True, new_url=refreshed_url)
 
     async def _resolve_inline_refresh(
         self,
@@ -959,6 +1003,32 @@ class FilmuVfsCatalogGrpcServer:
         """Return the current FilmuVFS catalog gRPC governance snapshot."""
 
         return self._servicer.build_governance_snapshot()
+
+    async def build_poll_event(
+        self,
+        *,
+        last_applied_generation_id: str | None = None,
+    ) -> catalog_pb2.WatchCatalogEvent:
+        """Build one transport-neutral catalog event for HTTP polling clients."""
+
+        return await self._servicer.build_poll_event(
+            last_applied_generation_id=last_applied_generation_id
+        )
+
+    async def refresh_catalog_entry_message(
+        self,
+        *,
+        provider_file_id: str,
+        handle_key: str,
+        entry_id: str,
+    ) -> catalog_pb2.RefreshCatalogEntryResponse:
+        """Resolve one inline-refresh request for non-gRPC transports."""
+
+        return await self._servicer.refresh_catalog_entry_message(
+            provider_file_id=provider_file_id,
+            handle_key=handle_key,
+            entry_id=entry_id,
+        )
 
     async def start(self) -> None:
         """Start serving the FilmuVFS catalog stream on the configured bind address."""

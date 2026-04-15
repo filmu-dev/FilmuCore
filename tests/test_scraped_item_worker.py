@@ -147,6 +147,7 @@ class FakePipelineMediaService:
     listed_items: list[MediaItemRecord] = field(default_factory=list)
     has_media_entries: bool = False
     last_requested_seasons: list[int] | None = None
+    blacklisted_stream_ids: set[str] = field(default_factory=set)
     enrichment_resolution: RequestMetadataResolution = field(
         default_factory=lambda: RequestMetadataResolution(
             metadata=None,
@@ -203,10 +204,19 @@ class FakePipelineMediaService:
             has_media_entries=self.has_media_entries,
         )
 
-    async def get_stream_candidates(self, *, media_item_id: str) -> list[StreamORM]:
+    async def get_stream_candidates(
+        self,
+        *,
+        media_item_id: str,
+        exclude_blacklisted: bool = False,
+    ) -> list[StreamORM]:
         self.calls.append("get_stream_candidates")
         assert media_item_id == self.item_id
-        return list(self.streams)
+        if not exclude_blacklisted:
+            return list(self.streams)
+        return [
+            stream for stream in self.streams if stream.id not in self.blacklisted_stream_ids
+        ]
 
     async def get_scrape_candidates(self, *, item_id: str) -> list[ScrapeCandidateRecord]:
         self.calls.append("get_scrape_candidates")
@@ -342,11 +352,13 @@ class FakePipelineMediaService:
         item_id: str,
         *,
         message: str,
+        blacklist_stream_ids: list[str] | None = None,
     ) -> MediaItemRecord:
         self.calls.append("prepare_item_for_scrape_retry")
         assert item_id == self.item_id
         self.state = ItemState.REQUESTED
         self.prepared_retry_messages.append(message)
+        self.blacklisted_stream_ids.update(blacklist_stream_ids or [])
         return MediaItemRecord(
             id=self.item_id,
             external_ref=f"tmdb:{self.item_id}",
@@ -781,6 +793,29 @@ def test_process_scraped_item_transitions_to_downloaded_on_success(monkeypatch: 
     assert media_service.state is ItemState.DOWNLOADED
     assert media_service.transition_messages == [
         (ItemEvent.DOWNLOAD, f"rank_streams selected stream {selected.id}")
+    ]
+
+
+def test_rank_streams_excludes_blacklisted_candidates(monkeypatch: Any) -> None:
+    item_id = "item-rank-blacklisted"
+    blacklisted = _build_stream(stream_id="stream-blacklisted", item_id=item_id, parsed=True)
+    fallback = _build_stream(stream_id="stream-fallback", item_id=item_id, parsed=True)
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.SCRAPED,
+        streams=[blacklisted, fallback],
+        selected_stream_id=fallback.id,
+        blacklisted_stream_ids={blacklisted.id},
+    )
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    result = asyncio.run(tasks.rank_streams({"settings": _build_worker_settings()}, item_id))
+
+    assert result == item_id
+    assert media_service.state is ItemState.DOWNLOADED
+    assert {record.stream_id for record in media_service.persisted_ranked_results} == {fallback.id}
+    assert media_service.transition_messages == [
+        (ItemEvent.DOWNLOAD, f"rank_streams selected stream {fallback.id}")
     ]
 
 
@@ -1435,6 +1470,109 @@ def test_debrid_item_transitions_to_failed_when_no_selected_stream(monkeypatch: 
     assert media_service.transition_messages == [
         (ItemEvent.FAIL, "debrid failed: selected_stream_missing")
     ]
+
+
+def test_debrid_item_requeues_search_on_poll_timeout_using_settings_window(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-debrid-timeout"
+    selected = _build_stream(
+        stream_id="stream-timeout",
+        item_id=item_id,
+        parsed=True,
+        selected=True,
+    )
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    settings.scraping.after_2 = 12.0
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+
+    class _TimingOutClient:
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return "provider-torrent-1"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            _ = provider_torrent_id
+
+            @dataclass(frozen=True)
+            class _TorrentFile:
+                file_id: str
+                file_name: str
+                file_size_bytes: int | None
+                selected: bool = True
+                download_url: str | None = None
+                media_type: str | None = "show"
+
+            @dataclass(frozen=True)
+            class _TorrentInfo:
+                provider_torrent_id: str
+                status: str
+                files: list[_TorrentFile]
+                links: list[str]
+
+            return _TorrentInfo(
+                provider_torrent_id="provider-torrent-1",
+                status="downloading",
+                files=[_TorrentFile(file_id="file-1", file_name="Show.S01E01.mkv", file_size_bytes=1)],
+                links=[],
+            )
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            raise AssertionError("get_download_links should not run after timeout")
+
+    loop_time = {"value": 0.0}
+
+    class _FakeLoop:
+        def time(self) -> float:
+            return loop_time["value"]
+
+    async def fake_sleep(seconds: float) -> None:
+        loop_time["value"] += seconds
+
+    monkeypatch.setattr(tasks, "_build_provider_client", lambda **_: _TimingOutClient())
+    monkeypatch.setattr(
+        tasks,
+        "_resolve_enabled_downloader",
+        lambda settings, item_id=None, item_request_id=None: "realdebrid",
+    )
+    monkeypatch.setattr(tasks, "_resolve_downloader_api_key", lambda settings, provider: "rd-token")
+    monkeypatch.setattr(tasks.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(tasks.asyncio, "get_running_loop", lambda: _FakeLoop())
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.state is ItemState.REQUESTED
+    assert media_service.transition_messages == []
+    assert media_service.prepared_retry_messages == [
+        "debrid_item retry scheduled: debrid_poll_timeout"
+    ]
+    assert media_service.blacklisted_stream_ids == {selected.id}
+    assert redis.calls[-1] == (
+        "scrape_item",
+        (item_id,),
+        {
+            "_job_id": f"{tasks.scrape_item_job_id(item_id)}:debrid_item:retry:1",
+            "_queue_name": "filmu-py",
+            "_defer_by": timedelta(hours=12),
+        },
+    )
 
 
 def test_debrid_item_retries_rate_limit_without_transitioning_to_failed(

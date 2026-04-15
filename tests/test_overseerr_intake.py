@@ -41,6 +41,7 @@ class DummyMediaService:
         tvdb_ids: list[str] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        request_source: str = "api",
         tenant_id: str = "global",
     ) -> ItemActionResult:
         self.requests.append(
@@ -51,6 +52,7 @@ class DummyMediaService:
                 "tvdb_ids": tvdb_ids,
                 "requested_seasons": requested_seasons,
                 "requested_episodes": requested_episodes,
+                "request_source": request_source,
                 "tenant_id": tenant_id,
             }
         )
@@ -118,6 +120,7 @@ def test_overseerr_request_added_movie_payload_is_accepted() -> None:
     assert service.requests[-1]["media_type"] == "movie"
     assert service.requests[-1]["identifiers"] == ["tmdb:123"]
     assert service.requests[-1]["requested_seasons"] is None
+    assert service.requests[-1]["request_source"] == "webhook:overseerr"
     assert service.requests[-1]["tenant_id"] == "tenant-main"
 
 
@@ -138,6 +141,7 @@ def test_overseerr_request_added_tv_payload_passes_partial_seasons() -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "accepted", "item_id": "item-tmdb-456"}
     assert service.requests[-1]["requested_seasons"] == [1, 2]
+    assert service.requests[-1]["request_source"] == "webhook:overseerr"
 
 
 def test_overseerr_non_actionable_notification_is_ignored() -> None:

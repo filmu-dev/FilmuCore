@@ -16,6 +16,7 @@ from fastapi.responses import ORJSONResponse
 from redis.asyncio import Redis
 
 from .api.router import RouteMetricsMiddleware, create_api_router
+from .api.routes.internal_vfs import router as internal_vfs_router
 from .config import Settings, get_settings, reset_runtime_settings, set_runtime_settings
 from .core import byte_streaming
 from .core.cache import CacheManager
@@ -36,6 +37,7 @@ from .observability import setup_observability
 from .plugins import PluginRuntimePolicy, load_plugins, register_builtin_plugins
 from .plugins.context import HostPluginDatasource, PluginContextProvider
 from .plugins.registry import PluginRegistry
+from .plugins.stream_control import HostStreamControlGateway
 from .resources import AppResources
 from .services.access_policy import AccessPolicyService
 from .services.authorization_audit import AuthorizationDecisionAuditService
@@ -169,6 +171,7 @@ def build_plugin_context_provider(resources: AppResources) -> PluginContextProvi
             HostPluginDatasource(
                 session_factory=resources.db.session,
                 http_client_factory=httpx.AsyncClient,
+                stream_control=HostStreamControlGateway(resources),
             )
             if datasource_name == "host"
             else None
@@ -531,6 +534,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.plugin_load_report = plugin_load_report
     app.state.plugin_registry = plugin_registry
     app.include_router(create_api_router())
+    app.include_router(internal_vfs_router)
     app.include_router(create_graphql_router(plugin_registry.graphql), prefix="/graphql")
     setup_observability(app, current_settings)
 

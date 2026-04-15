@@ -9,7 +9,9 @@ from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from google.protobuf.message import DecodeError
 from pydantic import SecretStr
+from starlette.responses import Response
 
 from filmu_py.api.deps import get_auth_context, require_permissions
 from filmu_py.audit import audit_action
@@ -18,8 +20,13 @@ from filmu_py.config import set_runtime_settings
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
+from filmu_py.plugins.interfaces import StreamControlAction, StreamControlInput
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
+from filmu_py.workers.stage_observability import (
+    worker_blocker_snapshot as _stage_worker_blocker_snapshot,
+)
+from filmuvfs.catalog.v1 import catalog_pb2
 
 from ..models import (
     AccessPolicyAuditAlertResponse,
@@ -53,6 +60,8 @@ from ..models import (
     PluginGovernanceOverrideWriteRequest,
     PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
+    PluginStreamControlRequest,
+    PluginStreamControlResponse,
     QueueAlertResponse,
     QueueStatusHistoryFiltersResponse,
     QueueStatusHistoryPointResponse,
@@ -96,6 +105,12 @@ def _vfs_runtime_governance_snapshot(
         request_tenant_id=request_tenant_id,
         authorized_tenant_ids=authorized_tenant_ids,
     )
+
+
+def _worker_blocker_snapshot() -> dict[str, object]:
+    """Compatibility wrapper around bounded worker blocker observability."""
+
+    return _stage_worker_blocker_snapshot()
 _AUTH_POLICY_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("library_read", ("library:read",)),
     ("item_write", ("library:write",)),
@@ -232,6 +247,7 @@ def _plugin_governance_summary(
         for plugin in plugins
         if plugin.release_channel != "builtin" and plugin.source != "builtin"
     ]
+    governed_plugins = non_builtin_plugins
     for plugin in plugins:
         sandbox_profile = plugin.sandbox_profile or "unspecified"
         sandbox_profile_counts[sandbox_profile] = sandbox_profile_counts.get(sandbox_profile, 0) + 1
@@ -245,13 +261,15 @@ def _plugin_governance_summary(
         and runtime_policy.require_strict_signatures
         and runtime_policy.require_source_digest
         and bool(runtime_policy.proof_refs)
-        and all(plugin.ready for plugin in plugins)
-        and not any(plugin.quarantined or plugin.quarantine_recommended for plugin in plugins)
-        and not any(plugin.status == "load_failed" for plugin in plugins)
+        and all(plugin.ready for plugin in governed_plugins)
+        and not any(
+            plugin.quarantined or plugin.quarantine_recommended for plugin in governed_plugins
+        )
+        and not any(plugin.status == "load_failed" for plugin in governed_plugins)
         and not any(
             plugin.publisher_policy_decision in {"rejected", "untrusted"}
             or plugin.trust_policy_decision in {"rejected", "untrusted"}
-            for plugin in plugins
+            for plugin in governed_plugins
         )
         and all(
             (plugin.sandbox_profile in runtime_policy.allowed_non_builtin_sandbox_profiles)
@@ -954,6 +972,15 @@ async def _enterprise_operations_governance(
     oidc_rollout_status, oidc_configuration_complete, oidc_evidence, oidc_remaining_gaps = (
         _oidc_rollout_snapshot(settings)
     )
+    worker_blockers = _worker_blocker_snapshot()
+    rank_no_winner_total = cast(int, worker_blockers["rank_streams_no_winner_total"])
+    rank_no_winner_reason_counts = cast(
+        dict[str, int], worker_blockers["rank_streams_no_winner_reason_counts"]
+    )
+    debrid_rate_limited_total = cast(int, worker_blockers["debrid_rate_limited_total"])
+    debrid_rate_limited_provider_counts = cast(
+        dict[str, int], worker_blockers["debrid_rate_limited_provider_counts"]
+    )
 
     identity_required_actions = [
         "configure_real_oidc_issuer_and_audience"
@@ -1068,6 +1095,69 @@ async def _enterprise_operations_governance(
             "operations/governance cannot yet summarize live mounted rollout readiness without a runtime snapshot",
         )
 
+    operational_evidence_required_actions: list[str] = []
+    operational_evidence_remaining_gaps: list[str] = []
+    if cast(int, playback_gate_governance["playback_gate_runner_ready"]) == 0:
+        operational_evidence_required_actions.append("record_playback_gate_runner_readiness")
+        operational_evidence_remaining_gaps.append(
+            "playback-gate runner readiness is not yet recorded as ready for the current environment"
+        )
+    policy_validation_status = cast(
+        str, playback_gate_governance["playback_gate_policy_validation_status"]
+    )
+    if policy_validation_status != "ready":
+        operational_evidence_required_actions.append("record_github_main_policy_validation")
+        operational_evidence_remaining_gaps.append(
+            "live GitHub protected-branch policy is not yet recorded as ready from an admin-authenticated host"
+        )
+    if cast(int, playback_gate_governance["playback_gate_windows_provider_movie_ready"]) == 0:
+        operational_evidence_required_actions.append("rerun_native_windows_provider_proof_movie")
+        operational_evidence_remaining_gaps.append(
+            "native Windows provider proof coverage is incomplete for movie across Emby/Plex"
+        )
+    if cast(int, playback_gate_governance["playback_gate_windows_provider_tv_ready"]) == 0:
+        operational_evidence_required_actions.append("rerun_native_windows_provider_proof_tv")
+        operational_evidence_remaining_gaps.append(
+            "native Windows provider proof coverage is incomplete for tv across Emby/Plex"
+        )
+    if cast(int, playback_gate_governance["playback_gate_windows_soak_ready"]) == 0:
+        operational_evidence_required_actions.append("run_windows_vfs_soak_enterprise_profiles")
+        operational_evidence_remaining_gaps.append(
+            "Windows soak evidence is not yet green across the full enterprise profile set"
+        )
+    if settings.oidc.enabled and not settings.oidc.rollout_evidence_refs:
+        operational_evidence_required_actions.append("record_oidc_rollout_evidence")
+        operational_evidence_remaining_gaps.append(
+            "OIDC is enabled but rollout evidence references have not been retained"
+        )
+    if not settings.plugin_runtime.proof_refs:
+        operational_evidence_required_actions.append("record_plugin_runtime_rollout_evidence")
+        operational_evidence_remaining_gaps.append(
+            "plugin runtime isolation has no retained rollout evidence references"
+        )
+    if not settings.observability.proof_refs:
+        operational_evidence_required_actions.append("record_observability_rollout_evidence")
+        operational_evidence_remaining_gaps.append(
+            "observability convergence has no retained rollout evidence references"
+        )
+    if rank_no_winner_total > 0:
+        operational_evidence_required_actions.append("reduce_rank_streams_fetch_rejections")
+        operational_evidence_remaining_gaps.append(
+            "rank_streams.no_winner is currently active with bounded reason counters"
+        )
+    if debrid_rate_limited_total > 0:
+        operational_evidence_required_actions.append("mitigate_debrid_rate_limit_pressure")
+        operational_evidence_remaining_gaps.append(
+            "debrid_item.rate_limited is currently active against live providers"
+        )
+
+    if rank_no_winner_total > 0 or debrid_rate_limited_total > 0:
+        operational_evidence_status: Literal["ready", "partial", "blocked", "not_ready"] = "blocked"
+    elif operational_evidence_remaining_gaps:
+        operational_evidence_status = "partial"
+    else:
+        operational_evidence_status = "ready"
+
     return EnterpriseOperationsGovernanceResponse(
         generated_at=datetime.now(UTC).isoformat(),
         playback_gate=EnterpriseOperationsSliceResponse(
@@ -1140,6 +1230,77 @@ async def _enterprise_operations_governance(
                 "this API host still depends on a recorded admin-authenticated policy artifact to prove live branch protection",
                 "playback/provider/windows proof promotion remains evidence-backed rather than assumption-backed",
             ],
+        ),
+        operational_evidence=EnterpriseOperationsSliceResponse(
+            name="Operational Evidence / Blocker Pressure",
+            status=operational_evidence_status,
+            evidence=[
+                (
+                    "playback_gate_runner_status="
+                    f"{playback_gate_governance['playback_gate_runner_status']}"
+                ),
+                (
+                    "playback_gate_runner_required_failures="
+                    f"{playback_gate_governance['playback_gate_runner_required_failures']}"
+                ),
+                (
+                    "playback_gate_policy_validation_status="
+                    f"{playback_gate_governance['playback_gate_policy_validation_status']}"
+                ),
+                (
+                    "playback_gate_windows_provider_coverage="
+                    + ",".join(
+                        cast(
+                            list[str],
+                            playback_gate_governance["playback_gate_windows_provider_coverage"],
+                        )
+                    )
+                ),
+                (
+                    "playback_gate_windows_provider_movie_ready="
+                    f"{playback_gate_governance['playback_gate_windows_provider_movie_ready']}"
+                ),
+                (
+                    "playback_gate_windows_provider_tv_ready="
+                    f"{playback_gate_governance['playback_gate_windows_provider_tv_ready']}"
+                ),
+                (
+                    "playback_gate_windows_soak_profile_coverage="
+                    + ",".join(
+                        cast(
+                            list[str],
+                            playback_gate_governance[
+                                "playback_gate_windows_soak_profile_coverage"
+                            ],
+                        )
+                    )
+                ),
+                (
+                    "playback_gate_windows_soak_repeat_count="
+                    f"{playback_gate_governance['playback_gate_windows_soak_repeat_count']}"
+                ),
+                f"oidc_rollout_evidence_count={len(settings.oidc.rollout_evidence_refs)}",
+                f"plugin_runtime_proof_ref_count={len(settings.plugin_runtime.proof_refs)}",
+                f"observability_proof_ref_count={len(settings.observability.proof_refs)}",
+                f"rank_streams_no_winner_total={rank_no_winner_total}",
+                (
+                    "rank_streams_no_winner_reason_counts="
+                    + ",".join(
+                        f"{reason}:{count}"
+                        for reason, count in sorted(rank_no_winner_reason_counts.items())
+                    )
+                ),
+                f"debrid_rate_limited_total={debrid_rate_limited_total}",
+                (
+                    "debrid_rate_limited_provider_counts="
+                    + ",".join(
+                        f"{provider}:{count}"
+                        for provider, count in sorted(debrid_rate_limited_provider_counts.items())
+                    )
+                ),
+            ],
+            required_actions=operational_evidence_required_actions,
+            remaining_gaps=operational_evidence_remaining_gaps,
         ),
         identity_authz=EnterpriseOperationsSliceResponse(
             name="Enterprise Identity / OIDC / ABAC",
@@ -1591,6 +1752,58 @@ async def health(request: Request) -> HealthResponse:
         service=resources.settings.service_name,
         status=status,
         checks=checks,
+    )
+
+
+@router.get(
+    "/vfs/catalog/watch-event.pb",
+    operation_id="default.vfs_catalog_watch_event_protobuf",
+)
+async def get_vfs_catalog_watch_event_protobuf(
+    request: Request,
+    last_applied_generation_id: str | None = Query(default=None),
+) -> Response:
+    """Return one protobuf catalog event for host-side HTTP polling fallback clients."""
+
+    resources = request.app.state.resources
+    if resources.vfs_catalog_server is None:
+        raise HTTPException(status_code=503, detail="FilmuVFS catalog server is unavailable")
+
+    event = await resources.vfs_catalog_server.build_poll_event(
+        last_applied_generation_id=last_applied_generation_id
+    )
+    return Response(
+        content=event.SerializeToString(),
+        media_type="application/x-protobuf",
+    )
+
+
+@router.post(
+    "/vfs/catalog/refresh-entry.pb",
+    operation_id="default.vfs_catalog_refresh_entry_protobuf",
+)
+async def post_vfs_catalog_refresh_entry_protobuf(request: Request) -> Response:
+    """Resolve one protobuf inline-refresh request for host-side HTTP fallback clients."""
+
+    resources = request.app.state.resources
+    if resources.vfs_catalog_server is None:
+        raise HTTPException(status_code=503, detail="FilmuVFS catalog server is unavailable")
+
+    body = await request.body()
+    proto_request = catalog_pb2.RefreshCatalogEntryRequest()
+    try:
+        proto_request.ParseFromString(body)
+    except DecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid protobuf request payload") from exc
+
+    proto_response = await resources.vfs_catalog_server.refresh_catalog_entry_message(
+        provider_file_id=proto_request.provider_file_id,
+        handle_key=proto_request.handle_key,
+        entry_id=proto_request.entry_id,
+    )
+    return Response(
+        content=proto_response.SerializeToString(),
+        media_type="application/x-protobuf",
     )
 
 
@@ -2604,6 +2817,58 @@ async def get_plugin_events(request: Request) -> list[PluginEventStatusResponse]
         )
         for plugin_name in sorted(plugin_registry.all_plugin_names())
     ]
+
+
+@router.post(
+    "/plugins/stream-control",
+    operation_id="default.plugin_stream_control",
+    response_model=PluginStreamControlResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def execute_plugin_stream_control(
+    request: Request,
+    payload: PluginStreamControlRequest,
+) -> PluginStreamControlResponse:
+    """Execute one controlled stream/status action through a registered stream-control plugin."""
+
+    resources = request.app.state.resources
+    plugin_registry = resources.plugin_registry
+    if plugin_registry is None:
+        raise HTTPException(status_code=503, detail="Plugin registry unavailable")
+
+    plugin = next(
+        (
+            candidate
+            for candidate in plugin_registry.get_stream_controls()
+            if getattr(candidate, "plugin_name", "") == payload.plugin_name
+        ),
+        None,
+    )
+    if plugin is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Stream-control plugin '{payload.plugin_name}' is not registered",
+        )
+
+    result = await plugin.control(
+        StreamControlInput(
+            action=StreamControlAction(payload.action),
+            item_identifier=payload.item_identifier,
+            prefer_queued=payload.prefer_queued,
+            metadata=dict(payload.metadata),
+        )
+    )
+    return PluginStreamControlResponse(
+        plugin_name=payload.plugin_name,
+        action=result.action.value,
+        item_identifier=result.item_identifier,
+        accepted=result.accepted,
+        outcome=result.outcome,
+        detail=result.detail,
+        controller_attached=result.controller_attached,
+        retry_after_seconds=result.retry_after_seconds,
+        metadata=dict(result.metadata),
+    )
 
 
 @router.get(

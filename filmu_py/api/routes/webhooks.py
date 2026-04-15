@@ -71,6 +71,7 @@ async def overseerr_webhook(
         identifiers=[f"tmdb:{payload.media.tmdbId}"],
         media_type=payload.media.media_type,
         requested_seasons=requested_seasons,
+        request_source="webhook:overseerr",
         tenant_id=auth_context.tenant_id,
     )
     item_id = result.ids[0] if result.ids else None

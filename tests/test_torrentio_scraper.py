@@ -7,6 +7,7 @@ import httpx
 from filmu_py.plugins import (
     MDBLIST_PLUGIN_NAME,
     NOTIFICATIONS_PLUGIN_NAME,
+    STREAM_CONTROL_PLUGIN_NAME,
     STREMTHRU_PLUGIN_NAME,
     ExternalIdentifiers,
     PluginRegistry,
@@ -31,6 +32,7 @@ def test_register_builtin_plugins_registers_torrentio_scraper() -> None:
         RARBG_PLUGIN_NAME,
         MDBLIST_PLUGIN_NAME,
         STREMTHRU_PLUGIN_NAME,
+        STREAM_CONTROL_PLUGIN_NAME,
         NOTIFICATIONS_PLUGIN_NAME,
     )
     assert [plugin.__class__.__name__ for plugin in registry.get_scrapers()] == [

@@ -113,6 +113,7 @@ fn integration_config(mountpoint: &std::path::Path, grpc_endpoint: &str) -> Side
         log_filter: "info".to_owned(),
         connect_timeout: Duration::from_secs(5),
         rpc_timeout: Duration::from_secs(10),
+        initial_catalog_sync_timeout: Duration::from_secs(30),
         heartbeat_interval: Duration::from_secs(1),
         reconnect_backoff_initial: Duration::from_secs(1),
         reconnect_backoff_max: Duration::from_secs(2),

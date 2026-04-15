@@ -24,6 +24,7 @@ _REQUIRED_PERMISSION_SCOPES_BY_CAPABILITY: dict[str, frozenset[str]] = {
     "content_service": frozenset({"content:ingest"}),
     "notification": frozenset({"notify:send"}),
     "event_hook": frozenset({"events:subscribe"}),
+    "stream_control": frozenset({"playback:operate"}),
 }
 
 
@@ -105,6 +106,7 @@ class PluginManifest(BaseModel):
     content_service: str | None = Field(default=None)
     notification: str | None = Field(default=None)
     event_hook: str | None = Field(default=None)
+    stream_control: str | None = Field(default=None)
     datasource: str | None = Field(default=None)
     publishable_events: tuple[str, ...] = Field(default_factory=tuple)
 
@@ -239,6 +241,7 @@ class PluginManifest(BaseModel):
         "content_service",
         "notification",
         "event_hook",
+        "stream_control",
         "datasource",
     )
     @classmethod
@@ -312,6 +315,7 @@ class PluginManifest(BaseModel):
             "content_service": self.content_service,
             "notification": self.notification,
             "event_hook": self.event_hook,
+            "stream_control": self.stream_control,
         }
 
     def declared_non_graphql_capabilities(self) -> tuple[str, ...]:

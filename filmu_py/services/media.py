@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -643,6 +643,17 @@ def _clone_requested_episodes(
     return {str(season): list(episodes) for season, episodes in value.items()}
 
 
+def _normalize_request_source(value: str | None) -> str:
+    """Keep request-source attribution non-empty and within the ORM column budget."""
+
+    if value is None:
+        return "api"
+    normalized = value.strip()
+    if not normalized:
+        return "api"
+    return normalized[:64]
+
+
 def _build_item_request_summary_record(
     request_record: ItemRequestORM | None,
 ) -> ItemRequestSummaryRecord | None:
@@ -654,6 +665,7 @@ def _build_item_request_summary_record(
         is_partial=request_record.is_partial,
         requested_seasons=_clone_requested_seasons(request_record.requested_seasons),
         requested_episodes=_clone_requested_episodes(request_record.requested_episodes),
+        request_source=_normalize_request_source(request_record.request_source),
     )
 
 
@@ -1591,6 +1603,7 @@ class ItemRequestSummaryRecord:
     is_partial: bool
     requested_seasons: list[int] | None = None
     requested_episodes: dict[str, list[int]] | None = None
+    request_source: str = "api"
 
 
 @dataclass(frozen=True)
@@ -1927,7 +1940,7 @@ def build_item_request_record(
         requested_seasons=_clone_requested_seasons(requested_seasons),
         requested_episodes=_clone_requested_episodes(requested_episodes),
         is_partial=is_partial,
-        request_source=request_source,
+        request_source=_normalize_request_source(request_source),
         request_count=1,
         first_requested_at=now,
         last_requested_at=now,
@@ -1967,7 +1980,7 @@ def update_item_request_record(
         )
     if is_partial is not None:
         record.is_partial = is_partial
-    record.request_source = request_source
+    record.request_source = _normalize_request_source(request_source)
     record.request_count += 1
     record.last_requested_at = now
     record.updated_at = now
@@ -2099,8 +2112,6 @@ class CalendarProjectionRecord:
 
 
 ShowCompletionResult = _media_show_completion.ShowCompletionResult
-_extract_tmdb_episode_inventory = _media_show_completion.extract_tmdb_episode_inventory
-_evaluate_show_completion = _media_show_completion.evaluate_show_completion
 ParsedStreamCandidateRecord = _media_stream_candidates.ParsedStreamCandidateRecord
 ParsedStreamCandidateValidation = _media_stream_candidates.ParsedStreamCandidateValidation
 RankedStreamCandidateRecord = _media_stream_candidates.RankedStreamCandidateRecord
@@ -2118,10 +2129,23 @@ rank_persisted_streams_for_item = _media_stream_candidates.rank_persisted_stream
 select_stream_candidate = _media_stream_candidates.select_stream_candidate
 parse_stream_candidate_title = _media_stream_candidates.parse_stream_candidate_title
 validate_parsed_stream_candidate = _media_stream_candidates.validate_parsed_stream_candidate
+
+
+def _extract_tmdb_episode_inventory(
+    attributes: dict[str, object],
+    *,
+    today: date,
+) -> dict[int, _media_show_completion.SeasonEpisodeInventory]:
+    return _media_show_completion.extract_tmdb_episode_inventory(attributes, today=today)
+
+
+async def _evaluate_show_completion(
+    item: MediaItemRecord,
+    db: DatabaseRuntime,
+    settings: Settings,
+) -> ShowCompletionResult:
+    return await _media_show_completion.evaluate_show_completion(item, db, settings)
 _infer_season_range_from_path = _media_path_inference.infer_season_range_from_path
-_infer_episode_number_from_path = _media_path_inference.infer_episode_number_from_path
-
-
 class CompletionStatus(enum.StrEnum):
     COMPLETE = "complete"
     INCOMPLETE = "incomplete"
@@ -2986,6 +3010,7 @@ class MediaService:
         item_id: str,
         *,
         message: str,
+        blacklist_stream_ids: list[str] | None = None,
     ) -> MediaItemRecord:
         """Move one item back to requested so the worker can run a fresh scrape cycle."""
 
@@ -2997,6 +3022,26 @@ class MediaService:
                 raise ItemNotFoundError(f"unknown item_id={item_id}")
 
             item.next_retry_at = None
+            normalized_blacklist_ids = {
+                stream_id.strip() for stream_id in (blacklist_stream_ids or []) if stream_id.strip()
+            }
+            if normalized_blacklist_ids:
+                existing_blacklist_ids = set(
+                    (
+                        await session.execute(
+                            select(StreamBlacklistRelationORM.stream_id).where(
+                                StreamBlacklistRelationORM.media_item_id == item.id
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for stream_id in sorted(normalized_blacklist_ids):
+                    if stream_id in existing_blacklist_ids:
+                        continue
+                    session.add(StreamBlacklistRelationORM(media_item_id=item.id, stream_id=stream_id))
+                    existing_blacklist_ids.add(stream_id)
             session.add(
                 self._build_retry_reset_state_event(
                     item,
@@ -3963,6 +4008,7 @@ class MediaService:
         tvdb_ids: list[str] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        request_source: str = "api",
         tenant_id: str = "global",
     ) -> ItemActionResult:
         """Create request records for the current `/api/v1/items/add` compatibility route."""
@@ -4009,6 +4055,7 @@ class MediaService:
                     attributes=attributes,
                     requested_seasons=requested_seasons,
                     requested_episodes=requested_episodes,
+                    request_source=request_source,
                     tenant_id=tenant_id,
                 )
             else:
@@ -4017,6 +4064,7 @@ class MediaService:
                     media_type=media_type,
                     title=request_title,
                     attributes=attributes,
+                    request_source=request_source,
                     tenant_id=tenant_id,
                 )
             requested_ids.append(record.id)
@@ -4441,14 +4489,22 @@ class MediaService:
             for row in rows
         ]
 
-    async def get_stream_candidates(self, *, media_item_id: str) -> list[StreamORM]:
+    async def get_stream_candidates(
+        self,
+        *,
+        media_item_id: str,
+        exclude_blacklisted: bool = False,
+    ) -> list[StreamORM]:
         """Return persisted stream candidates for one item in deterministic order."""
 
         async with self._db.session() as session:
             item = (
                 await session.execute(
                     select(MediaItemORM)
-                    .options(selectinload(MediaItemORM.streams))
+                    .options(
+                        selectinload(MediaItemORM.streams),
+                        selectinload(MediaItemORM.blacklisted_stream_relations),
+                    )
                     .where(MediaItemORM.id == media_item_id)
                 )
             ).scalar_one_or_none()
@@ -4456,7 +4512,16 @@ class MediaService:
         if item is None:
             raise ValueError(f"unknown media_item_id={media_item_id}")
 
-        return sorted(item.streams, key=lambda stream: (stream.created_at, stream.id))
+        streams = list(item.streams)
+        if exclude_blacklisted:
+            blacklisted_ids = {
+                relation.stream_id
+                for relation in item.blacklisted_stream_relations
+                if relation.stream_id is not None
+            }
+            streams = [stream for stream in streams if stream.id not in blacklisted_ids]
+
+        return sorted(streams, key=lambda stream: (stream.created_at, stream.id))
 
     async def recover_incomplete_library(
         self,
@@ -4707,6 +4772,7 @@ class MediaService:
         attributes: dict[str, object] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        request_source: str = "api",
         tenant_id: str = "global",
     ) -> RequestItemServiceResult:
         """Create a requested media item when it does not already exist."""
@@ -4811,6 +4877,7 @@ class MediaService:
                         requested_seasons=normalized_requested_seasons,
                         requested_episodes=normalized_requested_episodes,
                         is_partial=True,
+                        request_source=request_source,
                     )
                 else:
                     await self._upsert_item_request(
@@ -4820,6 +4887,7 @@ class MediaService:
                         media_item_id=existing.id,
                         requested_title=existing.title,
                         media_type=candidate_media_type,
+                        request_source=request_source,
                     )
                 # Flush before materialising the detached record to prevent
                 # post-commit lazy-load (MissingGreenlet) on attribute access.
@@ -4872,6 +4940,7 @@ class MediaService:
                         requested_seasons=normalized_requested_seasons,
                         requested_episodes=normalized_requested_episodes,
                         is_partial=True,
+                        request_source=request_source,
                     )
                 else:
                     await self._upsert_item_request(
@@ -4881,6 +4950,7 @@ class MediaService:
                         media_item_id=item.id,
                         requested_title=item.title,
                         media_type=candidate_media_type,
+                        request_source=request_source,
                     )
                 # Flush pending writes before materialising the detached record so
                 # that post-commit attribute access does not trigger a lazy load on
@@ -4929,6 +4999,7 @@ class MediaService:
                             requested_seasons=normalized_requested_seasons,
                             requested_episodes=normalized_requested_episodes,
                             is_partial=True,
+                            request_source=request_source,
                         )
                     else:
                         await self._upsert_item_request(
@@ -4938,6 +5009,7 @@ class MediaService:
                             media_item_id=existing.id,
                             requested_title=existing.title,
                             media_type=candidate_media_type,
+                            request_source=request_source,
                         )
                     # Flush the retry session before materialising so that
                     # pending writes are visible and lazy-loads are not triggered
@@ -4979,6 +5051,7 @@ class MediaService:
         attributes: dict[str, object] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        request_source: str = "api",
         tenant_id: str = "global",
     ) -> MediaItemRecord:
         """Create a requested media item when it does not already exist."""
@@ -4991,6 +5064,7 @@ class MediaService:
                 attributes=attributes,
                 requested_seasons=requested_seasons,
                 requested_episodes=requested_episodes,
+                request_source=request_source,
                 tenant_id=tenant_id,
             )
         ).item

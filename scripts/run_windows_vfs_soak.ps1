@@ -28,6 +28,7 @@ param(
     [int] $MaxReconnectIncidents = -1,
     [int] $MaxUnrecoveredStaleRefreshIncidents = -1,
     [int] $MaxCacheColdFetchIncidents = -1,
+    [double] $MinCacheHitRatio = -1,
     [int] $MaxProviderPressureIncidents = -1,
     [int] $MaxFatalErrorIncidents = -1
 )
@@ -63,6 +64,136 @@ function Resolve-BackendApiKey {
         return $envKey
     }
     return $null
+}
+
+function Get-DotEnvMap {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $map
+    }
+
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            continue
+        }
+        $index = $trimmed.IndexOf('=')
+        if ($index -lt 1) {
+            continue
+        }
+        $map[$trimmed.Substring(0, $index).Trim()] = $trimmed.Substring($index + 1)
+    }
+
+    return $map
+}
+
+function Get-JsonObjectFromString {
+    param([string] $Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    try {
+        return $Value | ConvertFrom-Json -Depth 12
+    }
+    catch {
+        throw ("[windows-vfs-soak] Invalid JSON configuration payload: {0}" -f $_.Exception.Message)
+    }
+}
+
+function ConvertTo-Base64Url {
+    param([byte[]] $Bytes)
+
+    $encoded = [Convert]::ToBase64String($Bytes)
+    return $encoded.TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function ConvertFrom-Base64Url {
+    param([string] $Value)
+
+    $normalized = $Value.Replace('-', '+').Replace('_', '/')
+    $padding = $normalized.Length % 4
+    if ($padding -ne 0) {
+        $normalized += ('=' * (4 - $padding))
+    }
+    return [Convert]::FromBase64String($normalized)
+}
+
+function New-Hs256Jwt {
+    param(
+        [string] $Issuer,
+        [string] $Audience,
+        [byte[]] $SymmetricKeyBytes,
+        [string] $KeyId = 'local-vfs-soak',
+        [string] $Subject
+    )
+
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $headerJson = [ordered]@{
+        alg = 'HS256'
+        kid = $KeyId
+        typ = 'JWT'
+    } | ConvertTo-Json -Compress
+    $payloadJson = [ordered]@{
+        iss = $Issuer
+        sub = $Subject
+        aud = $Audience
+        exp = $now + 3600
+        iat = $now
+        tenant_id = 'global'
+        actor_type = 'service'
+        authorized_tenants = @('global')
+        roles = @('platform:admin')
+        scope = 'library:write playback:operate settings:write security:policy.approve'
+    } | ConvertTo-Json -Compress -Depth 8
+
+    $headerSegment = ConvertTo-Base64Url -Bytes ([Text.Encoding]::UTF8.GetBytes($headerJson))
+    $payloadSegment = ConvertTo-Base64Url -Bytes ([Text.Encoding]::UTF8.GetBytes($payloadJson))
+    $signingInput = '{0}.{1}' -f $headerSegment, $payloadSegment
+    $hmac = [System.Security.Cryptography.HMACSHA256]::new($SymmetricKeyBytes)
+    try {
+        $signatureBytes = $hmac.ComputeHash([Text.Encoding]::ASCII.GetBytes($signingInput))
+    }
+    finally {
+        $hmac.Dispose()
+    }
+    $signatureSegment = ConvertTo-Base64Url -Bytes $signatureBytes
+    return '{0}.{1}' -f $signingInput, $signatureSegment
+}
+
+function Resolve-BackendHeaders {
+    param(
+        [string] $ApiKey,
+        [string] $RepoRoot
+    )
+
+    $dotEnv = Get-DotEnvMap -Path (Join-Path $RepoRoot '.env')
+    if ($dotEnv.ContainsKey('FILMU_PY_OIDC')) {
+        $oidcConfig = Get-JsonObjectFromString -Value ([string] $dotEnv['FILMU_PY_OIDC'])
+        if ($null -ne $oidcConfig -and [bool] $oidcConfig.enabled -and -not [bool] $oidcConfig.allow_api_key_fallback) {
+            $octKey = @($oidcConfig.jwks_json.keys) | Where-Object {
+                $_.kty -eq 'oct' -and -not [string]::IsNullOrWhiteSpace([string] $_.k)
+            } | Select-Object -First 1
+            if ($null -eq $octKey) {
+                throw '[windows-vfs-soak] FILMU_PY_OIDC requires one oct JWKS key for local bearer-token traffic.'
+            }
+            $jwt = New-Hs256Jwt `
+                -Issuer ([string] $oidcConfig.issuer) `
+                -Audience ([string] $oidcConfig.audience) `
+                -SymmetricKeyBytes (ConvertFrom-Base64Url -Value ([string] $octKey.k)) `
+                -KeyId ([string] $octKey.kid) `
+                -Subject 'ops://windows-vfs-soak'
+            return @{ authorization = "Bearer $jwt" }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+        return @{}
+    }
+    return @{ 'x-api-key' = $ApiKey }
 }
 
 function Resolve-FfmpegPath {
@@ -135,7 +266,7 @@ function Apply-SoakProfile {
             $script:SkipSeek = $true
             $script:SkipRemux = $true
             if ($script:MaxReconnectIncidents -lt 0) { $script:MaxReconnectIncidents = 1 }
-            if ($script:MaxCacheColdFetchIncidents -lt 0) { $script:MaxCacheColdFetchIncidents = 500 }
+            if ($script:MinCacheHitRatio -lt 0) { $script:MinCacheHitRatio = 0.65 }
             if ($script:MaxProviderPressureIncidents -lt 0) { $script:MaxProviderPressureIncidents = 0 }
             if ($script:MaxFatalErrorIncidents -lt 0) { $script:MaxFatalErrorIncidents = 0 }
         }
@@ -147,6 +278,7 @@ function Apply-SoakProfile {
             $script:SkipRemux = $true
             if ($script:MaxReconnectIncidents -lt 0) { $script:MaxReconnectIncidents = 1 }
             if ($script:MaxUnrecoveredStaleRefreshIncidents -lt 0) { $script:MaxUnrecoveredStaleRefreshIncidents = 0 }
+            if ($script:MinCacheHitRatio -lt 0) { $script:MinCacheHitRatio = 0.80 }
             if ($script:MaxProviderPressureIncidents -lt 0) { $script:MaxProviderPressureIncidents = 0 }
             if ($script:MaxFatalErrorIncidents -lt 0) { $script:MaxFatalErrorIncidents = 0 }
         }
@@ -507,7 +639,13 @@ function Invoke-ConcurrentScenario {
     }
 
     try {
-        $null = Wait-Job -Job $jobs -Timeout 600
+        $waitTimeoutSeconds = if ($DurationSeconds -gt 0) {
+            [Math]::Max($DurationSeconds + 180, 600)
+        }
+        else {
+            600
+        }
+        $null = Wait-Job -Job $jobs -Timeout $waitTimeoutSeconds
         $results = @()
         foreach ($job in $jobs) {
             if ($job.State -ne 'Completed') {
@@ -643,16 +781,51 @@ function Invoke-RemuxScenario {
     }
 }
 
+function Get-LogLineCount {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return 0
+    }
+
+    return @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue).Count
+}
+
+function Get-LogDeltaLines {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [int] $StartLineExclusive = 0
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    $allLines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)
+    if ($StartLineExclusive -le 0) {
+        return $allLines
+    }
+    if ($StartLineExclusive -ge $allLines.Count) {
+        return @()
+    }
+    return @($allLines | Select-Object -Skip $StartLineExclusive)
+}
+
 function Get-LogTailSnapshot {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
-        [int] $TailLines = 80
+        [int] $TailLines = 80,
+        [int] $StartLineExclusive = 0
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
         return [pscustomobject]@{
             path = $Path
             exists = $false
+            line_count = 0
+            delta_line_count = 0
             tail = @()
             stale_mentions = 0
             prefetch_mentions = 0
@@ -660,10 +833,13 @@ function Get-LogTailSnapshot {
         }
     }
 
-    $tail = @(Get-Content -LiteralPath $Path -Tail $TailLines -ErrorAction SilentlyContinue)
+    $deltaLines = @(Get-LogDeltaLines -Path $Path -StartLineExclusive $StartLineExclusive)
+    $tail = if ($deltaLines.Count -gt 0) { @($deltaLines | Select-Object -Last $TailLines) } else { @() }
     [pscustomobject]@{
         path = $Path
         exists = $true
+        line_count = Get-LogLineCount -Path $Path
+        delta_line_count = $deltaLines.Count
         tail = $tail
         stale_mentions = @($tail | Select-String -Pattern 'stale|ESTALE|inline refresh' -SimpleMatch:$false).Count
         prefetch_mentions = @($tail | Select-String -Pattern 'prefetch|chunk_engine.read plan' -SimpleMatch:$false).Count
@@ -673,18 +849,13 @@ function Get-LogTailSnapshot {
 
 function Get-PatternMatchCount {
     param(
-        [string[]] $Paths,
+        [string[]] $Lines,
         [string[]] $Patterns
     )
 
     $count = 0
-    foreach ($path in $Paths) {
-        if (-not (Test-Path -LiteralPath $path)) {
-            continue
-        }
-        foreach ($pattern in $Patterns) {
-            $count += @(Select-String -Path $path -Pattern $pattern -SimpleMatch:$false -ErrorAction SilentlyContinue).Count
-        }
+    foreach ($pattern in $Patterns) {
+        $count += @($Lines | Select-String -Pattern $pattern -SimpleMatch:$false -ErrorAction SilentlyContinue).Count
     }
     return $count
 }
@@ -703,10 +874,13 @@ function Get-BackendStreamStatusSnapshot {
             governance = $null
         }
     }
-    if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+    $backendHeaders = Resolve-BackendHeaders `
+        -ApiKey $ApiKey `
+        -RepoRoot (Split-Path -Parent $PSScriptRoot)
+    if ($backendHeaders.Count -eq 0) {
         return [ordered]@{
             captured = $false
-            reason = 'api_key_missing'
+            reason = 'backend_auth_missing'
             stream_status_url = $null
             governance = $null
         }
@@ -714,7 +888,7 @@ function Get-BackendStreamStatusSnapshot {
 
     $streamStatusUrl = $BackendUrl.TrimEnd('/') + '/api/v1/stream/status'
     try {
-        $response = Invoke-RestMethod -Uri $streamStatusUrl -Headers @{ 'x-api-key' = $ApiKey } -Method Get -TimeoutSec 15
+        $response = Invoke-RestMethod -Uri $streamStatusUrl -Headers $backendHeaders -Method Get -TimeoutSec 15
         return [ordered]@{
             captured = $true
             reason = $null
@@ -896,6 +1070,36 @@ function Get-SafeRatio {
     return [math]::Round(($Numerator / $Denominator), 4)
 }
 
+function Get-WeightedAverageDelta {
+    param(
+        [double] $BeforeAverage,
+        [int64] $BeforeTotal,
+        [double] $AfterAverage,
+        [int64] $AfterTotal
+    )
+
+    $deltaTotal = $AfterTotal - $BeforeTotal
+    if ($deltaTotal -le 0) {
+        return 0.0
+    }
+
+    $beforeWeighted = $BeforeAverage * $BeforeTotal
+    $afterWeighted = $AfterAverage * $AfterTotal
+    return [math]::Round((($afterWeighted - $beforeWeighted) / $deltaTotal), 3)
+}
+
+function Get-NewMaximumDelta {
+    param(
+        [double] $BeforeMaximum,
+        [double] $AfterMaximum
+    )
+
+    if ($AfterMaximum -le $BeforeMaximum) {
+        return 0.0
+    }
+    return [math]::Round($AfterMaximum, 3)
+}
+
 function Get-PressureClass {
     param(
         [bool] $Critical,
@@ -951,14 +1155,16 @@ function Get-FilmuvfsRuntimeDelta {
         handle_startup_ok = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'ok')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'ok'))
         handle_startup_error = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'error')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'error'))
         handle_startup_estale = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'estale')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'estale'))
-        handle_startup_average_duration_ms = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'average_duration_ms')
-        handle_startup_max_duration_ms = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'max_duration_ms')
+        handle_startup_average_duration_ms = Get-WeightedAverageDelta -BeforeAverage (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('handle_startup', 'average_duration_ms')) -BeforeTotal (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'total')) -AfterAverage (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('handle_startup', 'average_duration_ms')) -AfterTotal (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'total'))
+        handle_startup_new_max_duration_ms = Get-NewMaximumDelta -BeforeMaximum (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('handle_startup', 'max_duration_ms')) -AfterMaximum (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('handle_startup', 'max_duration_ms'))
         mounted_reads_total = ([int64]$AfterSnapshot.mounted_reads.total) - ([int64]$BeforeSnapshot.mounted_reads.total)
         mounted_reads_ok = ([int64]$AfterSnapshot.mounted_reads.ok) - ([int64]$BeforeSnapshot.mounted_reads.ok)
         mounted_reads_error = ([int64]$AfterSnapshot.mounted_reads.error) - ([int64]$BeforeSnapshot.mounted_reads.error)
         mounted_reads_estale = ([int64]$AfterSnapshot.mounted_reads.estale) - ([int64]$BeforeSnapshot.mounted_reads.estale)
         upstream_fetch_operations = ([int64]$AfterSnapshot.upstream_fetch.operations) - ([int64]$BeforeSnapshot.upstream_fetch.operations)
         upstream_fetch_bytes_total = ([int64]$AfterSnapshot.upstream_fetch.bytes_total) - ([int64]$BeforeSnapshot.upstream_fetch.bytes_total)
+        upstream_fetch_average_duration_ms = Get-WeightedAverageDelta -BeforeAverage (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -BeforeTotal (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('upstream_fetch', 'operations')) -AfterAverage (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -AfterTotal (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('upstream_fetch', 'operations'))
+        upstream_fetch_new_max_duration_ms = Get-NewMaximumDelta -BeforeMaximum (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('upstream_fetch', 'max_duration_ms')) -AfterMaximum (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('upstream_fetch', 'max_duration_ms'))
         upstream_fail_invalid_url = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('upstream_failures', 'invalid_url')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('upstream_failures', 'invalid_url'))
         upstream_fail_build_request = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('upstream_failures', 'build_request')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('upstream_failures', 'build_request'))
         upstream_fail_network = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('upstream_failures', 'network')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('upstream_failures', 'network'))
@@ -1004,8 +1210,8 @@ function Get-FilmuvfsRuntimeDelta {
         chunk_coalescing_waits_total = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_total')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_total'))
         chunk_coalescing_waits_hit = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_hit')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_hit'))
         chunk_coalescing_waits_miss = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_miss')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_miss'))
-        chunk_coalescing_wait_average_duration_ms = Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_average_duration_ms')
-        chunk_coalescing_wait_max_duration_ms = Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_max_duration_ms')
+        chunk_coalescing_wait_average_duration_ms = Get-WeightedAverageDelta -BeforeAverage (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'wait_average_duration_ms')) -BeforeTotal (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_total')) -AfterAverage (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_average_duration_ms')) -AfterTotal (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_total'))
+        chunk_coalescing_wait_new_max_duration_ms = Get-NewMaximumDelta -BeforeMaximum (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'wait_max_duration_ms')) -AfterMaximum (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'wait_max_duration_ms'))
         inline_refresh_success = ([int64]$AfterSnapshot.inline_refresh.success) - ([int64]$BeforeSnapshot.inline_refresh.success)
         inline_refresh_no_url = ([int64]$AfterSnapshot.inline_refresh.no_url) - ([int64]$BeforeSnapshot.inline_refresh.no_url)
         inline_refresh_error = ([int64]$AfterSnapshot.inline_refresh.error) - ([int64]$BeforeSnapshot.inline_refresh.error)
@@ -1039,6 +1245,7 @@ function Get-RuntimeDiagnostics {
             chunk_cache_disk_write_errors = $null
             chunk_cache_disk_evictions = $null
             cache_cold_fetch_incidents = $null
+            cache_hit_ratio = $null
             cache_pressure_incidents = $null
             prefetch_concurrency_limit = $null
             prefetch_available_permits = $null
@@ -1051,9 +1258,11 @@ function Get-RuntimeDiagnostics {
             chunk_coalescing_waits_hit = $null
             chunk_coalescing_waits_miss = $null
             chunk_coalescing_wait_average_duration_ms = $null
-            chunk_coalescing_wait_max_duration_ms = $null
+            chunk_coalescing_wait_new_max_duration_ms = $null
             provider_pressure_incidents = $null
             unrecovered_stale_refresh_incidents = $null
+            upstream_fetch_average_duration_ms = $null
+            upstream_fetch_new_max_duration_ms = $null
             fatal_error_incidents = $null
             cache_pressure_class = $null
             cache_pressure_reasons = $null
@@ -1105,6 +1314,7 @@ function Get-RuntimeDiagnostics {
     )
     $cacheMemoryPressureRatio = Get-SafeRatio -Numerator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_bytes')) -Denominator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'memory_max_bytes'))
     $cacheDiskPressureRatio = Get-SafeRatio -Numerator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'disk_bytes')) -Denominator (Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_cache', 'disk_max_bytes'))
+    $cacheHitRatio = Get-SafeRatio -Numerator ([double]$RuntimeDelta.chunk_cache_hits) -Denominator ([double]([int64]$RuntimeDelta.chunk_cache_hits + [int64]$RuntimeDelta.chunk_cache_misses))
     $cachePressureReasons = [System.Collections.Generic.List[string]]::new()
     if ([int64]$RuntimeDelta.chunk_cache_disk_write_errors -gt 0) {
         [void]$cachePressureReasons.Add('disk_write_errors')
@@ -1123,7 +1333,7 @@ function Get-RuntimeDiagnostics {
     if ([double]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms -ge 10.0) {
         [void]$chunkCoalescingPressureReasons.Add('coalescing_wait_latency_high')
     }
-    if ([double]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms -ge 75.0) {
+    if ([double]$RuntimeDelta.chunk_coalescing_wait_new_max_duration_ms -ge 250.0) {
         [void]$chunkCoalescingPressureReasons.Add('coalescing_wait_spike')
     }
 
@@ -1137,10 +1347,10 @@ function Get-RuntimeDiagnostics {
     if ([int64]$RuntimeDelta.upstream_retryable_read_body -gt 0) {
         [void]$upstreamWaitReasons.Add('retryable_read_body_wait')
     }
-    if ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -ge 50) {
+    if ([double]$RuntimeDelta.upstream_fetch_average_duration_ms -ge 100.0) {
         [void]$upstreamWaitReasons.Add('average_fetch_latency_high')
     }
-    if ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'max_duration_ms')) -ge 250) {
+    if ([double]$RuntimeDelta.upstream_fetch_new_max_duration_ms -ge 1000.0) {
         [void]$upstreamWaitReasons.Add('max_fetch_latency_high')
     }
 
@@ -1175,6 +1385,7 @@ function Get-RuntimeDiagnostics {
         chunk_cache_disk_write_errors = [int64]$RuntimeDelta.chunk_cache_disk_write_errors
         chunk_cache_disk_evictions = [int64]$RuntimeDelta.chunk_cache_disk_evictions
         cache_cold_fetch_incidents = [int64]$RuntimeDelta.chunk_cache_misses
+        cache_hit_ratio = $cacheHitRatio
         cache_pressure_incidents = $cachePressureIncidents
         prefetch_concurrency_limit = [int64]$RuntimeDelta.prefetch_concurrency_limit
         prefetch_available_permits = [int64]$RuntimeDelta.prefetch_available_permits
@@ -1187,22 +1398,24 @@ function Get-RuntimeDiagnostics {
         chunk_coalescing_waits_hit = [int64]$RuntimeDelta.chunk_coalescing_waits_hit
         chunk_coalescing_waits_miss = [int64]$RuntimeDelta.chunk_coalescing_waits_miss
         chunk_coalescing_wait_average_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms
-        chunk_coalescing_wait_max_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms
+        chunk_coalescing_wait_new_max_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_new_max_duration_ms
         provider_pressure_incidents = $providerPressureIncidents
         unrecovered_stale_refresh_incidents = [int64]$RuntimeDelta.mounted_reads_estale
         handle_startup_total = [int64]$RuntimeDelta.handle_startup_total
         handle_startup_failures = ([int64]$RuntimeDelta.handle_startup_error + [int64]$RuntimeDelta.handle_startup_estale)
         handle_startup_average_duration_ms = [int64]$RuntimeDelta.handle_startup_average_duration_ms
-        handle_startup_max_duration_ms = [int64]$RuntimeDelta.handle_startup_max_duration_ms
+        handle_startup_max_duration_ms = [double]$RuntimeDelta.handle_startup_new_max_duration_ms
+        upstream_fetch_average_duration_ms = [double]$RuntimeDelta.upstream_fetch_average_duration_ms
+        upstream_fetch_new_max_duration_ms = [double]$RuntimeDelta.upstream_fetch_new_max_duration_ms
         backend_fallback_attempts = [int64]$RuntimeDelta.backend_fallback_attempts
         backend_fallback_success = [int64]$RuntimeDelta.backend_fallback_success
         backend_fallback_failure = [int64]$RuntimeDelta.backend_fallback_failure
         fatal_error_incidents = $fatalIncidents
-        cache_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.chunk_cache_disk_write_errors -gt 0) -or ([math]::Max($cacheMemoryPressureRatio, $cacheDiskPressureRatio) -ge 0.95)) -Warning ($cachePressureReasons.Count -gt 0)
+        cache_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.chunk_cache_disk_write_errors -gt 0) -or ([math]::Max($cacheMemoryPressureRatio, $cacheDiskPressureRatio) -ge 1.10)) -Warning ($cachePressureReasons.Count -gt 0)
         cache_pressure_reasons = @($cachePressureReasons)
-        chunk_coalescing_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.chunk_coalescing_waits_miss -ge 5) -or ([double]$RuntimeDelta.chunk_coalescing_wait_max_duration_ms -ge 250.0)) -Warning ($chunkCoalescingPressureReasons.Count -gt 0)
+        chunk_coalescing_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.chunk_coalescing_waits_miss -ge 5) -or ([double]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms -ge 1000.0) -or ([double]$RuntimeDelta.chunk_coalescing_wait_new_max_duration_ms -ge 2000.0)) -Warning ($chunkCoalescingPressureReasons.Count -gt 0)
         chunk_coalescing_pressure_reasons = @($chunkCoalescingPressureReasons)
-        upstream_wait_class = Get-PressureClass -Critical (($providerPressureIncidents -ge 10) -or ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -ge 100) -or ((Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('upstream_fetch', 'max_duration_ms')) -ge 500)) -Warning ($upstreamWaitReasons.Count -gt 0)
+        upstream_wait_class = Get-PressureClass -Critical (($providerPressureIncidents -ge 10) -or ([double]$RuntimeDelta.upstream_fetch_average_duration_ms -ge 250.0) -or (([double]$RuntimeDelta.upstream_fetch_average_duration_ms -ge 100.0) -and ([double]$RuntimeDelta.upstream_fetch_new_max_duration_ms -ge 5000.0))) -Warning ($upstreamWaitReasons.Count -gt 0)
         upstream_wait_reasons = @($upstreamWaitReasons)
         refresh_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.backend_fallback_failure -gt 0) -or ([int64]$RuntimeDelta.inline_refresh_timeout -ge 3)) -Warning ($refreshPressureReasons.Count -gt 0)
         refresh_pressure_reasons = @($refreshPressureReasons)
@@ -1211,7 +1424,7 @@ function Get-RuntimeDiagnostics {
 }
 
 function Get-LogDiagnostics {
-    param([string[]] $Paths)
+    param($LogWindows)
 
     $reconnectPatterns = @(
         'catalog watch session failed; retrying after backoff',
@@ -1242,12 +1455,19 @@ function Get-LogDiagnostics {
         'rate_limit',
         'circuit open'
     )
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($window in $LogWindows) {
+        foreach ($line in @(Get-LogDeltaLines -Path $window.Path -StartLineExclusive $window.StartLineExclusive)) {
+            [void]$lines.Add([string]$line)
+        }
+    }
+    $allLines = @($lines)
     $failureClassifications = [ordered]@{
-        panic = (Get-PatternMatchCount -Paths $Paths -Patterns @('panic', 'panicked at'))
-        mounted_read_failure = (Get-PatternMatchCount -Paths $Paths -Patterns @('vfs.read.fail', 'I/O failure while reading'))
-        inline_refresh_failure = (Get-PatternMatchCount -Paths $Paths -Patterns $staleFailurePatterns)
-        callback_error = (Get-PatternMatchCount -Paths $Paths -Patterns @('projfs.get_file_data open failed', 'callback failed'))
-        ntstatus_failure = (Get-PatternMatchCount -Paths $Paths -Patterns @('STATUS_', 'NTSTATUS'))
+        panic = (Get-PatternMatchCount -Lines $allLines -Patterns @('panic', 'panicked at'))
+        mounted_read_failure = (Get-PatternMatchCount -Lines $allLines -Patterns @('vfs.read.fail', 'I/O failure while reading'))
+        inline_refresh_failure = (Get-PatternMatchCount -Lines $allLines -Patterns $staleFailurePatterns)
+        callback_error = (Get-PatternMatchCount -Lines $allLines -Patterns @('projfs.get_file_data open failed', 'callback failed'))
+        ntstatus_failure = (Get-PatternMatchCount -Lines $allLines -Patterns @('STATUS_', 'NTSTATUS'))
     }
 
     $fatalIncidents = 0
@@ -1256,12 +1476,12 @@ function Get-LogDiagnostics {
     }
 
     return [ordered]@{
-        reconnect_incidents = (Get-PatternMatchCount -Paths $Paths -Patterns $reconnectPatterns)
-        stale_refresh_attempts = (Get-PatternMatchCount -Paths $Paths -Patterns $staleAttemptPatterns)
-        unrecovered_stale_refresh_incidents = (Get-PatternMatchCount -Paths $Paths -Patterns $staleFailurePatterns)
-        cache_cold_fetch_incidents = (Get-PatternMatchCount -Paths $Paths -Patterns $cacheColdFetchPatterns)
-        cache_hit_incidents = (Get-PatternMatchCount -Paths $Paths -Patterns $cacheHitPatterns)
-        provider_pressure_incidents = (Get-PatternMatchCount -Paths $Paths -Patterns $providerPressurePatterns)
+        reconnect_incidents = (Get-PatternMatchCount -Lines $allLines -Patterns $reconnectPatterns)
+        stale_refresh_attempts = (Get-PatternMatchCount -Lines $allLines -Patterns $staleAttemptPatterns)
+        unrecovered_stale_refresh_incidents = (Get-PatternMatchCount -Lines $allLines -Patterns $staleFailurePatterns)
+        cache_cold_fetch_incidents = (Get-PatternMatchCount -Lines $allLines -Patterns $cacheColdFetchPatterns)
+        cache_hit_incidents = (Get-PatternMatchCount -Lines $allLines -Patterns $cacheHitPatterns)
+        provider_pressure_incidents = (Get-PatternMatchCount -Lines $allLines -Patterns $providerPressurePatterns)
         fatal_error_incidents = $fatalIncidents
         failure_classifications = $failureClassifications
     }
@@ -1381,6 +1601,7 @@ $runtimeDiagnostics = [ordered]@{
 $stdoutSnapshot = [ordered]@{ path = (Get-LogPath -Name 'filmuvfs-windows-stdout.log'); exists = $false; line_count = 0; tail = @() }
 $stderrSnapshot = [ordered]@{ path = (Get-LogPath -Name 'filmuvfs-windows-stderr.log'); exists = $false; line_count = 0; tail = @() }
 $callbacksSnapshot = [ordered]@{ path = (Get-LogPath -Name 'filmuvfs-windows-callbacks.log'); exists = $false; line_count = 0; tail = @() }
+$logWindows = @()
 $logDiagnostics = [ordered]@{
     reconnect_incidents = 0
     stale_refresh_attempts = 0
@@ -1410,7 +1631,12 @@ try {
     $beforeState = Assert-LiveMount -MountPath $MountPath -RequireFilmuvfs:$RequireFilmuvfs
     $runtimeStatusBefore = Get-FilmuvfsRuntimeStatusSnapshot -FilmuvfsState $beforeState
     $backendStatusBefore = Get-BackendStreamStatusSnapshot -BackendUrl $BackendUrl -ApiKey $resolvedApiKey
-    $targetFiles = Resolve-TargetFiles -MountPath $MountPath -ExplicitFile $TargetFile -DesiredCount ([Math]::Max($ConcurrentReaders, 1))
+    $logWindows = @(
+        @{ Name = 'stdout'; Path = (Get-LogPath -Name 'filmuvfs-windows-stdout.log'); StartLineExclusive = (Get-LogLineCount -Path (Get-LogPath -Name 'filmuvfs-windows-stdout.log')) },
+        @{ Name = 'stderr'; Path = (Get-LogPath -Name 'filmuvfs-windows-stderr.log'); StartLineExclusive = (Get-LogLineCount -Path (Get-LogPath -Name 'filmuvfs-windows-stderr.log')) },
+        @{ Name = 'callbacks'; Path = (Get-LogPath -Name 'filmuvfs-windows-callbacks.log'); StartLineExclusive = (Get-LogLineCount -Path (Get-LogPath -Name 'filmuvfs-windows-callbacks.log')) }
+    )
+    $targetFiles = @(Resolve-TargetFiles -MountPath $MountPath -ExplicitFile $TargetFile -DesiredCount ([Math]::Max($ConcurrentReaders, 1)))
     $primaryFile = $targetFiles[0]
     $remuxFile = Resolve-RemuxTargetFile -MountPath $MountPath -ExplicitFile $RemuxTargetFile
 
@@ -1485,37 +1711,46 @@ finally {
         $runtimeStatusDelta = $null
     }
     $runtimeDiagnostics = Get-RuntimeDiagnostics -RuntimeDelta $runtimeStatusDelta -RuntimeAfterSnapshot $runtimeStatusAfter.snapshot
-    $stdoutSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stdout.log')
-    $stderrSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stderr.log')
-    $callbacksSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-callbacks.log')
-    $logDiagnostics = Get-LogDiagnostics -Paths @(
-        $stdoutSnapshot.path,
-        $stderrSnapshot.path,
-        $callbacksSnapshot.path
-    )
+    $stdoutBaseline = $logWindows | Where-Object { $_.Name -eq 'stdout' } | Select-Object -First 1
+    $stderrBaseline = $logWindows | Where-Object { $_.Name -eq 'stderr' } | Select-Object -First 1
+    $callbacksBaseline = $logWindows | Where-Object { $_.Name -eq 'callbacks' } | Select-Object -First 1
+    $stdoutSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stdout.log') -StartLineExclusive $stdoutBaseline.StartLineExclusive
+    $stderrSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-stderr.log') -StartLineExclusive $stderrBaseline.StartLineExclusive
+    $callbacksSnapshot = Get-LogTailSnapshot -Path (Get-LogPath -Name 'filmuvfs-windows-callbacks.log') -StartLineExclusive $callbacksBaseline.StartLineExclusive
+    $logDiagnostics = Get-LogDiagnostics -LogWindows $logWindows
     $thresholdChecks = [System.Collections.Generic.List[object]]::new()
 
     if (-not $SkipSequential) {
-        $sequentialScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'sequential' } | Select-Object -First 1)[0]
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'continuous_playback_duration' -Passed ([bool]($null -ne $sequentialScenario -and $sequentialScenario.duration_seconds -ge ($SequentialMinutes * 60))) -Observed (if ($null -ne $sequentialScenario) { $sequentialScenario.duration_seconds } else { $null }) -Threshold ($SequentialMinutes * 60)
+        $sequentialScenario = $scenarioResults | Where-Object { $_.scenario -eq 'sequential' } | Select-Object -First 1
+        $sequentialObserved = if ($null -ne $sequentialScenario) { $sequentialScenario.duration_seconds } else { $null }
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'continuous_playback_duration' -Passed ([bool]($null -ne $sequentialScenario -and $sequentialScenario.duration_seconds -ge ($SequentialMinutes * 60))) -Observed $sequentialObserved -Threshold ($SequentialMinutes * 60)
     }
     if (-not $SkipSeek) {
-        $seekScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'seek_resume' } | Select-Object -First 1)[0]
+        $seekScenario = $scenarioResults | Where-Object { $_.scenario -eq 'seek_resume' } | Select-Object -First 1
         $seekThreshold = if ($SeekMinutes -gt 0) { $SeekMinutes * 60 } else { $SeekIterations }
         $seekObserved = if ($SeekMinutes -gt 0 -and $null -ne $seekScenario) { $seekScenario.duration_seconds } elseif ($null -ne $seekScenario) { $seekScenario.reads } else { $null }
         $seekPassed = if ($SeekMinutes -gt 0) { [bool]($null -ne $seekScenario -and $seekScenario.duration_seconds -ge ($SeekMinutes * 60)) } else { [bool]($null -ne $seekScenario -and $seekScenario.reads -ge $SeekIterations) }
         Add-ThresholdCheck -Checks $thresholdChecks -Name 'interactive_seek_soak' -Passed $seekPassed -Observed $seekObserved -Threshold $seekThreshold
     }
     if (-not $SkipConcurrent) {
-        $concurrentScenario = @($scenarioResults | Where-Object { $_.scenario -eq 'concurrent_readers' } | Select-Object -First 1)[0]
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_reader_count' -Passed ([bool]($null -ne $concurrentScenario -and $ConcurrentReaders -ge 3)) -Observed $ConcurrentReaders -Threshold 3
+        $concurrentScenario = $scenarioResults | Where-Object { $_.scenario -eq 'concurrent_readers' } | Select-Object -First 1
+        $observedReaderCount = if ($null -ne $concurrentScenario) { @($concurrentScenario.readers_detail).Count } else { $null }
+        $readerCountPassed = [bool](
+            $null -ne $concurrentScenario -and
+            $null -ne $observedReaderCount -and
+            $observedReaderCount -eq $ConcurrentReaders -and
+            $observedReaderCount -ge 3
+        )
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_reader_count' -Passed $readerCountPassed -Observed $observedReaderCount -Threshold $ConcurrentReaders
         if ($ConcurrentMinutes -gt 0) {
             $minObservedReaderReads = if ($null -ne $concurrentScenario) { (@($concurrentScenario.readers_detail | Measure-Object -Property reads -Minimum).Minimum) } else { $null }
-            Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_pressure_duration' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.duration_seconds -ge ($ConcurrentMinutes * 60))) -Observed (if ($null -ne $concurrentScenario) { $concurrentScenario.duration_seconds } else { $null }) -Threshold ($ConcurrentMinutes * 60)
+            $concurrentDurationObserved = if ($null -ne $concurrentScenario) { $concurrentScenario.duration_seconds } else { $null }
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_pressure_duration' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.duration_seconds -ge ($ConcurrentMinutes * 60))) -Observed $concurrentDurationObserved -Threshold ($ConcurrentMinutes * 60)
             Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_reader_activity' -Passed ([bool]($null -ne $concurrentScenario -and $minObservedReaderReads -gt 0)) -Observed $minObservedReaderReads -Threshold 'all readers produced reads for a timed run'
         }
         else {
-            Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_iterations' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.total_reads -ge ($ConcurrentReaders * $ConcurrentIterations))) -Observed (if ($null -ne $concurrentScenario) { $concurrentScenario.total_reads } else { $null }) -Threshold ($ConcurrentReaders * $ConcurrentIterations)
+            $concurrentReadsObserved = if ($null -ne $concurrentScenario) { $concurrentScenario.total_reads } else { $null }
+            Add-ThresholdCheck -Checks $thresholdChecks -Name 'concurrent_iterations' -Passed ([bool]($null -ne $concurrentScenario -and $concurrentScenario.total_reads -ge ($ConcurrentReaders * $ConcurrentIterations))) -Observed $concurrentReadsObserved -Threshold ($ConcurrentReaders * $ConcurrentIterations)
         }
     }
     Add-ThresholdCheck -Checks $thresholdChecks -Name 'mount_survived' -Passed ([bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))) -Observed ([bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))) -Threshold $true
@@ -1529,13 +1764,15 @@ finally {
         }
     }
     if ($MaxCacheColdFetchIncidents -ge 0) {
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'cache_cold_fetch_incidents' -Passed ([bool]($logDiagnostics.cache_cold_fetch_incidents -le $MaxCacheColdFetchIncidents)) -Observed $logDiagnostics.cache_cold_fetch_incidents -Threshold $MaxCacheColdFetchIncidents
         if ($runtimeDiagnostics.captured) {
             Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_cache_cold_fetch_incidents' -Passed ([bool]($runtimeDiagnostics.cache_cold_fetch_incidents -le $MaxCacheColdFetchIncidents)) -Observed $runtimeDiagnostics.cache_cold_fetch_incidents -Threshold $MaxCacheColdFetchIncidents
         }
     }
+    if ($MinCacheHitRatio -ge 0) {
+        $observedCacheHitRatio = if ($runtimeDiagnostics.captured) { $runtimeDiagnostics.cache_hit_ratio } else { $null }
+        Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_cache_hit_ratio' -Passed ([bool]($runtimeDiagnostics.captured -and $runtimeDiagnostics.cache_hit_ratio -ge $MinCacheHitRatio)) -Observed $observedCacheHitRatio -Threshold $MinCacheHitRatio
+    }
     if ($MaxProviderPressureIncidents -ge 0) {
-        Add-ThresholdCheck -Checks $thresholdChecks -Name 'provider_pressure_incidents' -Passed ([bool]($logDiagnostics.provider_pressure_incidents -le $MaxProviderPressureIncidents)) -Observed $logDiagnostics.provider_pressure_incidents -Threshold $MaxProviderPressureIncidents
         if ($runtimeDiagnostics.captured) {
             Add-ThresholdCheck -Checks $thresholdChecks -Name 'runtime_provider_pressure_incidents' -Passed ([bool]($runtimeDiagnostics.provider_pressure_incidents -le $MaxProviderPressureIncidents)) -Observed $runtimeDiagnostics.provider_pressure_incidents -Threshold $MaxProviderPressureIncidents
         }
@@ -1561,7 +1798,7 @@ finally {
     $summary = [ordered]@{
         soak_profile = $SoakProfile
         mount_path = $MountPath
-        target_files = $targetFiles
+        target_files = @($targetFiles)
         primary_file = $primaryFile
         remux_file = $remuxFile
         ffmpeg_path = $resolvedFfmpegPath
@@ -1602,6 +1839,7 @@ finally {
             max_reconnect_incidents = if ($MaxReconnectIncidents -ge 0) { $MaxReconnectIncidents } else { $null }
             max_unrecovered_stale_refresh_incidents = if ($MaxUnrecoveredStaleRefreshIncidents -ge 0) { $MaxUnrecoveredStaleRefreshIncidents } else { $null }
             max_cache_cold_fetch_incidents = if ($MaxCacheColdFetchIncidents -ge 0) { $MaxCacheColdFetchIncidents } else { $null }
+            min_cache_hit_ratio = if ($MinCacheHitRatio -ge 0) { $MinCacheHitRatio } else { $null }
             max_provider_pressure_incidents = if ($MaxProviderPressureIncidents -ge 0) { $MaxProviderPressureIncidents } else { $null }
             max_fatal_error_incidents = if ($MaxFatalErrorIncidents -ge 0) { $MaxFatalErrorIncidents } else { $null }
         }
