@@ -142,6 +142,97 @@ class GQLObservabilityConvergence:
 
 
 @strawberry.type
+class GQLControlPlaneStatusCount:
+    """One typed control-plane subscriber-status count bucket."""
+
+    status: str
+    count: int
+
+
+@strawberry.type
+class GQLControlPlaneSummary:
+    """Bounded control-plane health rollup for GraphQL-first operator views."""
+
+    total_subscribers: int = strawberry.field(name="totalSubscribers")
+    active_subscribers: int = strawberry.field(name="activeSubscribers")
+    stale_subscribers: int = strawberry.field(name="staleSubscribers")
+    error_subscribers: int = strawberry.field(name="errorSubscribers")
+    fenced_subscribers: int = strawberry.field(name="fencedSubscribers")
+    ack_pending_subscribers: int = strawberry.field(name="ackPendingSubscribers")
+    stream_count: int = strawberry.field(name="streamCount")
+    group_count: int = strawberry.field(name="groupCount")
+    node_count: int = strawberry.field(name="nodeCount")
+    tenant_count: int = strawberry.field(name="tenantCount")
+    oldest_heartbeat_age_seconds: float | None = strawberry.field(
+        name="oldestHeartbeatAgeSeconds",
+        default=None,
+    )
+    status_counts: list[GQLControlPlaneStatusCount] = strawberry.field(name="statusCounts")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLControlPlaneAutomation:
+    """Background replay/control-plane automation posture for GraphQL clients."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    enabled: bool
+    runner_status: str = strawberry.field(name="runnerStatus")
+    interval_seconds: int = strawberry.field(name="intervalSeconds")
+    active_within_seconds: int = strawberry.field(name="activeWithinSeconds")
+    pending_min_idle_ms: int = strawberry.field(name="pendingMinIdleMs")
+    claim_limit: int = strawberry.field(name="claimLimit")
+    max_claim_passes: int = strawberry.field(name="maxClaimPasses")
+    consumer_group: str = strawberry.field(name="consumerGroup")
+    consumer_name: str = strawberry.field(name="consumerName")
+    service_attached: bool = strawberry.field(name="serviceAttached")
+    backplane_attached: bool = strawberry.field(name="backplaneAttached")
+    last_run_at: str | None = strawberry.field(name="lastRunAt", default=None)
+    last_success_at: str | None = strawberry.field(name="lastSuccessAt", default=None)
+    last_failure_at: str | None = strawberry.field(name="lastFailureAt", default=None)
+    consecutive_failures: int = strawberry.field(name="consecutiveFailures")
+    last_error: str | None = strawberry.field(name="lastError", default=None)
+    remediation_updated_subscribers: int = strawberry.field(name="remediationUpdatedSubscribers")
+    rewound_subscribers: int = strawberry.field(name="rewoundSubscribers")
+    claimed_pending_events: int = strawberry.field(name="claimedPendingEvents")
+    claim_passes: int = strawberry.field(name="claimPasses")
+    pending_count_after: int | None = strawberry.field(name="pendingCountAfter", default=None)
+    summary: GQLControlPlaneSummary
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPluginIntegrationReadinessPlugin:
+    """One builtin plugin readiness row for GraphQL-first Director consoles."""
+
+    name: str
+    capability_kind: str = strawberry.field(name="capabilityKind")
+    status: str
+    registered: bool
+    enabled: bool
+    configured: bool
+    ready: bool
+    config_source: str | None = strawberry.field(name="configSource", default=None)
+    required_settings: list[str] = strawberry.field(name="requiredSettings")
+    missing_settings: list[str] = strawberry.field(name="missingSettings")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPluginIntegrationReadiness:
+    """Builtin plugin registration and config-validation posture for GraphQL."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    plugins: list[GQLPluginIntegrationReadinessPlugin]
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
 class GQLVfsCorrelationKeys:
     """Correlation identifiers for one VFS catalog node."""
 

@@ -26,6 +26,9 @@ from filmu_py.graphql.types import (
     GQLActiveStreamOwner,
     GQLCalendarEntry,
     GQLCalendarReleaseWindow,
+    GQLControlPlaneAutomation,
+    GQLControlPlaneStatusCount,
+    GQLControlPlaneSummary,
     GQLFilmuSettings,
     GQLHealthCheck,
     GQLItemEvent,
@@ -41,6 +44,8 @@ from filmu_py.graphql.types import (
     GQLPersistPlaybackAttachmentControlResult,
     GQLPlaybackAttachment,
     GQLPlaybackRefreshTriggerResult,
+    GQLPluginIntegrationReadiness,
+    GQLPluginIntegrationReadinessPlugin,
     GQLQueueAlert,
     GQLRecoveryMechanism,
     GQLRecoveryPlan,
@@ -85,6 +90,11 @@ from filmu_py.services.media import (
     StatsProjection,
     _canonical_item_type_name,
     _infer_request_media_type,
+)
+from filmu_py.services.operator_posture import (
+    build_control_plane_automation_posture,
+    build_control_plane_summary_posture,
+    build_plugin_integration_readiness_posture,
 )
 from filmu_py.services.playback import (
     AppScopedDirectPlaybackRefreshTriggerResult,
@@ -229,6 +239,87 @@ def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLO
         shared_cross_process_headers=list(snapshot.shared_cross_process_headers),
         expected_correlation_fields=list(snapshot.expected_correlation_fields),
         expected_correlation_fields_ready=snapshot.expected_correlation_fields_ready,
+    )
+
+
+def _build_control_plane_summary(snapshot: object) -> GQLControlPlaneSummary:
+    typed_snapshot: Any = snapshot
+    return GQLControlPlaneSummary(
+        total_subscribers=int(typed_snapshot.total_subscribers),
+        active_subscribers=int(typed_snapshot.active_subscribers),
+        stale_subscribers=int(typed_snapshot.stale_subscribers),
+        error_subscribers=int(typed_snapshot.error_subscribers),
+        fenced_subscribers=int(typed_snapshot.fenced_subscribers),
+        ack_pending_subscribers=int(typed_snapshot.ack_pending_subscribers),
+        stream_count=int(typed_snapshot.stream_count),
+        group_count=int(typed_snapshot.group_count),
+        node_count=int(typed_snapshot.node_count),
+        tenant_count=int(typed_snapshot.tenant_count),
+        oldest_heartbeat_age_seconds=typed_snapshot.oldest_heartbeat_age_seconds,
+        status_counts=[
+            GQLControlPlaneStatusCount(status=status, count=count)
+            for status, count in dict(typed_snapshot.status_counts).items()
+        ],
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegrationReadiness:
+    typed_snapshot: Any = snapshot
+    return GQLPluginIntegrationReadiness(
+        generated_at=str(typed_snapshot.generated_at),
+        status=str(typed_snapshot.status),
+        plugins=[
+            GQLPluginIntegrationReadinessPlugin(
+                name=str(row.name),
+                capability_kind=str(row.capability_kind),
+                status=str(row.status),
+                registered=bool(row.registered),
+                enabled=bool(row.enabled),
+                configured=bool(row.configured),
+                ready=bool(row.ready),
+                config_source=row.config_source,
+                required_settings=list(row.required_settings),
+                missing_settings=list(row.missing_settings),
+                required_actions=list(row.required_actions),
+                remaining_gaps=list(row.remaining_gaps),
+            )
+            for row in typed_snapshot.plugins
+        ],
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_control_plane_automation(snapshot: object) -> GQLControlPlaneAutomation:
+    typed_snapshot: Any = snapshot
+    return GQLControlPlaneAutomation(
+        generated_at=str(typed_snapshot.generated_at),
+        enabled=bool(typed_snapshot.enabled),
+        runner_status=str(typed_snapshot.runner_status),
+        interval_seconds=int(typed_snapshot.interval_seconds),
+        active_within_seconds=int(typed_snapshot.active_within_seconds),
+        pending_min_idle_ms=int(typed_snapshot.pending_min_idle_ms),
+        claim_limit=int(typed_snapshot.claim_limit),
+        max_claim_passes=int(typed_snapshot.max_claim_passes),
+        consumer_group=str(typed_snapshot.consumer_group),
+        consumer_name=str(typed_snapshot.consumer_name),
+        service_attached=bool(typed_snapshot.service_attached),
+        backplane_attached=bool(typed_snapshot.backplane_attached),
+        last_run_at=typed_snapshot.last_run_at,
+        last_success_at=typed_snapshot.last_success_at,
+        last_failure_at=typed_snapshot.last_failure_at,
+        consecutive_failures=int(typed_snapshot.consecutive_failures),
+        last_error=typed_snapshot.last_error,
+        remediation_updated_subscribers=int(typed_snapshot.remediation_updated_subscribers),
+        rewound_subscribers=int(typed_snapshot.rewound_subscribers),
+        claimed_pending_events=int(typed_snapshot.claimed_pending_events),
+        claim_passes=int(typed_snapshot.claim_passes),
+        pending_count_after=typed_snapshot.pending_count_after,
+        summary=_build_control_plane_summary(typed_snapshot.summary),
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
     )
 
 
@@ -1098,6 +1189,40 @@ class CoreQueryResolver:
     ) -> GQLObservabilityConvergence:
         return _build_observability_convergence(info)
 
+    @strawberry.field(
+        description="Builtin plugin registration and config-validation posture for GraphQL-first clients"
+    )
+    async def plugin_integration_readiness(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLPluginIntegrationReadiness:
+        return _build_plugin_integration_readiness(
+            build_plugin_integration_readiness_posture(info.context.resources)
+        )
+
+    @strawberry.field(description="Bounded control-plane subscriber health rollup")
+    async def control_plane_summary(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+    ) -> GQLControlPlaneSummary:
+        return _build_control_plane_summary(
+            await build_control_plane_summary_posture(
+                info.context.resources,
+                active_within_seconds=active_within_seconds,
+            )
+        )
+
+    @strawberry.field(
+        description="Background replay/control-plane recovery automation posture"
+    )
+    async def control_plane_automation(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLControlPlaneAutomation:
+        return _build_control_plane_automation(
+            await build_control_plane_automation_posture(info.context.resources)
+        )
     @strawberry.field(description="Current runtime lifecycle graph and bounded transition history")
     async def runtime_lifecycle(
         self,
