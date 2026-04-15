@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -94,8 +93,7 @@ class ControlPlaneAutomationController:
                 self._snapshot = self._replace_snapshot(runner_status="stopped")
             return
         task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        await asyncio.gather(task, return_exceptions=True)
         self._snapshot = self._replace_snapshot(runner_status="stopped")
 
     async def run_once(self) -> ControlPlaneAutomationSnapshot:
