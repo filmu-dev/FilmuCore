@@ -12,6 +12,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$permanentlyBlockedReviewBranches = @{
+    'codex/windows-vfs-rollout-20260415' = 'Previously-used review branch retained only for history. Push local main to a fresh remote review branch instead.'
+}
+
 function Invoke-GitCapture {
     param([Parameter(Mandatory = $true)][string[]] $Arguments)
 
@@ -108,6 +112,9 @@ if ($reuseCheckStatus -eq 'checked') {
 
 $actions = New-Object System.Collections.Generic.List[string]
 $advisories = New-Object System.Collections.Generic.List[string]
+if ($permanentlyBlockedReviewBranches.ContainsKey($ReviewBranch)) {
+    $actions.Add("Review branch '$ReviewBranch' is permanently blocked for this repository. $($permanentlyBlockedReviewBranches[$ReviewBranch])")
+}
 if ($behindBy -gt 0) {
     if ($LocalSourceOfTruth) {
         $advisories.Add("Branch '$Branch' differs from '$Remote/$BaseBranch' by $behindBy commit(s). Local '$Branch' remains authoritative; review mergeability in GitHub without rebasing from remote main.")
