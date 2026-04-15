@@ -236,6 +236,20 @@ class VfsCatalogSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class VfsCatalogRollup:
+    """Aggregate file/blocking posture for one published VFS catalog snapshot."""
+
+    blocked_reason_counts: dict[str, int]
+    query_strategy_counts: dict[str, int]
+    provider_family_counts: dict[str, int]
+    lease_state_counts: dict[str, int]
+    locator_source_counts: dict[str, int]
+    restricted_fallback_file_count: int
+    provider_path_preserved_file_count: int
+    multi_role_file_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class VfsCatalogRemoval:
     """One removed catalog entry emitted by a computed delta."""
 
@@ -276,6 +290,58 @@ class _PreparedCatalogFile:
     dedupe_suffix: str
     correlation: VfsCatalogCorrelationKeys
     payload: VfsCatalogFileEntry
+
+
+def summarize_vfs_catalog_snapshot(snapshot: VfsCatalogSnapshot) -> VfsCatalogRollup:
+    """Return aggregate blocking/query/provider posture for one VFS snapshot."""
+
+    blocked_reason_counts: dict[str, int] = {}
+    query_strategy_counts: dict[str, int] = {}
+    provider_family_counts: dict[str, int] = {}
+    lease_state_counts: dict[str, int] = {}
+    locator_source_counts: dict[str, int] = {}
+    restricted_fallback_file_count = 0
+    provider_path_preserved_file_count = 0
+    multi_role_file_count = 0
+
+    for blocked_item in snapshot.blocked_items:
+        reason = str(blocked_item.reason)
+        blocked_reason_counts[reason] = blocked_reason_counts.get(reason, 0) + 1
+
+    for entry in snapshot.entries:
+        file_entry = entry.file
+        if file_entry is None:
+            continue
+
+        query_strategy = file_entry.query_strategy or "unspecified"
+        query_strategy_counts[query_strategy] = query_strategy_counts.get(query_strategy, 0) + 1
+
+        provider_family = file_entry.provider_family if file_entry.provider_family else "none"
+        provider_family_counts[provider_family] = provider_family_counts.get(provider_family, 0) + 1
+
+        lease_state = file_entry.lease_state if file_entry.lease_state else "unknown"
+        lease_state_counts[lease_state] = lease_state_counts.get(lease_state, 0) + 1
+
+        locator_source = file_entry.locator_source if file_entry.locator_source else "locator"
+        locator_source_counts[locator_source] = locator_source_counts.get(locator_source, 0) + 1
+
+        if file_entry.restricted_fallback:
+            restricted_fallback_file_count += 1
+        if file_entry.provider_file_path:
+            provider_path_preserved_file_count += 1
+        if len(file_entry.active_roles) > 1:
+            multi_role_file_count += 1
+
+    return VfsCatalogRollup(
+        blocked_reason_counts=dict(sorted(blocked_reason_counts.items())),
+        query_strategy_counts=dict(sorted(query_strategy_counts.items())),
+        provider_family_counts=dict(sorted(provider_family_counts.items())),
+        lease_state_counts=dict(sorted(lease_state_counts.items())),
+        locator_source_counts=dict(sorted(locator_source_counts.items())),
+        restricted_fallback_file_count=restricted_fallback_file_count,
+        provider_path_preserved_file_count=provider_path_preserved_file_count,
+        multi_role_file_count=multi_role_file_count,
+    )
 
 
 class FilmuVfsCatalogSupplier:

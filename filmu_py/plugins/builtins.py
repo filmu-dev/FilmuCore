@@ -5,17 +5,25 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from filmu_py.plugins.builtin import (
+    COMET_PLUGIN_NAME,
+    LISTRR_PLUGIN_NAME,
     MDBLIST_PLUGIN_NAME,
     NOTIFICATIONS_PLUGIN_NAME,
+    PLEX_PLUGIN_NAME,
     PROWLARR_PLUGIN_NAME,
     RARBG_PLUGIN_NAME,
+    SEERR_PLUGIN_NAME,
     STREAM_CONTROL_PLUGIN_NAME,
     STREMTHRU_PLUGIN_NAME,
     TORRENTIO_PLUGIN_NAME,
+    CometScraper,
     HostStreamControlPlugin,
+    ListrrContentService,
     MDBListContentService,
+    PlexLibraryRefreshPlugin,
     ProwlarrScraper,
     RarbgScraper,
+    SeerrContentService,
     StremThruDownloader,
     TorrentioScraper,
     WebhookNotificationPlugin,
@@ -93,6 +101,19 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
         ),
         (
             _manifest(
+                name=COMET_PLUGIN_NAME,
+                version="1.0.0",
+                api_version="1",
+                capabilities=["scraper"],
+                permission_scopes=["scrape:search"],
+                entry_module="plugin.py",
+                scraper="CometScraper",
+            ),
+            PluginCapabilityKind.SCRAPER,
+            CometScraper,
+        ),
+        (
+            _manifest(
                 name=RARBG_PLUGIN_NAME,
                 version="1.0.0",
                 api_version="1",
@@ -118,6 +139,36 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
             ),
             PluginCapabilityKind.CONTENT_SERVICE,
             MDBListContentService,
+        ),
+        (
+            _manifest(
+                name=SEERR_PLUGIN_NAME,
+                version="1.0.0",
+                api_version="1",
+                capabilities=["content_service"],
+                permission_scopes=["content:ingest", "datasource:host", "events:publish"],
+                entry_module="plugin.py",
+                content_service="SeerrContentService",
+                datasource="host",
+                publishable_events=["seerr.requests.polled", "seerr.error"],
+            ),
+            PluginCapabilityKind.CONTENT_SERVICE,
+            SeerrContentService,
+        ),
+        (
+            _manifest(
+                name=LISTRR_PLUGIN_NAME,
+                version="1.0.0",
+                api_version="1",
+                capabilities=["content_service"],
+                permission_scopes=["content:ingest", "datasource:host", "events:publish"],
+                entry_module="plugin.py",
+                content_service="ListrrContentService",
+                datasource="host",
+                publishable_events=["listrr.requests.polled", "listrr.error"],
+            ),
+            PluginCapabilityKind.CONTENT_SERVICE,
+            ListrrContentService,
         ),
         (
             _manifest(
@@ -183,5 +234,19 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
             ),
             PluginCapabilityKind.EVENT_HOOK,
             WebhookNotificationPlugin,
+        ),
+        (
+            _manifest(
+                name=PLEX_PLUGIN_NAME,
+                version="1.0.0",
+                api_version="1",
+                capabilities=["event_hook"],
+                permission_scopes=["events:subscribe", "datasource:host"],
+                entry_module="plugin.py",
+                event_hook="PlexLibraryRefreshPlugin",
+                datasource="host",
+            ),
+            PluginCapabilityKind.EVENT_HOOK,
+            PlexLibraryRefreshPlugin,
         ),
     )

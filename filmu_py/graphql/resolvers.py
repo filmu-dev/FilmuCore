@@ -50,11 +50,13 @@ from filmu_py.graphql.types import (
     GQLStreamCandidate,
     GQLVfsBlockedItem,
     GQLVfsCatalogEntry,
+    GQLVfsCatalogRollup,
     GQLVfsCatalogStats,
     GQLVfsCorrelationKeys,
     GQLVfsDirectoryDetail,
     GQLVfsDirectoryListing,
     GQLVfsFileDetail,
+    GQLVfsRollupBucket,
     GQLVfsSnapshot,
     GQLWorkerQueueHistoryPoint,
     GQLWorkerQueueStatus,
@@ -91,7 +93,12 @@ from filmu_py.services.playback import (
     trigger_hls_failed_lease_refresh_from_resources,
     trigger_hls_restricted_fallback_refresh_from_resources,
 )
-from filmu_py.services.vfs_catalog import VfsCatalogEntry, VfsCatalogSnapshot
+from filmu_py.services.vfs_catalog import (
+    VfsCatalogEntry,
+    VfsCatalogRollup,
+    VfsCatalogSnapshot,
+    summarize_vfs_catalog_snapshot,
+)
 
 
 def _resolve_service_version() -> str:
@@ -274,6 +281,23 @@ def _build_vfs_blocked_item(item: object) -> GQLVfsBlockedItem:
     )
 
 
+def _build_vfs_rollup_buckets(values: dict[str, int]) -> list[GQLVfsRollupBucket]:
+    return [GQLVfsRollupBucket(key=key, count=count) for key, count in values.items()]
+
+
+def _build_vfs_catalog_rollup(rollup: VfsCatalogRollup) -> GQLVfsCatalogRollup:
+    return GQLVfsCatalogRollup(
+        blocked_reasons=_build_vfs_rollup_buckets(rollup.blocked_reason_counts),
+        query_strategies=_build_vfs_rollup_buckets(rollup.query_strategy_counts),
+        provider_families=_build_vfs_rollup_buckets(rollup.provider_family_counts),
+        lease_states=_build_vfs_rollup_buckets(rollup.lease_state_counts),
+        locator_sources=_build_vfs_rollup_buckets(rollup.locator_source_counts),
+        restricted_fallback_file_count=rollup.restricted_fallback_file_count,
+        provider_path_preserved_file_count=rollup.provider_path_preserved_file_count,
+        multi_role_file_count=rollup.multi_role_file_count,
+    )
+
+
 def _normalize_vfs_path(path: str) -> str:
     stripped = path.strip()
     if not stripped or stripped == "/":
@@ -302,10 +326,12 @@ def _find_vfs_entry(snapshot: VfsCatalogSnapshot, path: str) -> VfsCatalogEntry 
 
 
 def _build_vfs_snapshot(snapshot: VfsCatalogSnapshot) -> GQLVfsSnapshot:
+    rollup = summarize_vfs_catalog_snapshot(snapshot)
     return GQLVfsSnapshot(
         generation_id=snapshot.generation_id,
         published_at=snapshot.published_at.isoformat(),
         stats=_build_vfs_catalog_stats(snapshot),
+        rollup=_build_vfs_catalog_rollup(rollup),
         blocked_items=[_build_vfs_blocked_item(item) for item in snapshot.blocked_items],
     )
 
@@ -994,6 +1020,19 @@ class CoreQueryResolver:
         if snapshot is None:
             return None
         return _build_vfs_snapshot(snapshot)
+
+    @strawberry.field(
+        description="Return aggregate VFS blocking/query/provider posture for the current or requested snapshot"
+    )
+    async def vfs_catalog_rollup(
+        self,
+        info: Info[GraphQLContext, object],
+        generation_id: str | None = None,
+    ) -> GQLVfsCatalogRollup | None:
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
+            return None
+        return _build_vfs_catalog_rollup(summarize_vfs_catalog_snapshot(snapshot))
 
     @strawberry.field(
         description="List blocked mounted catalog items from the current or requested snapshot"

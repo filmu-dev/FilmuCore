@@ -769,6 +769,15 @@ class OrchestrationSettings(CompatibilityModel):
         default_factory=HeavyStageIsolationSettings
     )
     queued_refresh_proof_refs: list[str] = Field(default_factory=list)
+    downloader_selection_mode: Literal["fixed_priority", "ordered_failover"] = (
+        "ordered_failover"
+    )
+    downloader_provider_priority: list[str] = Field(
+        default_factory=lambda: ["realdebrid", "alldebrid", "debridlink", "stremthru"]
+    )
+    downloader_provider_attempt_limit: int = Field(default=4, ge=1)
+    downloader_failover_on_rate_limit: bool = True
+    downloader_failover_on_provider_error: bool = True
 
 
 class StreamSettings(CompatibilityModel):

@@ -71,6 +71,7 @@ class AppResources:
     queued_hls_restricted_fallback_refresh_controller: Any | None = None
     vfs_catalog_supplier: FilmuVfsCatalogSupplier | None = None
     vfs_catalog_server: FilmuVfsCatalogGrpcServer | None = None
+    replay_backplane: Any | None = None
     log_stream: LogStreamBroker = field(default_factory=LogStreamBroker)
     arq_redis: ArqRedis | None = None
     arq_queue_name: str = "filmu-py"

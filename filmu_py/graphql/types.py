@@ -175,6 +175,30 @@ class GQLVfsCatalogStats:
 
 
 @strawberry.type
+class GQLVfsRollupBucket:
+    """One named VFS rollup counter."""
+
+    key: str
+    count: int
+
+
+@strawberry.type
+class GQLVfsCatalogRollup:
+    """Aggregate VFS posture counts derived from one published snapshot."""
+
+    blocked_reasons: list[GQLVfsRollupBucket] = strawberry.field(name="blockedReasons")
+    query_strategies: list[GQLVfsRollupBucket] = strawberry.field(name="queryStrategies")
+    provider_families: list[GQLVfsRollupBucket] = strawberry.field(name="providerFamilies")
+    lease_states: list[GQLVfsRollupBucket] = strawberry.field(name="leaseStates")
+    locator_sources: list[GQLVfsRollupBucket] = strawberry.field(name="locatorSources")
+    restricted_fallback_file_count: int = strawberry.field(name="restrictedFallbackFileCount")
+    provider_path_preserved_file_count: int = strawberry.field(
+        name="providerPathPreservedFileCount"
+    )
+    multi_role_file_count: int = strawberry.field(name="multiRoleFileCount")
+
+
+@strawberry.type
 class GQLVfsBlockedItem:
     """Blocked mounted item retained in one VFS snapshot."""
 
@@ -191,6 +215,7 @@ class GQLVfsSnapshot:
     generation_id: str = strawberry.field(name="generationId")
     published_at: str = strawberry.field(name="publishedAt")
     stats: GQLVfsCatalogStats
+    rollup: GQLVfsCatalogRollup
     blocked_items: list[GQLVfsBlockedItem] = strawberry.field(name="blockedItems")
 
 

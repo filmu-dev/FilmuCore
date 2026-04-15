@@ -314,15 +314,13 @@ def _candidate_vfs_runtime_status_paths() -> list[Path]:
     env_path = os.getenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH")
     if env_path and env_path.strip():
         paths.append(Path(env_path.strip()))
-    try:
-        state_payload = json.loads(_MANAGED_WINDOWS_VFS_STATE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        state_payload = None
-    if isinstance(state_payload, dict):
+    state_payload = _load_managed_windows_vfs_state()
+    if state_payload is not None:
         runtime_status_path = state_payload.get("runtime_status_path")
         if isinstance(runtime_status_path, str) and runtime_status_path.strip():
             paths.append(Path(runtime_status_path.strip()))
-    paths.append(_MANAGED_WINDOWS_VFS_STATE_PATH.parent / "filmuvfs-runtime-status.json")
+    for state_path in _candidate_managed_windows_vfs_state_paths():
+        paths.append(state_path.parent / "filmuvfs-runtime-status.json")
     unique_paths: list[Path] = []
     seen: set[Path] = set()
     for path in paths:
@@ -365,6 +363,64 @@ def _candidate_playback_artifacts_roots() -> list[Path]:
         seen.add(normalized)
         unique_roots.append(normalized)
     return unique_roots
+
+
+def _candidate_managed_windows_vfs_state_paths() -> list[Path]:
+    """Return managed Windows rollout-control state paths in precedence order."""
+
+    paths = [
+        root / "windows-native-stack" / "filmuvfs-windows-state.json"
+        for root in _candidate_playback_artifacts_roots()
+    ]
+    if _MANAGED_WINDOWS_VFS_STATE_PATH not in paths:
+        paths.append(_MANAGED_WINDOWS_VFS_STATE_PATH)
+
+    unique_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        normalized = path.expanduser()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_paths.append(normalized)
+    return unique_paths
+
+
+def _load_managed_windows_vfs_state() -> dict[str, object] | None:
+    """Load the first readable managed Windows rollout-control state payload."""
+
+    for path in _candidate_managed_windows_vfs_state_paths():
+        payload = _load_json_file(path)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _preferred_managed_windows_vfs_state_path() -> Path:
+    """Return the preferred managed Windows rollout-control state path for writes."""
+
+    return _candidate_managed_windows_vfs_state_paths()[0]
+
+
+def _persist_managed_windows_vfs_state(
+    updates: dict[str, object | None],
+) -> dict[str, object]:
+    """Persist managed Windows rollout-control state while preserving unrelated fields."""
+
+    state = dict(_load_managed_windows_vfs_state() or {})
+    for key, value in updates.items():
+        if value is None:
+            state.pop(key, None)
+            continue
+        state[key] = value
+
+    state_path = _preferred_managed_windows_vfs_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(state, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return state
 
 
 def _candidate_github_main_policy_paths() -> list[Path]:
@@ -757,11 +813,17 @@ def _apply_vfs_rollout_policy(
 ) -> dict[str, int | float | str | list[str]]:
     """Apply canary and rollback policy to the runtime-derived VFS rollout posture."""
 
+    state_payload = _load_managed_windows_vfs_state() or {}
     canary_environment = ""
     if playback_gate_governance is not None:
         canary_environment = _as_str(
             playback_gate_governance.get("playback_gate_environment_class"),
         )
+    if not canary_environment:
+        canary_environment = _as_str(state_payload.get("environment_class"))
+
+    operator_pause = bool(state_payload.get("promotion_paused"))
+    operator_rollback = bool(state_payload.get("rollback_requested"))
 
     governance["vfs_runtime_rollout_environment_class"] = canary_environment
     governance["vfs_runtime_rollout_canary_decision"] = "capture_runtime_status"
@@ -778,14 +840,24 @@ def _apply_vfs_rollout_policy(
         playback_gate_governance is not None
         and _as_int(playback_gate_governance.get("playback_gate_windows_soak_ready")) > 0
     )
+    rollout_reasons = cast(list[str], governance["vfs_runtime_rollout_reasons"])
 
-    if rollout_readiness == "blocked":
+    if operator_rollback:
         governance["vfs_runtime_rollout_canary_decision"] = "rollback_current_environment"
         governance["vfs_runtime_rollout_merge_gate"] = "blocked"
+        if "operator_requested_rollback" not in rollout_reasons:
+            rollout_reasons.append("operator_requested_rollback")
+    elif rollout_readiness == "blocked":
+        governance["vfs_runtime_rollout_canary_decision"] = "rollback_current_environment"
+        governance["vfs_runtime_rollout_merge_gate"] = "blocked"
+    elif operator_pause:
+        governance["vfs_runtime_rollout_canary_decision"] = "hold_canary_and_repeat_soak"
+        governance["vfs_runtime_rollout_merge_gate"] = "hold"
+        if "operator_requested_promotion_pause" not in rollout_reasons:
+            rollout_reasons.append("operator_requested_promotion_pause")
     elif not windows_soak_ready:
         governance["vfs_runtime_rollout_canary_decision"] = "hold_until_windows_soak_is_green"
         governance["vfs_runtime_rollout_merge_gate"] = "hold"
-        rollout_reasons = cast(list[str], governance["vfs_runtime_rollout_reasons"])
         if "windows_vfs_soak_not_green" not in rollout_reasons:
             rollout_reasons.append("windows_vfs_soak_not_green")
     elif rollout_readiness == "warning":
@@ -1314,4 +1386,16 @@ def as_str(value: object, *, default: str = "") -> str:
     """Public string coercion helper for stream-route policy evaluation."""
 
     return _as_str(value, default=default)
+
+
+def managed_windows_vfs_state_snapshot() -> dict[str, object]:
+    """Return the current managed Windows rollout-control state payload."""
+
+    return dict(_load_managed_windows_vfs_state() or {})
+
+
+def persist_managed_windows_vfs_state(updates: dict[str, object | None]) -> dict[str, object]:
+    """Persist managed Windows rollout-control state and return the resulting payload."""
+
+    return _persist_managed_windows_vfs_state(updates)
 

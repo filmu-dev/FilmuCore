@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from sqlalchemy.orm.exc import DetachedInstanceError
+
 from filmu_py.db.models import EpisodeORM, MediaItemORM, MovieORM, SeasonORM, ShowORM
 from filmu_py.services.media import (
+    _build_specialization_record,
     build_media_specialization_record,
     update_media_specialization_record,
 )
@@ -79,3 +82,36 @@ def test_episode_specialization_hierarchy_can_link_to_season_and_show() -> None:
     assert episode.season is season
     assert season in show.seasons
     assert episode in season.episodes
+
+
+def test_build_specialization_record_uses_metadata_when_relationships_are_detached() -> None:
+    class _DetachedMovieItem:
+        def __init__(self) -> None:
+            self.title = "The Matrix"
+            self.attributes = {
+                "item_type": "movie",
+                "tmdb_id": "603",
+                "imdb_id": "tt0133093",
+            }
+
+        @property
+        def movie(self) -> object | None:
+            raise DetachedInstanceError("movie relationship is detached")
+
+        @property
+        def show(self) -> object | None:
+            raise DetachedInstanceError("show relationship is detached")
+
+        @property
+        def season(self) -> object | None:
+            raise DetachedInstanceError("season relationship is detached")
+
+        @property
+        def episode(self) -> object | None:
+            raise DetachedInstanceError("episode relationship is detached")
+
+    record = _build_specialization_record(_DetachedMovieItem())  # type: ignore[arg-type]
+
+    assert record.item_type == "movie"
+    assert record.tmdb_id == "603"
+    assert record.imdb_id == "tt0133093"

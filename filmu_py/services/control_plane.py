@@ -48,6 +48,50 @@ class ControlPlaneConsumerClaimResult:
     fence_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ControlPlaneSummary:
+    """Derived replay/control-plane health rollup for operator posture routes."""
+
+    total_subscribers: int
+    active_subscribers: int
+    stale_subscribers: int
+    error_subscribers: int
+    fenced_subscribers: int
+    ack_pending_subscribers: int
+    stream_count: int
+    group_count: int
+    node_count: int
+    tenant_count: int
+    oldest_heartbeat_age_seconds: float | None
+    status_counts: dict[str, int]
+    required_actions: tuple[str, ...]
+    remaining_gaps: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPlaneRemediationResult:
+    """Outcome of one control-plane stale/fence/error sweep."""
+
+    active_within_seconds: int
+    stale_marked_subscribers: int
+    fence_resolved_subscribers: int
+    error_recovered_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummary
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPlaneAckRecoveryResult:
+    """Outcome of one operator-triggered ack-backlog recovery sweep."""
+
+    active_within_seconds: int
+    rewound_subscribers: int
+    stale_marked_subscribers: int
+    pending_without_ack_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummary
+
+
 class ControlPlaneService:
     """Persist and summarize active replay/control-plane subscriber ownership."""
 
@@ -79,6 +123,243 @@ class ControlPlaneService:
                     status = "stale"
                 records.append(_record_from_orm(row, status=status))
             return records
+
+    async def summarize_subscribers(
+        self,
+        *,
+        active_within_seconds: int = 120,
+    ) -> ControlPlaneSummary:
+        """Return a bounded summary of durable replay/control-plane ownership health."""
+
+        records = await self.list_subscribers(active_within_seconds=active_within_seconds)
+        now = datetime.now(UTC)
+        status_counts: dict[str, int] = {}
+        active = 0
+        stale = 0
+        error = 0
+        fenced = 0
+        ack_pending = 0
+        stream_names: set[str] = set()
+        group_keys: set[tuple[str, str]] = set()
+        node_ids: set[str] = set()
+        tenant_ids: set[str] = set()
+        oldest_heartbeat_age_seconds: float | None = None
+
+        for record in records:
+            status_counts[record.status] = status_counts.get(record.status, 0) + 1
+            stream_names.add(record.stream_name)
+            group_keys.add((record.stream_name, record.group_name))
+            node_ids.add(record.node_id)
+            if record.tenant_id:
+                tenant_ids.add(record.tenant_id)
+
+            heartbeat_age_seconds = max(
+                0.0,
+                (now - record.last_heartbeat_at).total_seconds(),
+            )
+            if oldest_heartbeat_age_seconds is None:
+                oldest_heartbeat_age_seconds = heartbeat_age_seconds
+            else:
+                oldest_heartbeat_age_seconds = max(
+                    oldest_heartbeat_age_seconds,
+                    heartbeat_age_seconds,
+                )
+
+            if record.status == "active":
+                active += 1
+            elif record.status == "stale":
+                stale += 1
+            elif record.status == "error":
+                error += 1
+
+            if _has_unresolved_fence(record):
+                fenced += 1
+            if record.last_delivered_event_id and record.last_delivered_event_id != record.last_acked_event_id:
+                ack_pending += 1
+
+        required_actions: list[str] = []
+        remaining_gaps: list[str] = []
+        if stale > 0:
+            required_actions.append("recover_stale_control_plane_subscribers")
+            remaining_gaps.append(
+                "at least one control-plane subscriber heartbeat is stale"
+            )
+        if fenced > 0:
+            required_actions.append("resolve_fenced_control_plane_consumers")
+            remaining_gaps.append(
+                "one or more replay consumers remain fenced by an active owner"
+            )
+        if error > 0:
+            required_actions.append("investigate_control_plane_subscriber_errors")
+            remaining_gaps.append(
+                "one or more control-plane subscribers are in error status"
+            )
+        if ack_pending > 0:
+            required_actions.append("drain_control_plane_ack_backlog")
+            remaining_gaps.append(
+                "one or more subscribers have unacknowledged delivered events"
+            )
+
+        return ControlPlaneSummary(
+            total_subscribers=len(records),
+            active_subscribers=active,
+            stale_subscribers=stale,
+            error_subscribers=error,
+            fenced_subscribers=fenced,
+            ack_pending_subscribers=ack_pending,
+            stream_count=len(stream_names),
+            group_count=len(group_keys),
+            node_count=len(node_ids),
+            tenant_count=len(tenant_ids),
+            oldest_heartbeat_age_seconds=oldest_heartbeat_age_seconds,
+            status_counts=dict(sorted(status_counts.items())),
+            required_actions=tuple(required_actions),
+            remaining_gaps=tuple(remaining_gaps),
+        )
+
+    async def remediate_subscribers(
+        self,
+        *,
+        active_within_seconds: int = 120,
+    ) -> ControlPlaneRemediationResult:
+        """Persistently mark expired/fenced/error rows stale so ownership can recover cleanly."""
+
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=max(1, active_within_seconds))
+        stale_marked = 0
+        fence_resolved = 0
+        error_recovered = 0
+
+        async with self._db.session() as session:
+            rows = (
+                await session.execute(
+                    select(ControlPlaneSubscriberORM).order_by(
+                        ControlPlaneSubscriberORM.stream_name.asc(),
+                        ControlPlaneSubscriberORM.group_name.asc(),
+                        ControlPlaneSubscriberORM.consumer_name.asc(),
+                    )
+                )
+            ).scalars()
+            for row in rows:
+                heartbeat_expired = row.last_heartbeat_at < stale_before
+                unresolved_fence = _has_unresolved_fence(_record_from_orm(row))
+                should_mark_stale = heartbeat_expired and row.status in {
+                    "active",
+                    "error",
+                    "fenced",
+                }
+                if not should_mark_stale and not (heartbeat_expired and unresolved_fence):
+                    continue
+
+                if unresolved_fence or row.status == "fenced":
+                    fence_resolved += 1
+                elif row.status == "error":
+                    error_recovered += 1
+                elif row.status == "active":
+                    stale_marked += 1
+
+                row.status = "stale"
+                row.updated_at = now
+                if unresolved_fence and "consumer_fenced" in str(row.last_error or ""):
+                    row.last_error = (
+                        f"{row.last_error}; stale_fence_swept at={now.isoformat()}"
+                    )
+            await session.flush()
+            await session.commit()
+
+        summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return ControlPlaneRemediationResult(
+            active_within_seconds=active_within_seconds,
+            stale_marked_subscribers=stale_marked,
+            fence_resolved_subscribers=fence_resolved,
+            error_recovered_subscribers=error_recovered,
+            total_updated_subscribers=stale_marked + fence_resolved + error_recovered,
+            summary=summary,
+        )
+
+    async def recover_ack_backlog(
+        self,
+        *,
+        active_within_seconds: int = 120,
+    ) -> ControlPlaneAckRecoveryResult:
+        """Rewind abandoned subscriber delivery cursors back to the last acknowledged event."""
+
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=max(1, active_within_seconds))
+        rewound = 0
+        stale_marked = 0
+        pending_without_ack = 0
+        updated_rows = 0
+
+        async with self._db.session() as session:
+            rows = (
+                await session.execute(
+                    select(ControlPlaneSubscriberORM).order_by(
+                        ControlPlaneSubscriberORM.stream_name.asc(),
+                        ControlPlaneSubscriberORM.group_name.asc(),
+                        ControlPlaneSubscriberORM.consumer_name.asc(),
+                    )
+                )
+            ).scalars()
+            for row in rows:
+                ack_pending = bool(
+                    row.last_delivered_event_id
+                    and row.last_delivered_event_id != row.last_acked_event_id
+                )
+                if not ack_pending:
+                    continue
+
+                heartbeat_expired = row.last_heartbeat_at < stale_before
+                recoverable_status = row.status in {"stale", "fenced", "error"}
+                if not heartbeat_expired and not recoverable_status:
+                    continue
+
+                if row.last_acked_event_id is None:
+                    pending_without_ack += 1
+                    if row.status != "stale":
+                        row.status = "stale"
+                        stale_marked += 1
+                    if row.last_error:
+                        row.last_error = (
+                            f"{row.last_error}; ack_recovery_blocked no_last_acked_event at={now.isoformat()}"
+                        )
+                    else:
+                        row.last_error = (
+                            f"ack_recovery_blocked no_last_acked_event at={now.isoformat()}"
+                        )
+                    row.updated_at = now
+                    updated_rows += 1
+                    continue
+
+                if row.status != "stale":
+                    row.status = "stale"
+                    stale_marked += 1
+
+                row.last_read_offset = row.last_acked_event_id
+                row.last_delivered_event_id = row.last_acked_event_id
+                row.updated_at = now
+                if row.last_error:
+                    row.last_error = (
+                        f"{row.last_error}; ack_recovery_rewound to={row.last_acked_event_id} at={now.isoformat()}"
+                    )
+                else:
+                    row.last_error = (
+                        f"ack_recovery_rewound to={row.last_acked_event_id} at={now.isoformat()}"
+                    )
+                rewound += 1
+                updated_rows += 1
+            await session.flush()
+            await session.commit()
+
+        summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return ControlPlaneAckRecoveryResult(
+            active_within_seconds=active_within_seconds,
+            rewound_subscribers=rewound,
+            stale_marked_subscribers=stale_marked,
+            pending_without_ack_subscribers=pending_without_ack,
+            total_updated_subscribers=updated_rows,
+            summary=summary,
+        )
 
     async def observe_delivery(
         self,
@@ -339,3 +620,13 @@ def _record_from_orm(
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def _has_unresolved_fence(record: ControlPlaneSubscriberRecord) -> bool:
+    """Return whether one subscriber row still reflects an unresolved fence state."""
+
+    if record.status == "fenced":
+        return True
+    if "consumer_fenced" not in str(record.last_error or ""):
+        return False
+    return bool(record.last_heartbeat_at <= record.updated_at)

@@ -5,8 +5,12 @@ import asyncio
 import httpx
 
 from filmu_py.plugins import (
+    COMET_PLUGIN_NAME,
+    LISTRR_PLUGIN_NAME,
     MDBLIST_PLUGIN_NAME,
     NOTIFICATIONS_PLUGIN_NAME,
+    PLEX_PLUGIN_NAME,
+    SEERR_PLUGIN_NAME,
     STREAM_CONTROL_PLUGIN_NAME,
     STREMTHRU_PLUGIN_NAME,
     ExternalIdentifiers,
@@ -29,15 +33,20 @@ def test_register_builtin_plugins_registers_torrentio_scraper() -> None:
     assert registered == (
         TORRENTIO_PLUGIN_NAME,
         PROWLARR_PLUGIN_NAME,
+        COMET_PLUGIN_NAME,
         RARBG_PLUGIN_NAME,
         MDBLIST_PLUGIN_NAME,
+        SEERR_PLUGIN_NAME,
+        LISTRR_PLUGIN_NAME,
         STREMTHRU_PLUGIN_NAME,
         STREAM_CONTROL_PLUGIN_NAME,
         NOTIFICATIONS_PLUGIN_NAME,
+        PLEX_PLUGIN_NAME,
     )
     assert [plugin.__class__.__name__ for plugin in registry.get_scrapers()] == [
         "TorrentioScraper",
         "ProwlarrScraper",
+        "CometScraper",
         "RarbgScraper",
     ]
 

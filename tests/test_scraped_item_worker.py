@@ -50,11 +50,15 @@ from filmu_py.workers import stage_isolation, tasks
 
 
 class _PluginRegistryStub:
-    def __init__(self, scrapers: list[object]) -> None:
+    def __init__(self, scrapers: list[object], *, downloaders: list[object] | None = None) -> None:
         self._scrapers = scrapers
+        self._downloaders = downloaders or []
 
     def get_scrapers(self) -> list[object]:
         return list(self._scrapers)
+
+    def get_downloaders(self) -> list[object]:
+        return list(self._downloaders)
 
 
 def _build_item_orm(*, item_id: str, state: ItemState) -> MediaItemORM:
@@ -1453,6 +1457,179 @@ def test_debrid_item_persists_entries_and_enqueues_finalize(monkeypatch: Any) ->
     )
 
 
+def test_debrid_item_fails_over_to_next_downloader_provider(monkeypatch: Any) -> None:
+    item_id = "item-debrid-failover"
+    selected = _build_stream(
+        stream_id="stream-failover",
+        item_id=item_id,
+        parsed=True,
+        selected=True,
+    )
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    settings.downloaders.all_debrid.enabled = True
+    settings.downloaders.all_debrid.api_key = "ad-token"
+
+    class _RateLimitedClient:
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return "provider-torrent-rd"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            request = httpx.Request(
+                "GET",
+                f"https://api.real-debrid.com/rest/1.0/torrents/info/{provider_torrent_id}",
+            )
+            response = httpx.Response(429, headers={"Retry-After": "7"}, request=request)
+            raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+            raise AssertionError("select_files should not run after a rate-limit failure")
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            raise AssertionError("get_download_links should not run after a rate-limit failure")
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([])
+
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **kwargs: _RateLimitedClient()
+        if kwargs["provider"] == "realdebrid"
+        else _FakeDebridClient(),
+    )
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.persisted_downloads[0]["provider"] == "alldebrid"
+    assert redis.calls[-1] == (
+        "finalize_item",
+        (item_id,),
+        {"_job_id": tasks.finalize_item_job_id(item_id), "_queue_name": "filmu-py"},
+    )
+
+
+def test_debrid_item_fails_over_when_provider_manifest_is_incomplete(monkeypatch: Any) -> None:
+    item_id = "item-debrid-manifest-failover"
+    selected = _build_stream(
+        stream_id="stream-manifest-failover",
+        item_id=item_id,
+        parsed=True,
+        selected=True,
+    )
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    settings.downloaders.all_debrid.enabled = True
+    settings.downloaders.all_debrid.api_key = "ad-token"
+
+    class _IncompleteManifestClient:
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return "provider-torrent-rd"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            _ = provider_torrent_id
+
+            @dataclass(frozen=True)
+            class _TorrentFile:
+                file_id: str
+                file_name: str
+                file_path: str | None
+                file_size_bytes: int | None
+                selected: bool = True
+                download_url: str | None = None
+                media_type: str | None = "episode"
+
+            @dataclass(frozen=True)
+            class _TorrentInfo:
+                provider_torrent_id: str
+                status: str
+                name: str | None
+                info_hash: str | None
+                files: list[_TorrentFile]
+                links: list[str]
+
+            return _TorrentInfo(
+                provider_torrent_id="provider-torrent-rd",
+                status="downloaded",
+                name="Pack",
+                info_hash="abc123",
+                files=[
+                    _TorrentFile(
+                        file_id="file-1",
+                        file_name="Episode 01.mkv",
+                        file_path="Show A/Season 01/Episode 01.mkv",
+                        file_size_bytes=800 * 1024 * 1024,
+                    ),
+                    _TorrentFile(
+                        file_id="file-2",
+                        file_name="Episode 02.mkv",
+                        file_path="Show B/Season 01/Episode 02.mkv",
+                        file_size_bytes=810 * 1024 * 1024,
+                    ),
+                ],
+                links=[],
+            )
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            return []
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([])
+
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **kwargs: _IncompleteManifestClient()
+        if kwargs["provider"] == "realdebrid"
+        else _FakeDebridClient(),
+    )
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.persisted_downloads[0]["provider"] == "alldebrid"
+    assert redis.calls[-1] == (
+        "finalize_item",
+        (item_id,),
+        {"_job_id": tasks.finalize_item_job_id(item_id), "_queue_name": "filmu-py"},
+    )
+
+
 def test_debrid_item_transitions_to_failed_when_no_selected_stream(monkeypatch: Any) -> None:
     item_id = "item-debrid-failed"
     media_service = FakePipelineMediaService(
@@ -2508,6 +2685,127 @@ def test_resolve_enabled_downloader_uses_priority_order_and_logs_warning(
         and getattr(record, "item_request_id", None) == "request-priority"
         for record in caplog.records
     )
+
+
+def test_resolve_download_client_falls_back_to_registered_stremthru_plugin(
+    monkeypatch: Any,
+) -> None:
+    settings = _build_worker_settings()
+    settings.downloaders.real_debrid.enabled = False
+    settings.downloaders.real_debrid.api_key = ""
+    settings.downloaders.stremthru.enabled = True
+    settings.downloaders.stremthru.url = "https://stremthru.example.test"
+    settings.downloaders.stremthru.token = "st-token"
+
+    class _FakeDownloaderPlugin:
+        plugin_name = "stremthru"
+
+        async def add_magnet(self, request: object) -> object:
+            _ = request
+            return type("MagnetAddResult", (), {"download_id": "st-1"})()
+
+        async def get_status(self, request: object) -> object:
+            _ = request
+            return type(
+                "DownloadStatusResult",
+                (),
+                {
+                    "download_id": "st-1",
+                    "status": "ready",
+                    "files": (
+                        type(
+                            "DownloadFileRecord",
+                            (),
+                            {
+                                "file_id": "file-1",
+                                "path": "Show/Season 01/Episode 01.mkv",
+                                "size_bytes": 800 * 1024 * 1024,
+                                "selected": True,
+                                "download_url": "https://cdn.example.test/st-1",
+                            },
+                        )(),
+                    ),
+                },
+            )()
+
+        async def get_download_links(self, request: object) -> list[object]:
+            _ = request
+            return [type("DownloadLinkResult", (), {"url": "https://cdn.example.test/st-1"})()]
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([], downloaders=[_FakeDownloaderPlugin()])
+
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+
+    provider, client = asyncio.run(
+        tasks._resolve_download_client(
+            {},
+            settings=settings,
+            limiter=_AllowedLimiter(),
+            item_id="item-plugin-fallback",
+            item_request_id="request-plugin-fallback",
+        )
+    )
+    torrent_id = asyncio.run(client.add_magnet("magnet:?xt=urn:btih:abc"))
+    torrent_info = asyncio.run(client.get_torrent_info(torrent_id))
+    links = asyncio.run(client.get_download_links(torrent_id))
+
+    assert provider == "stremthru"
+    assert torrent_id == "st-1"
+    assert torrent_info.status == "ready"
+    assert torrent_info.files[0].file_path == "Show/Season 01/Episode 01.mkv"
+    assert links == ["https://cdn.example.test/st-1"]
+
+
+def test_resolve_download_clients_applies_shared_policy_order_across_builtin_and_plugin(
+    monkeypatch: Any,
+) -> None:
+    settings = _build_worker_settings()
+    settings.downloaders.real_debrid.enabled = True
+    settings.downloaders.real_debrid.api_key = "rd-token"
+    settings.orchestration.downloader_provider_priority = ["hyperdebrid", "realdebrid", "stremthru"]
+
+    class _FakeDownloaderPlugin:
+        plugin_name = "hyperdebrid"
+
+        async def add_magnet(self, request: object) -> object:
+            _ = request
+            return type("MagnetAddResult", (), {"download_id": "hd-1"})()
+
+        async def get_status(self, request: object) -> object:
+            _ = request
+            return type(
+                "DownloadStatusResult",
+                (),
+                {"download_id": "hd-1", "status": "ready", "files": ()},
+            )()
+
+        async def get_download_links(self, request: object) -> list[object]:
+            _ = request
+            return []
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([], downloaders=[_FakeDownloaderPlugin()])
+
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **kwargs: f"builtin:{kwargs['provider']}",
+    )
+
+    candidates = asyncio.run(
+        tasks._resolve_download_clients(
+            {},
+            settings=settings,
+            limiter=_AllowedLimiter(),
+            item_id="item-plugin-policy",
+            item_request_id="request-plugin-policy",
+        )
+    )
+
+    assert [provider for provider, _client in candidates] == ["hyperdebrid", "realdebrid"]
+    assert "builtin:realdebrid" in [client for _provider, client in candidates]
 
 
 def test_worker_runtime_settings_resolution_prefers_persisted_blob_when_ctx_has_no_settings(

@@ -335,6 +335,70 @@ class ControlPlaneSubscriberResponse(BaseModel):
     updated_at: str
 
 
+class ControlPlaneSummaryResponse(BaseModel):
+    """Operator-visible control-plane rollup across durable subscribers."""
+
+    total_subscribers: int
+    active_subscribers: int
+    stale_subscribers: int
+    error_subscribers: int
+    fenced_subscribers: int
+    ack_pending_subscribers: int
+    stream_count: int
+    group_count: int
+    node_count: int
+    tenant_count: int
+    oldest_heartbeat_age_seconds: float | None = None
+    status_counts: dict[str, int]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class ControlPlaneRemediationResponse(BaseModel):
+    """Outcome of one operator-triggered control-plane stale/fence sweep."""
+
+    generated_at: str
+    active_within_seconds: int
+    stale_marked_subscribers: int
+    fence_resolved_subscribers: int
+    error_recovered_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummaryResponse
+
+
+class ControlPlaneAckRecoveryResponse(BaseModel):
+    """Outcome of one operator-triggered control-plane ack-backlog recovery sweep."""
+
+    generated_at: str
+    active_within_seconds: int
+    rewound_subscribers: int
+    stale_marked_subscribers: int
+    pending_without_ack_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummaryResponse
+
+
+class ControlPlanePendingRecoveryResponse(BaseModel):
+    """Outcome of one operator-triggered replay pending-entry claim sweep."""
+
+    generated_at: str
+    group_name: str
+    consumer_name: str
+    min_idle_ms: int
+    claim_limit: int
+    claimed_count: int
+    claimed_event_ids: list[str]
+    next_start_id: str
+    pending_count_before: int
+    pending_count_after: int
+    oldest_pending_event_id: str | None = None
+    latest_pending_event_id: str | None = None
+    pending_consumer_counts: dict[str, int]
+    summary: ControlPlaneSummaryResponse
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
 class EnterpriseOperationsSliceResponse(BaseModel):
     """One enterprise-operations workstream posture summary."""
 
@@ -392,6 +456,105 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
     plugin_runtime_isolation: EnterpriseOperationsSliceResponse
     heavy_stage_workload_isolation: EnterpriseOperationsSliceResponse
     release_metadata_performance: EnterpriseOperationsSliceResponse
+
+
+class PlaybackGateEvidenceResponse(BaseModel):
+    """Current playback-gate artifact posture with operator actions and gaps."""
+
+    generated_at: str
+    rollout_readiness: str
+    next_action: str
+    reasons: list[str]
+    runner_status: str
+    runner_ready: bool
+    policy_validation_status: str
+    policy_ready: bool
+    provider_gate_required: bool
+    provider_gate_ran: bool
+    windows_provider_ready: bool
+    windows_provider_coverage: list[str]
+    windows_soak_ready: bool
+    windows_soak_profiles: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class VfsRolloutControlRequest(BaseModel):
+    """Operator-managed VFS rollout-control state persisted for canary decisions."""
+
+    environment_class: str | None = None
+    runtime_status_path: str | None = None
+    promotion_paused: bool | None = None
+    rollback_requested: bool | None = None
+    notes: str | None = None
+
+
+class VfsRolloutControlResponse(BaseModel):
+    """Current VFS rollout-control state plus the derived canary posture."""
+
+    generated_at: str
+    environment_class: str
+    runtime_status_path: str | None = None
+    promotion_paused: bool
+    rollback_requested: bool
+    notes: str | None = None
+    rollout_readiness: str
+    next_action: str
+    canary_decision: str
+    merge_gate: str
+    reasons: list[str]
+
+
+class ObservabilityConvergenceResponse(BaseModel):
+    """Operator-facing cross-process log/search/trace convergence posture."""
+
+    generated_at: str
+    status: Literal["ready", "partial", "blocked"]
+    structured_logging_enabled: bool
+    structured_log_path: str
+    otel_enabled: bool
+    otel_endpoint_configured: bool
+    log_shipper_enabled: bool
+    log_shipper_type: str
+    log_shipper_target_configured: bool
+    log_shipper_healthcheck_configured: bool
+    search_backend: str
+    environment_shipping_enabled: bool
+    alerting_enabled: bool
+    rust_trace_correlation_enabled: bool
+    correlation_contract_complete: bool
+    proof_refs: list[str]
+    required_correlation_fields: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class DownloaderProviderCandidateResponse(BaseModel):
+    """One downloader candidate surfaced by the orchestration posture endpoint."""
+
+    name: str
+    source: Literal["builtin", "plugin"]
+    enabled: bool
+    configured: bool
+    selected: bool = False
+    priority: int | None = None
+    capabilities: list[str] = []
+
+
+class DownloaderOrchestrationResponse(BaseModel):
+    """Operator-facing downloader orchestration posture and known limitations."""
+
+    generated_at: str
+    selection_mode: str
+    selected_provider: str | None = None
+    multi_provider_enabled: bool
+    plugin_downloaders_registered: int
+    worker_plugin_dispatch_ready: bool
+    fanout_ready: bool
+    multi_container_ready: bool
+    providers: list[DownloaderProviderCandidateResponse]
+    required_actions: list[str]
+    remaining_gaps: list[str]
 
 
 class TenantQuotaPolicyResponse(BaseModel):

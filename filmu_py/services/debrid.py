@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, Protocol, cast, runtime_checkable
 
 import httpx
@@ -43,6 +44,7 @@ class TorrentFile:
 
     file_id: str
     file_name: str
+    file_path: str | None = None
     file_size_bytes: int | None = None
     selected: bool = False
     download_url: str | None = None
@@ -61,6 +63,18 @@ class TorrentInfo:
     links: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class TorrentDownloadManifest:
+    """Validated file/link manifest derived from one provider download payload."""
+
+    files: list[TorrentFile] = field(default_factory=list)
+    download_urls: list[str] = field(default_factory=list)
+    container_roots: tuple[str, ...] = ()
+    multi_container: bool = False
+    unresolved_file_count: int = 0
+    duplicate_path_count: int = 0
+
+
 @runtime_checkable
 class DebridDownloadClient(Protocol):
     """Structural interface for debrid provider clients used in the download pipeline."""
@@ -69,6 +83,52 @@ class DebridDownloadClient(Protocol):
     async def get_torrent_info(self, provider_torrent_id: str) -> TorrentInfo: ...
     async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None: ...
     async def get_download_links(self, provider_torrent_id: str) -> list[str]: ...
+
+
+@dataclass(slots=True)
+class PluginDownloaderClientAdapter:
+    """Adapt one registered downloader plugin into the debrid worker client contract."""
+
+    provider: str
+    plugin: Any
+
+    async def add_magnet(self, magnet_url: str) -> str:
+        result = await self.plugin.add_magnet(SimpleNamespace(magnet_url=magnet_url))
+        return str(result.download_id)
+
+    async def get_torrent_info(self, provider_torrent_id: str) -> TorrentInfo:
+        status = await self.plugin.get_status(SimpleNamespace(download_id=provider_torrent_id))
+        files = [
+            TorrentFile(
+                file_id=file.file_id,
+                file_name=file.path.rsplit("/", 1)[-1],
+                file_path=file.path,
+                file_size_bytes=file.size_bytes,
+                selected=file.selected,
+                download_url=file.download_url,
+                media_type=_infer_media_type(file.path),
+            )
+            for file in status.files
+        ]
+        links = [file.download_url for file in status.files if file.download_url]
+        return TorrentInfo(
+            provider_torrent_id=status.download_id,
+            status=status.status,
+            files=files,
+            links=links,
+        )
+
+    async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+        selection_method = getattr(self.plugin, "select_files", None)
+        if callable(selection_method):
+            await cast(Any, selection_method)(provider_torrent_id, file_ids)
+        return None
+
+    async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+        results = await self.plugin.get_download_links(
+            SimpleNamespace(download_id=provider_torrent_id, file_ids=())
+        )
+        return [result.url for result in results if result.url]
 
 
 def _build_download_rate_limit_bucket_key(provider: str) -> str:
@@ -112,14 +172,19 @@ def filter_torrent_files(
     }
     filtered: list[TorrentFile] = []
     for file in files:
-        extension = file.file_name.rsplit(".", 1)[-1].lower() if "." in file.file_name else ""
+        identity_path = (
+            getattr(file, "file_path", None)
+            or getattr(file, "file_name", None)
+            or ""
+        )
+        extension = identity_path.rsplit(".", 1)[-1].lower() if "." in identity_path else ""
         if extension not in allowed_extensions:
             continue
 
-        media_type = file.media_type or _infer_media_type(file.file_name)
+        media_type = getattr(file, "media_type", None) or _infer_media_type(identity_path)
         size_mb = None
-        if file.file_size_bytes is not None:
-            size_bytes = file.file_size_bytes
+        size_bytes = getattr(file, "file_size_bytes", None)
+        if size_bytes is not None:
             size_mb = float(size_bytes) / (1024 * 1024)
         if media_type == "episode":
             min_mb = settings.episode_filesize_mb_min
@@ -133,6 +198,73 @@ def filter_torrent_files(
             continue
         filtered.append(file)
     return filtered
+
+
+def build_download_manifest(
+    files: list[TorrentFile],
+    *,
+    download_urls: list[str],
+    settings: DownloadersSettings,
+) -> TorrentDownloadManifest:
+    """Build a validated file/link manifest for one selected torrent payload.
+
+    The manifest preserves nested provider paths, validates positional link coverage,
+    and detects multi-root containers without collapsing them into basename-only rows.
+    """
+
+    selected_files = filter_torrent_files(files, settings)
+    resolved_files: list[TorrentFile] = []
+    resolved_urls: list[str] = []
+    container_roots: set[str] = set()
+    seen_paths: set[str] = set()
+    unresolved_file_count = 0
+    duplicate_path_count = 0
+
+    for index, file in enumerate(selected_files):
+        file_path = getattr(file, "file_path", None)
+        file_name = getattr(file, "file_name", None)
+        file_size_bytes = getattr(file, "file_size_bytes", None)
+        selected = bool(getattr(file, "selected", False))
+        media_type = getattr(file, "media_type", None)
+
+        identity_path = (file_path or file_name or "").strip()
+        if identity_path:
+            if identity_path in seen_paths:
+                duplicate_path_count += 1
+            else:
+                seen_paths.add(identity_path)
+            if "/" in identity_path:
+                container_roots.add(identity_path.split("/", 1)[0])
+
+        resolved_url = file.download_url or (
+            download_urls[index] if index < len(download_urls) else None
+        )
+        if resolved_url is None:
+            unresolved_file_count += 1
+        else:
+            resolved_urls.append(resolved_url)
+
+        resolved_files.append(
+            TorrentFile(
+                file_id=file.file_id,
+                file_name=file_name or identity_path or file.file_id,
+                file_path=file_path,
+                file_size_bytes=file_size_bytes,
+                selected=selected,
+                download_url=resolved_url,
+                media_type=media_type,
+            )
+        )
+
+    ordered_roots = tuple(sorted(container_roots))
+    return TorrentDownloadManifest(
+        files=resolved_files,
+        download_urls=resolved_urls,
+        container_roots=ordered_roots,
+        multi_container=len(ordered_roots) > 1,
+        unresolved_file_count=unresolved_file_count,
+        duplicate_path_count=duplicate_path_count,
+    )
 
 
 def _normalize_torrent_file(
@@ -150,6 +282,9 @@ def _normalize_torrent_file(
     )
     if not isinstance(path_value, str) or not path_value:
         return None
+    normalized_path = path_value.strip()
+    if not normalized_path:
+        return None
     file_size_value = (
         file_payload.get("bytes")
         or file_payload.get("size")
@@ -162,11 +297,12 @@ def _normalize_torrent_file(
     file_id = str(file_id_value) if file_id_value is not None else path_value
     return TorrentFile(
         file_id=file_id,
-        file_name=path_value.rsplit("/", 1)[-1],
+        file_name=normalized_path.rsplit("/", 1)[-1],
+        file_path=normalized_path,
         file_size_bytes=size_bytes,
         selected=selected,
         download_url=download_url,
-        media_type=_infer_media_type(path_value),
+        media_type=_infer_media_type(normalized_path),
     )
 
 

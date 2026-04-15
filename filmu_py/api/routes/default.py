@@ -19,6 +19,7 @@ from filmu_py.authz import evaluate_permissions, permission_constraints_from_map
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
+from filmu_py.core.replay import ReplayConsumerFencedError
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
 from filmu_py.plugins.interfaces import StreamControlAction, StreamControlInput
 from filmu_py.services.debrid import DownloaderAccountService
@@ -43,7 +44,13 @@ from ..models import (
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
+    ControlPlaneAckRecoveryResponse,
+    ControlPlanePendingRecoveryResponse,
+    ControlPlaneRemediationResponse,
     ControlPlaneSubscriberResponse,
+    ControlPlaneSummaryResponse,
+    DownloaderOrchestrationResponse,
+    DownloaderProviderCandidateResponse,
     EnterpriseOperationsGovernanceResponse,
     EnterpriseOperationsSliceResponse,
     HealthResponse,
@@ -54,6 +61,8 @@ from ..models import (
     MetadataReindexHistoryResponse,
     MetadataReindexHistorySummaryResponse,
     MetadataReindexStatusResponse,
+    ObservabilityConvergenceResponse,
+    PlaybackGateEvidenceResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
     PluginGovernanceOverrideResponse,
@@ -73,8 +82,15 @@ from ..models import (
     StatsMediaYearRelease,
     StatsResponse,
     TenantQuotaPolicyResponse,
+    VfsRolloutControlRequest,
+    VfsRolloutControlResponse,
 )
-from .runtime_governance import playback_gate_governance_snapshot, vfs_runtime_governance_snapshot
+from .runtime_governance import (
+    managed_windows_vfs_state_snapshot,
+    persist_managed_windows_vfs_state,
+    playback_gate_governance_snapshot,
+    vfs_runtime_governance_snapshot,
+)
 
 router = APIRouter(tags=["default"])
 _MAX_API_KEY_ID_LENGTH = 128
@@ -342,6 +358,340 @@ def _has_unresolved_fence(record: Any) -> bool:
     if last_heartbeat_at is None or updated_at is None:
         return False
     return bool(last_heartbeat_at <= updated_at)
+
+
+def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
+    """Return a dedicated playback-gate artifact and readiness summary."""
+
+    governance = playback_gate_governance_snapshot()
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+
+    if cast(int, governance["playback_gate_runner_ready"]) == 0:
+        required_actions.append("record_playback_gate_runner_readiness")
+        remaining_gaps.append(
+            "playback-gate runner readiness is not yet recorded as ready for the current environment"
+        )
+    if cast(str, governance["playback_gate_policy_validation_status"]) != "ready":
+        required_actions.append("record_github_main_policy_validation")
+        remaining_gaps.append(
+            "live GitHub protected-branch policy is not yet recorded as ready from an admin-authenticated host"
+        )
+    if cast(int, governance["playback_gate_windows_provider_movie_ready"]) == 0:
+        required_actions.append("rerun_native_windows_provider_proof_movie")
+        remaining_gaps.append(
+            "native Windows provider proof coverage is incomplete for movie across Emby/Plex"
+        )
+    if cast(int, governance["playback_gate_windows_provider_tv_ready"]) == 0:
+        required_actions.append("rerun_native_windows_provider_proof_tv")
+        remaining_gaps.append(
+            "native Windows provider proof coverage is incomplete for tv across Emby/Plex"
+        )
+    if cast(int, governance["playback_gate_windows_soak_ready"]) == 0:
+        required_actions.append("run_windows_vfs_soak_enterprise_profiles")
+        remaining_gaps.append(
+            "Windows soak evidence is not yet green across the full enterprise profile set"
+        )
+
+    return PlaybackGateEvidenceResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        rollout_readiness=cast(str, governance["playback_gate_rollout_readiness"]),
+        next_action=cast(str, governance["playback_gate_rollout_next_action"]),
+        reasons=list(cast(list[str], governance["playback_gate_rollout_reasons"])),
+        runner_status=cast(str, governance["playback_gate_runner_status"]),
+        runner_ready=bool(cast(int, governance["playback_gate_runner_ready"])),
+        policy_validation_status=cast(str, governance["playback_gate_policy_validation_status"]),
+        policy_ready=bool(cast(int, governance["playback_gate_policy_ready"])),
+        provider_gate_required=bool(cast(int, governance["playback_gate_provider_gate_required"])),
+        provider_gate_ran=bool(cast(int, governance["playback_gate_provider_gate_ran"])),
+        windows_provider_ready=bool(cast(int, governance["playback_gate_windows_provider_ready"])),
+        windows_provider_coverage=list(
+            cast(list[str], governance["playback_gate_windows_provider_coverage"])
+        ),
+        windows_soak_ready=bool(cast(int, governance["playback_gate_windows_soak_ready"])),
+        windows_soak_profiles=list(
+            cast(list[str], governance["playback_gate_windows_soak_profile_coverage"])
+        ),
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
+    """Return the persisted rollout-control state plus the derived VFS canary posture."""
+
+    playback_gate_governance = playback_gate_governance_snapshot()
+    runtime_governance = vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate_governance,
+    )
+    state = managed_windows_vfs_state_snapshot()
+    environment_class = (
+        str(state.get("environment_class") or "").strip()
+        or cast(str, runtime_governance["vfs_runtime_rollout_environment_class"])
+    )
+    runtime_status_path = state.get("runtime_status_path")
+    return VfsRolloutControlResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        environment_class=environment_class,
+        runtime_status_path=runtime_status_path if isinstance(runtime_status_path, str) else None,
+        promotion_paused=bool(state.get("promotion_paused")),
+        rollback_requested=bool(state.get("rollback_requested")),
+        notes=cast(str | None, state.get("notes") if isinstance(state.get("notes"), str) else None),
+        rollout_readiness=cast(str, runtime_governance["vfs_runtime_rollout_readiness"]),
+        next_action=cast(str, runtime_governance["vfs_runtime_rollout_next_action"]),
+        canary_decision=cast(str, runtime_governance["vfs_runtime_rollout_canary_decision"]),
+        merge_gate=cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"]),
+        reasons=list(cast(list[str], runtime_governance["vfs_runtime_rollout_reasons"])),
+    )
+
+
+def _structured_log_path(settings: Any) -> str:
+    """Return the normalized structured log path for operator-facing responses."""
+
+    normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
+    return f"{normalized_log_dir}/{settings.logging.structured_filename}"
+
+
+def _operator_log_pipeline_ready(settings: Any) -> bool:
+    """Return whether the repo-side operator log pipeline exit gates are satisfied."""
+
+    observability_policy = settings.observability
+    return bool(
+        settings.logging.enabled
+        and settings.log_shipper.enabled
+        and bool(settings.log_shipper.target)
+        and bool(settings.log_shipper.healthcheck_url)
+        and settings.otel_enabled
+        and bool(settings.otel_exporter_otlp_endpoint)
+        and observability_policy.environment_shipping_enabled
+        and observability_policy.alerting_enabled
+        and observability_policy.rust_trace_correlation_enabled
+        and observability_policy.search_backend != "none"
+        and bool(observability_policy.required_correlation_fields)
+        and bool(observability_policy.proof_refs)
+    )
+
+
+def _observability_convergence_response(request: Request) -> ObservabilityConvergenceResponse:
+    """Return the current cross-process log/search/trace convergence posture."""
+
+    settings = request.app.state.resources.settings
+    observability_policy = settings.observability
+    structured_log_path = _structured_log_path(settings)
+    ready = _operator_log_pipeline_ready(settings)
+    correlation_contract_complete = bool(observability_policy.required_correlation_fields)
+
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if not settings.log_shipper.enabled:
+        required_actions.append("configure_log_shipper_for_structured_ndjson")
+        remaining_gaps.append("structured logs are not yet shipped out of process")
+    elif not settings.log_shipper.healthcheck_url:
+        required_actions.append("monitor_log_shipper_health")
+        remaining_gaps.append("log shipper health is not externally checked")
+    if not settings.log_shipper.target or observability_policy.search_backend == "none":
+        required_actions.append("define_search_index_mapping_and_retention_policy")
+        remaining_gaps.append("structured logs are not yet wired into a searchable backend")
+    if not (settings.otel_enabled and settings.otel_exporter_otlp_endpoint):
+        required_actions.append("configure_otlp_trace_export")
+        remaining_gaps.append("cross-process traces are not exported through OTLP")
+    if not observability_policy.environment_shipping_enabled:
+        required_actions.append("enable_environment_log_shipping")
+        remaining_gaps.append("environment-managed log shipping is not enabled")
+    if not observability_policy.alerting_enabled:
+        required_actions.append("enable_alerting_for_log_search_and_trace_pipeline")
+        remaining_gaps.append("search/trace alerting is not configured")
+    if not observability_policy.rust_trace_correlation_enabled:
+        required_actions.append("wire_rust_trace_correlation_fields")
+        remaining_gaps.append("Python and Rust traces are not yet forced onto one correlation contract")
+    if not correlation_contract_complete:
+        required_actions.append("define_required_cross_process_correlation_fields")
+        remaining_gaps.append("required correlation fields are not configured")
+    if not observability_policy.proof_refs:
+        required_actions.append("record_log_pipeline_rollout_evidence")
+        remaining_gaps.append("observability convergence has no retained rollout evidence references")
+
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready"
+        if ready
+        else (
+            "partial"
+            if settings.logging.enabled or settings.otel_enabled or settings.log_shipper.enabled
+            else "blocked"
+        )
+    )
+    return ObservabilityConvergenceResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=status,
+        structured_logging_enabled=settings.logging.enabled,
+        structured_log_path=structured_log_path,
+        otel_enabled=settings.otel_enabled,
+        otel_endpoint_configured=bool(settings.otel_exporter_otlp_endpoint),
+        log_shipper_enabled=settings.log_shipper.enabled,
+        log_shipper_type=settings.log_shipper.type,
+        log_shipper_target_configured=bool(settings.log_shipper.target),
+        log_shipper_healthcheck_configured=bool(settings.log_shipper.healthcheck_url),
+        search_backend=observability_policy.search_backend,
+        environment_shipping_enabled=observability_policy.environment_shipping_enabled,
+        alerting_enabled=observability_policy.alerting_enabled,
+        rust_trace_correlation_enabled=observability_policy.rust_trace_correlation_enabled,
+        correlation_contract_complete=correlation_contract_complete,
+        proof_refs=list(observability_policy.proof_refs),
+        required_correlation_fields=list(observability_policy.required_correlation_fields),
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrationResponse:
+    """Return the current downloader orchestration posture and known breadth gaps."""
+
+    resources = request.app.state.resources
+    settings = resources.settings
+    provider_priority = {
+        name: index
+        for index, name in enumerate(settings.orchestration.downloader_provider_priority, start=1)
+    }
+    providers: list[DownloaderProviderCandidateResponse] = []
+    builtin_candidates: list[DownloaderProviderCandidateResponse] = []
+    provider_entries = (
+        ("realdebrid", settings.downloaders.real_debrid),
+        ("alldebrid", settings.downloaders.all_debrid),
+        ("debridlink", settings.downloaders.debrid_link),
+    )
+    for priority, (name, config) in enumerate(provider_entries, start=1):
+        configured = bool(config.api_key.strip())
+        enabled = bool(config.enabled and configured)
+        candidate = DownloaderProviderCandidateResponse(
+            name=name,
+            source="builtin",
+            enabled=enabled,
+            configured=configured,
+            selected=False,
+            priority=provider_priority.get(name, priority),
+            capabilities=["magnet_add", "file_select", "status_poll", "download_links"],
+        )
+        builtin_candidates.append(candidate)
+        providers.append(candidate)
+
+    plugin_registry = resources.plugin_registry
+    plugin_downloaders_registered = 0
+    if plugin_registry is not None:
+        for plugin in plugin_registry.get_downloaders():
+            plugin_downloaders_registered += 1
+            plugin_name = str(getattr(plugin, "plugin_name", type(plugin).__name__))
+            configured = True
+            enabled = True
+            if plugin_name == "stremthru":
+                stremthru = settings.downloaders.stremthru
+                configured = bool(stremthru.enabled and stremthru.token.strip() and stremthru.url.strip())
+                enabled = configured
+            providers.append(
+                DownloaderProviderCandidateResponse(
+                    name=plugin_name,
+                    source="plugin",
+                    enabled=enabled,
+                    configured=configured,
+                    selected=False,
+                    priority=provider_priority.get(plugin_name),
+                    capabilities=["magnet_add", "status_poll", "download_links"],
+                )
+            )
+
+    enabled_candidates = sorted(
+        [candidate for candidate in providers if candidate.enabled],
+        key=lambda candidate: (
+            candidate.priority if candidate.priority is not None else 10_000,
+            candidate.name,
+        ),
+    )
+    selected_provider = enabled_candidates[0].name if enabled_candidates else None
+    if selected_provider is not None:
+        providers = [
+            candidate.model_copy(update={"selected": candidate.name == selected_provider})
+            for candidate in providers
+        ]
+
+    plugin_policy_ready = any(
+        candidate.source == "plugin" and candidate.enabled for candidate in providers
+    )
+
+    multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
+    worker_plugin_dispatch_ready = plugin_policy_ready
+    fanout_ready = bool(
+        settings.orchestration.downloader_selection_mode == "ordered_failover"
+        and len(enabled_candidates) > 1
+        and (plugin_downloaders_registered == 0 or plugin_policy_ready)
+    )
+    multi_container_ready = True
+    ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
+
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if selected_provider is None:
+        required_actions.append("configure_at_least_one_builtin_downloader_provider")
+        remaining_gaps.append("debrid worker execution has no configured builtin downloader provider")
+    if multi_provider_enabled:
+        if ordered_failover_ready and not fanout_ready:
+            required_actions.append("promote_ordered_failover_into_policy_driven_fanout")
+            remaining_gaps.append(
+                "multiple builtin downloaders now support ordered failover, but not policy-driven fan-out"
+            )
+        elif not ordered_failover_ready:
+            required_actions.append("replace_fixed_priority_builtin_selection_with_policy_driven_fanout")
+            remaining_gaps.append(
+                "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
+            )
+    if plugin_downloaders_registered > 0 and not worker_plugin_dispatch_ready:
+        required_actions.append("wire_registered_downloader_plugins_into_debrid_worker")
+        remaining_gaps.append(
+            "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
+        )
+
+    return DownloaderOrchestrationResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        selection_mode=(
+            "ordered_failover_policy_fanout"
+            if ordered_failover_ready and worker_plugin_dispatch_ready and fanout_ready
+            else "ordered_failover_with_plugin_policy"
+            if ordered_failover_ready and worker_plugin_dispatch_ready
+            else "ordered_failover"
+            if ordered_failover_ready
+            else "fixed_priority_builtin_then_plugin_policy"
+            if worker_plugin_dispatch_ready
+            else "fixed_priority_builtin_only"
+        ),
+        selected_provider=selected_provider,
+        multi_provider_enabled=multi_provider_enabled,
+        plugin_downloaders_registered=plugin_downloaders_registered,
+        worker_plugin_dispatch_ready=worker_plugin_dispatch_ready,
+        fanout_ready=fanout_ready,
+        multi_container_ready=multi_container_ready,
+        providers=providers,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _control_plane_summary_response(summary: Any) -> ControlPlaneSummaryResponse:
+    """Normalize control-plane summary DTOs into the API response model."""
+
+    return ControlPlaneSummaryResponse(
+        total_subscribers=summary.total_subscribers,
+        active_subscribers=summary.active_subscribers,
+        stale_subscribers=summary.stale_subscribers,
+        error_subscribers=summary.error_subscribers,
+        fenced_subscribers=summary.fenced_subscribers,
+        ack_pending_subscribers=summary.ack_pending_subscribers,
+        stream_count=summary.stream_count,
+        group_count=summary.group_count,
+        node_count=summary.node_count,
+        tenant_count=summary.tenant_count,
+        oldest_heartbeat_age_seconds=summary.oldest_heartbeat_age_seconds,
+        status_counts=dict(summary.status_counts),
+        required_actions=list(summary.required_actions),
+        remaining_gaps=list(summary.remaining_gaps),
+    )
 
 
 def _next_api_key_id(auth_context: Any) -> str:
@@ -1030,23 +1380,9 @@ async def _enterprise_operations_governance(
     if auth_context.authorization_tenant_scope == "all":
         tenant_required_actions.append("review_global_tenant_scope_for_actor")
 
-    normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
-    structured_log_path = f"{normalized_log_dir}/{settings.logging.structured_filename}"
+    structured_log_path = _structured_log_path(settings)
     observability_policy = settings.observability
-    operator_log_pipeline_ready = (
-        settings.logging.enabled
-        and settings.log_shipper.enabled
-        and bool(settings.log_shipper.target)
-        and bool(settings.log_shipper.healthcheck_url)
-        and settings.otel_enabled
-        and bool(settings.otel_exporter_otlp_endpoint)
-        and observability_policy.environment_shipping_enabled
-        and observability_policy.alerting_enabled
-        and observability_policy.rust_trace_correlation_enabled
-        and observability_policy.search_backend != "none"
-        and bool(observability_policy.required_correlation_fields)
-        and bool(observability_policy.proof_refs)
-    )
+    operator_log_pipeline_ready = _operator_log_pipeline_ready(settings)
     plugin_governance_summary = _plugin_governance_summary(
         plugins,
         runtime_policy=settings.plugin_runtime,
@@ -2753,6 +3089,88 @@ async def get_enterprise_operations_governance(
 
 
 @router.get(
+    "/operations/playback-gate/evidence",
+    operation_id="default.playback_gate_evidence",
+    response_model=PlaybackGateEvidenceResponse,
+)
+async def get_playback_gate_evidence() -> PlaybackGateEvidenceResponse:
+    """Return a dedicated playback-gate artifact/evidence readiness summary."""
+
+    return _playback_gate_evidence_response()
+
+
+@router.get(
+    "/operations/vfs-rollout/control",
+    operation_id="default.vfs_rollout_control",
+    response_model=VfsRolloutControlResponse,
+)
+async def get_vfs_rollout_control() -> VfsRolloutControlResponse:
+    """Return persisted VFS rollout-control state plus the live canary decision."""
+
+    return _vfs_rollout_control_response()
+
+
+@router.post(
+    "/operations/vfs-rollout/control",
+    operation_id="default.write_vfs_rollout_control",
+    response_model=VfsRolloutControlResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def write_vfs_rollout_control(
+    request: Request,
+    payload: VfsRolloutControlRequest,
+) -> VfsRolloutControlResponse:
+    """Persist VFS rollout-control state used by operator-managed canary promotion."""
+
+    updates: dict[str, object | None] = {
+        "environment_class": payload.environment_class,
+        "runtime_status_path": payload.runtime_status_path,
+        "promotion_paused": payload.promotion_paused,
+        "rollback_requested": payload.rollback_requested,
+        "notes": payload.notes,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    persist_managed_windows_vfs_state(updates)
+    audit_action(
+        request,
+        action="operations.vfs_rollout.write_control",
+        target="operations.vfs_rollout",
+        details={
+            "promotion_paused": payload.promotion_paused,
+            "rollback_requested": payload.rollback_requested,
+            "environment_class": payload.environment_class,
+        },
+    )
+    return _vfs_rollout_control_response()
+
+
+@router.get(
+    "/operations/observability/convergence",
+    operation_id="default.observability_convergence",
+    response_model=ObservabilityConvergenceResponse,
+)
+async def get_observability_convergence(
+    request: Request,
+) -> ObservabilityConvergenceResponse:
+    """Return the current cross-process logging/search/tracing convergence posture."""
+
+    return _observability_convergence_response(request)
+
+
+@router.get(
+    "/operations/downloader-orchestration",
+    operation_id="default.downloader_orchestration",
+    response_model=DownloaderOrchestrationResponse,
+)
+async def get_downloader_orchestration(
+    request: Request,
+) -> DownloaderOrchestrationResponse:
+    """Return current downloader candidate selection and orchestration breadth posture."""
+
+    return _downloader_orchestration_response(request)
+
+
+@router.get(
     "/operations/control-plane/subscribers",
     operation_id="default.control_plane_subscribers",
     response_model=list[ControlPlaneSubscriberResponse],
@@ -2817,6 +3235,285 @@ async def get_plugin_events(request: Request) -> list[PluginEventStatusResponse]
         )
         for plugin_name in sorted(plugin_registry.all_plugin_names())
     ]
+
+
+
+
+@router.get(
+    "/operations/control-plane/summary",
+    operation_id="default.control_plane_summary",
+    response_model=ControlPlaneSummaryResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def get_control_plane_summary(
+    request: Request,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlaneSummaryResponse:
+    """Return a bounded control-plane health rollup across durable subscribers."""
+
+    service = request.app.state.resources.control_plane_service
+    if service is None:
+        return ControlPlaneSummaryResponse(
+            total_subscribers=0,
+            active_subscribers=0,
+            stale_subscribers=0,
+            error_subscribers=0,
+            fenced_subscribers=0,
+            ack_pending_subscribers=0,
+            stream_count=0,
+            group_count=0,
+            node_count=0,
+            tenant_count=0,
+            oldest_heartbeat_age_seconds=None,
+            status_counts={},
+            required_actions=["attach_control_plane_service"],
+            remaining_gaps=["durable replay/control-plane ownership is not configured"],
+        )
+    summary = await service.summarize_subscribers(active_within_seconds=active_within_seconds)
+    return _control_plane_summary_response(summary)
+
+
+@router.post(
+    "/operations/control-plane/remediation",
+    operation_id="default.control_plane_remediation",
+    response_model=ControlPlaneRemediationResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def remediate_control_plane_subscribers(
+    request: Request,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlaneRemediationResponse:
+    """Persist stale/fenced/error control-plane rows into a recoverable stale posture."""
+
+    service = request.app.state.resources.control_plane_service
+    if service is None:
+        return ControlPlaneRemediationResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            active_within_seconds=active_within_seconds,
+            stale_marked_subscribers=0,
+            fence_resolved_subscribers=0,
+            error_recovered_subscribers=0,
+            total_updated_subscribers=0,
+            summary=ControlPlaneSummaryResponse(
+                total_subscribers=0,
+                active_subscribers=0,
+                stale_subscribers=0,
+                error_subscribers=0,
+                fenced_subscribers=0,
+                ack_pending_subscribers=0,
+                stream_count=0,
+                group_count=0,
+                node_count=0,
+                tenant_count=0,
+                oldest_heartbeat_age_seconds=None,
+                status_counts={},
+                required_actions=["attach_control_plane_service"],
+                remaining_gaps=["durable replay/control-plane ownership is not configured"],
+            ),
+        )
+    remediation = await service.remediate_subscribers(active_within_seconds=active_within_seconds)
+    audit_action(
+        request,
+        action="operations.control_plane.remediate",
+        target="operations.control_plane",
+        details={
+            "active_within_seconds": active_within_seconds,
+            "total_updated_subscribers": remediation.total_updated_subscribers,
+        },
+    )
+    return ControlPlaneRemediationResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        active_within_seconds=active_within_seconds,
+        stale_marked_subscribers=remediation.stale_marked_subscribers,
+        fence_resolved_subscribers=remediation.fence_resolved_subscribers,
+        error_recovered_subscribers=remediation.error_recovered_subscribers,
+        total_updated_subscribers=remediation.total_updated_subscribers,
+        summary=_control_plane_summary_response(remediation.summary),
+    )
+
+
+@router.post(
+    "/operations/control-plane/ack-recovery",
+    operation_id="default.control_plane_ack_recovery",
+    response_model=ControlPlaneAckRecoveryResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def recover_control_plane_ack_backlog(
+    request: Request,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlaneAckRecoveryResponse:
+    """Rewind stale control-plane delivery cursors back to their last acknowledged event."""
+
+    service = request.app.state.resources.control_plane_service
+    if service is None:
+        return ControlPlaneAckRecoveryResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            active_within_seconds=active_within_seconds,
+            rewound_subscribers=0,
+            stale_marked_subscribers=0,
+            pending_without_ack_subscribers=0,
+            total_updated_subscribers=0,
+            summary=ControlPlaneSummaryResponse(
+                total_subscribers=0,
+                active_subscribers=0,
+                stale_subscribers=0,
+                error_subscribers=0,
+                fenced_subscribers=0,
+                ack_pending_subscribers=0,
+                stream_count=0,
+                group_count=0,
+                node_count=0,
+                tenant_count=0,
+                oldest_heartbeat_age_seconds=None,
+                status_counts={},
+                required_actions=["attach_control_plane_service"],
+                remaining_gaps=["durable replay/control-plane ownership is not configured"],
+            ),
+        )
+    recovery = await service.recover_ack_backlog(active_within_seconds=active_within_seconds)
+    audit_action(
+        request,
+        action="operations.control_plane.ack_recovery",
+        target="operations.control_plane",
+        details={
+            "active_within_seconds": active_within_seconds,
+            "rewound_subscribers": recovery.rewound_subscribers,
+            "pending_without_ack_subscribers": recovery.pending_without_ack_subscribers,
+            "total_updated_subscribers": recovery.total_updated_subscribers,
+        },
+    )
+    return ControlPlaneAckRecoveryResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        active_within_seconds=active_within_seconds,
+        rewound_subscribers=recovery.rewound_subscribers,
+        stale_marked_subscribers=recovery.stale_marked_subscribers,
+        pending_without_ack_subscribers=recovery.pending_without_ack_subscribers,
+        total_updated_subscribers=recovery.total_updated_subscribers,
+        summary=_control_plane_summary_response(recovery.summary),
+    )
+
+
+@router.post(
+    "/operations/control-plane/pending-recovery",
+    operation_id="default.control_plane_pending_recovery",
+    response_model=ControlPlanePendingRecoveryResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def recover_control_plane_pending_entries(
+    request: Request,
+    group_name: str | None = None,
+    consumer_name: str = "recovery-ops",
+    min_idle_ms: Annotated[int, Query(ge=1, le=86_400_000)] = 60_000,
+    claim_limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlanePendingRecoveryResponse:
+    """Claim stale replay pending entries into one operator recovery consumer."""
+
+    resources = request.app.state.resources
+    service = resources.control_plane_service
+    backplane = resources.replay_backplane
+    resolved_group_name = group_name or resources.settings.control_plane.consumer_group
+    auth_context = get_auth_context(request)
+    empty_summary = (
+        _control_plane_summary_response(
+            await service.summarize_subscribers(active_within_seconds=active_within_seconds)
+        )
+        if service is not None
+        else ControlPlaneSummaryResponse(
+            total_subscribers=0,
+            active_subscribers=0,
+            stale_subscribers=0,
+            error_subscribers=0,
+            fenced_subscribers=0,
+            ack_pending_subscribers=0,
+            stream_count=0,
+            group_count=0,
+            node_count=0,
+            tenant_count=0,
+            oldest_heartbeat_age_seconds=None,
+            status_counts={},
+            required_actions=["attach_control_plane_service"],
+            remaining_gaps=["durable replay/control-plane ownership is not configured"],
+        )
+    )
+    if backplane is None or not hasattr(backplane, "claim_pending"):
+        return ControlPlanePendingRecoveryResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            group_name=resolved_group_name,
+            consumer_name=consumer_name,
+            min_idle_ms=min_idle_ms,
+            claim_limit=claim_limit,
+            claimed_count=0,
+            claimed_event_ids=[],
+            next_start_id="0-0",
+            pending_count_before=0,
+            pending_count_after=0,
+            oldest_pending_event_id=None,
+            latest_pending_event_id=None,
+            pending_consumer_counts={},
+            summary=empty_summary,
+            required_actions=["attach_redis_replay_backplane"],
+            remaining_gaps=["durable replay backplane is not configured"],
+        )
+
+    try:
+        result = await backplane.claim_pending(
+            group_name=resolved_group_name,
+            consumer_name=consumer_name,
+            node_id=f"operator:{auth_context.actor_id}",
+            tenant_id=auth_context.tenant_id,
+            min_idle_ms=min_idle_ms,
+            count=claim_limit,
+            start_id="0-0",
+            heartbeat_expiry_seconds=active_within_seconds,
+        )
+    except ReplayConsumerFencedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    summary = (
+        _control_plane_summary_response(
+            await service.summarize_subscribers(active_within_seconds=active_within_seconds)
+        )
+        if service is not None
+        else empty_summary
+    )
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if result.pending_after.pending_count > 0:
+        required_actions.append("repeat_pending_claim_until_backlog_drained")
+        remaining_gaps.append("bounded claim window left replay pending entries in the consumer group")
+    audit_action(
+        request,
+        action="operations.control_plane.pending_recovery",
+        target="operations.control_plane",
+        details={
+            "group_name": resolved_group_name,
+            "consumer_name": consumer_name,
+            "min_idle_ms": min_idle_ms,
+            "claim_limit": claim_limit,
+            "claimed_count": len(result.claimed_events),
+            "pending_count_before": result.pending_before.pending_count,
+            "pending_count_after": result.pending_after.pending_count,
+        },
+    )
+    return ControlPlanePendingRecoveryResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        group_name=resolved_group_name,
+        consumer_name=consumer_name,
+        min_idle_ms=min_idle_ms,
+        claim_limit=claim_limit,
+        claimed_count=len(result.claimed_events),
+        claimed_event_ids=[event.event_id for event in result.claimed_events],
+        next_start_id=result.next_start_id,
+        pending_count_before=result.pending_before.pending_count,
+        pending_count_after=result.pending_after.pending_count,
+        oldest_pending_event_id=result.pending_before.oldest_event_id,
+        latest_pending_event_id=result.pending_before.latest_event_id,
+        pending_consumer_counts=result.pending_after.consumer_counts,
+        summary=summary,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
 
 
 @router.post(

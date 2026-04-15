@@ -6,8 +6,12 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from filmu_py.plugins import (
+    COMET_PLUGIN_NAME,
+    LISTRR_PLUGIN_NAME,
     MDBLIST_PLUGIN_NAME,
     NOTIFICATIONS_PLUGIN_NAME,
+    PLEX_PLUGIN_NAME,
+    SEERR_PLUGIN_NAME,
     STREAM_CONTROL_PLUGIN_NAME,
     STREMTHRU_PLUGIN_NAME,
     DownloadStatusInput,
@@ -17,6 +21,7 @@ from filmu_py.plugins import (
     ScraperSearchInput,
     TestPluginContext,
 )
+from filmu_py.plugins.builtin.comet import CometScraper
 from filmu_py.plugins.builtin.prowlarr import PROWLARR_PLUGIN_NAME, ProwlarrScraper
 from filmu_py.plugins.builtin.rarbg import RARBG_PLUGIN_NAME, RarbgScraper
 from filmu_py.plugins.builtin.torrentio import TORRENTIO_PLUGIN_NAME
@@ -30,6 +35,7 @@ def test_register_builtin_plugins_registers_all_builtin_scrapers() -> None:
             "scraping": {
                 "torrentio": {"enabled": True},
                 "prowlarr": {"enabled": True},
+                "comet": {"enabled": True},
                 "rarbg": {"enabled": True},
             }
         }
@@ -40,19 +46,26 @@ def test_register_builtin_plugins_registers_all_builtin_scrapers() -> None:
     assert registered == (
         TORRENTIO_PLUGIN_NAME,
         PROWLARR_PLUGIN_NAME,
+        COMET_PLUGIN_NAME,
         RARBG_PLUGIN_NAME,
         MDBLIST_PLUGIN_NAME,
+        SEERR_PLUGIN_NAME,
+        LISTRR_PLUGIN_NAME,
         STREMTHRU_PLUGIN_NAME,
         STREAM_CONTROL_PLUGIN_NAME,
         NOTIFICATIONS_PLUGIN_NAME,
+        PLEX_PLUGIN_NAME,
     )
     assert [plugin.__class__.__name__ for plugin in registry.get_scrapers()] == [
         "TorrentioScraper",
         "ProwlarrScraper",
+        "CometScraper",
         "RarbgScraper",
     ]
     assert [plugin.__class__.__name__ for plugin in registry.get_content_services()] == [
-        "MDBListContentService"
+        "MDBListContentService",
+        "SeerrContentService",
+        "ListrrContentService",
     ]
     assert [plugin.__class__.__name__ for plugin in registry.get_downloaders()] == [
         "StremThruDownloader"
@@ -63,6 +76,7 @@ def test_register_builtin_plugins_registers_all_builtin_scrapers() -> None:
     assert [plugin.__class__.__name__ for plugin in registry.get_stream_controls()] == [
         "HostStreamControlPlugin"
     ]
+    assert any(plugin.__class__.__name__ == "PlexLibraryRefreshPlugin" for plugin in registry.get_event_hooks())
 
 
 def test_builtin_stub_plugins_warn_when_not_configured() -> None:
@@ -189,3 +203,43 @@ def test_rarbg_scraper_parses_search_and_detail_pages() -> None:
     assert results[0].info_hash == "abcdef0123456789abcdef0123456789abcdef01"
     assert results[0].seeders == 27
     assert results[0].leechers == 29
+
+
+def test_comet_scraper_parses_stremio_stream_results() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://comet.example/stream/movie/tt0133093.json"
+        return httpx.Response(
+            200,
+            json={
+                "streams": [
+                    {
+                        "title": "The Matrix 1999 2160p\nSource: Comet",
+                        "magnetUrl": "magnet:?xt=urn:btih:ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+                    }
+                ]
+            },
+        )
+
+    scraper = CometScraper(transport=httpx.MockTransport(handler))
+    harness = TestPluginContext(
+        settings={"scraping": {"comet": {"enabled": True, "url": "https://comet.example"}}}
+    )
+    asyncio.run(scraper.initialize(harness.build("comet")))
+
+    results = asyncio.run(
+        scraper.search(
+            ScraperSearchInput(
+                title="The Matrix",
+                item_type="movie",
+                external_ids=ExternalIdentifiers(imdb_id="tt0133093"),
+            )
+        )
+    )
+
+    assert harness.rate_limiter.requests[0][0] == "comet:search"
+    assert results == [
+        results[0]
+    ]
+    assert results[0].provider == "comet"
+    assert results[0].info_hash == "abcdef0123456789abcdef0123456789abcdef01"
+    assert results[0].title == "The Matrix 1999 2160p"

@@ -5,7 +5,8 @@ param(
     [string] $BaseBranch = 'main',
     [string] $Repository = '',
     [switch] $NoFetch,
-    [switch] $AsJson
+    [switch] $AsJson,
+    [bool] $LocalSourceOfTruth = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,15 +107,21 @@ if ($reuseCheckStatus -eq 'checked') {
 }
 
 $actions = New-Object System.Collections.Generic.List[string]
+$advisories = New-Object System.Collections.Generic.List[string]
 if ($behindBy -gt 0) {
-    $actions.Add("Branch '$Branch' is behind '$Remote/$BaseBranch' by $behindBy commit(s). Rebase or recreate it from current main before opening or merging a PR.")
+    if ($LocalSourceOfTruth) {
+        $advisories.Add("Branch '$Branch' differs from '$Remote/$BaseBranch' by $behindBy commit(s). Local '$Branch' remains authoritative; review mergeability in GitHub without rebasing from remote main.")
+    }
+    else {
+        $actions.Add("Branch '$Branch' is behind '$Remote/$BaseBranch' by $behindBy commit(s). Rebase or recreate it from current main before opening or merging a PR.")
+    }
 }
 if ($aheadBy -eq 0) {
     $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from a real feature branch instead.")
 }
 if ($null -ne $closedReuse) {
     $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
-    $actions.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Create a fresh single-use branch from current main instead of reusing it.")
+    $actions.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Create a fresh single-use remote review branch from the current local source branch instead of reusing it.")
 }
 
 $status = if ($actions.Count -eq 0) { 'ready' } else { 'not_ready' }
@@ -124,12 +131,14 @@ $result = [ordered]@{
     base_branch = "$Remote/$BaseBranch"
     ahead_by = $aheadBy
     behind_by = $behindBy
+    local_source_of_truth = [bool] $LocalSourceOfTruth
     release_please_branch = $releasePleaseBranch
     repository = if ([string]::IsNullOrWhiteSpace($repositoryName)) { $null } else { $repositoryName }
     reuse_check_status = $reuseCheckStatus
     open_pr = $openPr
     closed_branch_reuse = $closedReuse
     status = $status
+    advisories = @($advisories)
     actions = @($actions)
 }
 
@@ -141,6 +150,7 @@ else {
     Write-Output "base_branch=$($result.base_branch)"
     Write-Output "ahead_by=$($result.ahead_by)"
     Write-Output "behind_by=$($result.behind_by)"
+    Write-Output "local_source_of_truth=$($result.local_source_of_truth)"
     Write-Output "reuse_check_status=$($result.reuse_check_status)"
     Write-Output "status=$($result.status)"
     if ($null -ne $openPr) {
@@ -152,6 +162,9 @@ else {
     }
     foreach ($action in $result.actions) {
         Write-Output "action=$action"
+    }
+    foreach ($advisory in $result.advisories) {
+        Write-Output "advisory=$advisory"
     }
 }
 

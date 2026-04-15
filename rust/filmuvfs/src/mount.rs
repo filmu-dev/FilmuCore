@@ -1380,11 +1380,10 @@ impl MountRuntime {
         }
         let base_url = self.backend_http_base_url.as_ref()?;
         let api_key = self.backend_api_key.as_ref()?;
-        Some(format!(
-            "{}/stream/file/{}?api_key={}",
+        Some(format_backend_stream_url(
             base_url.as_str(),
-            request.item_id,
-            api_key.as_str()
+            request.item_id.as_str(),
+            api_key.as_str(),
         ))
     }
 
@@ -3044,10 +3043,20 @@ fn is_windows_drive_mountpoint(path: &Path) -> bool {
         && normalized.as_bytes()[0].is_ascii_alphabetic()
 }
 
+fn format_backend_stream_url(base_url: &str, item_id: &str, api_key: &str) -> String {
+    let api_base = if base_url.ends_with("/api/v1") {
+        base_url.to_owned()
+    } else {
+        format!("{}/api/v1", base_url.trim_end_matches('/'))
+    };
+    format!("{}/stream/file/{}?api_key={}", api_base, item_id, api_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chunk_read_request, parse_media_semantic_path, InlineRefreshFlight, MountReadRequest,
+        build_chunk_read_request, format_backend_stream_url, parse_media_semantic_path,
+        InlineRefreshFlight, MountReadRequest,
     };
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
@@ -3099,6 +3108,22 @@ mod tests {
             Some("movie-file")
         );
         assert_eq!(request.semantic_path.tmdb_id.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn backend_stream_url_appends_api_prefix_when_missing() {
+        assert_eq!(
+            format_backend_stream_url("http://127.0.0.1:8000", "item-123", "secret"),
+            "http://127.0.0.1:8000/api/v1/stream/file/item-123?api_key=secret"
+        );
+    }
+
+    #[test]
+    fn backend_stream_url_preserves_existing_api_prefix() {
+        assert_eq!(
+            format_backend_stream_url("http://127.0.0.1:8000/api/v1", "item-123", "secret"),
+            "http://127.0.0.1:8000/api/v1/stream/file/item-123?api_key=secret"
+        );
     }
 
     #[tokio::test]

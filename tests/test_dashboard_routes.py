@@ -451,6 +451,165 @@ class DummyControlPlaneService:
         _ = active_within_seconds
         return list(self.records)
 
+    async def summarize_subscribers(self, *, active_within_seconds: int = 120) -> Any:
+        _ = active_within_seconds
+        active = sum(1 for record in self.records if getattr(record, "status", "") == "active")
+        stale = sum(1 for record in self.records if getattr(record, "status", "") == "stale")
+        error = sum(1 for record in self.records if getattr(record, "status", "") == "error")
+        ack_pending = sum(
+            1
+            for record in self.records
+            if getattr(record, "last_delivered_event_id", None)
+            and getattr(record, "last_delivered_event_id", None)
+            != getattr(record, "last_acked_event_id", None)
+        )
+        summary = type("ControlPlaneSummary", (), {})()
+        summary.total_subscribers = len(self.records)
+        summary.active_subscribers = active
+        summary.stale_subscribers = stale
+        summary.error_subscribers = error
+        summary.fenced_subscribers = 0
+        summary.ack_pending_subscribers = ack_pending
+        summary.stream_count = len({record.stream_name for record in self.records})
+        summary.group_count = len(
+            {(record.stream_name, record.group_name) for record in self.records}
+        )
+        summary.node_count = len({record.node_id for record in self.records})
+        summary.tenant_count = len(
+            {record.tenant_id for record in self.records if getattr(record, "tenant_id", None)}
+        )
+        summary.oldest_heartbeat_age_seconds = 30.0 if self.records else None
+        summary.status_counts = {"active": active, "stale": stale, "error": error}
+        summary.required_actions = (
+            ["recover_stale_control_plane_subscribers"] if stale else []
+        ) + (["drain_control_plane_ack_backlog"] if ack_pending else [])
+        summary.remaining_gaps = (
+            ["at least one control-plane subscriber heartbeat is stale"] if stale else []
+        ) + (
+            ["one or more subscribers have unacknowledged delivered events"]
+            if ack_pending
+            else []
+        )
+        return summary
+
+    async def remediate_subscribers(self, *, active_within_seconds: int = 120) -> Any:
+        _ = active_within_seconds
+        stale_marked = 0
+        fence_resolved = 0
+        error_recovered = 0
+        for record in self.records:
+            if getattr(record, "status", "") == "active":
+                stale_marked += 1
+                record.status = "stale"
+            elif "consumer_fenced" in str(getattr(record, "last_error", None) or ""):
+                fence_resolved += 1
+                record.status = "stale"
+            elif getattr(record, "status", "") == "error":
+                error_recovered += 1
+                record.status = "stale"
+
+        result = type("ControlPlaneRemediationResult", (), {})()
+        result.active_within_seconds = active_within_seconds
+        result.stale_marked_subscribers = stale_marked
+        result.fence_resolved_subscribers = fence_resolved
+        result.error_recovered_subscribers = error_recovered
+        result.total_updated_subscribers = stale_marked + fence_resolved + error_recovered
+        result.summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return result
+
+    async def recover_ack_backlog(self, *, active_within_seconds: int = 120) -> Any:
+        _ = active_within_seconds
+        rewound = 0
+        stale_marked = 0
+        pending_without_ack = 0
+        updated = 0
+        for record in self.records:
+            delivered = getattr(record, "last_delivered_event_id", None)
+            acked = getattr(record, "last_acked_event_id", None)
+            if not delivered or delivered == acked:
+                continue
+            if getattr(record, "status", "") == "active":
+                record.status = "stale"
+                stale_marked += 1
+            if acked is None:
+                pending_without_ack += 1
+                updated += 1
+                continue
+            record.last_delivered_event_id = acked
+            rewound += 1
+            updated += 1
+
+        result = type("ControlPlaneAckRecoveryResult", (), {})()
+        result.active_within_seconds = active_within_seconds
+        result.rewound_subscribers = rewound
+        result.stale_marked_subscribers = stale_marked
+        result.pending_without_ack_subscribers = pending_without_ack
+        result.total_updated_subscribers = updated
+        result.summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return result
+
+
+class DummyReplayBackplane:
+    """Minimal replay backplane stub for pending-recovery route tests."""
+
+    def __init__(self) -> None:
+        self.claims: list[dict[str, Any]] = []
+
+    async def claim_pending(
+        self,
+        *,
+        group_name: str,
+        consumer_name: str,
+        node_id: str | None = None,
+        tenant_id: str | None = None,
+        min_idle_ms: int = 60_000,
+        count: int = 100,
+        start_id: str = "0-0",
+        heartbeat_expiry_seconds: int = 120,
+    ) -> Any:
+        self.claims.append(
+            {
+                "group_name": group_name,
+                "consumer_name": consumer_name,
+                "node_id": node_id,
+                "tenant_id": tenant_id,
+                "min_idle_ms": min_idle_ms,
+                "count": count,
+                "start_id": start_id,
+                "heartbeat_expiry_seconds": heartbeat_expiry_seconds,
+            }
+        )
+        result = type("ReplayPendingClaimResult", (), {})()
+        result.group_name = group_name
+        result.consumer_name = consumer_name
+        result.min_idle_ms = min_idle_ms
+        result.claimed_events = [
+            type("ReplayEvent", (), {"event_id": "21-0"})(),
+            type("ReplayEvent", (), {"event_id": "22-0"})(),
+        ]
+        result.next_start_id = "23-0"
+        result.pending_before = type(
+            "ReplayPendingSummary",
+            (),
+            {
+                "pending_count": 2,
+                "oldest_event_id": "21-0",
+                "latest_event_id": "22-0",
+                "consumer_counts": {"consumer-1": 2},
+            },
+        )()
+        result.pending_after = type(
+            "ReplayPendingSummary",
+            (),
+            {
+                "pending_count": 0,
+                "oldest_event_id": None,
+                "latest_event_id": None,
+                "consumer_counts": {"recovery-ops": 0},
+            },
+        )()
+        return result
+
 
 class DummyAuthorizationAuditService:
     """In-memory authorization-decision ledger used by route tests."""
@@ -604,6 +763,7 @@ def _build_client(
     plugin_load_report: Any | None = None,
     security_identity_service: Any | None = None,
     authorization_audit_service: Any | None = None,
+    replay_backplane: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
@@ -637,6 +797,7 @@ def _build_client(
         ),
         control_plane_service=DummyControlPlaneService(),
         plugin_governance_service=DummyPluginGovernanceService(),
+        replay_backplane=DummyReplayBackplane() if replay_backplane is None else replay_backplane,
     )
     app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
@@ -2443,6 +2604,389 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
     assert "vfs_runtime_rollout_merge_gate=ready" in body["vfs_data_plane"]["evidence"]
     assert "vfs_runtime_cache_pressure_class=healthy" in body["vfs_data_plane"]["evidence"]
     assert "vfs_runtime_upstream_wait_class=healthy" in body["vfs_data_plane"]["evidence"]
+
+
+def test_playback_gate_evidence_route_surfaces_missing_operational_proofs() -> None:
+    client = _build_client()
+
+    response = client.get("/api/v1/operations/playback-gate/evidence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runner_ready"] is False
+    assert body["policy_ready"] is False
+    assert "record_playback_gate_runner_readiness" in body["required_actions"]
+    assert "record_github_main_policy_validation" in body["required_actions"]
+
+
+def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gate(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {"open_handles": 1, "peak_open_handles": 1, "active_reads": 0, "peak_active_reads": 0},
+                "chunk_cache": {
+                    "backend": "hybrid",
+                    "hits": 2,
+                    "misses": 0,
+                    "memory_bytes": 1024,
+                    "memory_max_bytes": 8192,
+                    "disk_bytes": 1024,
+                    "disk_max_bytes": 65536,
+                    "disk_write_errors": 0,
+                    "disk_evictions": 0,
+                },
+                "mounted_reads": {"total": 2, "ok": 2, "error": 0, "estale": 0, "cancelled": 0},
+                "backend_fallback": {"attempts": 0, "success": 0, "failure": 0},
+                "prefetch": {
+                    "available_permits": 4,
+                    "active_permits": 0,
+                    "background_backpressure": 0,
+                    "fairness_denied": 0,
+                    "global_backpressure_denied": 0,
+                    "background_error": 0,
+                },
+                "chunk_coalescing": {"waits_miss": 0},
+                "inline_refresh": {"error": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    (artifacts_root / "stability-summary-20260412-020101.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:01Z",
+                "environment_class": "windows-native:enterprise",
+                "repeat_count": 2,
+                "dry_run": False,
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "ci-execution-summary.json").write_text(
+        json.dumps({"gate_mode": "full", "provider_gate_required": True, "provider_gate_ran": True}),
+        encoding="utf-8",
+    )
+    (artifacts_root / "media-server-gate-20260412-020102.json").write_text(
+        json.dumps({"timestamp": "2026-04-12T02:01:02Z", "all_green": True}),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-020103.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:03Z",
+                "media_type": "movie",
+                "results": [
+                    {"provider": "emby", "status": "passed"},
+                    {"provider": "plex", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-020104.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:04Z",
+                "media_type": "tv",
+                "results": [
+                    {"provider": "emby", "status": "passed"},
+                    {"provider": "plex", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (windows_artifacts_root / "soak-stability-20260412-020105.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T02:01:05Z",
+                "all_green": True,
+                "repeat_count": 1,
+                "profiles": ["continuous", "seek", "concurrent", "full"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+
+    client = _build_client()
+
+    write_response = client.post(
+        "/api/v1/operations/vfs-rollout/control",
+        headers=_headers(),
+        json={
+            "environment_class": "windows-native:enterprise",
+            "runtime_status_path": str(runtime_status_path),
+            "promotion_paused": True,
+            "notes": "holding canary for manual review",
+        },
+    )
+
+    assert write_response.status_code == 200
+    assert write_response.json()["promotion_paused"] is True
+    assert write_response.json()["merge_gate"] == "hold"
+    assert write_response.json()["canary_decision"] == "hold_canary_and_repeat_soak"
+
+    governance_response = client.get("/api/v1/operations/governance", headers=_headers())
+
+    assert governance_response.status_code == 200
+    body = governance_response.json()
+    assert "vfs_runtime_rollout_canary_decision=hold_canary_and_repeat_soak" in body[
+        "vfs_data_plane"
+    ]["evidence"]
+
+
+def test_control_plane_summary_route_returns_ack_backlog_visibility() -> None:
+    client = _build_client()
+    resources = cast(Any, client.app.state.resources)
+    record = type("ControlPlaneSubscriberRecord", (), {})()
+    record.stream_name = "filmu:events"
+    record.group_name = "filmu-api"
+    record.consumer_name = "consumer-1"
+    record.node_id = "node-a"
+    record.tenant_id = "tenant-main"
+    record.status = "stale"
+    record.last_read_offset = ">"
+    record.last_delivered_event_id = "11-0"
+    record.last_acked_event_id = "10-0"
+    record.last_error = None
+    record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    resources.control_plane_service.records = [record]
+
+    response = client.get("/api/v1/operations/control-plane/summary", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_subscribers"] == 1
+    assert body["stale_subscribers"] == 1
+    assert body["ack_pending_subscribers"] == 1
+    assert "recover_stale_control_plane_subscribers" in body["required_actions"]
+    assert "drain_control_plane_ack_backlog" in body["required_actions"]
+
+
+def test_control_plane_remediation_route_sweeps_rows_into_recoverable_stale_state() -> None:
+    client = _build_client()
+    resources = cast(Any, client.app.state.resources)
+    active_record = type("ControlPlaneSubscriberRecord", (), {})()
+    active_record.stream_name = "filmu:events"
+    active_record.group_name = "filmu-api"
+    active_record.consumer_name = "consumer-1"
+    active_record.node_id = "node-a"
+    active_record.tenant_id = "tenant-main"
+    active_record.status = "active"
+    active_record.last_read_offset = ">"
+    active_record.last_delivered_event_id = "11-0"
+    active_record.last_acked_event_id = "10-0"
+    active_record.last_error = None
+    active_record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    active_record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    active_record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    active_record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record = type("ControlPlaneSubscriberRecord", (), {})()
+    fenced_record.stream_name = "filmu:events"
+    fenced_record.group_name = "filmu-api"
+    fenced_record.consumer_name = "consumer-2"
+    fenced_record.node_id = "node-b"
+    fenced_record.tenant_id = "tenant-main"
+    fenced_record.status = "error"
+    fenced_record.last_read_offset = ">"
+    fenced_record.last_delivered_event_id = "12-0"
+    fenced_record.last_acked_event_id = "11-0"
+    fenced_record.last_error = "consumer_fenced owner=node-a contender=node-b"
+    fenced_record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    resources.control_plane_service.records = [active_record, fenced_record]
+
+    response = client.post("/api/v1/operations/control-plane/remediation", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stale_marked_subscribers"] == 1
+    assert body["fence_resolved_subscribers"] == 1
+    assert body["error_recovered_subscribers"] == 0
+    assert body["total_updated_subscribers"] == 2
+    assert body["summary"]["stale_subscribers"] == 2
+
+
+def test_control_plane_ack_recovery_route_rewinds_stale_backlog() -> None:
+    client = _build_client()
+    service = cast(DummyControlPlaneService, client.app.state.resources.control_plane_service)
+
+    record = type("ControlPlaneSubscriberRecord", (), {})()
+    record.stream_name = "filmu:events"
+    record.group_name = "filmu-api"
+    record.consumer_name = "consumer-1"
+    record.node_id = "node-a"
+    record.tenant_id = "tenant-main"
+    record.status = "stale"
+    record.last_read_offset = ">"
+    record.last_delivered_event_id = "11-0"
+    record.last_acked_event_id = "10-0"
+    record.last_error = None
+    record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    service.records = [record]
+
+    response = client.post("/api/v1/operations/control-plane/ack-recovery", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rewound_subscribers"] == 1
+    assert body["stale_marked_subscribers"] == 0
+    assert body["pending_without_ack_subscribers"] == 0
+    assert body["total_updated_subscribers"] == 1
+    assert body["summary"]["ack_pending_subscribers"] == 0
+    assert service.records[0].last_delivered_event_id == "10-0"
+
+
+def test_control_plane_pending_recovery_route_claims_replay_backlog() -> None:
+    client = _build_client()
+    resources = cast(Any, client.app.state.resources)
+    service = cast(DummyControlPlaneService, resources.control_plane_service)
+    replay_backplane = cast(DummyReplayBackplane, resources.replay_backplane)
+
+    record = type("ControlPlaneSubscriberRecord", (), {})()
+    record.stream_name = "filmu:events"
+    record.group_name = "filmu-api"
+    record.consumer_name = "consumer-1"
+    record.node_id = "node-a"
+    record.tenant_id = "tenant-main"
+    record.status = "stale"
+    record.last_read_offset = ">"
+    record.last_delivered_event_id = "22-0"
+    record.last_acked_event_id = "20-0"
+    record.last_error = None
+    record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    service.records = [record]
+
+    response = client.post(
+        "/api/v1/operations/control-plane/pending-recovery",
+        params={"group_name": "filmu-api", "consumer_name": "recovery-ops", "claim_limit": 25},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["group_name"] == "filmu-api"
+    assert body["consumer_name"] == "recovery-ops"
+    assert body["claimed_count"] == 2
+    assert body["claimed_event_ids"] == ["21-0", "22-0"]
+    assert body["next_start_id"] == "23-0"
+    assert body["pending_count_before"] == 2
+    assert body["pending_count_after"] == 0
+    assert body["pending_consumer_counts"] == {"recovery-ops": 0}
+    assert body["required_actions"] == []
+    assert replay_backplane.claims[0]["count"] == 25
+    assert replay_backplane.claims[0]["tenant_id"] == "tenant-main"
+
+
+def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "opensearch://logs-filmu",
+                "healthcheck_url": "https://ops.example.test/vector/health",
+                "field_mapping_version": "filmu-ecs-v1",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "required_correlation_fields": [
+                    "request.id",
+                    "trace.id",
+                    "tenant.id",
+                ],
+                "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
+            },
+        }
+    )
+
+    response = client.get("/api/v1/operations/observability/convergence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["structured_logging_enabled"] is True
+    assert body["otel_enabled"] is True
+    assert body["otel_endpoint_configured"] is True
+    assert body["log_shipper_enabled"] is True
+    assert body["log_shipper_type"] == "vector"
+    assert body["log_shipper_target_configured"] is True
+    assert body["log_shipper_healthcheck_configured"] is True
+    assert body["search_backend"] == "opensearch"
+    assert body["environment_shipping_enabled"] is True
+    assert body["alerting_enabled"] is True
+    assert body["rust_trace_correlation_enabled"] is True
+    assert body["correlation_contract_complete"] is True
+    assert body["required_correlation_fields"] == ["request.id", "trace.id", "tenant.id"]
+    assert body["proof_refs"] == ["ops/wave4/log-pipeline-rollout.md"]
+    assert body["required_actions"] == []
+    assert body["remaining_gaps"] == []
+
+
+def test_downloader_orchestration_route_surfaces_ordered_failover_and_plugin_gap() -> None:
+    plugin_registry = PluginRegistry()
+    harness = TestPluginContext(settings={"plugins": {}})
+    register_builtin_plugins(plugin_registry, context_provider=harness.provider())
+    client = _build_client(
+        plugin_registry=plugin_registry,
+        settings_overrides={
+            "FILMU_PY_DOWNLOADERS": {
+                "real_debrid": {"enabled": True, "api_key": "rd-token"},
+                "all_debrid": {"enabled": True, "api_key": "ad-token"},
+                "debrid_link": {"enabled": False, "api_key": ""},
+                "stremthru": {
+                    "enabled": True,
+                    "url": "https://stremthru.example.test",
+                    "token": "st-token",
+                },
+            }
+        },
+    )
+
+    response = client.get("/api/v1/operations/downloader-orchestration", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selection_mode"] == "ordered_failover_policy_fanout"
+    assert body["selected_provider"] == "realdebrid"
+    assert body["multi_provider_enabled"] is True
+    assert body["plugin_downloaders_registered"] == 1
+    assert body["worker_plugin_dispatch_ready"] is True
+    assert body["fanout_ready"] is True
+    assert body["multi_container_ready"] is True
+    assert body["required_actions"] == []
+    providers = {(row["name"], row["source"]): row for row in body["providers"]}
+    assert providers[("realdebrid", "builtin")]["enabled"] is True
+    assert providers[("realdebrid", "builtin")]["selected"] is True
+    assert providers[("alldebrid", "builtin")]["enabled"] is True
+    assert providers[("stremthru", "plugin")]["configured"] is True
+    assert providers[("stremthru", "plugin")]["priority"] == 4
+    assert body["remaining_gaps"] == []
 
 
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:
