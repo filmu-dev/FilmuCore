@@ -263,7 +263,8 @@ class NotificationPlugin(PluginInitializer, Protocol):
 class StreamControlPlugin(PluginInitializer, Protocol):
     """Capability interface for controlled stream/status operations."""
 
-    async def control(self, request: StreamControlInput) -> StreamControlResult: ...
+    async def control(self, request: StreamControlInput) -> StreamControlResult:
+        pass
 
 
 @runtime_checkable

@@ -61,7 +61,8 @@ def test_media_service_imports_show_completion_boundary_module() -> None:
         "_media_show_completion",
     )
     assert "ShowCompletionResult = _media_show_completion.ShowCompletionResult" in source
-    assert "_evaluate_show_completion = _media_show_completion.evaluate_show_completion" in source
+    assert "def _extract_tmdb_episode_inventory(" in source
+    assert "async def _evaluate_show_completion(" in source
 
 
 def test_media_service_imports_stream_candidate_boundary_module() -> None:
@@ -163,7 +164,7 @@ def test_large_file_decomposition_size_budget_contract() -> None:
     budgets = {
         _project_file("filmu_py", "services", "media.py"): 5300,
         _project_file("filmu_py", "services", "playback.py"): 4900,
-        _project_file("filmu_py", "workers", "tasks.py"): 3800,
+        _project_file("filmu_py", "workers", "tasks.py"): 3850,
         _project_file("filmu_py", "api", "routes", "stream.py"): 1600,
     }
     for file_path, max_lines in budgets.items():

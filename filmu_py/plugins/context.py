@@ -76,7 +76,8 @@ class PluginLogger(Protocol):
 class PluginStreamControlGateway(Protocol):
     """Host-controlled stream/status gateway exposed to authorized plugins."""
 
-    async def control(self, request: StreamControlInput) -> StreamControlResult: ...
+    async def control(self, request: StreamControlInput) -> StreamControlResult:
+        pass
 
 
 @dataclass(frozen=True, slots=True)

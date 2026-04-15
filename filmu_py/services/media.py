@@ -2112,8 +2112,6 @@ class CalendarProjectionRecord:
 
 
 ShowCompletionResult = _media_show_completion.ShowCompletionResult
-_extract_tmdb_episode_inventory = _media_show_completion.extract_tmdb_episode_inventory
-_evaluate_show_completion = _media_show_completion.evaluate_show_completion
 ParsedStreamCandidateRecord = _media_stream_candidates.ParsedStreamCandidateRecord
 ParsedStreamCandidateValidation = _media_stream_candidates.ParsedStreamCandidateValidation
 RankedStreamCandidateRecord = _media_stream_candidates.RankedStreamCandidateRecord
@@ -2131,6 +2129,22 @@ rank_persisted_streams_for_item = _media_stream_candidates.rank_persisted_stream
 select_stream_candidate = _media_stream_candidates.select_stream_candidate
 parse_stream_candidate_title = _media_stream_candidates.parse_stream_candidate_title
 validate_parsed_stream_candidate = _media_stream_candidates.validate_parsed_stream_candidate
+
+
+def _extract_tmdb_episode_inventory(
+    attributes: dict[str, object],
+    *,
+    today: date,
+) -> dict[int, _media_show_completion.SeasonEpisodeInventory]:
+    return _media_show_completion.extract_tmdb_episode_inventory(attributes, today=today)
+
+
+async def _evaluate_show_completion(
+    item: MediaItemRecord,
+    db: DatabaseRuntime,
+    settings: Settings,
+) -> ShowCompletionResult:
+    return await _media_show_completion.evaluate_show_completion(item, db, settings)
 _infer_season_range_from_path = _media_path_inference.infer_season_range_from_path
 _infer_episode_number_from_path = _media_path_inference.infer_episode_number_from_path
 
