@@ -366,6 +366,18 @@ class ControlPlaneRemediationResponse(BaseModel):
     summary: ControlPlaneSummaryResponse
 
 
+class ControlPlaneAckRecoveryResponse(BaseModel):
+    """Outcome of one operator-triggered control-plane ack-backlog recovery sweep."""
+
+    generated_at: str
+    active_within_seconds: int
+    rewound_subscribers: int
+    stale_marked_subscribers: int
+    pending_without_ack_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummaryResponse
+
+
 class EnterpriseOperationsSliceResponse(BaseModel):
     """One enterprise-operations workstream posture summary."""
 

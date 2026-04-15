@@ -37,11 +37,13 @@ from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.rtn import RankingProfile
 from filmu_py.services.debrid import (
     AllDebridPlaybackClient,
+    build_download_manifest,
     DebridDownloadClient,
     DebridLinkPlaybackClient,
     PluginDownloaderClientAdapter,
     DebridRateLimitError,
     RealDebridPlaybackClient,
+    TorrentInfo,
     filter_torrent_files,
 )
 from filmu_py.services.media import (
@@ -1650,7 +1652,7 @@ async def _execute_debrid_download(
     settings: Settings,
     item_id: str,
     item_request_id: str | None,
-) -> tuple[str, object, list[str]]:
+ ) -> tuple[str, TorrentInfo, list[str]]:
     """Run one downloader candidate through add/select/poll/link resolution."""
 
     magnet_url = f"magnet:?xt=urn:btih:{infohash}".lower()
@@ -1691,7 +1693,35 @@ async def _execute_debrid_download(
     await client.select_files(provider_torrent_id, [file.file_id for file in selected_files])
     refreshed_info = await client.get_torrent_info(provider_torrent_id)
     download_urls = await client.get_download_links(provider_torrent_id)
-    return provider_torrent_id, refreshed_info, download_urls
+    manifest = build_download_manifest(
+        refreshed_info.files,
+        download_urls=download_urls,
+        settings=settings.downloaders,
+    )
+    if not manifest.files:
+        raise ValueError("no_downloadable_files")
+    if manifest.unresolved_file_count > 0:
+        raise ValueError("download_manifest_incomplete")
+    if manifest.duplicate_path_count > 0:
+        raise ValueError("download_manifest_duplicate_paths")
+    validated_info = TorrentInfo(
+        provider_torrent_id=refreshed_info.provider_torrent_id,
+        status=refreshed_info.status,
+        name=getattr(refreshed_info, "name", None),
+        info_hash=getattr(refreshed_info, "info_hash", None),
+        files=manifest.files,
+        links=manifest.download_urls,
+    )
+    _worker_stage_logger().info(
+        "debrid_item.manifest_validated",
+        item_id=item_id,
+        item_request_id=item_request_id,
+        provider=provider,
+        file_count=len(manifest.files),
+        multi_container=manifest.multi_container,
+        container_roots=list(manifest.container_roots),
+    )
+    return provider_torrent_id, validated_info, manifest.download_urls
 
 
 def _should_failover_downloader(

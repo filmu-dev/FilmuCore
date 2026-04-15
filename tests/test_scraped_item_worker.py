@@ -1526,6 +1526,110 @@ def test_debrid_item_fails_over_to_next_downloader_provider(monkeypatch: Any) ->
     )
 
 
+def test_debrid_item_fails_over_when_provider_manifest_is_incomplete(monkeypatch: Any) -> None:
+    item_id = "item-debrid-manifest-failover"
+    selected = _build_stream(
+        stream_id="stream-manifest-failover",
+        item_id=item_id,
+        parsed=True,
+        selected=True,
+    )
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    settings.downloaders.all_debrid.enabled = True
+    settings.downloaders.all_debrid.api_key = "ad-token"
+
+    class _IncompleteManifestClient:
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return "provider-torrent-rd"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            _ = provider_torrent_id
+
+            @dataclass(frozen=True)
+            class _TorrentFile:
+                file_id: str
+                file_name: str
+                file_path: str | None
+                file_size_bytes: int | None
+                selected: bool = True
+                download_url: str | None = None
+                media_type: str | None = "episode"
+
+            @dataclass(frozen=True)
+            class _TorrentInfo:
+                provider_torrent_id: str
+                status: str
+                name: str | None
+                info_hash: str | None
+                files: list[_TorrentFile]
+                links: list[str]
+
+            return _TorrentInfo(
+                provider_torrent_id="provider-torrent-rd",
+                status="downloaded",
+                name="Pack",
+                info_hash="abc123",
+                files=[
+                    _TorrentFile(
+                        file_id="file-1",
+                        file_name="Episode 01.mkv",
+                        file_path="Show A/Season 01/Episode 01.mkv",
+                        file_size_bytes=800 * 1024 * 1024,
+                    ),
+                    _TorrentFile(
+                        file_id="file-2",
+                        file_name="Episode 02.mkv",
+                        file_path="Show B/Season 01/Episode 02.mkv",
+                        file_size_bytes=810 * 1024 * 1024,
+                    ),
+                ],
+                links=[],
+            )
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            return []
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([])
+
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **kwargs: _IncompleteManifestClient()
+        if kwargs["provider"] == "realdebrid"
+        else _FakeDebridClient(),
+    )
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.persisted_downloads[0]["provider"] == "alldebrid"
+    assert redis.calls[-1] == (
+        "finalize_item",
+        (item_id,),
+        {"_job_id": tasks.finalize_item_job_id(item_id), "_queue_name": "filmu-py"},
+    )
+
+
 def test_debrid_item_transitions_to_failed_when_no_selected_stream(monkeypatch: Any) -> None:
     item_id = "item-debrid-failed"
     media_service = FakePipelineMediaService(

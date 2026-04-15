@@ -43,6 +43,7 @@ from ..models import (
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
+    ControlPlaneAckRecoveryResponse,
     ControlPlaneRemediationResponse,
     ControlPlaneSummaryResponse,
     ControlPlaneSubscriberResponse,
@@ -625,7 +626,7 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
     multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
     worker_plugin_dispatch_ready = plugin_dispatch_fallback_ready
     fanout_ready = False
-    multi_container_ready = False
+    multi_container_ready = True
     ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
 
     required_actions: list[str] = []
@@ -654,10 +655,6 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         remaining_gaps.append(
             "plugin-backed downloader execution now exists as fallback only and is not yet part of policy-driven fan-out"
         )
-    required_actions.append("promote_multi_container_validation_and_provider_fallback")
-    remaining_gaps.append(
-        "multi-container validation and cross-provider fallback remain outside the live downloader worker path"
-    )
 
     return DownloaderOrchestrationResponse(
         generated_at=datetime.now(UTC).isoformat(),
@@ -3336,6 +3333,67 @@ async def remediate_control_plane_subscribers(
         error_recovered_subscribers=remediation.error_recovered_subscribers,
         total_updated_subscribers=remediation.total_updated_subscribers,
         summary=_control_plane_summary_response(remediation.summary),
+    )
+
+
+@router.post(
+    "/operations/control-plane/ack-recovery",
+    operation_id="default.control_plane_ack_recovery",
+    response_model=ControlPlaneAckRecoveryResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def recover_control_plane_ack_backlog(
+    request: Request,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlaneAckRecoveryResponse:
+    """Rewind stale control-plane delivery cursors back to their last acknowledged event."""
+
+    service = request.app.state.resources.control_plane_service
+    if service is None:
+        return ControlPlaneAckRecoveryResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            active_within_seconds=active_within_seconds,
+            rewound_subscribers=0,
+            stale_marked_subscribers=0,
+            pending_without_ack_subscribers=0,
+            total_updated_subscribers=0,
+            summary=ControlPlaneSummaryResponse(
+                total_subscribers=0,
+                active_subscribers=0,
+                stale_subscribers=0,
+                error_subscribers=0,
+                fenced_subscribers=0,
+                ack_pending_subscribers=0,
+                stream_count=0,
+                group_count=0,
+                node_count=0,
+                tenant_count=0,
+                oldest_heartbeat_age_seconds=None,
+                status_counts={},
+                required_actions=["attach_control_plane_service"],
+                remaining_gaps=["durable replay/control-plane ownership is not configured"],
+            ),
+        )
+    recovery = await service.recover_ack_backlog(active_within_seconds=active_within_seconds)
+    audit_action(
+        request,
+        action="operations.control_plane.ack_recovery",
+        target="operations.control_plane",
+        details={
+            "active_within_seconds": active_within_seconds,
+            "rewound_subscribers": recovery.rewound_subscribers,
+            "pending_without_ack_subscribers": recovery.pending_without_ack_subscribers,
+            "total_updated_subscribers": recovery.total_updated_subscribers,
+        },
+    )
+    return ControlPlaneAckRecoveryResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        active_within_seconds=active_within_seconds,
+        rewound_subscribers=recovery.rewound_subscribers,
+        stale_marked_subscribers=recovery.stale_marked_subscribers,
+        pending_without_ack_subscribers=recovery.pending_without_ack_subscribers,
+        total_updated_subscribers=recovery.total_updated_subscribers,
+        summary=_control_plane_summary_response(recovery.summary),
     )
 
 

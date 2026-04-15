@@ -80,6 +80,18 @@ class ControlPlaneRemediationResult:
     summary: ControlPlaneSummary
 
 
+@dataclass(frozen=True, slots=True)
+class ControlPlaneAckRecoveryResult:
+    """Outcome of one operator-triggered ack-backlog recovery sweep."""
+
+    active_within_seconds: int
+    rewound_subscribers: int
+    stale_marked_subscribers: int
+    pending_without_ack_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummary
+
+
 class ControlPlaneService:
     """Persist and summarize active replay/control-plane subscriber ownership."""
 
@@ -262,6 +274,90 @@ class ControlPlaneService:
             fence_resolved_subscribers=fence_resolved,
             error_recovered_subscribers=error_recovered,
             total_updated_subscribers=stale_marked + fence_resolved + error_recovered,
+            summary=summary,
+        )
+
+    async def recover_ack_backlog(
+        self,
+        *,
+        active_within_seconds: int = 120,
+    ) -> ControlPlaneAckRecoveryResult:
+        """Rewind abandoned subscriber delivery cursors back to the last acknowledged event."""
+
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=max(1, active_within_seconds))
+        rewound = 0
+        stale_marked = 0
+        pending_without_ack = 0
+        updated_rows = 0
+
+        async with self._db.session() as session:
+            rows = (
+                await session.execute(
+                    select(ControlPlaneSubscriberORM).order_by(
+                        ControlPlaneSubscriberORM.stream_name.asc(),
+                        ControlPlaneSubscriberORM.group_name.asc(),
+                        ControlPlaneSubscriberORM.consumer_name.asc(),
+                    )
+                )
+            ).scalars()
+            for row in rows:
+                ack_pending = bool(
+                    row.last_delivered_event_id
+                    and row.last_delivered_event_id != row.last_acked_event_id
+                )
+                if not ack_pending:
+                    continue
+
+                heartbeat_expired = row.last_heartbeat_at < stale_before
+                recoverable_status = row.status in {"stale", "fenced", "error"}
+                if not heartbeat_expired and not recoverable_status:
+                    continue
+
+                if row.last_acked_event_id is None:
+                    pending_without_ack += 1
+                    if row.status != "stale":
+                        row.status = "stale"
+                        stale_marked += 1
+                    if row.last_error:
+                        row.last_error = (
+                            f"{row.last_error}; ack_recovery_blocked no_last_acked_event at={now.isoformat()}"
+                        )
+                    else:
+                        row.last_error = (
+                            f"ack_recovery_blocked no_last_acked_event at={now.isoformat()}"
+                        )
+                    row.updated_at = now
+                    updated_rows += 1
+                    continue
+
+                if row.status != "stale":
+                    row.status = "stale"
+                    stale_marked += 1
+
+                row.last_read_offset = row.last_acked_event_id
+                row.last_delivered_event_id = row.last_acked_event_id
+                row.updated_at = now
+                if row.last_error:
+                    row.last_error = (
+                        f"{row.last_error}; ack_recovery_rewound to={row.last_acked_event_id} at={now.isoformat()}"
+                    )
+                else:
+                    row.last_error = (
+                        f"ack_recovery_rewound to={row.last_acked_event_id} at={now.isoformat()}"
+                    )
+                rewound += 1
+                updated_rows += 1
+            await session.flush()
+            await session.commit()
+
+        summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return ControlPlaneAckRecoveryResult(
+            active_within_seconds=active_within_seconds,
+            rewound_subscribers=rewound,
+            stale_marked_subscribers=stale_marked,
+            pending_without_ack_subscribers=pending_without_ack,
+            total_updated_subscribers=updated_rows,
             summary=summary,
         )
 

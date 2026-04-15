@@ -517,6 +517,37 @@ class DummyControlPlaneService:
         result.summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
         return result
 
+    async def recover_ack_backlog(self, *, active_within_seconds: int = 120) -> Any:
+        _ = active_within_seconds
+        rewound = 0
+        stale_marked = 0
+        pending_without_ack = 0
+        updated = 0
+        for record in self.records:
+            delivered = getattr(record, "last_delivered_event_id", None)
+            acked = getattr(record, "last_acked_event_id", None)
+            if not delivered or delivered == acked:
+                continue
+            if getattr(record, "status", "") == "active":
+                record.status = "stale"
+                stale_marked += 1
+            if acked is None:
+                pending_without_ack += 1
+                updated += 1
+                continue
+            record.last_delivered_event_id = acked
+            rewound += 1
+            updated += 1
+
+        result = type("ControlPlaneAckRecoveryResult", (), {})()
+        result.active_within_seconds = active_within_seconds
+        result.rewound_subscribers = rewound
+        result.stale_marked_subscribers = stale_marked
+        result.pending_without_ack_subscribers = pending_without_ack
+        result.total_updated_subscribers = updated
+        result.summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return result
+
 
 class DummyAuthorizationAuditService:
     """In-memory authorization-decision ledger used by route tests."""
@@ -2726,6 +2757,39 @@ def test_control_plane_remediation_route_sweeps_rows_into_recoverable_stale_stat
     assert body["summary"]["stale_subscribers"] == 2
 
 
+def test_control_plane_ack_recovery_route_rewinds_stale_backlog() -> None:
+    client = _build_client()
+    service = cast(DummyControlPlaneService, client.app.state.resources.control_plane_service)
+
+    record = type("ControlPlaneSubscriberRecord", (), {})()
+    record.stream_name = "filmu:events"
+    record.group_name = "filmu-api"
+    record.consumer_name = "consumer-1"
+    record.node_id = "node-a"
+    record.tenant_id = "tenant-main"
+    record.status = "stale"
+    record.last_read_offset = ">"
+    record.last_delivered_event_id = "11-0"
+    record.last_acked_event_id = "10-0"
+    record.last_error = None
+    record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    service.records = [record]
+
+    response = client.post("/api/v1/operations/control-plane/ack-recovery", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rewound_subscribers"] == 1
+    assert body["stale_marked_subscribers"] == 0
+    assert body["pending_without_ack_subscribers"] == 0
+    assert body["total_updated_subscribers"] == 1
+    assert body["summary"]["ack_pending_subscribers"] == 0
+    assert service.records[0].last_delivered_event_id == "10-0"
+
+
 def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> None:
     client = _build_client(
         settings_overrides={
@@ -2806,7 +2870,7 @@ def test_downloader_orchestration_route_surfaces_ordered_failover_and_plugin_gap
     assert body["plugin_downloaders_registered"] == 1
     assert body["worker_plugin_dispatch_ready"] is True
     assert body["fanout_ready"] is False
-    assert body["multi_container_ready"] is False
+    assert body["multi_container_ready"] is True
     assert "promote_ordered_failover_into_policy_driven_fanout" in body[
         "required_actions"
     ]

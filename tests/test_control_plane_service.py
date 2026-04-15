@@ -200,3 +200,56 @@ async def test_control_plane_remediation_sweeps_stale_and_fenced_rows(tmp_path: 
         assert remediation.summary.active_subscribers == 0
     finally:
         await runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_ack_recovery_rewinds_stale_delivery_cursor(tmp_path: Path) -> None:
+    runtime = await _build_runtime(tmp_path)
+    service = ControlPlaneService(runtime)
+    try:
+        await service.observe_delivery(
+            stream_name="filmu:events",
+            group_name="filmu-api",
+            consumer_name="consumer-1",
+            node_id="node-a",
+            tenant_id="tenant-main",
+            offset=">",
+            event_id="11-0",
+        )
+        await service.observe_ack(
+            stream_name="filmu:events",
+            group_name="filmu-api",
+            consumer_name="consumer-1",
+            node_id="node-a",
+            tenant_id="tenant-main",
+            event_id="10-0",
+        )
+
+        stale_time = datetime.now(UTC) - timedelta(minutes=15)
+        async with runtime.session() as session:
+            row = (
+                await session.execute(
+                    select(ControlPlaneSubscriberORM).where(
+                        ControlPlaneSubscriberORM.stream_name == "filmu:events",
+                        ControlPlaneSubscriberORM.group_name == "filmu-api",
+                        ControlPlaneSubscriberORM.consumer_name == "consumer-1",
+                    )
+                )
+            ).scalar_one()
+            row.last_heartbeat_at = stale_time
+            row.updated_at = stale_time
+            await session.flush()
+            await session.commit()
+
+        recovery = await service.recover_ack_backlog(active_within_seconds=30)
+        subscribers = await service.list_subscribers(active_within_seconds=30)
+
+        assert recovery.rewound_subscribers == 1
+        assert recovery.stale_marked_subscribers == 0
+        assert recovery.pending_without_ack_subscribers == 0
+        assert recovery.total_updated_subscribers == 1
+        assert recovery.summary.ack_pending_subscribers == 0
+        assert subscribers[0].last_delivered_event_id == "10-0"
+        assert subscribers[0].last_read_offset == "10-0"
+    finally:
+        await runtime.dispose()

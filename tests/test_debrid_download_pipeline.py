@@ -10,6 +10,7 @@ from filmu_py.config import DownloadersSettings, Settings
 from filmu_py.core.rate_limiter import RateLimitDecision
 from filmu_py.services.debrid import (
     AllDebridPlaybackClient,
+    build_download_manifest,
     DebridLinkPlaybackClient,
     DebridRateLimitError,
     RealDebridPlaybackClient,
@@ -398,3 +399,72 @@ def test_filter_torrent_files_preserves_nested_provider_path_for_pack_files() ->
     filtered = filter_torrent_files(files, settings)
 
     assert filtered[0].file_path == "Show/Season 01/Episode 01.mkv"
+
+
+def test_build_download_manifest_detects_multi_container_pack_and_preserves_paths() -> None:
+    settings = DownloadersSettings(
+        movie_filesize_mb_min=700,
+        movie_filesize_mb_max=-1,
+        episode_filesize_mb_min=100,
+        episode_filesize_mb_max=-1,
+        video_extensions=["mkv"],
+    )
+    manifest = build_download_manifest(
+        [
+            TorrentFile(
+                file_id="1",
+                file_name="Episode 01.mkv",
+                file_path="Show A/Season 01/Episode 01.mkv",
+                file_size_bytes=800 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            ),
+            TorrentFile(
+                file_id="2",
+                file_name="Episode 02.mkv",
+                file_path="Show B/Season 01/Episode 02.mkv",
+                file_size_bytes=810 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            ),
+        ],
+        download_urls=[
+            "https://cdn.example.com/show-a-s01e01",
+            "https://cdn.example.com/show-b-s01e02",
+        ],
+        settings=settings,
+    )
+
+    assert manifest.multi_container is True
+    assert manifest.container_roots == ("Show A", "Show B")
+    assert manifest.unresolved_file_count == 0
+    assert manifest.files[0].download_url == "https://cdn.example.com/show-a-s01e01"
+    assert manifest.files[1].file_path == "Show B/Season 01/Episode 02.mkv"
+
+
+def test_build_download_manifest_reports_unresolved_selected_files() -> None:
+    settings = DownloadersSettings(
+        movie_filesize_mb_min=700,
+        movie_filesize_mb_max=-1,
+        episode_filesize_mb_min=100,
+        episode_filesize_mb_max=-1,
+        video_extensions=["mkv"],
+    )
+    manifest = build_download_manifest(
+        [
+            TorrentFile(
+                file_id="1",
+                file_name="Episode 01.mkv",
+                file_path="Show/Season 01/Episode 01.mkv",
+                file_size_bytes=800 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            )
+        ],
+        download_urls=[],
+        settings=settings,
+    )
+
+    assert manifest.multi_container is False
+    assert manifest.unresolved_file_count == 1
+    assert manifest.download_urls == []
