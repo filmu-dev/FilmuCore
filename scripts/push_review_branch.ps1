@@ -54,9 +54,18 @@ $hygieneArgs = @(
     '-LocalSourceOfTruth:$true'
 )
 
-& pwsh @hygieneArgs
+$hygieneOutput = & pwsh @hygieneArgs
 if ($LASTEXITCODE -ne 0) {
     throw 'Branch hygiene failed. Fix the local source branch state or use a fresh remote review branch before pushing.'
+}
+@($hygieneOutput) | ForEach-Object { Write-Output $_ }
+
+$suggestedTitle = ''
+foreach ($line in @($hygieneOutput)) {
+    if ($line -like 'suggested_pr_title=*') {
+        $suggestedTitle = $line.Substring('suggested_pr_title='.Length).Trim()
+        break
+    }
 }
 
 $result = [ordered]@{
@@ -66,6 +75,7 @@ $result = [ordered]@{
     fetched_base = $false
     dry_run = [bool] $DryRun
     local_source_of_truth = $true
+    suggested_pr_title = if ([string]::IsNullOrWhiteSpace($suggestedTitle)) { $null } else { $suggestedTitle }
 }
 
 if ($DryRun) {
@@ -75,3 +85,6 @@ if ($DryRun) {
 
 Invoke-GitCapture -Arguments @('push', $Remote, "HEAD:refs/heads/$RemoteBranch") | Out-Null
 Write-Output "Pushed local '$currentBranch' to '$Remote/$RemoteBranch'."
+if (-not [string]::IsNullOrWhiteSpace($suggestedTitle)) {
+    Write-Output "Open the PR with title '$suggestedTitle'."
+}
