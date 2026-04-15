@@ -60,6 +60,21 @@ class RedisStreamClient(Protocol):
     async def xack(self, name: str, groupname: str, *ids: str) -> int:
         pass
 
+    async def xpending(self, name: str, groupname: str) -> object:
+        pass
+
+    async def xautoclaim(
+        self,
+        name: str,
+        groupname: str,
+        consumername: str,
+        min_idle_time: int,
+        start_id: str = "0-0",
+        count: int | None = None,
+        justid: bool = False,
+    ) -> object:
+        pass
+
 
 class ReplaySubscriptionStateSink(Protocol):
     """Observer sink used to persist durable replay consumer ownership/offset state."""
@@ -122,6 +137,29 @@ class ReplayEvent:
     topic: str
     tenant_id: str | None
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayPendingSummary:
+    """Summary of pending consumer-group deliveries for one replay stream."""
+
+    pending_count: int
+    oldest_event_id: str | None
+    latest_event_id: str | None
+    consumer_counts: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayPendingClaimResult:
+    """Outcome of one stale pending-delivery claim operation."""
+
+    group_name: str
+    consumer_name: str
+    min_idle_ms: int
+    claimed_events: list[ReplayEvent]
+    next_start_id: str
+    pending_before: ReplayPendingSummary
+    pending_after: ReplayPendingSummary
 
 
 class RedisReplayEventBackplane:
@@ -289,6 +327,85 @@ class RedisReplayEventBackplane:
             )
         return acked
 
+    async def pending_summary(
+        self,
+        *,
+        group_name: str,
+    ) -> ReplayPendingSummary:
+        """Return one bounded summary of pending consumer-group deliveries."""
+
+        raw_summary = await self._redis.xpending(self.stream_name, group_name)
+        return _decode_pending_summary(raw_summary)
+
+    async def claim_pending(
+        self,
+        *,
+        group_name: str,
+        consumer_name: str,
+        node_id: str | None = None,
+        tenant_id: str | None = None,
+        min_idle_ms: int = 60_000,
+        count: int = 100,
+        start_id: str = "0-0",
+        heartbeat_expiry_seconds: int = 120,
+    ) -> ReplayPendingClaimResult:
+        """Claim stale pending entries into one recovery consumer."""
+
+        pending_before = await self.pending_summary(group_name=group_name)
+
+        if self._subscription_state_sink is not None:
+            claim_consumer = getattr(self._subscription_state_sink, "claim_consumer", None)
+            if callable(claim_consumer):
+                claim_result = await claim_consumer(
+                    stream_name=self.stream_name,
+                    group_name=group_name,
+                    consumer_name=consumer_name,
+                    node_id=node_id or "unknown",
+                    tenant_id=tenant_id,
+                    heartbeat_expiry_seconds=max(1, heartbeat_expiry_seconds),
+                )
+                if isinstance(claim_result, dict):
+                    claim_outcome = claim_result.get("outcome")
+                    claim_owner = claim_result.get("owner_node_id", node_id or "unknown")
+                else:
+                    claim_outcome = getattr(claim_result, "outcome", None)
+                    claim_owner = getattr(claim_result, "owner_node_id", node_id or "unknown")
+                if claim_outcome == "fenced":
+                    raise ReplayConsumerFencedError(
+                        f"consumer {consumer_name} fenced by active owner {claim_owner}"
+                    )
+
+        raw_claim = await self._redis.xautoclaim(
+            self.stream_name,
+            group_name,
+            consumer_name,
+            max(1, min_idle_ms),
+            start_id=start_id,
+            count=max(1, count),
+            justid=False,
+        )
+        next_start_id, claimed_events = _decode_autoclaim_result(self.stream_name, raw_claim)
+        if self._subscription_state_sink is not None and claimed_events:
+            await self._subscription_state_sink.observe_delivery(
+                stream_name=self.stream_name,
+                group_name=group_name,
+                consumer_name=consumer_name,
+                node_id=node_id or "unknown",
+                tenant_id=tenant_id,
+                offset=start_id,
+                event_id=claimed_events[-1].event_id,
+            )
+        pending_after = await self.pending_summary(group_name=group_name)
+        return ReplayPendingClaimResult(
+            group_name=group_name,
+            consumer_name=consumer_name,
+            min_idle_ms=max(1, min_idle_ms),
+            claimed_events=claimed_events,
+            next_start_id=next_start_id,
+            pending_before=pending_before,
+            pending_after=pending_after,
+        )
+
 
 def _decode_replay_events(
     streams: list[tuple[bytes | str, list[tuple[bytes | str, dict[bytes | str, bytes | str]]]]],
@@ -317,3 +434,75 @@ def _decode_replay_events(
                 )
             )
     return events
+
+
+def _decode_pending_summary(raw_summary: object) -> ReplayPendingSummary:
+    pending_count = 0
+    oldest_event_id: str | None = None
+    latest_event_id: str | None = None
+    consumer_counts: dict[str, int] = {}
+
+    if isinstance(raw_summary, dict):
+        pending_count = int(raw_summary.get("pending", 0) or 0)
+        oldest = raw_summary.get("min")
+        latest = raw_summary.get("max")
+        oldest_event_id = str(oldest) if oldest else None
+        latest_event_id = str(latest) if latest else None
+        consumers = raw_summary.get("consumers", ())
+        if isinstance(consumers, list):
+            for consumer in consumers:
+                if isinstance(consumer, dict):
+                    name = consumer.get("name")
+                    pending = consumer.get("pending", 0)
+                    if name:
+                        consumer_counts[str(name)] = int(pending or 0)
+    elif isinstance(raw_summary, (tuple, list)) and len(raw_summary) >= 4:
+        pending_count = int(raw_summary[0] or 0)
+        oldest_event_id = str(raw_summary[1]) if raw_summary[1] else None
+        latest_event_id = str(raw_summary[2]) if raw_summary[2] else None
+        consumers = raw_summary[3]
+        if isinstance(consumers, list):
+            for consumer in consumers:
+                if isinstance(consumer, dict):
+                    name = consumer.get("name")
+                    pending = consumer.get("pending", 0)
+                    if name:
+                        consumer_counts[str(name)] = int(pending or 0)
+                elif isinstance(consumer, (tuple, list)) and len(consumer) >= 2:
+                    consumer_counts[str(consumer[0])] = int(consumer[1] or 0)
+
+    return ReplayPendingSummary(
+        pending_count=pending_count,
+        oldest_event_id=oldest_event_id,
+        latest_event_id=latest_event_id,
+        consumer_counts=consumer_counts,
+    )
+
+
+def _decode_autoclaim_result(
+    stream_name: str,
+    raw_claim: object,
+) -> tuple[str, list[ReplayEvent]]:
+    next_start_id = "0-0"
+    rows: list[tuple[bytes | str, dict[bytes | str, bytes | str]]] = []
+
+    if isinstance(raw_claim, (tuple, list)) and len(raw_claim) >= 2:
+        raw_next_start = raw_claim[0]
+        next_start_id = (
+            raw_next_start.decode("utf-8")
+            if isinstance(raw_next_start, bytes)
+            else str(raw_next_start)
+        )
+        raw_rows = raw_claim[1]
+        if isinstance(raw_rows, list):
+            for row in raw_rows:
+                if isinstance(row, (tuple, list)) and len(row) >= 2 and isinstance(row[1], dict):
+                    rows.append(
+                        (
+                            cast(bytes | str, row[0]),
+                            cast(dict[bytes | str, bytes | str], row[1]),
+                        )
+                    )
+
+    events = _decode_replay_events([(stream_name, rows)])
+    return next_start_id, events

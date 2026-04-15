@@ -378,6 +378,27 @@ class ControlPlaneAckRecoveryResponse(BaseModel):
     summary: ControlPlaneSummaryResponse
 
 
+class ControlPlanePendingRecoveryResponse(BaseModel):
+    """Outcome of one operator-triggered replay pending-entry claim sweep."""
+
+    generated_at: str
+    group_name: str
+    consumer_name: str
+    min_idle_ms: int
+    claim_limit: int
+    claimed_count: int
+    claimed_event_ids: list[str]
+    next_start_id: str
+    pending_count_before: int
+    pending_count_after: int
+    oldest_pending_event_id: str | None = None
+    latest_pending_event_id: str | None = None
+    pending_consumer_counts: dict[str, int]
+    summary: ControlPlaneSummaryResponse
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
 class EnterpriseOperationsSliceResponse(BaseModel):
     """One enterprise-operations workstream posture summary."""
 

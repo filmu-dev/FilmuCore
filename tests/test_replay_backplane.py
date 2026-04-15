@@ -14,7 +14,7 @@ from filmu_py.core.replay import RedisReplayEventBackplane, ReplayConsumerFenced
 class FakeRedisStream:
     def __init__(self) -> None:
         self.rows: list[tuple[str, dict[str, str]]] = []
-        self.groups: dict[str, dict[str, set[str]]] = {}
+        self.groups: dict[str, dict[str, dict[str, set[str]]]] = {}
         self.acked: list[tuple[str, str, tuple[str, ...]]] = []
 
     async def xadd(
@@ -59,7 +59,7 @@ class FakeRedisStream:
         groups = self.groups.setdefault(name, {})
         if groupname in groups:
             raise ResponseError("BUSYGROUP Consumer Group name already exists")
-        groups[groupname] = set()
+        groups[groupname] = {}
         return True
 
     async def xreadgroup(
@@ -78,20 +78,64 @@ class FakeRedisStream:
             selected = [row for row in selected if _stream_id_gt(row[0], offset)]
         if count is not None:
             selected = selected[:count]
-        self.groups.setdefault(stream_name, {}).setdefault(groupname, set()).update(
-            row[0] for row in selected
-        )
+        group = self.groups.setdefault(stream_name, {}).setdefault(groupname, {})
+        group.setdefault(consumername, set()).update(row[0] for row in selected)
         return [(stream_name, selected)]
 
     async def xack(self, name: str, groupname: str, *ids: str) -> int:
         self.acked.append((name, groupname, ids))
-        group = self.groups.setdefault(name, {}).setdefault(groupname, set())
+        group = self.groups.setdefault(name, {}).setdefault(groupname, {})
         acked = 0
         for event_id in ids:
-            if event_id in group:
-                group.remove(event_id)
-                acked += 1
+            for consumer_ids in group.values():
+                if event_id in consumer_ids:
+                    consumer_ids.remove(event_id)
+                    acked += 1
+                    break
         return acked
+
+    async def xpending(self, name: str, groupname: str) -> dict[str, object]:
+        group = self.groups.setdefault(name, {}).setdefault(groupname, {})
+        all_ids = sorted({event_id for consumer_ids in group.values() for event_id in consumer_ids}, key=_stream_id_sort_key)
+        return {
+            "pending": len(all_ids),
+            "min": all_ids[0] if all_ids else None,
+            "max": all_ids[-1] if all_ids else None,
+            "consumers": [
+                {"name": consumer, "pending": len(ids)}
+                for consumer, ids in sorted(group.items())
+            ],
+        }
+
+    async def xautoclaim(
+        self,
+        name: str,
+        groupname: str,
+        consumername: str,
+        min_idle_time: int,
+        start_id: str = "0-0",
+        count: int | None = None,
+        justid: bool = False,
+    ) -> list[object]:
+        _ = (min_idle_time, justid)
+        group = self.groups.setdefault(name, {}).setdefault(groupname, {})
+        claimable_ids = sorted(
+            {
+                event_id
+                for ids in group.values()
+                for event_id in ids
+                if _stream_id_gt(event_id, start_id) or event_id == start_id
+            },
+            key=_stream_id_sort_key,
+        )
+        if count is not None:
+            claimable_ids = claimable_ids[:count]
+        for ids in group.values():
+            ids.difference_update(claimable_ids)
+        group.setdefault(consumername, set()).update(claimable_ids)
+        claimed_rows = [row for row in self.rows if row[0] in claimable_ids]
+        next_start = claimable_ids[-1] if claimable_ids else start_id
+        return [next_start, claimed_rows, []]
 
 
 class FailingReplayBackplane:
@@ -144,6 +188,11 @@ def _stream_id_gt(left: str, right: str) -> bool:
     left_ms, left_seq = (int(part) for part in left.split("-", 1))
     right_ms, right_seq = (int(part) for part in right.split("-", 1))
     return (left_ms, left_seq) > (right_ms, right_seq)
+
+
+def _stream_id_sort_key(value: str) -> tuple[int, int]:
+    left_ms, left_seq = (int(part) for part in value.split("-", 1))
+    return left_ms, left_seq
 
 
 @pytest.mark.asyncio
@@ -209,6 +258,8 @@ def test_fake_redis_stream_signature_is_compatible() -> None:
     assert hasattr(FakeRedisStream(), "xgroup_create")
     assert hasattr(FakeRedisStream(), "xreadgroup")
     assert hasattr(FakeRedisStream(), "xack")
+    assert hasattr(FakeRedisStream(), "xpending")
+    assert hasattr(FakeRedisStream(), "xautoclaim")
 
 
 @pytest.mark.asyncio
@@ -327,3 +378,69 @@ async def test_redis_replay_backplane_fences_consumer_when_claim_is_denied() -> 
         }
     ]
     assert sink.errors == []
+
+
+@pytest.mark.asyncio
+async def test_redis_replay_backplane_reports_pending_summary() -> None:
+    redis = FakeRedisStream()
+    backplane = RedisReplayEventBackplane(redis, stream_name="filmu:events", maxlen=10)
+    await backplane.publish("tenant.updated", {"ok": True}, tenant_id="tenant-a")
+    await backplane.publish("tenant.updated", {"ok": False}, tenant_id="tenant-b")
+    await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
+    await backplane.read_group(
+        group_name="filmu-api",
+        consumer_name="consumer-1",
+        count=2,
+    )
+
+    summary = await backplane.pending_summary(group_name="filmu-api")
+
+    assert summary.pending_count == 2
+    assert summary.oldest_event_id == "1-0"
+    assert summary.latest_event_id == "2-0"
+    assert summary.consumer_counts == {"consumer-1": 2}
+
+
+@pytest.mark.asyncio
+async def test_redis_replay_backplane_claims_pending_entries_into_recovery_consumer() -> None:
+    redis = FakeRedisStream()
+    sink = RecordingReplaySink()
+    backplane = RedisReplayEventBackplane(
+        redis,
+        stream_name="filmu:events",
+        maxlen=10,
+        subscription_state_sink=sink,
+    )
+    await backplane.publish("tenant.updated", {"ok": True}, tenant_id="tenant-a")
+    await backplane.publish("tenant.updated", {"ok": False}, tenant_id="tenant-a")
+    await backplane.ensure_consumer_group("filmu-api", start_id="0-0")
+    await backplane.read_group(
+        group_name="filmu-api",
+        consumer_name="consumer-1",
+        node_id="node-a",
+        tenant_id="tenant-a",
+        count=2,
+    )
+
+    result = await backplane.claim_pending(
+        group_name="filmu-api",
+        consumer_name="recovery-ops",
+        node_id="node-recovery",
+        tenant_id="tenant-a",
+        min_idle_ms=5_000,
+        count=10,
+    )
+
+    assert [event.event_id for event in result.claimed_events] == ["1-0", "2-0"]
+    assert result.pending_before.pending_count == 2
+    assert result.pending_after.pending_count == 2
+    assert result.pending_after.consumer_counts == {"consumer-1": 0, "recovery-ops": 2}
+    assert sink.deliveries[-1] == {
+        "stream_name": "filmu:events",
+        "group_name": "filmu-api",
+        "consumer_name": "recovery-ops",
+        "node_id": "node-recovery",
+        "tenant_id": "tenant-a",
+        "offset": "0-0",
+        "event_id": "2-0",
+    }

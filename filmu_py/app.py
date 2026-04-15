@@ -374,13 +374,15 @@ def _build_lifespan(
             resources.control_plane_service = build_control_plane_service(resources)
             resources.plugin_governance_service = build_plugin_governance_service(resources)
             if runtime_settings.control_plane.event_backplane == "redis_stream":
+                replay_backplane = RedisReplayEventBackplane(
+                    cast("Any", redis),
+                    stream_name=runtime_settings.control_plane.event_stream_name,
+                    maxlen=runtime_settings.control_plane.event_replay_maxlen,
+                    subscription_state_sink=resources.control_plane_service,
+                )
+                resources.replay_backplane = replay_backplane
                 event_bus.attach_replay_backplane(
-                    RedisReplayEventBackplane(
-                        cast("Any", redis),
-                        stream_name=runtime_settings.control_plane.event_stream_name,
-                        maxlen=runtime_settings.control_plane.event_replay_maxlen,
-                        subscription_state_sink=resources.control_plane_service,
-                    )
+                    replay_backplane
                 )
             runtime_lifecycle.transition(
                 RuntimeLifecyclePhase.PLUGIN_REGISTRATION,

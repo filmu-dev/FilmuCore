@@ -19,6 +19,7 @@ from filmu_py.authz import evaluate_permissions, permission_constraints_from_map
 from filmu_py.config import set_runtime_settings
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
+from filmu_py.core.replay import ReplayConsumerFencedError
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
 from filmu_py.plugins.interfaces import StreamControlAction, StreamControlInput
 from filmu_py.services.debrid import DownloaderAccountService
@@ -44,6 +45,7 @@ from ..models import (
     CalendarReleaseDataResponse,
     CalendarResponse,
     ControlPlaneAckRecoveryResponse,
+    ControlPlanePendingRecoveryResponse,
     ControlPlaneRemediationResponse,
     ControlPlaneSummaryResponse,
     ControlPlaneSubscriberResponse,
@@ -3386,6 +3388,129 @@ async def recover_control_plane_ack_backlog(
         pending_without_ack_subscribers=recovery.pending_without_ack_subscribers,
         total_updated_subscribers=recovery.total_updated_subscribers,
         summary=_control_plane_summary_response(recovery.summary),
+    )
+
+
+@router.post(
+    "/operations/control-plane/pending-recovery",
+    operation_id="default.control_plane_pending_recovery",
+    response_model=ControlPlanePendingRecoveryResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def recover_control_plane_pending_entries(
+    request: Request,
+    group_name: str | None = None,
+    consumer_name: str = "recovery-ops",
+    min_idle_ms: Annotated[int, Query(ge=1, le=86_400_000)] = 60_000,
+    claim_limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlanePendingRecoveryResponse:
+    """Claim stale replay pending entries into one operator recovery consumer."""
+
+    resources = request.app.state.resources
+    service = resources.control_plane_service
+    backplane = resources.replay_backplane
+    resolved_group_name = group_name or resources.settings.control_plane.consumer_group
+    auth_context = get_auth_context(request)
+    empty_summary = (
+        _control_plane_summary_response(
+            await service.summarize_subscribers(active_within_seconds=active_within_seconds)
+        )
+        if service is not None
+        else ControlPlaneSummaryResponse(
+            total_subscribers=0,
+            active_subscribers=0,
+            stale_subscribers=0,
+            error_subscribers=0,
+            fenced_subscribers=0,
+            ack_pending_subscribers=0,
+            stream_count=0,
+            group_count=0,
+            node_count=0,
+            tenant_count=0,
+            oldest_heartbeat_age_seconds=None,
+            status_counts={},
+            required_actions=["attach_control_plane_service"],
+            remaining_gaps=["durable replay/control-plane ownership is not configured"],
+        )
+    )
+    if backplane is None or not hasattr(backplane, "claim_pending"):
+        return ControlPlanePendingRecoveryResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            group_name=resolved_group_name,
+            consumer_name=consumer_name,
+            min_idle_ms=min_idle_ms,
+            claim_limit=claim_limit,
+            claimed_count=0,
+            claimed_event_ids=[],
+            next_start_id="0-0",
+            pending_count_before=0,
+            pending_count_after=0,
+            oldest_pending_event_id=None,
+            latest_pending_event_id=None,
+            pending_consumer_counts={},
+            summary=empty_summary,
+            required_actions=["attach_redis_replay_backplane"],
+            remaining_gaps=["durable replay backplane is not configured"],
+        )
+
+    try:
+        result = await backplane.claim_pending(
+            group_name=resolved_group_name,
+            consumer_name=consumer_name,
+            node_id=f"operator:{auth_context.actor_id}",
+            tenant_id=auth_context.tenant_id,
+            min_idle_ms=min_idle_ms,
+            count=claim_limit,
+            start_id="0-0",
+            heartbeat_expiry_seconds=active_within_seconds,
+        )
+    except ReplayConsumerFencedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    summary = (
+        _control_plane_summary_response(
+            await service.summarize_subscribers(active_within_seconds=active_within_seconds)
+        )
+        if service is not None
+        else empty_summary
+    )
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if result.pending_after.pending_count > 0:
+        required_actions.append("repeat_pending_claim_until_backlog_drained")
+        remaining_gaps.append("bounded claim window left replay pending entries in the consumer group")
+    audit_action(
+        request,
+        action="operations.control_plane.pending_recovery",
+        target="operations.control_plane",
+        details={
+            "group_name": resolved_group_name,
+            "consumer_name": consumer_name,
+            "min_idle_ms": min_idle_ms,
+            "claim_limit": claim_limit,
+            "claimed_count": len(result.claimed_events),
+            "pending_count_before": result.pending_before.pending_count,
+            "pending_count_after": result.pending_after.pending_count,
+        },
+    )
+    return ControlPlanePendingRecoveryResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        group_name=resolved_group_name,
+        consumer_name=consumer_name,
+        min_idle_ms=min_idle_ms,
+        claim_limit=claim_limit,
+        claimed_count=len(result.claimed_events),
+        claimed_event_ids=[event.event_id for event in result.claimed_events],
+        next_start_id=result.next_start_id,
+        pending_count_before=result.pending_before.pending_count,
+        pending_count_after=result.pending_after.pending_count,
+        oldest_pending_event_id=result.pending_before.oldest_event_id,
+        latest_pending_event_id=result.pending_before.latest_event_id,
+        pending_consumer_counts=result.pending_after.consumer_counts,
+        summary=summary,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
     )
 
 

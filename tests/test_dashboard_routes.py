@@ -549,6 +549,68 @@ class DummyControlPlaneService:
         return result
 
 
+class DummyReplayBackplane:
+    """Minimal replay backplane stub for pending-recovery route tests."""
+
+    def __init__(self) -> None:
+        self.claims: list[dict[str, Any]] = []
+
+    async def claim_pending(
+        self,
+        *,
+        group_name: str,
+        consumer_name: str,
+        node_id: str | None = None,
+        tenant_id: str | None = None,
+        min_idle_ms: int = 60_000,
+        count: int = 100,
+        start_id: str = "0-0",
+        heartbeat_expiry_seconds: int = 120,
+    ) -> Any:
+        self.claims.append(
+            {
+                "group_name": group_name,
+                "consumer_name": consumer_name,
+                "node_id": node_id,
+                "tenant_id": tenant_id,
+                "min_idle_ms": min_idle_ms,
+                "count": count,
+                "start_id": start_id,
+                "heartbeat_expiry_seconds": heartbeat_expiry_seconds,
+            }
+        )
+        result = type("ReplayPendingClaimResult", (), {})()
+        result.group_name = group_name
+        result.consumer_name = consumer_name
+        result.min_idle_ms = min_idle_ms
+        result.claimed_events = [
+            type("ReplayEvent", (), {"event_id": "21-0"})(),
+            type("ReplayEvent", (), {"event_id": "22-0"})(),
+        ]
+        result.next_start_id = "23-0"
+        result.pending_before = type(
+            "ReplayPendingSummary",
+            (),
+            {
+                "pending_count": 2,
+                "oldest_event_id": "21-0",
+                "latest_event_id": "22-0",
+                "consumer_counts": {"consumer-1": 2},
+            },
+        )()
+        result.pending_after = type(
+            "ReplayPendingSummary",
+            (),
+            {
+                "pending_count": 0,
+                "oldest_event_id": None,
+                "latest_event_id": None,
+                "consumer_counts": {"recovery-ops": 0},
+            },
+        )()
+        return result
+
+
 class DummyAuthorizationAuditService:
     """In-memory authorization-decision ledger used by route tests."""
 
@@ -701,6 +763,7 @@ def _build_client(
     plugin_load_report: Any | None = None,
     security_identity_service: Any | None = None,
     authorization_audit_service: Any | None = None,
+    replay_backplane: Any | None = None,
 ) -> TestClient:
     """Build a FastAPI test app with compatibility routers and mocked resources."""
 
@@ -734,6 +797,7 @@ def _build_client(
         ),
         control_plane_service=DummyControlPlaneService(),
         plugin_governance_service=DummyPluginGovernanceService(),
+        replay_backplane=DummyReplayBackplane() if replay_backplane is None else replay_backplane,
     )
     app.state.plugin_load_report = plugin_load_report
     app.include_router(create_api_router())
@@ -2788,6 +2852,50 @@ def test_control_plane_ack_recovery_route_rewinds_stale_backlog() -> None:
     assert body["total_updated_subscribers"] == 1
     assert body["summary"]["ack_pending_subscribers"] == 0
     assert service.records[0].last_delivered_event_id == "10-0"
+
+
+def test_control_plane_pending_recovery_route_claims_replay_backlog() -> None:
+    client = _build_client()
+    resources = cast(Any, client.app.state.resources)
+    service = cast(DummyControlPlaneService, resources.control_plane_service)
+    replay_backplane = cast(DummyReplayBackplane, resources.replay_backplane)
+
+    record = type("ControlPlaneSubscriberRecord", (), {})()
+    record.stream_name = "filmu:events"
+    record.group_name = "filmu-api"
+    record.consumer_name = "consumer-1"
+    record.node_id = "node-a"
+    record.tenant_id = "tenant-main"
+    record.status = "stale"
+    record.last_read_offset = ">"
+    record.last_delivered_event_id = "22-0"
+    record.last_acked_event_id = "20-0"
+    record.last_error = None
+    record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    service.records = [record]
+
+    response = client.post(
+        "/api/v1/operations/control-plane/pending-recovery",
+        params={"group_name": "filmu-api", "consumer_name": "recovery-ops", "claim_limit": 25},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["group_name"] == "filmu-api"
+    assert body["consumer_name"] == "recovery-ops"
+    assert body["claimed_count"] == 2
+    assert body["claimed_event_ids"] == ["21-0", "22-0"]
+    assert body["next_start_id"] == "23-0"
+    assert body["pending_count_before"] == 2
+    assert body["pending_count_after"] == 0
+    assert body["pending_consumer_counts"] == {"recovery-ops": 0}
+    assert body["required_actions"] == []
+    assert replay_backplane.claims[0]["count"] == 25
+    assert replay_backplane.claims[0]["tenant_id"] == "tenant-main"
 
 
 def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> None:
