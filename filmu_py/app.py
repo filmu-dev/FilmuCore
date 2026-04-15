@@ -36,8 +36,8 @@ from .middleware import RequestIdMiddleware
 from .observability import setup_observability
 from .plugins import PluginRuntimePolicy, load_plugins, register_builtin_plugins
 from .plugins.context import HostPluginDatasource, PluginContextProvider
-from .plugins.stream_control import HostStreamControlGateway
 from .plugins.registry import PluginRegistry
+from .plugins.stream_control import HostStreamControlGateway
 from .resources import AppResources
 from .services.access_policy import AccessPolicyService
 from .services.authorization_audit import AuthorizationDecisionAuditService

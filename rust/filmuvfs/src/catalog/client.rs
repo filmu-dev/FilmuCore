@@ -146,6 +146,16 @@ impl CatalogHttpFallbackClient {
     }
 
     #[cfg(target_os = "windows")]
+    fn fallback_target(&self) -> String {
+        format!("docker exec {}", self.container_name)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn fallback_target(&self) -> String {
+        self.endpoint.clone()
+    }
+
+    #[cfg(target_os = "windows")]
     async fn fetch_event_via_docker_exec(
         &self,
         last_applied_generation_id: Option<&str>,
@@ -234,7 +244,7 @@ impl CatalogWatchRuntime {
                     info!(
                         daemon_id = %self.config.daemon_id,
                         session_id = %self.config.session_id,
-                        fallback_target = %format!("docker exec {}", http_fallback.container_name),
+                        fallback_target = %http_fallback.fallback_target(),
                         "windows docker bridge transport forced; skipping direct gRPC WatchCatalog session"
                     );
                     match self
@@ -280,11 +290,7 @@ impl CatalogWatchRuntime {
                 }
                 Err(error) => {
                     if let Some(http_fallback) = self.http_fallback_client() {
-                        #[cfg(target_os = "windows")]
-                        let fallback_target =
-                            format!("docker exec {}", http_fallback.container_name);
-                        #[cfg(not(target_os = "windows"))]
-                        let fallback_target = http_fallback.endpoint.clone();
+                        let fallback_target = http_fallback.fallback_target();
                         warn!(
                             daemon_id = %self.config.daemon_id,
                             session_id = %self.config.session_id,

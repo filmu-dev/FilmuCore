@@ -20,8 +20,13 @@ from filmu_py.config import set_runtime_settings
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
+from filmu_py.plugins.interfaces import StreamControlAction, StreamControlInput
 from filmu_py.services.debrid import DownloaderAccountService
 from filmu_py.services.settings_service import save_settings
+from filmu_py.workers.stage_observability import (
+    worker_blocker_snapshot as _stage_worker_blocker_snapshot,
+)
+from filmuvfs.catalog.v1 import catalog_pb2
 
 from ..models import (
     AccessPolicyAuditAlertResponse,
@@ -51,12 +56,12 @@ from ..models import (
     MetadataReindexStatusResponse,
     PluginCapabilityStatusResponse,
     PluginEventStatusResponse,
-    PluginStreamControlRequest,
-    PluginStreamControlResponse,
     PluginGovernanceOverrideResponse,
     PluginGovernanceOverrideWriteRequest,
     PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
+    PluginStreamControlRequest,
+    PluginStreamControlResponse,
     QueueAlertResponse,
     QueueStatusHistoryFiltersResponse,
     QueueStatusHistoryPointResponse,
@@ -70,11 +75,6 @@ from ..models import (
     TenantQuotaPolicyResponse,
 )
 from .runtime_governance import playback_gate_governance_snapshot, vfs_runtime_governance_snapshot
-from filmuvfs.catalog.v1 import catalog_pb2
-from filmu_py.plugins.interfaces import StreamControlAction, StreamControlInput
-from filmu_py.workers.stage_observability import (
-    worker_blocker_snapshot as _stage_worker_blocker_snapshot,
-)
 
 router = APIRouter(tags=["default"])
 _MAX_API_KEY_ID_LENGTH = 128

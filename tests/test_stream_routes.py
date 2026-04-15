@@ -10056,7 +10056,24 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
         json.dumps(
             {
                 "timestamp": "2026-04-12T01:01:03Z",
-                "results": [{"provider": "plex", "status": "passed"}],
+                "media_type": "movie",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103-tv.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:03Z",
+                "media_type": "tv",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
             }
         ),
         encoding="utf-8",
