@@ -10104,6 +10104,32 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
         ),
         encoding="utf-8",
     )
+    (artifacts_root / "playback-gate-runner-readiness.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-12T01:01:06Z",
+                "status": "ready",
+                "checks": [
+                    {
+                        "name": "frontend_context",
+                        "required": True,
+                        "ok": True,
+                    },
+                    {
+                        "name": "browser_executable",
+                        "required": True,
+                        "ok": True,
+                    },
+                    {
+                        "name": "linux_fuse",
+                        "required": True,
+                        "ok": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
     monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
     client, _ = _build_client()
