@@ -3012,7 +3012,7 @@ def test_control_plane_automation_route_deduplicates_remaining_gaps() -> None:
     client = _build_client(
         settings_overrides={
             "FILMU_PY_CONTROL_PLANE_AUTOMATION": {
-                "enabled": True,
+                "enabled": False,
             }
         }
     )
