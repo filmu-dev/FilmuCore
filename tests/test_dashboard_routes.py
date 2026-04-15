@@ -3286,6 +3286,11 @@ def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> 
                     "request.id",
                     "trace.id",
                     "tenant.id",
+                    "vfs.session_id",
+                    "vfs.daemon_id",
+                    "catalog.entry_id",
+                    "provider.file_id",
+                    "vfs.handle_key",
                 ],
                 "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
             },
@@ -3309,7 +3314,16 @@ def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> 
     assert body["alerting_enabled"] is True
     assert body["rust_trace_correlation_enabled"] is True
     assert body["correlation_contract_complete"] is True
-    assert body["required_correlation_fields"] == ["request.id", "trace.id", "tenant.id"]
+    assert body["required_correlation_fields"] == [
+        "request.id",
+        "trace.id",
+        "tenant.id",
+        "vfs.session_id",
+        "vfs.daemon_id",
+        "catalog.entry_id",
+        "provider.file_id",
+        "vfs.handle_key",
+    ]
     assert body["proof_refs"] == ["ops/wave4/log-pipeline-rollout.md"]
     assert body["required_actions"] == []
     assert body["remaining_gaps"] == []

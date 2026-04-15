@@ -417,7 +417,7 @@ class FakePlaybackService:
         return self.attachment_persist_result
 
 
-def _build_settings() -> Settings:
+def _build_settings(*, settings_overrides: dict[str, Any] | None = None) -> Settings:
     return Settings(
         FILMU_PY_API_KEY=SecretStr("a" * 32),
         FILMU_PY_POSTGRES_DSN="postgresql+asyncpg://postgres:postgres@localhost:5432/filmu",
@@ -426,12 +426,14 @@ def _build_settings() -> Settings:
         FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
         FILMU_PY_LOG_LEVEL="INFO",
         FILMU_PY_SERVICE_NAME="filmu-python-test",
+        **(settings_overrides or {}),
     )
 
 
 def _build_client(
     media_service: FakeMediaService,
     *,
+    settings_overrides: dict[str, Any] | None = None,
     vfs_catalog_supplier: FakeVfsCatalogSupplier | None = None,
     redis: DummyRedis | None = None,
     runtime_lifecycle: RuntimeLifecycleState | None = None,
@@ -440,7 +442,7 @@ def _build_client(
     queued_hls_restricted_fallback_refresh_controller: object | None = None,
     playback_service: object | None = None,
 ) -> TestClient:
-    settings = _build_settings()
+    settings = _build_settings(settings_overrides=settings_overrides)
     runtime_redis = redis or DummyRedis()
     app = FastAPI()
     resources = AppResources(
@@ -499,7 +501,7 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
     response = client.post(
         "/graphql",
         json={
-            "query": "query { calendarEntries { itemId showTitle itemType airedAt lastState season episode tmdbId tvdbId imdbId parentTmdbId parentTvdbId releaseData } }"
+            "query": "query { calendarEntries { itemId showTitle itemType airedAt lastState season episode tmdbId tvdbId imdbId parentTmdbId parentTvdbId releaseData releaseWindow { nextAired lastAired } } }"
         },
     )
 
@@ -520,8 +522,131 @@ def test_graphql_calendar_entries_returns_list_shape() -> None:
             "parentTmdbId": 999,
             "parentTvdbId": 555,
             "releaseData": '{"next_aired": "2026-03-16T10:00:00+00:00", "nextAired": null, "last_aired": null, "lastAired": null}',
+            "releaseWindow": {
+                "nextAired": "2026-03-16T10:00:00+00:00",
+                "lastAired": None,
+            },
         }
     ]
+
+
+def test_graphql_observability_convergence_returns_typed_cross_process_snapshot() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "opensearch://logs-filmu",
+                "healthcheck_url": "https://ops.example.test/vector/health",
+                "field_mapping_version": "filmu-ecs-v1",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "required_correlation_fields": [
+                    "request.id",
+                    "trace.id",
+                    "tenant.id",
+                    "vfs.session_id",
+                    "vfs.daemon_id",
+                    "catalog.entry_id",
+                    "provider.file_id",
+                    "vfs.handle_key",
+                ],
+                "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
+            },
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  observabilityConvergence {
+                    status
+                    structuredLoggingEnabled
+                    otelEnabled
+                    otelEndpointConfigured
+                    logShipperEnabled
+                    logShipperType
+                    logShipperTargetConfigured
+                    logShipperHealthcheckConfigured
+                    searchBackend
+                    environmentShippingEnabled
+                    alertingEnabled
+                    rustTraceCorrelationEnabled
+                    correlationContractComplete
+                    expectedCorrelationFieldsReady
+                    traceContextHeaders
+                    correlationHeaders
+                    sharedCrossProcessHeaders
+                    expectedCorrelationFields
+                    requiredCorrelationFields
+                    proofRefs
+                    requiredActions
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["observabilityConvergence"]
+    assert payload["status"] == "ready"
+    assert payload["structuredLoggingEnabled"] is True
+    assert payload["otelEnabled"] is True
+    assert payload["otelEndpointConfigured"] is True
+    assert payload["logShipperEnabled"] is True
+    assert payload["logShipperType"] == "vector"
+    assert payload["logShipperTargetConfigured"] is True
+    assert payload["logShipperHealthcheckConfigured"] is True
+    assert payload["searchBackend"] == "opensearch"
+    assert payload["environmentShippingEnabled"] is True
+    assert payload["alertingEnabled"] is True
+    assert payload["rustTraceCorrelationEnabled"] is True
+    assert payload["correlationContractComplete"] is True
+    assert payload["expectedCorrelationFieldsReady"] is True
+    assert payload["traceContextHeaders"] == ["traceparent", "tracestate", "baggage"]
+    assert payload["correlationHeaders"] == [
+        "x-request-id",
+        "x-tenant-id",
+        "x-filmu-vfs-session-id",
+        "x-filmu-vfs-daemon-id",
+        "x-filmu-vfs-entry-id",
+        "x-filmu-vfs-provider-file-id",
+        "x-filmu-vfs-handle-key",
+    ]
+    assert payload["sharedCrossProcessHeaders"][0] == "traceparent"
+    assert payload["expectedCorrelationFields"] == [
+        "request.id",
+        "trace.id",
+        "tenant.id",
+        "vfs.session_id",
+        "vfs.daemon_id",
+        "catalog.entry_id",
+        "provider.file_id",
+        "vfs.handle_key",
+    ]
+    assert payload["requiredCorrelationFields"] == [
+        "request.id",
+        "trace.id",
+        "tenant.id",
+        "vfs.session_id",
+        "vfs.daemon_id",
+        "catalog.entry_id",
+        "provider.file_id",
+        "vfs.handle_key",
+    ]
+    assert payload["proofRefs"] == ["ops/wave4/log-pipeline-rollout.md"]
+    assert payload["requiredActions"] == []
+    assert payload["remainingGaps"] == []
 
 
 def test_graphql_library_stats_returns_typed_breakdown() -> None:

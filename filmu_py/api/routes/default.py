@@ -23,6 +23,11 @@ from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.replay import ReplayConsumerFencedError
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
+from filmu_py.observability_convergence import (
+    build_observability_convergence_snapshot,
+    operator_log_pipeline_ready,
+    structured_log_path,
+)
 from filmu_py.plugins.builtin.listrr import resolve_listrr_settings
 from filmu_py.plugins.builtin.plex import resolve_plex_settings
 from filmu_py.plugins.builtin.seerr import resolve_seerr_settings
@@ -462,101 +467,30 @@ def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
     )
 
 
-def _structured_log_path(settings: Any) -> str:
-    """Return the normalized structured log path for operator-facing responses."""
-
-    normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
-    return f"{normalized_log_dir}/{settings.logging.structured_filename}"
-
-
-def _operator_log_pipeline_ready(settings: Any) -> bool:
-    """Return whether the repo-side operator log pipeline exit gates are satisfied."""
-
-    observability_policy = settings.observability
-    return bool(
-        settings.logging.enabled
-        and settings.log_shipper.enabled
-        and bool(settings.log_shipper.target)
-        and bool(settings.log_shipper.healthcheck_url)
-        and settings.otel_enabled
-        and bool(settings.otel_exporter_otlp_endpoint)
-        and observability_policy.environment_shipping_enabled
-        and observability_policy.alerting_enabled
-        and observability_policy.rust_trace_correlation_enabled
-        and observability_policy.search_backend != "none"
-        and bool(observability_policy.required_correlation_fields)
-        and bool(observability_policy.proof_refs)
-    )
-
-
 def _observability_convergence_response(request: Request) -> ObservabilityConvergenceResponse:
     """Return the current cross-process log/search/trace convergence posture."""
 
-    settings = request.app.state.resources.settings
-    observability_policy = settings.observability
-    structured_log_path = _structured_log_path(settings)
-    ready = _operator_log_pipeline_ready(settings)
-    correlation_contract_complete = bool(observability_policy.required_correlation_fields)
-
-    required_actions: list[str] = []
-    remaining_gaps: list[str] = []
-    if not settings.log_shipper.enabled:
-        required_actions.append("configure_log_shipper_for_structured_ndjson")
-        remaining_gaps.append("structured logs are not yet shipped out of process")
-    elif not settings.log_shipper.healthcheck_url:
-        required_actions.append("monitor_log_shipper_health")
-        remaining_gaps.append("log shipper health is not externally checked")
-    if not settings.log_shipper.target or observability_policy.search_backend == "none":
-        required_actions.append("define_search_index_mapping_and_retention_policy")
-        remaining_gaps.append("structured logs are not yet wired into a searchable backend")
-    if not (settings.otel_enabled and settings.otel_exporter_otlp_endpoint):
-        required_actions.append("configure_otlp_trace_export")
-        remaining_gaps.append("cross-process traces are not exported through OTLP")
-    if not observability_policy.environment_shipping_enabled:
-        required_actions.append("enable_environment_log_shipping")
-        remaining_gaps.append("environment-managed log shipping is not enabled")
-    if not observability_policy.alerting_enabled:
-        required_actions.append("enable_alerting_for_log_search_and_trace_pipeline")
-        remaining_gaps.append("search/trace alerting is not configured")
-    if not observability_policy.rust_trace_correlation_enabled:
-        required_actions.append("wire_rust_trace_correlation_fields")
-        remaining_gaps.append("Python and Rust traces are not yet forced onto one correlation contract")
-    if not correlation_contract_complete:
-        required_actions.append("define_required_cross_process_correlation_fields")
-        remaining_gaps.append("required correlation fields are not configured")
-    if not observability_policy.proof_refs:
-        required_actions.append("record_log_pipeline_rollout_evidence")
-        remaining_gaps.append("observability convergence has no retained rollout evidence references")
-
-    status: Literal["ready", "partial", "blocked"] = (
-        "ready"
-        if ready
-        else (
-            "partial"
-            if settings.logging.enabled or settings.otel_enabled or settings.log_shipper.enabled
-            else "blocked"
-        )
-    )
+    snapshot = build_observability_convergence_snapshot(request.app.state.resources.settings)
     return ObservabilityConvergenceResponse(
-        generated_at=datetime.now(UTC).isoformat(),
-        status=status,
-        structured_logging_enabled=settings.logging.enabled,
-        structured_log_path=structured_log_path,
-        otel_enabled=settings.otel_enabled,
-        otel_endpoint_configured=bool(settings.otel_exporter_otlp_endpoint),
-        log_shipper_enabled=settings.log_shipper.enabled,
-        log_shipper_type=settings.log_shipper.type,
-        log_shipper_target_configured=bool(settings.log_shipper.target),
-        log_shipper_healthcheck_configured=bool(settings.log_shipper.healthcheck_url),
-        search_backend=observability_policy.search_backend,
-        environment_shipping_enabled=observability_policy.environment_shipping_enabled,
-        alerting_enabled=observability_policy.alerting_enabled,
-        rust_trace_correlation_enabled=observability_policy.rust_trace_correlation_enabled,
-        correlation_contract_complete=correlation_contract_complete,
-        proof_refs=list(observability_policy.proof_refs),
-        required_correlation_fields=list(observability_policy.required_correlation_fields),
-        required_actions=required_actions,
-        remaining_gaps=remaining_gaps,
+        generated_at=snapshot.generated_at,
+        status=cast(Literal["ready", "partial", "blocked"], snapshot.status),
+        structured_logging_enabled=snapshot.structured_logging_enabled,
+        structured_log_path=snapshot.structured_log_path,
+        otel_enabled=snapshot.otel_enabled,
+        otel_endpoint_configured=snapshot.otel_endpoint_configured,
+        log_shipper_enabled=snapshot.log_shipper_enabled,
+        log_shipper_type=snapshot.log_shipper_type,
+        log_shipper_target_configured=snapshot.log_shipper_target_configured,
+        log_shipper_healthcheck_configured=snapshot.log_shipper_healthcheck_configured,
+        search_backend=snapshot.search_backend,
+        environment_shipping_enabled=snapshot.environment_shipping_enabled,
+        alerting_enabled=snapshot.alerting_enabled,
+        rust_trace_correlation_enabled=snapshot.rust_trace_correlation_enabled,
+        correlation_contract_complete=snapshot.correlation_contract_complete,
+        proof_refs=list(snapshot.proof_refs),
+        required_correlation_fields=list(snapshot.required_correlation_fields),
+        required_actions=list(snapshot.required_actions),
+        remaining_gaps=list(snapshot.remaining_gaps),
     )
 
 
@@ -1749,9 +1683,9 @@ async def _enterprise_operations_governance(
     if auth_context.authorization_tenant_scope == "all":
         tenant_required_actions.append("review_global_tenant_scope_for_actor")
 
-    structured_log_path = _structured_log_path(settings)
+    structured_log_path_value = structured_log_path(settings)
     observability_policy = settings.observability
-    operator_log_pipeline_ready = _operator_log_pipeline_ready(settings)
+    log_pipeline_ready = operator_log_pipeline_ready(settings)
     plugin_governance_summary = _plugin_governance_summary(
         plugins,
         runtime_policy=settings.plugin_runtime,
@@ -2190,12 +2124,12 @@ async def _enterprise_operations_governance(
             name="Durable Operator Log Pipeline",
             status=(
                 "ready"
-                if operator_log_pipeline_ready
+                if log_pipeline_ready
                 else ("partial" if settings.logging.enabled else "blocked")
             ),
             evidence=[
                 f"structured_logging_enabled={settings.logging.enabled}",
-                f"structured_log_path={structured_log_path}",
+                f"structured_log_path={structured_log_path_value}",
                 f"retention_files={settings.logging.retention_files}",
                 f"otel_enabled={settings.otel_enabled}",
                 f"otel_endpoint_configured={bool(settings.otel_exporter_otlp_endpoint)}",
@@ -2217,7 +2151,7 @@ async def _enterprise_operations_governance(
             ],
             required_actions=(
                 []
-                if operator_log_pipeline_ready
+                if log_pipeline_ready
                 else [
                     "configure_log_shipper_for_structured_ndjson"
                     if not settings.log_shipper.enabled
@@ -2245,7 +2179,7 @@ async def _enterprise_operations_governance(
             ),
             remaining_gaps=(
                 []
-                if operator_log_pipeline_ready
+                if log_pipeline_ready
                 else [
                     "shipper/search backend still requires environment provisioning even though repo config is present",
                     "cross-process trace correlation is not fully enforced",

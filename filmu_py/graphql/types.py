@@ -77,6 +77,14 @@ class GQLMediaItem:
 
 
 @strawberry.type
+class GQLCalendarReleaseWindow:
+    """Typed release-window projection for GraphQL-first calendar consumers."""
+
+    next_aired: str | None = strawberry.field(name="nextAired", default=None)
+    last_aired: str | None = strawberry.field(name="lastAired", default=None)
+
+
+@strawberry.type
 class GQLCalendarEntry:
     """Intentional GraphQL calendar entry unconstrained by REST compatibility shape."""
 
@@ -93,6 +101,44 @@ class GQLCalendarEntry:
     parent_tmdb_id: int | None = strawberry.field(name="parentTmdbId", default=None)
     parent_tvdb_id: int | None = strawberry.field(name="parentTvdbId", default=None)
     release_data: str | None = strawberry.field(name="releaseData", default=None)
+    release_window: GQLCalendarReleaseWindow | None = strawberry.field(
+        name="releaseWindow",
+        default=None,
+    )
+
+
+@strawberry.type
+class GQLObservabilityConvergence:
+    """Typed GraphQL view over cross-process log/search/trace convergence."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    structured_logging_enabled: bool = strawberry.field(name="structuredLoggingEnabled")
+    structured_log_path: str = strawberry.field(name="structuredLogPath")
+    otel_enabled: bool = strawberry.field(name="otelEnabled")
+    otel_endpoint_configured: bool = strawberry.field(name="otelEndpointConfigured")
+    log_shipper_enabled: bool = strawberry.field(name="logShipperEnabled")
+    log_shipper_type: str = strawberry.field(name="logShipperType")
+    log_shipper_target_configured: bool = strawberry.field(name="logShipperTargetConfigured")
+    log_shipper_healthcheck_configured: bool = strawberry.field(
+        name="logShipperHealthcheckConfigured"
+    )
+    search_backend: str = strawberry.field(name="searchBackend")
+    environment_shipping_enabled: bool = strawberry.field(name="environmentShippingEnabled")
+    alerting_enabled: bool = strawberry.field(name="alertingEnabled")
+    rust_trace_correlation_enabled: bool = strawberry.field(name="rustTraceCorrelationEnabled")
+    correlation_contract_complete: bool = strawberry.field(name="correlationContractComplete")
+    proof_refs: list[str] = strawberry.field(name="proofRefs")
+    required_correlation_fields: list[str] = strawberry.field(name="requiredCorrelationFields")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+    trace_context_headers: list[str] = strawberry.field(name="traceContextHeaders")
+    correlation_headers: list[str] = strawberry.field(name="correlationHeaders")
+    shared_cross_process_headers: list[str] = strawberry.field(name="sharedCrossProcessHeaders")
+    expected_correlation_fields: list[str] = strawberry.field(name="expectedCorrelationFields")
+    expected_correlation_fields_ready: bool = strawberry.field(
+        name="expectedCorrelationFieldsReady"
+    )
 
 
 @strawberry.type
