@@ -1103,6 +1103,22 @@ class Settings(BaseSettings):
     def _content_model(self) -> ContentSettings:
         return _coerce_model(self.content, ContentSettings)
 
+    def _compat_content_payload(self) -> dict[str, Any]:
+        """Return the legacy-compatible content payload without new-shape noise."""
+
+        payload = _compat_dump(self._content_model())
+        mdblist = cast(dict[str, Any], payload.get("mdblist", {}))
+        if mdblist:
+            if "list_ids" in mdblist:
+                mdblist["lists"] = list(cast(list[str], mdblist.pop("list_ids")))
+            if "poll_interval_minutes" in mdblist:
+                mdblist["update_interval"] = int(mdblist.pop("poll_interval_minutes")) * 60
+
+        listrr = cast(dict[str, Any], payload.get("listrr", {}))
+        if listrr.get("url") == "":
+            listrr.pop("url", None)
+        return payload
+
     def _scraping_model(self) -> ScrapingSettings:
         return _coerce_model(self.scraping, ScrapingSettings)
 
@@ -1142,13 +1158,7 @@ class Settings(BaseSettings):
     def to_compatibility_dict(self) -> dict[str, Any]:
         """Return the exact legacy `settings.json` compatibility shape."""
 
-        content = _compat_dump(self._content_model())
-        mdblist = cast(dict[str, Any], content.get("mdblist", {}))
-        if mdblist:
-            if "list_ids" in mdblist:
-                mdblist["lists"] = list(cast(list[str], mdblist.pop("list_ids")))
-            if "poll_interval_minutes" in mdblist:
-                mdblist["update_interval"] = int(mdblist.pop("poll_interval_minutes")) * 60
+        content = self._compat_content_payload()
 
         stream = _compat_dump(self._stream_model())
         if stream.get("refresh_dispatch_mode") == "in_process":
