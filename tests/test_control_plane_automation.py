@@ -137,3 +137,46 @@ def test_control_plane_automation_controller_marks_failures_degraded() -> None:
     assert snapshot.consecutive_failures == 1
     assert snapshot.last_failure_at is not None
     assert snapshot.last_error == "boom"
+
+
+def test_control_plane_automation_controller_clears_stale_success_metrics_on_failure() -> None:
+    class _ToggleService(_FakeService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = False
+
+        async def remediate_subscribers(self, *, active_within_seconds: int) -> Any:
+            if self.fail:
+                raise RuntimeError("boom")
+            return await super().remediate_subscribers(
+                active_within_seconds=active_within_seconds
+            )
+
+    service = _ToggleService()
+    controller = ControlPlaneAutomationController(
+        service=service,  # type: ignore[arg-type]
+        backplane=_FakeBackplane(),
+        consumer_group="filmu-api",
+        automation=ControlPlaneAutomationSettings(enabled=True),
+    )
+
+    success_snapshot = asyncio.run(controller.run_once())
+    service.fail = True
+    failure_snapshot = asyncio.run(controller.run_once())
+
+    assert success_snapshot.runner_status == "running"
+    assert success_snapshot.remediation_updated_subscribers == 2
+    assert success_snapshot.rewound_subscribers == 1
+    assert success_snapshot.claimed_pending_events == 2
+    assert success_snapshot.claim_passes == 2
+    assert success_snapshot.pending_count_after == 0
+    assert success_snapshot.summary is not None
+    assert failure_snapshot.runner_status == "degraded"
+    assert failure_snapshot.last_success_at is not None
+    assert failure_snapshot.last_failure_at is not None
+    assert failure_snapshot.remediation_updated_subscribers == 0
+    assert failure_snapshot.rewound_subscribers == 0
+    assert failure_snapshot.claimed_pending_events == 0
+    assert failure_snapshot.claim_passes == 0
+    assert failure_snapshot.pending_count_after is None
+    assert failure_snapshot.summary is None

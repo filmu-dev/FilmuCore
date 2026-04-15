@@ -3008,6 +3008,35 @@ def test_control_plane_automation_route_surfaces_background_recovery_status() ->
     assert body["summary"]["total_subscribers"] == 0
 
 
+def test_control_plane_automation_route_deduplicates_remaining_gaps() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_CONTROL_PLANE_AUTOMATION": {
+                "enabled": True,
+            }
+        }
+    )
+    resources = cast(Any, client.app.state.resources)
+    resources.control_plane_service = None
+    resources.control_plane_automation = None
+    resources.replay_backplane = None
+
+    response = client.get("/api/v1/operations/control-plane/automation", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body["required_actions"]) == {
+        "attach_control_plane_service",
+        "attach_redis_replay_backplane",
+        "enable_control_plane_automation",
+    }
+    assert body["remaining_gaps"] == [
+        "durable replay/control-plane ownership is not configured",
+        "background replay/control-plane automation is disabled",
+        "durable replay pending-entry recovery is not attached",
+    ]
+
+
 def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins() -> None:
     plugin_settings = {
         "scraping": {"comet": {"enabled": True, "url": "https://comet.example"}},

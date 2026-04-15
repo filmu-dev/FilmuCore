@@ -100,7 +100,15 @@ class ControlPlaneAutomationController:
         """Execute one automation pass immediately."""
 
         if not self._automation.enabled:
-            self._snapshot = self._replace_snapshot(runner_status="disabled")
+            self._snapshot = self._replace_snapshot(
+                runner_status="disabled",
+                remediation_updated_subscribers=0,
+                rewound_subscribers=0,
+                claimed_pending_events=0,
+                claim_passes=0,
+                pending_count_after=None,
+                summary=None,
+            )
             return self._snapshot
 
         started_at = datetime.now(UTC)
@@ -111,6 +119,12 @@ class ControlPlaneAutomationController:
                 last_failure_at=started_at,
                 consecutive_failures=self._snapshot.consecutive_failures + 1,
                 last_error="control_plane_service_unavailable",
+                remediation_updated_subscribers=0,
+                rewound_subscribers=0,
+                claimed_pending_events=0,
+                claim_passes=0,
+                pending_count_after=None,
+                summary=None,
             )
             return self._snapshot
 
@@ -167,6 +181,12 @@ class ControlPlaneAutomationController:
                 last_failure_at=started_at,
                 consecutive_failures=self._snapshot.consecutive_failures + 1,
                 last_error=str(exc),
+                remediation_updated_subscribers=0,
+                rewound_subscribers=0,
+                claimed_pending_events=0,
+                claim_passes=0,
+                pending_count_after=None,
+                summary=None,
             )
             return self._snapshot
 

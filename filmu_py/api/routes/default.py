@@ -3659,7 +3659,7 @@ async def get_control_plane_automation(
         pending_count_after=snapshot.pending_count_after if snapshot is not None else None,
         summary=normalized_summary,
         required_actions=sorted(set(required_actions)),
-        remaining_gaps=remaining_gaps,
+        remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )
 
 
