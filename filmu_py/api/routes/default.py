@@ -3237,6 +3237,58 @@ async def get_plugin_events(request: Request) -> list[PluginEventStatusResponse]
     ]
 
 
+@router.post(
+    "/plugins/stream-control",
+    operation_id="default.plugin_stream_control",
+    response_model=PluginStreamControlResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def execute_plugin_stream_control(
+    request: Request,
+    payload: PluginStreamControlRequest,
+) -> PluginStreamControlResponse:
+    """Execute one controlled stream/status action through a registered stream-control plugin."""
+
+    resources = request.app.state.resources
+    plugin_registry = resources.plugin_registry
+    if plugin_registry is None:
+        raise HTTPException(status_code=503, detail="Plugin registry unavailable")
+
+    plugin = next(
+        (
+            candidate
+            for candidate in plugin_registry.get_stream_controls()
+            if getattr(candidate, "plugin_name", "") == payload.plugin_name
+        ),
+        None,
+    )
+    if plugin is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Stream-control plugin '{payload.plugin_name}' is not registered",
+        )
+
+    result = await plugin.control(
+        StreamControlInput(
+            action=StreamControlAction(payload.action),
+            item_identifier=payload.item_identifier,
+            prefer_queued=payload.prefer_queued,
+            metadata=dict(payload.metadata),
+        )
+    )
+    return PluginStreamControlResponse(
+        plugin_name=payload.plugin_name,
+        action=result.action.value,
+        item_identifier=result.item_identifier,
+        accepted=result.accepted,
+        outcome=result.outcome,
+        detail=result.detail,
+        controller_attached=result.controller_attached,
+        retry_after_seconds=result.retry_after_seconds,
+        metadata=dict(result.metadata),
+    )
+
+
 @router.get(
     "/operations/control-plane/summary",
     operation_id="default.control_plane_summary",
