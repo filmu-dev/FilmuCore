@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from threading import Lock
+from typing import cast
 
 from arq.jobs import JobStatus
 from prometheus_client import Counter, Histogram
@@ -51,6 +52,47 @@ _WORKER_BLOCKER_SNAPSHOT: dict[str, object] = {
 }
 
 
+def _coerce_snapshot_int(value: object) -> int:
+    """Return one bounded integer snapshot value."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _coerce_snapshot_float(value: object) -> float:
+    """Return one bounded floating-point snapshot value."""
+
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _coerce_snapshot_counts(value: object) -> dict[str, int]:
+    """Return one bounded snapshot counter mapping."""
+
+    if not isinstance(value, dict):
+        return {}
+    raw_counts = cast(dict[object, object], value)
+    return {str(key): _coerce_snapshot_int(count) for key, count in raw_counts.items()}
+
+
 def job_status_name(status: JobStatus) -> str:
     """Normalize ARQ job status enum values for bounded metrics/log labels."""
 
@@ -95,8 +137,8 @@ def _increment_snapshot_counter(counter_name: str, key: str) -> None:
         if not isinstance(raw_counts, dict):
             raw_counts = {}
             _WORKER_BLOCKER_SNAPSHOT[counter_name] = raw_counts
-        current_value = raw_counts.get(key, 0)
-        raw_counts[key] = int(current_value) + 1
+        current_value = _coerce_snapshot_int(raw_counts.get(key, 0))
+        raw_counts[key] = current_value + 1
 
 
 def record_rank_no_winner(*, failure_reason: str) -> None:
@@ -110,7 +152,7 @@ def record_rank_no_winner(*, failure_reason: str) -> None:
     ).inc()
     with _WORKER_BLOCKER_SNAPSHOT_LOCK:
         _WORKER_BLOCKER_SNAPSHOT["rank_streams_no_winner_total"] = (
-            int(_WORKER_BLOCKER_SNAPSHOT["rank_streams_no_winner_total"]) + 1
+            _coerce_snapshot_int(_WORKER_BLOCKER_SNAPSHOT["rank_streams_no_winner_total"]) + 1
         )
         _WORKER_BLOCKER_SNAPSHOT["rank_streams_no_winner_last_reason"] = normalized_reason
     _increment_snapshot_counter("rank_streams_no_winner_reason_counts", normalized_reason)
@@ -128,7 +170,7 @@ def record_debrid_rate_limited(*, provider: str, retry_after_seconds: float | No
     ).inc()
     with _WORKER_BLOCKER_SNAPSHOT_LOCK:
         _WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_total"] = (
-            int(_WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_total"]) + 1
+            _coerce_snapshot_int(_WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_total"]) + 1
         )
         _WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_last_provider"] = normalized_provider
         _WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_last_retry_after_seconds"] = float(
@@ -142,25 +184,25 @@ def worker_blocker_snapshot() -> dict[str, object]:
 
     with _WORKER_BLOCKER_SNAPSHOT_LOCK:
         return {
-            "rank_streams_no_winner_total": int(
+            "rank_streams_no_winner_total": _coerce_snapshot_int(
                 _WORKER_BLOCKER_SNAPSHOT["rank_streams_no_winner_total"]
             ),
-            "rank_streams_no_winner_reason_counts": dict(
+            "rank_streams_no_winner_reason_counts": _coerce_snapshot_counts(
                 _WORKER_BLOCKER_SNAPSHOT["rank_streams_no_winner_reason_counts"]
             ),
             "rank_streams_no_winner_last_reason": str(
                 _WORKER_BLOCKER_SNAPSHOT["rank_streams_no_winner_last_reason"]
             ),
-            "debrid_rate_limited_total": int(
+            "debrid_rate_limited_total": _coerce_snapshot_int(
                 _WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_total"]
             ),
-            "debrid_rate_limited_provider_counts": dict(
+            "debrid_rate_limited_provider_counts": _coerce_snapshot_counts(
                 _WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_provider_counts"]
             ),
             "debrid_rate_limited_last_provider": str(
                 _WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_last_provider"]
             ),
-            "debrid_rate_limited_last_retry_after_seconds": float(
+            "debrid_rate_limited_last_retry_after_seconds": _coerce_snapshot_float(
                 _WORKER_BLOCKER_SNAPSHOT["debrid_rate_limited_last_retry_after_seconds"]
             ),
         }

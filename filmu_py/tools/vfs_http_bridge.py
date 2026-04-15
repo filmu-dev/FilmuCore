@@ -6,6 +6,8 @@ import argparse
 import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from typing import cast
 
 from filmuvfs.catalog.v1 import catalog_pb2
 
@@ -16,7 +18,7 @@ _DEFAULT_TIMEOUT_SECONDS = 30.0
 def _read_url(url: str, *, key: str, timeout_seconds: float) -> bytes:
     request = urllib.request.Request(url, headers={"x-filmu-vfs-key": key})
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
+        return cast(bytes, response.read())
 
 
 def _post_proto(
@@ -36,7 +38,7 @@ def _post_proto(
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
+        return cast(bytes, response.read())
 
 
 def _watch_event(args: argparse.Namespace) -> int:
@@ -88,7 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     refresh_parser.set_defaults(handler=_refresh_entry)
 
     args = parser.parse_args(argv)
-    return args.handler(args)
+    handler = cast(Callable[[argparse.Namespace], int], args.handler)
+    return handler(args)
 
 
 if __name__ == "__main__":

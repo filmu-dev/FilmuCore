@@ -973,11 +973,11 @@ async def _enterprise_operations_governance(
         _oidc_rollout_snapshot(settings)
     )
     worker_blockers = _worker_blocker_snapshot()
-    rank_no_winner_total = int(worker_blockers["rank_streams_no_winner_total"])
+    rank_no_winner_total = cast(int, worker_blockers["rank_streams_no_winner_total"])
     rank_no_winner_reason_counts = cast(
         dict[str, int], worker_blockers["rank_streams_no_winner_reason_counts"]
     )
-    debrid_rate_limited_total = int(worker_blockers["debrid_rate_limited_total"])
+    debrid_rate_limited_total = cast(int, worker_blockers["debrid_rate_limited_total"])
     debrid_rate_limited_provider_counts = cast(
         dict[str, int], worker_blockers["debrid_rate_limited_provider_counts"]
     )
