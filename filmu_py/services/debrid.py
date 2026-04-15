@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, Protocol, cast, runtime_checkable
 
 import httpx
@@ -72,6 +73,52 @@ class DebridDownloadClient(Protocol):
     async def get_download_links(self, provider_torrent_id: str) -> list[str]: ...
 
 
+@dataclass(slots=True)
+class PluginDownloaderClientAdapter:
+    """Adapt one registered downloader plugin into the debrid worker client contract."""
+
+    provider: str
+    plugin: Any
+
+    async def add_magnet(self, magnet_url: str) -> str:
+        result = await self.plugin.add_magnet(SimpleNamespace(magnet_url=magnet_url))
+        return result.download_id
+
+    async def get_torrent_info(self, provider_torrent_id: str) -> TorrentInfo:
+        status = await self.plugin.get_status(SimpleNamespace(download_id=provider_torrent_id))
+        files = [
+            TorrentFile(
+                file_id=file.file_id,
+                file_name=file.path.rsplit("/", 1)[-1],
+                file_path=file.path,
+                file_size_bytes=file.size_bytes,
+                selected=file.selected,
+                download_url=file.download_url,
+                media_type=_infer_media_type(file.path),
+            )
+            for file in status.files
+        ]
+        links = [file.download_url for file in status.files if file.download_url]
+        return TorrentInfo(
+            provider_torrent_id=status.download_id,
+            status=status.status,
+            files=files,
+            links=links,
+        )
+
+    async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+        selection_method = getattr(self.plugin, "select_files", None)
+        if callable(selection_method):
+            await cast(Any, selection_method)(provider_torrent_id, file_ids)
+        return None
+
+    async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+        results = await self.plugin.get_download_links(
+            SimpleNamespace(download_id=provider_torrent_id, file_ids=())
+        )
+        return [result.url for result in results if result.url]
+
+
 def _build_download_rate_limit_bucket_key(provider: str) -> str:
     return f"ratelimit:{provider}:download"
 
@@ -113,15 +160,19 @@ def filter_torrent_files(
     }
     filtered: list[TorrentFile] = []
     for file in files:
-        identity_path = file.file_path or file.file_name
+        identity_path = (
+            getattr(file, "file_path", None)
+            or getattr(file, "file_name", None)
+            or ""
+        )
         extension = identity_path.rsplit(".", 1)[-1].lower() if "." in identity_path else ""
         if extension not in allowed_extensions:
             continue
 
-        media_type = file.media_type or _infer_media_type(identity_path)
+        media_type = getattr(file, "media_type", None) or _infer_media_type(identity_path)
         size_mb = None
-        if file.file_size_bytes is not None:
-            size_bytes = file.file_size_bytes
+        size_bytes = getattr(file, "file_size_bytes", None)
+        if size_bytes is not None:
             size_mb = float(size_bytes) / (1024 * 1024)
         if media_type == "episode":
             min_mb = settings.episode_filesize_mb_min

@@ -43,6 +43,7 @@ from ..models import (
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
+    ControlPlaneRemediationResponse,
     ControlPlaneSummaryResponse,
     ControlPlaneSubscriberResponse,
     DownloaderOrchestrationResponse,
@@ -566,13 +567,14 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         builtin_candidates.append(candidate)
         providers.append(candidate)
 
-    selected_provider = next(
+    builtin_selected_provider = next(
         (candidate.name for candidate in builtin_candidates if candidate.enabled),
         None,
     )
-    if selected_provider is not None:
+    selected_provider = builtin_selected_provider
+    if builtin_selected_provider is not None:
         providers = [
-            candidate.model_copy(update={"selected": candidate.name == selected_provider})
+            candidate.model_copy(update={"selected": candidate.name == builtin_selected_provider})
             if candidate.source == "builtin"
             else candidate
             for candidate in providers
@@ -602,8 +604,26 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
                 )
             )
 
+    plugin_dispatch_fallback_ready = False
+    if plugin_downloaders_registered > 0 and selected_provider is None:
+        stremthru = settings.downloaders.stremthru
+        if stremthru.enabled and stremthru.token.strip() and stremthru.url.strip():
+            selected_provider = "stremthru"
+            plugin_dispatch_fallback_ready = True
+            providers = [
+                candidate.model_copy(update={"selected": candidate.name == "stremthru"})
+                if candidate.name == "stremthru" and candidate.source == "plugin"
+                else candidate
+                for candidate in providers
+            ]
+    elif plugin_downloaders_registered > 0:
+        stremthru = settings.downloaders.stremthru
+        plugin_dispatch_fallback_ready = bool(
+            stremthru.enabled and stremthru.token.strip() and stremthru.url.strip()
+        )
+
     multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
-    worker_plugin_dispatch_ready = False
+    worker_plugin_dispatch_ready = plugin_dispatch_fallback_ready
     fanout_ready = False
     multi_container_ready = False
 
@@ -617,10 +637,15 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         remaining_gaps.append(
             "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
         )
-    if plugin_downloaders_registered > 0:
+    if plugin_downloaders_registered > 0 and not worker_plugin_dispatch_ready:
         required_actions.append("wire_registered_downloader_plugins_into_debrid_worker")
         remaining_gaps.append(
             "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
+        )
+    elif plugin_downloaders_registered > 0:
+        required_actions.append("promote_plugin_downloader_dispatch_from_fallback_to_policy_fanout")
+        remaining_gaps.append(
+            "plugin-backed downloader execution now exists as fallback only and is not yet part of policy-driven fan-out"
         )
     required_actions.append("promote_multi_container_validation_and_provider_fallback")
     remaining_gaps.append(
@@ -629,7 +654,11 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
 
     return DownloaderOrchestrationResponse(
         generated_at=datetime.now(UTC).isoformat(),
-        selection_mode="fixed_priority_builtin_only",
+        selection_mode=(
+            "fixed_priority_builtin_then_plugin_fallback"
+            if worker_plugin_dispatch_ready
+            else "fixed_priority_builtin_only"
+        ),
         selected_provider=selected_provider,
         multi_provider_enabled=multi_provider_enabled,
         plugin_downloaders_registered=plugin_downloaders_registered,
@@ -639,6 +668,27 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         providers=providers,
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
+    )
+
+
+def _control_plane_summary_response(summary: Any) -> ControlPlaneSummaryResponse:
+    """Normalize control-plane summary DTOs into the API response model."""
+
+    return ControlPlaneSummaryResponse(
+        total_subscribers=summary.total_subscribers,
+        active_subscribers=summary.active_subscribers,
+        stale_subscribers=summary.stale_subscribers,
+        error_subscribers=summary.error_subscribers,
+        fenced_subscribers=summary.fenced_subscribers,
+        ack_pending_subscribers=summary.ack_pending_subscribers,
+        stream_count=summary.stream_count,
+        group_count=summary.group_count,
+        node_count=summary.node_count,
+        tenant_count=summary.tenant_count,
+        oldest_heartbeat_age_seconds=summary.oldest_heartbeat_age_seconds,
+        status_counts=dict(summary.status_counts),
+        required_actions=list(summary.required_actions),
+        remaining_gaps=list(summary.remaining_gaps),
     )
 
 
@@ -3216,21 +3266,65 @@ async def get_control_plane_summary(
             remaining_gaps=["durable replay/control-plane ownership is not configured"],
         )
     summary = await service.summarize_subscribers(active_within_seconds=active_within_seconds)
-    return ControlPlaneSummaryResponse(
-        total_subscribers=summary.total_subscribers,
-        active_subscribers=summary.active_subscribers,
-        stale_subscribers=summary.stale_subscribers,
-        error_subscribers=summary.error_subscribers,
-        fenced_subscribers=summary.fenced_subscribers,
-        ack_pending_subscribers=summary.ack_pending_subscribers,
-        stream_count=summary.stream_count,
-        group_count=summary.group_count,
-        node_count=summary.node_count,
-        tenant_count=summary.tenant_count,
-        oldest_heartbeat_age_seconds=summary.oldest_heartbeat_age_seconds,
-        status_counts=dict(summary.status_counts),
-        required_actions=list(summary.required_actions),
-        remaining_gaps=list(summary.remaining_gaps),
+    return _control_plane_summary_response(summary)
+
+
+@router.post(
+    "/operations/control-plane/remediation",
+    operation_id="default.control_plane_remediation",
+    response_model=ControlPlaneRemediationResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def remediate_control_plane_subscribers(
+    request: Request,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlaneRemediationResponse:
+    """Persist stale/fenced/error control-plane rows into a recoverable stale posture."""
+
+    service = request.app.state.resources.control_plane_service
+    if service is None:
+        return ControlPlaneRemediationResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            active_within_seconds=active_within_seconds,
+            stale_marked_subscribers=0,
+            fence_resolved_subscribers=0,
+            error_recovered_subscribers=0,
+            total_updated_subscribers=0,
+            summary=ControlPlaneSummaryResponse(
+                total_subscribers=0,
+                active_subscribers=0,
+                stale_subscribers=0,
+                error_subscribers=0,
+                fenced_subscribers=0,
+                ack_pending_subscribers=0,
+                stream_count=0,
+                group_count=0,
+                node_count=0,
+                tenant_count=0,
+                oldest_heartbeat_age_seconds=None,
+                status_counts={},
+                required_actions=["attach_control_plane_service"],
+                remaining_gaps=["durable replay/control-plane ownership is not configured"],
+            ),
+        )
+    remediation = await service.remediate_subscribers(active_within_seconds=active_within_seconds)
+    audit_action(
+        request,
+        action="operations.control_plane.remediate",
+        target="operations.control_plane",
+        details={
+            "active_within_seconds": active_within_seconds,
+            "total_updated_subscribers": remediation.total_updated_subscribers,
+        },
+    )
+    return ControlPlaneRemediationResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        active_within_seconds=active_within_seconds,
+        stale_marked_subscribers=remediation.stale_marked_subscribers,
+        fence_resolved_subscribers=remediation.fence_resolved_subscribers,
+        error_recovered_subscribers=remediation.error_recovered_subscribers,
+        total_updated_subscribers=remediation.total_updated_subscribers,
+        summary=_control_plane_summary_response(remediation.summary),
     )
 
 

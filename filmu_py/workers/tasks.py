@@ -39,6 +39,7 @@ from filmu_py.services.debrid import (
     AllDebridPlaybackClient,
     DebridDownloadClient,
     DebridLinkPlaybackClient,
+    PluginDownloaderClientAdapter,
     DebridRateLimitError,
     RealDebridPlaybackClient,
     filter_torrent_files,
@@ -1168,6 +1169,61 @@ def _resolve_enabled_downloader(
         )
     if enabled_providers:
         return enabled_providers[0]
+    raise ValueError("no_enabled_downloader")
+
+
+async def _resolve_download_client(
+    ctx: dict[str, Any],
+    *,
+    settings: Settings,
+    limiter: DistributedRateLimiter,
+    item_id: str | None = None,
+    item_request_id: str | None = None,
+) -> tuple[str, DebridDownloadClient]:
+    """Resolve the active debrid client, allowing plugin-backed fallback when no builtin is enabled."""
+
+    try:
+        provider = _resolve_enabled_downloader(
+            settings,
+            item_id=item_id,
+            item_request_id=item_request_id,
+        )
+    except ValueError:
+        provider = None
+
+    if provider is not None:
+        api_key = _resolve_downloader_api_key(settings, provider=provider)
+        return provider, _build_provider_client(provider=provider, api_key=api_key, limiter=limiter)
+
+    plugin_registry = await _resolve_plugin_registry(ctx)
+    stremthru_plugin = next(
+        (
+            plugin
+            for plugin in plugin_registry.get_downloaders()
+            if getattr(plugin, "plugin_name", "") == "stremthru"
+        ),
+        None,
+    )
+    stremthru_settings = settings.downloaders.stremthru
+    if (
+        stremthru_plugin is not None
+        and stremthru_settings.enabled
+        and bool(stremthru_settings.token.strip())
+        and bool(stremthru_settings.url.strip())
+    ):
+        logger.info(
+            "builtin downloader unavailable; using registered downloader plugin fallback",
+            extra={
+                "item_id": item_id,
+                "item_request_id": item_request_id,
+                "provider": "stremthru",
+            },
+        )
+        return "stremthru", PluginDownloaderClientAdapter(
+            provider="stremthru",
+            plugin=stremthru_plugin,
+        )
+
     raise ValueError("no_enabled_downloader")
 
 
@@ -2651,13 +2707,13 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             raise ValueError("selected_stream_missing")
         selected_stream_id = selected_stream.id
 
-        provider = _resolve_enabled_downloader(
-            settings,
+        provider, client = await _resolve_download_client(
+            mutable_ctx,
+            settings=settings,
+            limiter=limiter,
             item_id=item_id,
             item_request_id=item_request_id,
         )
-        api_key = _resolve_downloader_api_key(settings, provider=provider)
-        client = _build_provider_client(provider=provider, api_key=api_key, limiter=limiter)
         magnet_url = f"magnet:?xt=urn:btih:{selected_stream.infohash}".lower()
         logger.info(
             "debrid stage starting",

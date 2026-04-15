@@ -154,3 +154,49 @@ async def test_control_plane_summary_reports_ack_backlog_and_stale_subscribers(
         assert summary.oldest_heartbeat_age_seconds >= 30
     finally:
         await runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_remediation_sweeps_stale_and_fenced_rows(tmp_path: Path) -> None:
+    runtime = await _build_runtime(tmp_path)
+    service = ControlPlaneService(runtime)
+    try:
+        await service.observe_delivery(
+            stream_name="filmu:events",
+            group_name="filmu-api",
+            consumer_name="consumer-1",
+            node_id="node-a",
+            tenant_id="tenant-main",
+            offset=">",
+            event_id="11-0",
+        )
+        await service.observe_error(
+            stream_name="filmu:events",
+            group_name="filmu-api",
+            consumer_name="consumer-2",
+            node_id="node-b",
+            tenant_id="tenant-main",
+            error="consumer_fenced owner=node-a contender=node-b",
+        )
+
+        stale_time = datetime.now(UTC) - timedelta(minutes=15)
+        async with runtime.session() as session:
+            rows = (
+                await session.execute(select(ControlPlaneSubscriberORM))
+            ).scalars().all()
+            for row in rows:
+                row.last_heartbeat_at = stale_time
+                row.updated_at = stale_time
+            await session.flush()
+            await session.commit()
+
+        remediation = await service.remediate_subscribers(active_within_seconds=30)
+
+        assert remediation.total_updated_subscribers == 2
+        assert remediation.stale_marked_subscribers == 1
+        assert remediation.fence_resolved_subscribers == 1
+        assert remediation.error_recovered_subscribers == 0
+        assert remediation.summary.stale_subscribers == 2
+        assert remediation.summary.active_subscribers == 0
+    finally:
+        await runtime.dispose()

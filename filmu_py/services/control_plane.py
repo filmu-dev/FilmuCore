@@ -68,6 +68,18 @@ class ControlPlaneSummary:
     remaining_gaps: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ControlPlaneRemediationResult:
+    """Outcome of one control-plane stale/fence/error sweep."""
+
+    active_within_seconds: int
+    stale_marked_subscribers: int
+    fence_resolved_subscribers: int
+    error_recovered_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummary
+
+
 class ControlPlaneService:
     """Persist and summarize active replay/control-plane subscriber ownership."""
 
@@ -191,6 +203,66 @@ class ControlPlaneService:
             status_counts=dict(sorted(status_counts.items())),
             required_actions=tuple(required_actions),
             remaining_gaps=tuple(remaining_gaps),
+        )
+
+    async def remediate_subscribers(
+        self,
+        *,
+        active_within_seconds: int = 120,
+    ) -> ControlPlaneRemediationResult:
+        """Persistently mark expired/fenced/error rows stale so ownership can recover cleanly."""
+
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=max(1, active_within_seconds))
+        stale_marked = 0
+        fence_resolved = 0
+        error_recovered = 0
+
+        async with self._db.session() as session:
+            rows = (
+                await session.execute(
+                    select(ControlPlaneSubscriberORM).order_by(
+                        ControlPlaneSubscriberORM.stream_name.asc(),
+                        ControlPlaneSubscriberORM.group_name.asc(),
+                        ControlPlaneSubscriberORM.consumer_name.asc(),
+                    )
+                )
+            ).scalars()
+            for row in rows:
+                heartbeat_expired = row.last_heartbeat_at < stale_before
+                unresolved_fence = _has_unresolved_fence(_record_from_orm(row))
+                should_mark_stale = heartbeat_expired and row.status in {
+                    "active",
+                    "error",
+                    "fenced",
+                }
+                if not should_mark_stale and not (heartbeat_expired and unresolved_fence):
+                    continue
+
+                if unresolved_fence or row.status == "fenced":
+                    fence_resolved += 1
+                elif row.status == "error":
+                    error_recovered += 1
+                elif row.status == "active":
+                    stale_marked += 1
+
+                row.status = "stale"
+                row.updated_at = now
+                if unresolved_fence and "consumer_fenced" in str(row.last_error or ""):
+                    row.last_error = (
+                        f"{row.last_error}; stale_fence_swept at={now.isoformat()}"
+                    )
+            await session.flush()
+            await session.commit()
+
+        summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return ControlPlaneRemediationResult(
+            active_within_seconds=active_within_seconds,
+            stale_marked_subscribers=stale_marked,
+            fence_resolved_subscribers=fence_resolved,
+            error_recovered_subscribers=error_recovered,
+            total_updated_subscribers=stale_marked + fence_resolved + error_recovered,
+            summary=summary,
         )
 
     async def observe_delivery(

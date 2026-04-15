@@ -50,11 +50,15 @@ from filmu_py.workers import stage_isolation, tasks
 
 
 class _PluginRegistryStub:
-    def __init__(self, scrapers: list[object]) -> None:
+    def __init__(self, scrapers: list[object], *, downloaders: list[object] | None = None) -> None:
         self._scrapers = scrapers
+        self._downloaders = downloaders or []
 
     def get_scrapers(self) -> list[object]:
         return list(self._scrapers)
+
+    def get_downloaders(self) -> list[object]:
+        return list(self._downloaders)
 
 
 def _build_item_orm(*, item_id: str, state: ItemState) -> MediaItemORM:
@@ -2508,6 +2512,76 @@ def test_resolve_enabled_downloader_uses_priority_order_and_logs_warning(
         and getattr(record, "item_request_id", None) == "request-priority"
         for record in caplog.records
     )
+
+
+def test_resolve_download_client_falls_back_to_registered_stremthru_plugin(
+    monkeypatch: Any,
+) -> None:
+    settings = _build_worker_settings()
+    settings.downloaders.real_debrid.enabled = False
+    settings.downloaders.real_debrid.api_key = ""
+    settings.downloaders.stremthru.enabled = True
+    settings.downloaders.stremthru.url = "https://stremthru.example.test"
+    settings.downloaders.stremthru.token = "st-token"
+
+    class _FakeDownloaderPlugin:
+        plugin_name = "stremthru"
+
+        async def add_magnet(self, request: object) -> object:
+            _ = request
+            return type("MagnetAddResult", (), {"download_id": "st-1"})()
+
+        async def get_status(self, request: object) -> object:
+            _ = request
+            return type(
+                "DownloadStatusResult",
+                (),
+                {
+                    "download_id": "st-1",
+                    "status": "ready",
+                    "files": (
+                        type(
+                            "DownloadFileRecord",
+                            (),
+                            {
+                                "file_id": "file-1",
+                                "path": "Show/Season 01/Episode 01.mkv",
+                                "size_bytes": 800 * 1024 * 1024,
+                                "selected": True,
+                                "download_url": "https://cdn.example.test/st-1",
+                            },
+                        )(),
+                    ),
+                },
+            )()
+
+        async def get_download_links(self, request: object) -> list[object]:
+            _ = request
+            return [type("DownloadLinkResult", (), {"url": "https://cdn.example.test/st-1"})()]
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([], downloaders=[_FakeDownloaderPlugin()])
+
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+
+    provider, client = asyncio.run(
+        tasks._resolve_download_client(
+            {},
+            settings=settings,
+            limiter=_AllowedLimiter(),
+            item_id="item-plugin-fallback",
+            item_request_id="request-plugin-fallback",
+        )
+    )
+    torrent_id = asyncio.run(client.add_magnet("magnet:?xt=urn:btih:abc"))
+    torrent_info = asyncio.run(client.get_torrent_info(torrent_id))
+    links = asyncio.run(client.get_download_links(torrent_id))
+
+    assert provider == "stremthru"
+    assert torrent_id == "st-1"
+    assert torrent_info.status == "ready"
+    assert torrent_info.files[0].file_path == "Show/Season 01/Episode 01.mkv"
+    assert links == ["https://cdn.example.test/st-1"]
 
 
 def test_worker_runtime_settings_resolution_prefers_persisted_blob_when_ctx_has_no_settings(

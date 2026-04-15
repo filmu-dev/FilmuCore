@@ -354,6 +354,18 @@ class ControlPlaneSummaryResponse(BaseModel):
     remaining_gaps: list[str]
 
 
+class ControlPlaneRemediationResponse(BaseModel):
+    """Outcome of one operator-triggered control-plane stale/fence sweep."""
+
+    generated_at: str
+    active_within_seconds: int
+    stale_marked_subscribers: int
+    fence_resolved_subscribers: int
+    error_recovered_subscribers: int
+    total_updated_subscribers: int
+    summary: ControlPlaneSummaryResponse
+
+
 class EnterpriseOperationsSliceResponse(BaseModel):
     """One enterprise-operations workstream posture summary."""
 

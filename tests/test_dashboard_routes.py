@@ -492,6 +492,31 @@ class DummyControlPlaneService:
         )
         return summary
 
+    async def remediate_subscribers(self, *, active_within_seconds: int = 120) -> Any:
+        _ = active_within_seconds
+        stale_marked = 0
+        fence_resolved = 0
+        error_recovered = 0
+        for record in self.records:
+            if getattr(record, "status", "") == "active":
+                stale_marked += 1
+                record.status = "stale"
+            elif "consumer_fenced" in str(getattr(record, "last_error", None) or ""):
+                fence_resolved += 1
+                record.status = "stale"
+            elif getattr(record, "status", "") == "error":
+                error_recovered += 1
+                record.status = "stale"
+
+        result = type("ControlPlaneRemediationResult", (), {})()
+        result.active_within_seconds = active_within_seconds
+        result.stale_marked_subscribers = stale_marked
+        result.fence_resolved_subscribers = fence_resolved
+        result.error_recovered_subscribers = error_recovered
+        result.total_updated_subscribers = stale_marked + fence_resolved + error_recovered
+        result.summary = await self.summarize_subscribers(active_within_seconds=active_within_seconds)
+        return result
+
 
 class DummyAuthorizationAuditService:
     """In-memory authorization-decision ledger used by route tests."""
@@ -2655,6 +2680,52 @@ def test_control_plane_summary_route_returns_ack_backlog_visibility() -> None:
     assert "drain_control_plane_ack_backlog" in body["required_actions"]
 
 
+def test_control_plane_remediation_route_sweeps_rows_into_recoverable_stale_state() -> None:
+    client = _build_client()
+    resources = cast(Any, client.app.state.resources)
+    active_record = type("ControlPlaneSubscriberRecord", (), {})()
+    active_record.stream_name = "filmu:events"
+    active_record.group_name = "filmu-api"
+    active_record.consumer_name = "consumer-1"
+    active_record.node_id = "node-a"
+    active_record.tenant_id = "tenant-main"
+    active_record.status = "active"
+    active_record.last_read_offset = ">"
+    active_record.last_delivered_event_id = "11-0"
+    active_record.last_acked_event_id = "10-0"
+    active_record.last_error = None
+    active_record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    active_record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    active_record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    active_record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record = type("ControlPlaneSubscriberRecord", (), {})()
+    fenced_record.stream_name = "filmu:events"
+    fenced_record.group_name = "filmu-api"
+    fenced_record.consumer_name = "consumer-2"
+    fenced_record.node_id = "node-b"
+    fenced_record.tenant_id = "tenant-main"
+    fenced_record.status = "error"
+    fenced_record.last_read_offset = ">"
+    fenced_record.last_delivered_event_id = "12-0"
+    fenced_record.last_acked_event_id = "11-0"
+    fenced_record.last_error = "consumer_fenced owner=node-a contender=node-b"
+    fenced_record.claimed_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record.last_heartbeat_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record.created_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    fenced_record.updated_at = datetime(2026, 4, 12, 2, 0, tzinfo=UTC)
+    resources.control_plane_service.records = [active_record, fenced_record]
+
+    response = client.post("/api/v1/operations/control-plane/remediation", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stale_marked_subscribers"] == 1
+    assert body["fence_resolved_subscribers"] == 1
+    assert body["error_recovered_subscribers"] == 0
+    assert body["total_updated_subscribers"] == 2
+    assert body["summary"]["stale_subscribers"] == 2
+
+
 def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> None:
     client = _build_client(
         settings_overrides={
@@ -2729,17 +2800,17 @@ def test_downloader_orchestration_route_surfaces_fixed_priority_and_plugin_gap()
 
     assert response.status_code == 200
     body = response.json()
-    assert body["selection_mode"] == "fixed_priority_builtin_only"
+    assert body["selection_mode"] == "fixed_priority_builtin_then_plugin_fallback"
     assert body["selected_provider"] == "realdebrid"
     assert body["multi_provider_enabled"] is True
     assert body["plugin_downloaders_registered"] == 1
-    assert body["worker_plugin_dispatch_ready"] is False
+    assert body["worker_plugin_dispatch_ready"] is True
     assert body["fanout_ready"] is False
     assert body["multi_container_ready"] is False
     assert "replace_fixed_priority_builtin_selection_with_policy_driven_fanout" in body[
         "required_actions"
     ]
-    assert "wire_registered_downloader_plugins_into_debrid_worker" in body[
+    assert "promote_plugin_downloader_dispatch_from_fallback_to_policy_fanout" in body[
         "required_actions"
     ]
     providers = {(row["name"], row["source"]): row for row in body["providers"]}
@@ -2748,7 +2819,7 @@ def test_downloader_orchestration_route_surfaces_fixed_priority_and_plugin_gap()
     assert providers[("alldebrid", "builtin")]["enabled"] is True
     assert providers[("stremthru", "plugin")]["configured"] is True
     assert (
-        "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
+        "plugin-backed downloader execution now exists as fallback only and is not yet part of policy-driven fan-out"
         in body["remaining_gaps"]
     )
 
