@@ -614,6 +614,107 @@ class DownloaderOrchestrationResponse(BaseModel):
     remaining_gaps: list[str]
 
 
+class VfsCatalogCorrelationKeysResponse(BaseModel):
+    """REST/operator correlation identifiers for one VFS catalog node."""
+
+    item_id: str | None = None
+    media_entry_id: str | None = None
+    source_attachment_id: str | None = None
+    provider: str | None = None
+    provider_download_id: str | None = None
+    provider_file_id: str | None = None
+    provider_file_path: str | None = None
+    session_id: str | None = None
+    handle_key: str | None = None
+    tenant_id: str | None = None
+
+
+class VfsCatalogDirectoryDetailResponse(BaseModel):
+    """REST/operator directory metadata for one VFS catalog node."""
+
+    path: str
+
+
+class VfsCatalogFileDetailResponse(BaseModel):
+    """REST/operator file metadata for one VFS catalog node."""
+
+    item_id: str
+    item_title: str
+    item_external_ref: str
+    media_entry_id: str
+    source_attachment_id: str | None = None
+    media_type: str
+    transport: str
+    locator: str
+    local_path: str | None = None
+    restricted_url: str | None = None
+    unrestricted_url: str | None = None
+    original_filename: str | None = None
+    size_bytes: int | None = None
+    lease_state: str
+    expires_at: str | None = None
+    last_refreshed_at: str | None = None
+    last_refresh_error: str | None = None
+    provider: str | None = None
+    provider_download_id: str | None = None
+    provider_file_id: str | None = None
+    provider_file_path: str | None = None
+    active_roles: list[str]
+    source_key: str | None = None
+    query_strategy: str | None = None
+    provider_family: str
+    locator_source: str
+    match_basis: str | None = None
+    restricted_fallback: bool
+
+
+class VfsCatalogEntryResponse(BaseModel):
+    """REST/operator representation of one VFS catalog node."""
+
+    entry_id: str
+    parent_entry_id: str | None = None
+    path: str
+    name: str
+    kind: str
+    correlation: VfsCatalogCorrelationKeysResponse
+    directory: VfsCatalogDirectoryDetailResponse | None = None
+    file: VfsCatalogFileDetailResponse | None = None
+
+
+class VfsCatalogStatsResponse(BaseModel):
+    """REST/operator aggregate counts for one VFS catalog snapshot."""
+
+    directory_count: int
+    file_count: int
+    blocked_item_count: int
+
+
+class VfsCatalogBlockedItemResponse(BaseModel):
+    """Blocked mounted item retained in one VFS snapshot."""
+
+    item_id: str
+    external_ref: str
+    title: str
+    reason: str
+
+
+class VfsCatalogEntryDetailResponse(BaseModel):
+    """REST/operator entry/detail view over the mounted VFS catalog snapshot."""
+
+    generated_at: str
+    requested_path: str
+    generation_id: str | None = None
+    published_at: str | None = None
+    found: bool
+    entry: VfsCatalogEntryResponse | None = None
+    stats: VfsCatalogStatsResponse | None = None
+    directories: list[VfsCatalogEntryResponse]
+    files: list[VfsCatalogEntryResponse]
+    blocked_items: list[VfsCatalogBlockedItemResponse]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
 class VfsCatalogRollupResponse(BaseModel):
     """REST/operator view over the current VFS catalog rollup."""
 

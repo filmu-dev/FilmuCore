@@ -5,17 +5,26 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from time import monotonic
+from typing import Any, cast
 from uuid import uuid4
 
 import grpc
 import httpx
+import structlog
 from google.protobuf.timestamp_pb2 import Timestamp
 from prometheus_client import Counter, Gauge
 
+from filmu_py.observability_contract import (
+    VFS_ENTRY_ID_HEADER,
+    VFS_HANDLE_KEY_HEADER,
+    VFS_PROVIDER_FILE_ID_HEADER,
+    extract_structlog_bindings,
+    normalize_text_carrier,
+)
 from filmuvfs.catalog.v1 import catalog_pb2, catalog_pb2_grpc
 
 from .playback import PlaybackAttachmentProviderClient, PlaybackAttachmentRefreshRequest
@@ -158,6 +167,103 @@ def _parse_generation_id(value: str | None) -> int | None:
     except ValueError:
         return None
     return parsed if parsed > 0 else None
+
+
+def _metadata_carrier(
+    context: grpc.aio.ServicerContext[object, object],
+) -> dict[str, str]:
+    """Return one lower-cased text carrier from gRPC invocation metadata."""
+
+    raw_metadata = getattr(context, "invocation_metadata", None)
+    if raw_metadata is None:
+        return {}
+    try:
+        values = raw_metadata()
+    except Exception:
+        return {}
+
+    pairs: list[tuple[str, object]] = []
+    for item in values:
+        key = getattr(item, "key", None)
+        value = getattr(item, "value", None)
+        if key is not None:
+            pairs.append((key, value))
+            continue
+        if isinstance(item, tuple) and len(item) == 2:
+            pairs.append((item[0], item[1]))
+    return normalize_text_carrier(pairs)
+
+
+@asynccontextmanager
+async def _grpc_observability_scope(
+    *,
+    context: grpc.aio.ServicerContext[object, object],
+    operation: str,
+    extra_bindings: dict[str, str] | None = None,
+) -> AsyncIterator[None]:
+    """Bind correlation metadata and extracted trace context for one gRPC handler."""
+
+    carrier = _metadata_carrier(context)
+    bindings = extract_structlog_bindings(carrier)
+    if extra_bindings:
+        bindings.update(
+            {
+                key: value
+                for key, value in extra_bindings.items()
+                if isinstance(value, str) and value.strip()
+            }
+        )
+    if bindings:
+        structlog.contextvars.bind_contextvars(**bindings)
+
+    otel_token: Any | None = None
+    span_manager: Any | None = None
+    try:
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace
+        from opentelemetry.propagate import extract
+
+        otel_token = otel_context.attach(extract(carrier))
+        tracer = trace.get_tracer("filmu_py.services.vfs_server")
+        attributes = {
+            "rpc.system": "grpc",
+            "rpc.service": "filmu.vfs.catalog.v1.FilmuVfsCatalogService",
+            "rpc.method": operation,
+        }
+        attributes.update(
+            {
+                key: value
+                for key, value in {
+                    "request.id": bindings.get("request_id"),
+                    "filmuvfs.session_id": bindings.get("vfs_session_id"),
+                    "filmuvfs.daemon_id": bindings.get("vfs_daemon_id"),
+                    "catalog.entry_id": bindings.get("vfs_entry_id"),
+                    "provider.file_id": bindings.get("provider_file_id"),
+                    "vfs.handle_key": bindings.get("handle_key"),
+                    "tenant.id": bindings.get("tenant_id"),
+                }.items()
+                if value is not None
+            }
+        )
+        span_manager = tracer.start_as_current_span(
+            f"filmuvfs.grpc.{operation}",
+            attributes=attributes,
+        )
+        span_manager.__enter__()
+        yield
+    except Exception:
+        yield
+    finally:
+        if span_manager is not None:
+            cast(Any, span_manager).__exit__(None, None, None)
+        if otel_token is not None:
+            try:
+                from opentelemetry import context as otel_context
+
+                otel_context.detach(cast(Any, otel_token))
+            except Exception:
+                pass
+        structlog.contextvars.clear_contextvars()
 
 
 def _timestamp_from_datetime(value: datetime) -> Timestamp:
@@ -754,12 +860,22 @@ class FilmuVfsCatalogGrpcServicer:
             catalog_pb2.RefreshCatalogEntryResponse,
         ],
     ) -> catalog_pb2.RefreshCatalogEntryResponse:
-        _ = context
-        return await self.refresh_catalog_entry_message(
-            provider_file_id=request.provider_file_id,
-            handle_key=request.handle_key,
-            entry_id=request.entry_id,
-        )
+        async with _grpc_observability_scope(
+            context=cast(grpc.aio.ServicerContext[object, object], context),
+            operation="RefreshCatalogEntry",
+            extra_bindings=normalize_text_carrier(
+                {
+                    VFS_PROVIDER_FILE_ID_HEADER: request.provider_file_id,
+                    VFS_HANDLE_KEY_HEADER: request.handle_key,
+                    VFS_ENTRY_ID_HEADER: request.entry_id,
+                }
+            ),
+        ):
+            return await self.refresh_catalog_entry_message(
+                provider_file_id=request.provider_file_id,
+                handle_key=request.handle_key,
+                entry_id=request.entry_id,
+            )
 
     async def _resolve_inline_refresh(
         self,
@@ -800,6 +916,21 @@ class FilmuVfsCatalogGrpcServicer:
                 self._inline_refresh_flights.pop(refresh_key, None)
 
     async def WatchCatalog(
+        self,
+        request_iterator: AsyncIterator[catalog_pb2.WatchCatalogRequest],
+        context: grpc.aio.ServicerContext[
+            catalog_pb2.WatchCatalogRequest,
+            catalog_pb2.WatchCatalogEvent,
+        ],
+    ) -> AsyncIterator[catalog_pb2.WatchCatalogEvent]:
+        async with _grpc_observability_scope(
+            context=cast(grpc.aio.ServicerContext[object, object], context),
+            operation="WatchCatalog",
+        ):
+            async for event in self._watch_catalog_impl(request_iterator, context):
+                yield event
+
+    async def _watch_catalog_impl(
         self,
         request_iterator: AsyncIterator[catalog_pb2.WatchCatalogRequest],
         context: grpc.aio.ServicerContext[

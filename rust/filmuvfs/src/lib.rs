@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod chunk_engine;
 pub mod chunk_planner;
 pub mod config;
+pub mod cross_process_observability;
 pub mod hidden_paths;
 pub mod media_path;
 pub mod mount;

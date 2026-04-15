@@ -82,6 +82,11 @@ class CorrelationContextFilter(logging.Filter):
             "actor_type",
             "api_key_id",
             "authentication_mode",
+            "vfs_session_id",
+            "vfs_daemon_id",
+            "vfs_entry_id",
+            "provider_file_id",
+            "handle_key",
         ):
             if not hasattr(record, key) and key in context:
                 setattr(record, key, context[key])
@@ -132,6 +137,11 @@ class StructuredJsonFormatter(logging.Formatter):
             "auth.actor.type": extra.pop("actor_type", None),
             "auth.api_key_id": extra.pop("api_key_id", None),
             "auth.mode": extra.pop("authentication_mode", None),
+            "vfs.session_id": extra.pop("vfs_session_id", None),
+            "vfs.daemon_id": extra.pop("vfs_daemon_id", None),
+            "catalog.entry_id": extra.pop("vfs_entry_id", None),
+            "provider.file_id": extra.pop("provider_file_id", None),
+            "vfs.handle_key": extra.pop("handle_key", None),
             "trace.id": extra.pop("trace_id", None) or trace_context["trace_id"],
             "span.id": extra.pop("span_id", None) or trace_context["span_id"],
         }

@@ -5,6 +5,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from secrets import token_hex
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
@@ -90,7 +91,14 @@ from ..models import (
     StatsMediaYearRelease,
     StatsResponse,
     TenantQuotaPolicyResponse,
+    VfsCatalogBlockedItemResponse,
+    VfsCatalogCorrelationKeysResponse,
+    VfsCatalogDirectoryDetailResponse,
+    VfsCatalogEntryDetailResponse,
+    VfsCatalogEntryResponse,
+    VfsCatalogFileDetailResponse,
     VfsCatalogRollupResponse,
+    VfsCatalogStatsResponse,
     VfsRolloutControlRequest,
     VfsRolloutControlResponse,
 )
@@ -932,6 +940,105 @@ def _vfs_catalog_rollup_response(
         multi_role_file_count=rollup.multi_role_file_count,
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
+    )
+
+
+def _format_optional_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _normalize_vfs_catalog_path(path: str) -> str:
+    stripped = path.strip()
+    if not stripped or stripped == "/":
+        return "/"
+    normalized = PurePosixPath(f"/{stripped.lstrip('/')}").as_posix()
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+def _vfs_catalog_correlation_response(record: Any) -> VfsCatalogCorrelationKeysResponse:
+    correlation = record.correlation
+    return VfsCatalogCorrelationKeysResponse(
+        item_id=correlation.item_id,
+        media_entry_id=correlation.media_entry_id,
+        source_attachment_id=correlation.source_attachment_id,
+        provider=correlation.provider,
+        provider_download_id=correlation.provider_download_id,
+        provider_file_id=correlation.provider_file_id,
+        provider_file_path=correlation.provider_file_path,
+        session_id=correlation.session_id,
+        handle_key=correlation.handle_key,
+        tenant_id=getattr(correlation, "tenant_id", None),
+    )
+
+
+def _vfs_catalog_entry_response(record: Any) -> VfsCatalogEntryResponse:
+    file_payload = record.file
+    directory_payload = record.directory
+    return VfsCatalogEntryResponse(
+        entry_id=record.entry_id,
+        parent_entry_id=record.parent_entry_id,
+        path=record.path,
+        name=record.name,
+        kind=record.kind,
+        correlation=_vfs_catalog_correlation_response(record),
+        directory=(
+            VfsCatalogDirectoryDetailResponse(path=directory_payload.path)
+            if directory_payload is not None
+            else None
+        ),
+        file=(
+            VfsCatalogFileDetailResponse(
+                item_id=file_payload.item_id,
+                item_title=file_payload.item_title,
+                item_external_ref=file_payload.item_external_ref,
+                media_entry_id=file_payload.media_entry_id,
+                source_attachment_id=file_payload.source_attachment_id,
+                media_type=file_payload.media_type,
+                transport=file_payload.transport,
+                locator=file_payload.locator,
+                local_path=file_payload.local_path,
+                restricted_url=file_payload.restricted_url,
+                unrestricted_url=file_payload.unrestricted_url,
+                original_filename=file_payload.original_filename,
+                size_bytes=file_payload.size_bytes,
+                lease_state=file_payload.lease_state,
+                expires_at=_format_optional_datetime(file_payload.expires_at),
+                last_refreshed_at=_format_optional_datetime(file_payload.last_refreshed_at),
+                last_refresh_error=file_payload.last_refresh_error,
+                provider=file_payload.provider,
+                provider_download_id=file_payload.provider_download_id,
+                provider_file_id=file_payload.provider_file_id,
+                provider_file_path=file_payload.provider_file_path,
+                active_roles=list(file_payload.active_roles),
+                source_key=file_payload.source_key,
+                query_strategy=file_payload.query_strategy,
+                provider_family=file_payload.provider_family,
+                locator_source=file_payload.locator_source,
+                match_basis=file_payload.match_basis,
+                restricted_fallback=file_payload.restricted_fallback,
+            )
+            if file_payload is not None
+            else None
+        ),
+    )
+
+
+def _vfs_catalog_stats_response(snapshot: Any) -> VfsCatalogStatsResponse:
+    return VfsCatalogStatsResponse(
+        directory_count=snapshot.stats.directory_count,
+        file_count=snapshot.stats.file_count,
+        blocked_item_count=snapshot.stats.blocked_item_count,
+    )
+
+
+def _vfs_catalog_blocked_item_response(item: Any) -> VfsCatalogBlockedItemResponse:
+    return VfsCatalogBlockedItemResponse(
+        item_id=str(item.item_id),
+        external_ref=str(item.external_ref),
+        title=str(item.title),
+        reason=str(item.reason),
     )
 
 
@@ -3930,6 +4037,93 @@ async def get_vfs_catalog_rollup(
     if generation_id is not None and snapshot is None:
         raise HTTPException(status_code=404, detail=f"Unknown VFS catalog generation '{generation_id}'")
     return _vfs_catalog_rollup_response(request, snapshot=snapshot)
+
+
+@router.get(
+    "/operations/vfs-catalog/entry",
+    operation_id="default.vfs_catalog_entry_detail",
+    response_model=VfsCatalogEntryDetailResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def get_vfs_catalog_entry_detail(
+    request: Request,
+    path: str = Query("/", description="Absolute mounted VFS path to inspect."),
+    generation_id: Annotated[int | None, Query(ge=1)] = None,
+) -> VfsCatalogEntryDetailResponse:
+    """Return one REST/operator detail view over a mounted VFS catalog path."""
+
+    normalized_path = _normalize_vfs_catalog_path(path)
+    supplier = request.app.state.resources.vfs_catalog_supplier
+    if supplier is None:
+        return VfsCatalogEntryDetailResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            requested_path=normalized_path,
+            found=False,
+            directories=[],
+            files=[],
+            blocked_items=[],
+            required_actions=["attach_vfs_catalog_supplier"],
+            remaining_gaps=["the proto-first VFS catalog supplier is not attached"],
+        )
+
+    snapshot = (
+        await supplier.snapshot_for_generation(generation_id)
+        if generation_id is not None
+        else await supplier.build_snapshot()
+    )
+    if generation_id is not None and snapshot is None:
+        raise HTTPException(status_code=404, detail=f"Unknown VFS catalog generation '{generation_id}'")
+    assert snapshot is not None
+
+    entry = next((candidate for candidate in snapshot.entries if candidate.path == normalized_path), None)
+    if entry is None:
+        return VfsCatalogEntryDetailResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            requested_path=normalized_path,
+            generation_id=snapshot.generation_id,
+            published_at=snapshot.published_at.isoformat(),
+            found=False,
+            stats=_vfs_catalog_stats_response(snapshot),
+            directories=[],
+            files=[],
+            blocked_items=[
+                _vfs_catalog_blocked_item_response(item) for item in snapshot.blocked_items
+            ],
+            required_actions=["inspect_vfs_catalog_path_projection"],
+            remaining_gaps=[f"no VFS catalog entry exists at path {normalized_path}"],
+        )
+
+    children = [
+        candidate for candidate in snapshot.entries if candidate.parent_entry_id == entry.entry_id
+    ]
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if snapshot.stats.blocked_item_count > 0:
+        required_actions.append("investigate_vfs_blocked_items")
+        remaining_gaps.append("one or more media items are still blocked from the VFS catalog")
+
+    return VfsCatalogEntryDetailResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        requested_path=normalized_path,
+        generation_id=snapshot.generation_id,
+        published_at=snapshot.published_at.isoformat(),
+        found=True,
+        entry=_vfs_catalog_entry_response(entry),
+        stats=_vfs_catalog_stats_response(snapshot),
+        directories=[
+            _vfs_catalog_entry_response(candidate)
+            for candidate in children
+            if candidate.kind == "directory"
+        ],
+        files=[
+            _vfs_catalog_entry_response(candidate)
+            for candidate in children
+            if candidate.kind == "file"
+        ],
+        blocked_items=[_vfs_catalog_blocked_item_response(item) for item in snapshot.blocked_items],
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
 
 
 @router.post(

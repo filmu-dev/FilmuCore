@@ -973,6 +973,186 @@ def test_vfs_catalog_rollup_route_returns_rest_projection() -> None:
     assert body["multi_role_file_count"] == 1
 
 
+def test_vfs_catalog_entry_detail_route_returns_rest_projection() -> None:
+    client = _build_client()
+
+    class FakeVfsCatalogSupplier:
+        async def build_snapshot(self) -> Any:
+            directory_root = type("DirectoryPayload", (), {"path": "/"})()
+            directory_show = type("DirectoryPayload", (), {"path": "/shows"})()
+            directory_season = type("DirectoryPayload", (), {"path": "/shows/Example Show/Season 01"})()
+
+            empty_correlation = type(
+                "Correlation",
+                (),
+                {
+                    "item_id": None,
+                    "media_entry_id": None,
+                    "source_attachment_id": None,
+                    "provider": None,
+                    "provider_download_id": None,
+                    "provider_file_id": None,
+                    "provider_file_path": None,
+                    "session_id": None,
+                    "handle_key": None,
+                    "tenant_id": "tenant-main",
+                },
+            )()
+            file_correlation = type(
+                "Correlation",
+                (),
+                {
+                    "item_id": "item-episode-1",
+                    "media_entry_id": "media-entry-1",
+                    "source_attachment_id": "attachment-1",
+                    "provider": "realdebrid",
+                    "provider_download_id": "download-1",
+                    "provider_file_id": "provider-file-1",
+                    "provider_file_path": "Season 01/Episode 01.mkv",
+                    "session_id": "session-1",
+                    "handle_key": "handle-1",
+                    "tenant_id": "tenant-main",
+                },
+            )()
+            file_payload = type(
+                "FilePayload",
+                (),
+                {
+                    "item_id": "item-episode-1",
+                    "item_title": "Example Show",
+                    "item_external_ref": "tvdb:1",
+                    "media_entry_id": "media-entry-1",
+                    "source_attachment_id": "attachment-1",
+                    "media_type": "episode",
+                    "transport": "remote-direct",
+                    "locator": "https://cdn.example.test/episode-1.mkv",
+                    "local_path": None,
+                    "restricted_url": "https://api.example.test/episode-1.mkv",
+                    "unrestricted_url": "https://cdn.example.test/episode-1.mkv",
+                    "original_filename": "Episode 01.mkv",
+                    "size_bytes": 2048,
+                    "lease_state": "ready",
+                    "expires_at": None,
+                    "last_refreshed_at": None,
+                    "last_refresh_error": None,
+                    "provider": "realdebrid",
+                    "provider_download_id": "download-1",
+                    "provider_file_id": "provider-file-1",
+                    "provider_file_path": "Season 01/Episode 01.mkv",
+                    "active_roles": ("direct",),
+                    "source_key": "media-entry:media-entry-1",
+                    "query_strategy": "by-provider-file-id",
+                    "provider_family": "debrid",
+                    "locator_source": "unrestricted-url",
+                    "match_basis": "provider-file-id",
+                    "restricted_fallback": False,
+                },
+            )()
+
+            entries = (
+                type(
+                    "Entry",
+                    (),
+                    {
+                        "entry_id": "dir:/",
+                        "parent_entry_id": None,
+                        "path": "/",
+                        "name": "/",
+                        "kind": "directory",
+                        "correlation": empty_correlation,
+                        "directory": directory_root,
+                        "file": None,
+                    },
+                )(),
+                type(
+                    "Entry",
+                    (),
+                    {
+                        "entry_id": "dir:/shows",
+                        "parent_entry_id": "dir:/",
+                        "path": "/shows",
+                        "name": "shows",
+                        "kind": "directory",
+                        "correlation": empty_correlation,
+                        "directory": directory_show,
+                        "file": None,
+                    },
+                )(),
+                type(
+                    "Entry",
+                    (),
+                    {
+                        "entry_id": "dir:/shows/Example Show/Season 01",
+                        "parent_entry_id": "dir:/shows",
+                        "path": "/shows/Example Show/Season 01",
+                        "name": "Season 01",
+                        "kind": "directory",
+                        "correlation": empty_correlation,
+                        "directory": directory_season,
+                        "file": None,
+                    },
+                )(),
+                type(
+                    "Entry",
+                    (),
+                    {
+                        "entry_id": "file:/shows/Example Show/Season 01/Episode 01.mkv",
+                        "parent_entry_id": "dir:/shows/Example Show/Season 01",
+                        "path": "/shows/Example Show/Season 01/Episode 01.mkv",
+                        "name": "Episode 01.mkv",
+                        "kind": "file",
+                        "correlation": file_correlation,
+                        "directory": None,
+                        "file": file_payload,
+                    },
+                )(),
+            )
+
+            blocked_item = type(
+                "BlockedItem",
+                (),
+                {
+                    "item_id": "item-blocked-1",
+                    "external_ref": "tmdb:99",
+                    "title": "Blocked Example",
+                    "reason": "missing_media_entry",
+                },
+            )()
+            stats = type("Stats", (), {"directory_count": 3, "file_count": 1, "blocked_item_count": 1})()
+            snapshot = type("Snapshot", (), {})()
+            snapshot.generation_id = "11"
+            snapshot.published_at = datetime(2026, 4, 15, 13, 0, tzinfo=UTC)
+            snapshot.entries = entries
+            snapshot.blocked_items = (blocked_item,)
+            snapshot.stats = stats
+            return snapshot
+
+        async def snapshot_for_generation(self, generation_id: int) -> Any:
+            _ = generation_id
+            return await self.build_snapshot()
+
+    resources = cast(Any, client.app.state.resources)
+    resources.vfs_catalog_supplier = FakeVfsCatalogSupplier()
+
+    response = client.get(
+        "/api/v1/operations/vfs-catalog/entry",
+        params={"path": "/shows/Example Show/Season 01"},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["found"] is True
+    assert body["generation_id"] == "11"
+    assert body["entry"]["kind"] == "directory"
+    assert body["directories"] == []
+    assert len(body["files"]) == 1
+    assert body["files"][0]["correlation"]["provider_file_id"] == "provider-file-1"
+    assert body["stats"]["blocked_item_count"] == 1
+    assert body["blocked_items"][0]["reason"] == "missing_media_entry"
+    assert body["remaining_gaps"] == ["one or more media items are still blocked from the VFS catalog"]
+
+
 def test_services_route_reflects_runtime_flags() -> None:
     """Services route should expose the real provider enablement map."""
 

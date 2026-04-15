@@ -23,11 +23,14 @@ use tokio_util::sync::CancellationToken;
 use tonic::{transport::Endpoint, Request};
 use tracing::{debug, info, info_span, warn, Instrument};
 
+#[cfg(not(target_os = "windows"))]
+use crate::cross_process_observability::apply_http_observability_headers;
 use crate::{
     catalog::state::{
         inode_for_entry_id as hashed_inode_for_entry_id, CatalogStateError, CatalogStateStore,
     },
     config::SidecarConfig,
+    cross_process_observability::{apply_tonic_observability_metadata, cross_process_request_id},
     mount::MountRuntime,
     proto::{
         filmu::vfs::catalog::v1::filmu_vfs_catalog_service_client::FilmuVfsCatalogServiceClient,
@@ -54,6 +57,10 @@ pub enum CatalogWatchError {
 #[derive(Clone)]
 struct CatalogHttpFallbackClient {
     api_key: String,
+    #[cfg(not(target_os = "windows"))]
+    daemon_id: String,
+    #[cfg(not(target_os = "windows"))]
+    session_id: String,
     rpc_timeout: std::time::Duration,
     #[cfg(target_os = "windows")]
     container_name: String,
@@ -64,7 +71,13 @@ struct CatalogHttpFallbackClient {
 }
 
 impl CatalogHttpFallbackClient {
-    fn new(_endpoint: String, api_key: String, rpc_timeout: std::time::Duration) -> Self {
+    fn new(
+        _endpoint: String,
+        api_key: String,
+        daemon_id: String,
+        session_id: String,
+        rpc_timeout: std::time::Duration,
+    ) -> Self {
         #[cfg(not(target_os = "windows"))]
         let connector = HttpsConnectorBuilder::new()
             .with_webpki_roots()
@@ -74,8 +87,14 @@ impl CatalogHttpFallbackClient {
             .build();
         #[cfg(not(target_os = "windows"))]
         let client = Client::builder(TokioExecutor::new()).build(connector);
+        #[cfg(target_os = "windows")]
+        let _ = (&daemon_id, &session_id);
         Self {
             api_key,
+            #[cfg(not(target_os = "windows"))]
+            daemon_id,
+            #[cfg(not(target_os = "windows"))]
+            session_id,
             rpc_timeout,
             #[cfg(target_os = "windows")]
             container_name: std::env::var("FILMUVFS_WINDOWS_BACKEND_CONTAINER")
@@ -117,13 +136,27 @@ impl CatalogHttpFallbackClient {
             let uri = url
                 .parse::<Uri>()
                 .context("failed to parse catalog HTTP fallback endpoint")?;
+            let poll_span = info_span!(
+                "filmuvfs.catalog.watch_http_poll",
+                daemon_id = %self.daemon_id,
+                session_id = %self.session_id,
+                fallback_target = %self.fallback_target(),
+            );
             let request = HttpRequest::builder()
                 .method("GET")
                 .uri(uri)
-                .header("x-filmu-vfs-key", self.api_key.as_str())
-                .header(CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)
-                .body(Full::new(Bytes::new()))
-                .context("failed to build catalog HTTP fallback request")?;
+                .header("x-filmu-vfs-key", self.api_key.as_str());
+            let request = apply_http_observability_headers(
+                request,
+                &poll_span,
+                &cross_process_request_id(&self.session_id, "watch-event"),
+                &self.daemon_id,
+                &self.session_id,
+                &[],
+            )
+            .header(CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)
+            .body(Full::new(Bytes::new()))
+            .context("failed to build catalog HTTP fallback request")?;
             let response = timeout(self.rpc_timeout, self.client.request(request))
                 .await
                 .context("catalog HTTP fallback request timed out")?
@@ -353,6 +386,8 @@ impl CatalogWatchRuntime {
         Some(CatalogHttpFallbackClient::new(
             endpoint,
             api_key,
+            self.config.daemon_id.clone(),
+            self.config.session_id.clone(),
             self.config.rpc_timeout,
         ))
     }
@@ -410,8 +445,26 @@ impl CatalogWatchRuntime {
             }
         };
 
+        let session_span = info_span!(
+            "filmuvfs.catalog.watch_session",
+            daemon_id = %self.config.daemon_id,
+            session_id = %self.config.session_id,
+            grpc_endpoint = %self.config.grpc_endpoint,
+        );
+        let mut request = Request::new(outbound_stream);
+        session_span.in_scope(|| {
+            apply_tonic_observability_metadata(
+                request.metadata_mut(),
+                &session_span,
+                &cross_process_request_id(&self.config.session_id, "watch-catalog"),
+                &self.config.daemon_id,
+                &self.config.session_id,
+                &[],
+            );
+        });
         let response = client
-            .watch_catalog(Request::new(outbound_stream))
+            .watch_catalog(request)
+            .instrument(session_span.clone())
             .await
             .context("WatchCatalog request failed")?;
         let mut inbound = response.into_inner();
@@ -428,7 +481,9 @@ impl CatalogWatchRuntime {
                 break;
             };
 
-            self.handle_event(&outbound_tx, event, initial_sync).await?;
+            self.handle_event(&outbound_tx, event, initial_sync)
+                .instrument(session_span.clone())
+                .await?;
         }
 
         warn!(

@@ -38,6 +38,8 @@ use tracing::{debug, error, info_span, warn, Instrument};
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::catalog::client::CatalogWatchRuntime;
+#[cfg(not(target_os = "windows"))]
+use crate::cross_process_observability::apply_http_observability_headers;
 #[cfg(target_os = "windows")]
 use crate::windows_host::WindowsMountedFilesystem;
 use crate::{
@@ -51,6 +53,10 @@ use crate::{
     },
     chunk_planner::ChunkPlannerConfig,
     config::{PrefetchConfig, ResolvedMountAdapterKind, SidecarConfig},
+    cross_process_observability::{
+        apply_tonic_observability_metadata, cross_process_request_id, ENTRY_ID_HEADER,
+        HANDLE_KEY_HEADER, PROVIDER_FILE_ID_HEADER,
+    },
     hidden_paths::{is_hidden_path, is_ignored_path},
     media_path::{parse_media_semantic_path, MediaSemanticPathInfo},
     prefetch::{PrefetchSchedulerSnapshot, VelocityTracker},
@@ -264,6 +270,8 @@ pub trait CatalogEntryRefreshClient: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct GrpcCatalogEntryRefreshClient {
     endpoint: String,
+    daemon_id: String,
+    session_id: String,
     connect_timeout: Duration,
     rpc_timeout: Duration,
     heartbeat_interval: Duration,
@@ -274,6 +282,10 @@ pub struct HttpCatalogEntryRefreshClient {
     #[cfg(not(target_os = "windows"))]
     endpoint: String,
     api_key: String,
+    #[cfg(not(target_os = "windows"))]
+    daemon_id: String,
+    #[cfg(not(target_os = "windows"))]
+    session_id: String,
     rpc_timeout: Duration,
     container_name: String,
     #[cfg(not(target_os = "windows"))]
@@ -281,7 +293,13 @@ pub struct HttpCatalogEntryRefreshClient {
 }
 
 impl HttpCatalogEntryRefreshClient {
-    pub fn new(_endpoint: String, api_key: String, rpc_timeout: Duration) -> Self {
+    pub fn new(
+        _endpoint: String,
+        api_key: String,
+        daemon_id: String,
+        session_id: String,
+        rpc_timeout: Duration,
+    ) -> Self {
         #[cfg(not(target_os = "windows"))]
         let connector = HttpsConnectorBuilder::new()
             .with_webpki_roots()
@@ -291,10 +309,16 @@ impl HttpCatalogEntryRefreshClient {
             .build();
         #[cfg(not(target_os = "windows"))]
         let client = Client::builder(TokioExecutor::new()).build(connector);
+        #[cfg(target_os = "windows")]
+        let _ = (&daemon_id, &session_id);
         Self {
             #[cfg(not(target_os = "windows"))]
             endpoint: _endpoint,
             api_key,
+            #[cfg(not(target_os = "windows"))]
+            daemon_id,
+            #[cfg(not(target_os = "windows"))]
+            session_id,
             rpc_timeout,
             container_name: std::env::var("FILMUVFS_WINDOWS_BACKEND_CONTAINER")
                 .ok()
@@ -309,12 +333,16 @@ impl HttpCatalogEntryRefreshClient {
 impl GrpcCatalogEntryRefreshClient {
     pub fn new(
         endpoint: String,
+        daemon_id: String,
+        session_id: String,
         connect_timeout: Duration,
         rpc_timeout: Duration,
         heartbeat_interval: Duration,
     ) -> Self {
         Self {
             endpoint,
+            daemon_id,
+            session_id,
             connect_timeout,
             rpc_timeout,
             heartbeat_interval,
@@ -346,12 +374,36 @@ impl CatalogEntryRefreshClient for GrpcCatalogEntryRefreshClient {
             .await
             .map_err(|error| error.to_string())?;
         let mut client = FilmuVfsCatalogServiceClient::new(channel);
+        let refresh_span = info_span!(
+            "filmuvfs.catalog.entry_refresh",
+            daemon_id = %self.daemon_id,
+            session_id = %self.session_id,
+            provider_file_id = %provider_file_id,
+            handle_key = %handle_key,
+            entry_id = %entry_id,
+        );
+        let mut request = Request::new(RefreshCatalogEntryRequest {
+            provider_file_id: provider_file_id.to_owned(),
+            handle_key: handle_key.to_owned(),
+            entry_id: entry_id.to_owned(),
+        });
+        refresh_span.in_scope(|| {
+            apply_tonic_observability_metadata(
+                request.metadata_mut(),
+                &refresh_span,
+                &cross_process_request_id(&self.session_id, "refresh-catalog-entry"),
+                &self.daemon_id,
+                &self.session_id,
+                &[
+                    (PROVIDER_FILE_ID_HEADER, provider_file_id),
+                    (HANDLE_KEY_HEADER, handle_key),
+                    (ENTRY_ID_HEADER, entry_id),
+                ],
+            );
+        });
         let response = client
-            .refresh_catalog_entry(Request::new(RefreshCatalogEntryRequest {
-                provider_file_id: provider_file_id.to_owned(),
-                handle_key: handle_key.to_owned(),
-                entry_id: entry_id.to_owned(),
-            }))
+            .refresh_catalog_entry(request)
+            .instrument(refresh_span)
             .await
             .map_err(|error| error.to_string())?
             .into_inner();
@@ -381,6 +433,14 @@ impl CatalogEntryRefreshClient for HttpCatalogEntryRefreshClient {
 
         #[cfg(not(target_os = "windows"))]
         {
+            let refresh_span = info_span!(
+                "filmuvfs.catalog.entry_refresh_http",
+                daemon_id = %self.daemon_id,
+                session_id = %self.session_id,
+                provider_file_id = %provider_file_id,
+                handle_key = %handle_key,
+                entry_id = %entry_id,
+            );
             let uri = format!(
                 "{}/internal/vfs/refresh-entry.pb",
                 self.endpoint.trim_end_matches('/')
@@ -396,11 +456,24 @@ impl CatalogEntryRefreshClient for HttpCatalogEntryRefreshClient {
             let request = HttpRequest::builder()
                 .method("POST")
                 .uri(uri)
-                .header("x-filmu-vfs-key", self.api_key.as_str())
-                .header(CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)
-                .body(Full::new(Bytes::from(payload)))
-                .map_err(|error| error.to_string())?;
+                .header("x-filmu-vfs-key", self.api_key.as_str());
+            let request = apply_http_observability_headers(
+                request,
+                &refresh_span,
+                &cross_process_request_id(&self.session_id, "refresh-catalog-entry"),
+                &self.daemon_id,
+                &self.session_id,
+                &[
+                    (PROVIDER_FILE_ID_HEADER, provider_file_id),
+                    (HANDLE_KEY_HEADER, handle_key),
+                    (ENTRY_ID_HEADER, entry_id),
+                ],
+            )
+            .header(CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)
+            .body(Full::new(Bytes::from(payload)))
+            .map_err(|error| error.to_string())?;
             let response = timeout(self.rpc_timeout, self.client.request(request))
+                .instrument(refresh_span.clone())
                 .await
                 .map_err(|_| "catalog HTTP refresh request timed out".to_owned())?
                 .map_err(|error| error.to_string())?;
@@ -489,6 +562,8 @@ pub fn build_catalog_entry_refresh_client(
             return Arc::new(HttpCatalogEntryRefreshClient::new(
                 base_url.clone(),
                 api_key.clone(),
+                config.daemon_id.clone(),
+                config.session_id.clone(),
                 config.rpc_timeout,
             ));
         }
@@ -496,6 +571,8 @@ pub fn build_catalog_entry_refresh_client(
 
     Arc::new(GrpcCatalogEntryRefreshClient::new(
         config.grpc_endpoint.clone(),
+        config.daemon_id.clone(),
+        config.session_id.clone(),
         config.connect_timeout,
         config.rpc_timeout,
         config.heartbeat_interval,
