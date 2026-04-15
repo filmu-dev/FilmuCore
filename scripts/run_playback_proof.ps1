@@ -62,6 +62,33 @@ function Wait-HttpReady {
     return $false
 }
 
+function Wait-BackendReady {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $BaseUrl,
+        [Parameter(Mandatory = $true)]
+        [int] $TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $healthStatus = (docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' filmu-python 2>$null | Select-Object -First 1)
+            if ([string] $healthStatus -eq 'healthy') {
+                return $true
+            }
+        }
+        catch {
+        }
+
+        if (Wait-HttpReady -Uri "$BaseUrl/openapi.json" -TimeoutSeconds 5) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Convert-ToWslPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -231,6 +258,35 @@ function Resolve-TvdbIdForProof {
     return $resolvedTvdbId
 }
 
+function Write-TextFileWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object] $Value,
+        [int] $MaxAttempts = 5
+    )
+
+    $directory = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    for ($attempt = 0; $attempt -lt $MaxAttempts; $attempt++) {
+        try {
+            Set-Content -Path $Path -Encoding UTF8 -Value $Value
+            return
+        }
+        catch {
+            if ($attempt -eq ($MaxAttempts - 1)) {
+                throw
+            }
+            Start-Sleep -Milliseconds (100 * ($attempt + 1))
+        }
+    }
+}
+
 function Write-SummaryFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -241,7 +297,7 @@ function Write-SummaryFile {
 
     $summaryDir = Split-Path -Parent $Path
     $summaryStagePath = Join-Path $summaryDir 'summary-stage.txt'
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:start'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:start'
 
     $stepSnapshot = @(
         $script:StepResults | ForEach-Object {
@@ -253,18 +309,18 @@ function Write-SummaryFile {
             }
         }
     )
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:step-snapshot'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:step-snapshot'
 
     $timestampJson = Convert-ToCompactJsonValue -Value $Summary.timestamp
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:timestamp'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:timestamp'
     $artifactDirJson = Convert-ToCompactJsonValue -Value $Summary.artifact_dir
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:artifact-dir'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:artifact-dir'
     $parametersJson = ConvertTo-Json -InputObject $Summary.parameters -Depth 20
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:parameters'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:parameters'
     $movieJson = ConvertTo-Json -InputObject $Summary.movie -Depth 20
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:movie'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:movie'
     $mountJson = ConvertTo-Json -InputObject $Summary.mount -Depth 20
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:mount'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:mount'
     $mediaServerLines = @(
         '{'
         ('  "provider": {0},' -f (Convert-ToCompactJsonValue -Value $Summary.media_server.provider))
@@ -346,9 +402,9 @@ function Write-SummaryFile {
         '}'
     )
     $mediaServerJson = $mediaServerLines -join [Environment]::NewLine
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:media-server'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:media-server'
     $stepsJson = ConvertTo-Json -InputObject $stepSnapshot -Depth 20
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:steps-json'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:steps-json'
 
     $json = @(
         '{'
@@ -361,10 +417,10 @@ function Write-SummaryFile {
         ('  "steps": {0}' -f $stepsJson)
         '}'
     ) -join [Environment]::NewLine
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:json-built'
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:json-built'
 
-    Set-Content -Path $Path -Encoding UTF8 -Value $json
-    Set-Content -Path $summaryStagePath -Encoding UTF8 -Value 'stage:summary-written'
+    Write-TextFileWithRetry -Path $Path -Value $json
+    Write-TextFileWithRetry -Path $summaryStagePath -Value 'stage:summary-written'
 }
 
 function Add-StepResult {
@@ -390,10 +446,23 @@ function Add-StepResult {
 function Get-BackendJson {
     param(
         [Parameter(Mandatory = $true)]
-        [string] $Uri
+        [string] $Uri,
+        [int] $TimeoutSec = 15,
+        [int] $RetryCount = 1,
+        [int] $RetryDelaySeconds = 2
     )
 
-    return Invoke-RestMethod -Method Get -Uri $Uri -Headers $script:BackendHeaders -TimeoutSec 15
+    for ($attempt = 1; $attempt -le [Math]::Max(1, $RetryCount); $attempt++) {
+        try {
+            return Invoke-RestMethod -Method Get -Uri $Uri -Headers $script:BackendHeaders -TimeoutSec $TimeoutSec
+        }
+        catch {
+            if ($attempt -ge [Math]::Max(1, $RetryCount)) {
+                throw
+            }
+            Start-Sleep -Seconds ([Math]::Max(1, $RetryDelaySeconds))
+        }
+    }
 }
 
 function Get-JsonObjectFromString {
@@ -434,13 +503,14 @@ function New-Hs256Jwt {
         [string] $Issuer,
         [string] $Audience,
         [byte[]] $SymmetricKeyBytes,
+        [string] $KeyId,
         [string] $Subject
     )
 
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $headerJson = [ordered]@{
         alg = 'HS256'
-        kid = 'local-playback-proof'
+        kid = $KeyId
         typ = 'JWT'
     } | ConvertTo-Json -Compress
     $payloadJson = [ordered]@{
@@ -496,6 +566,7 @@ function Get-BackendHeaders {
             -Issuer ([string] $oidcConfig.issuer) `
             -Audience ([string] $oidcConfig.audience) `
             -SymmetricKeyBytes (ConvertFrom-Base64Url -Value ([string] $octKey.k)) `
+            -KeyId ([string] $octKey.kid) `
             -Subject 'ops://playback-proof'
         $headers.authorization = "Bearer $jwt"
     }
@@ -614,9 +685,13 @@ function Get-JellyfinVisibilitySignal {
     $result = Get-JellyfinJson -Uri $uri -ApiKey $Context.api_key
     $items = @($result.Items)
     if ($items.Count -gt 0) {
+        $playableItem = $items | Where-Object { [string] $_.Type -eq 'Episode' } | Sort-Object ParentIndexNumber, IndexNumber | Select-Object -First 1
+        if ($null -eq $playableItem) {
+            $playableItem = $items[0]
+        }
         return [pscustomobject]@{
             status = 'visible'
-            item   = $items[0]
+            item   = $playableItem
         }
     }
 
@@ -1080,9 +1155,13 @@ function Get-EmbyVisibilitySignal {
     $result = Get-EmbyJson -Uri $uri -ApiKey $Context.api_key
     $items = @($result.Items)
     if ($items.Count -gt 0) {
+        $playableItem = $items | Where-Object { [string] $_.Type -eq 'Episode' } | Sort-Object ParentIndexNumber, IndexNumber | Select-Object -First 1
+        if ($null -eq $playableItem) {
+            $playableItem = $items[0]
+        }
         return [pscustomobject]@{
             status = 'visible'
-            item   = $items[0]
+            item   = $playableItem
         }
     }
 
@@ -1460,12 +1539,89 @@ function Resolve-PlexContext {
     }
 }
 
+function Get-PlexMountRefreshHintPaths {
+    param(
+        [string] $MountedFilePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($MountedFilePath) -or (-not (Test-Path -LiteralPath $MountedFilePath))) {
+        return @()
+    }
+
+    $paths = New-Object System.Collections.Generic.List[string]
+    $mountedFile = Get-Item -LiteralPath $MountedFilePath -ErrorAction SilentlyContinue
+    if ($null -eq $mountedFile) {
+        return @()
+    }
+
+    $fileDirectory = $mountedFile.Directory
+    if ($null -eq $fileDirectory) {
+        return @()
+    }
+
+    $canonicalRoot = $fileDirectory.FullName
+    if ($MediaType -eq 'tv') {
+        $seasonDirectory = $fileDirectory
+        if ($null -ne $seasonDirectory.Parent) {
+            $canonicalRoot = $seasonDirectory.Parent.FullName
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($canonicalRoot)) {
+        $paths.Add($canonicalRoot)
+    }
+
+    if ($MediaType -eq 'tv') {
+        $categoryRoot = Split-Path -Path $canonicalRoot -Parent
+        if (-not [string]::IsNullOrWhiteSpace($categoryRoot) -and (Test-Path -LiteralPath $categoryRoot)) {
+            $relativeLeafPath = $null
+            try {
+                $relativeLeafPath = [System.IO.Path]::GetRelativePath($canonicalRoot, $mountedFile.FullName)
+            }
+            catch {
+                $relativeLeafPath = $null
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($relativeLeafPath)) {
+                foreach ($aliasDirectory in @(Get-ChildItem -LiteralPath $categoryRoot -Directory -Filter 'tvdb-*' -ErrorAction SilentlyContinue)) {
+                    $candidatePath = Join-Path $aliasDirectory.FullName $relativeLeafPath
+                    if (Test-Path -LiteralPath $candidatePath) {
+                        $paths.Add($aliasDirectory.FullName)
+                    }
+                }
+            }
+        }
+    }
+
+    return @($paths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+}
+
+function Invoke-PlexVisibilityRefreshHints {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Context,
+        [string] $MountedFilePath
+    )
+
+    $refreshPaths = Get-PlexMountRefreshHintPaths -MountedFilePath $MountedFilePath
+    foreach ($refreshPath in $refreshPaths) {
+        $encodedPath = [uri]::EscapeDataString($refreshPath)
+        $uri = "$($Context.base_url)/library/sections/$($Context.library_id)/refresh?path=$encodedPath"
+        try {
+            Invoke-WebRequest -Uri $uri -Headers @{ 'X-Plex-Token' = $Context.api_key } -UseBasicParsing -TimeoutSec $MediaServerTimeoutSeconds | Out-Null
+        }
+        catch {
+        }
+    }
+}
+
 function Get-PlexVisibilitySignal {
     param(
         [Parameter(Mandatory = $true)]
         [object] $Context,
         [Parameter(Mandatory = $true)]
-        [string] $SearchTerm
+        [string] $SearchTerm,
+        [string] $MountedFilePath = ''
     )
 
     $sectionPath = if ($MediaType -eq 'tv') { 'allLeaves' } else { 'all' }
@@ -1474,6 +1630,9 @@ function Get-PlexVisibilitySignal {
     $target = $SearchTerm.ToLowerInvariant()
     $normalizedTarget = ($target -replace '^[^a-z0-9]+|[^a-z0-9]+$', '') -replace '[^a-z0-9]+', ' '
     $articleTrimmedTarget = ($normalizedTarget -replace '^(the|a|an)\s+', '').Trim()
+    $normalizedMountedFilePath = (($MountedFilePath.ToLowerInvariant() -replace '[\\/_\.\-\(\)\[\]]+', ' ') -replace '\s+', ' ').Trim()
+    $mountedFileName = if ([string]::IsNullOrWhiteSpace($MountedFilePath)) { '' } else { [System.IO.Path]::GetFileName($MountedFilePath).ToLowerInvariant() }
+    $normalizedMountedFileName = (($mountedFileName -replace '[\\/_\.\-\(\)\[\]]+', ' ') -replace '\s+', ' ').Trim()
     $items = @()
     if ($xml.MediaContainer.PSObject.Properties.Name -contains 'Video') {
         $items = @($xml.MediaContainer.Video)
@@ -1482,7 +1641,8 @@ function Get-PlexVisibilitySignal {
         $items = @($xml.MediaContainer.Directory)
     }
 
-    $match = $items | Where-Object {
+    $match = $items | Sort-Object -Descending -Property @{
+        Expression = {
         $title = [string] $_.title
         $normalizedTitle = (($title.ToLowerInvariant() -replace '^[^a-z0-9]+|[^a-z0-9]+$', '') -replace '[^a-z0-9]+', ' ').Trim()
         $articleTrimmedTitle = ($normalizedTitle -replace '^(the|a|an)\s+', '').Trim()
@@ -1497,12 +1657,48 @@ function Get-PlexVisibilitySignal {
             }
         }
         $normalizedFilePath = (($filePath.ToLowerInvariant() -replace '[\\/_\.\-\(\)\[\]]+', ' ') -replace '\s+', ' ').Trim()
+        $fileName = if ([string]::IsNullOrWhiteSpace($filePath)) { '' } else { [System.IO.Path]::GetFileName($filePath).ToLowerInvariant() }
+        $normalizedFileName = (($fileName -replace '[\\/_\.\-\(\)\[\]]+', ' ') -replace '\s+', ' ').Trim()
 
-        $title.ToLowerInvariant().Contains($target) -or
-        $normalizedTitle.Contains($normalizedTarget) -or
-        (($articleTrimmedTarget.Length -gt 0) -and $articleTrimmedTitle.Contains($articleTrimmedTarget)) -or
-        (($normalizedTarget.Length -gt 0) -and $normalizedFilePath.Contains($normalizedTarget))
+        if (($normalizedMountedFileName.Length -gt 0) -and ($normalizedFileName -eq $normalizedMountedFileName)) { return 100 }
+        if (($normalizedMountedFilePath.Length -gt 0) -and $normalizedFilePath.Contains($normalizedMountedFilePath)) { return 90 }
+        if (($normalizedMountedFileName.Length -gt 0) -and $normalizedFileName.Contains($normalizedMountedFileName)) { return 80 }
+        if ($title.ToLowerInvariant().Contains($target)) { return 70 }
+        if ($normalizedTitle.Contains($normalizedTarget)) { return 60 }
+        if ((($articleTrimmedTarget.Length -gt 0) -and $articleTrimmedTitle.Contains($articleTrimmedTarget))) { return 50 }
+        if ((($normalizedTarget.Length -gt 0) -and $normalizedFilePath.Contains($normalizedTarget))) { return 40 }
+        return 0
+        }
     } | Select-Object -First 1
+
+    if ($null -ne $match) {
+        $candidateTitle = [string] $match.title
+        $candidateFilePath = ''
+        if ($match.PSObject.Properties.Name -contains 'Media') {
+            $firstMedia = @($match.Media) | Select-Object -First 1
+            if (($null -ne $firstMedia) -and ($firstMedia.PSObject.Properties.Name -contains 'Part')) {
+                $firstPart = @($firstMedia.Part) | Select-Object -First 1
+                if ($null -ne $firstPart) {
+                    $candidateFilePath = [string] $firstPart.file
+                }
+            }
+        }
+        $normalizedCandidateFilePath = (($candidateFilePath.ToLowerInvariant() -replace '[\\/_\.\-\(\)\[\]]+', ' ') -replace '\s+', ' ').Trim()
+        $matched = $false
+        if (($normalizedMountedFileName.Length -gt 0) -and ($normalizedCandidateFilePath.Contains($normalizedMountedFileName) -or ([System.IO.Path]::GetFileName($candidateFilePath).ToLowerInvariant() -eq $mountedFileName))) {
+            $matched = $true
+        }
+        elseif ($candidateTitle.ToLowerInvariant().Contains($target)) {
+            $matched = $true
+        }
+        elseif (($normalizedTarget.Length -gt 0) -and $normalizedCandidateFilePath.Contains($normalizedTarget)) {
+            $matched = $true
+        }
+
+        if (-not $matched) {
+            return $null
+        }
+    }
 
     if ($null -ne $match) {
         return [pscustomobject]@{
@@ -1664,6 +1860,43 @@ function Get-MediaServerTopology {
             return 'unknown'
         }
     }
+}
+
+function Test-ShouldSkipWslPersistentMountPreflight {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Provider,
+        [string] $ConfiguredMediaServerUrl = ''
+    )
+
+    if (-not $IsWindows) {
+        return $false
+    }
+
+    $normalizedProvider = $Provider.Trim().ToLowerInvariant()
+    $normalizedUrl = $ConfiguredMediaServerUrl.Trim()
+
+    switch ($normalizedProvider) {
+        'plex' {
+            return [string]::IsNullOrWhiteSpace($normalizedUrl) -or
+                ($normalizedUrl -match '://(localhost|127\.0\.0\.1):32400/?$')
+        }
+        'emby' {
+            return [string]::IsNullOrWhiteSpace($normalizedUrl) -or
+                ($normalizedUrl -match '://(localhost|127\.0\.0\.1):8096(/emby)?/?$')
+        }
+        default {
+            return $false
+        }
+    }
+}
+
+function Get-NativeWindowsMountRoot {
+    $systemDrive = [System.Environment]::GetEnvironmentVariable('SystemDrive')
+    if ([string]::IsNullOrWhiteSpace($systemDrive)) {
+        $systemDrive = 'C:'
+    }
+    return (Join-Path $systemDrive 'FilmuCoreVFS')
 }
 
 function Invoke-HttpPlaybackStartSignal {
@@ -2111,13 +2344,14 @@ function Get-MediaServerVisibilitySignal {
         [Parameter(Mandatory = $true)]
         [object] $Context,
         [Parameter(Mandatory = $true)]
-        [string] $SearchTerm
+        [string] $SearchTerm,
+        [string] $MountedFilePath = ''
     )
 
     switch ([string] $Context.provider) {
         'jellyfin' { return Get-JellyfinVisibilitySignal -Context $Context -SearchTerm $SearchTerm }
         'emby' { return Get-EmbyVisibilitySignal -Context $Context -SearchTerm $SearchTerm }
-        'plex' { return Get-PlexVisibilitySignal -Context $Context -SearchTerm $SearchTerm }
+        'plex' { return Get-PlexVisibilitySignal -Context $Context -SearchTerm $SearchTerm -MountedFilePath $MountedFilePath }
         default { throw ("Unsupported media server provider for visibility proof: {0}" -f $Context.provider) }
     }
 }
@@ -2408,7 +2642,23 @@ function Restore-SettingsPayload {
         [object] $Payload
     )
 
-    Set-AllSettings -Payload $Payload | Out-Null
+    $lastError = $null
+    foreach ($attempt in 1..3) {
+        try {
+            Set-AllSettings -Payload $Payload | Out-Null
+            return
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt 3) {
+                Start-Sleep -Seconds 5
+            }
+        }
+    }
+
+    if ($null -ne $lastError) {
+        throw $lastError
+    }
 }
 
 function Get-MediaServerSignal {
@@ -2784,7 +3034,7 @@ try {
         Add-StepResult -Name 'stack_start' -Status 'skipped' -Details 'Skipped start_local_stack.ps1 by request.'
     }
 
-    if (-not (Wait-HttpReady -Uri "$BackendUrl/openapi.json" -TimeoutSeconds 45)) {
+    if (-not (Wait-BackendReady -BaseUrl $BackendUrl -TimeoutSeconds 45)) {
         throw 'Backend OpenAPI endpoint did not become ready.'
     }
     Add-StepResult -Name 'backend_ready' -Status 'passed' -Details $BackendUrl
@@ -2794,8 +3044,13 @@ try {
     }
     Add-StepResult -Name 'frontend_ready' -Status 'passed' -Details $FrontendUrl
 
-    $wslMountPreflight = Refresh-WslPersistentMount -ArtifactDir $artifactDir
-    Add-StepResult -Name 'wsl_mount_preflight' -Status 'passed' -Details $wslMountPreflight.details
+    if (Test-ShouldSkipWslPersistentMountPreflight -Provider $MediaServerProvider -ConfiguredMediaServerUrl $MediaServerUrl) {
+        Add-StepResult -Name 'wsl_mount_preflight' -Status 'skipped' -Details 'Skipped WSL persistent-mount preflight for native Windows media-server proof.'
+    }
+    else {
+        $wslMountPreflight = Refresh-WslPersistentMount -ArtifactDir $artifactDir
+        Add-StepResult -Name 'wsl_mount_preflight' -Status 'passed' -Details $wslMountPreflight.details
+    }
 
     $itemSummary = $null
     $existingItem = Get-ProofItemSummary
@@ -2913,40 +3168,83 @@ try {
     $summary.movie.resolved_title = $resolvedTitle
     $mountCategory = if ($MediaType -eq 'tv') { 'shows' } else { 'movies' }
     $mountArtifactLabel = if ($MediaType -eq 'tv') { 'show episode file' } else { 'movie file' }
-    $quotedMountRoot = ConvertTo-BashSingleQuoted -Value $MountRoot
-    $quotedTitle = ConvertTo-BashSingleQuoted -Value $resolvedTitle
-    $mountListingCommand = "find $quotedMountRoot/$mountCategory -type f 2>/dev/null | grep -i --fixed-strings -- $quotedTitle | head -n 1"
+    $useNativeWindowsMount = Test-ShouldSkipWslPersistentMountPreflight -Provider $MediaServerProvider -ConfiguredMediaServerUrl $MediaServerUrl
     $mountDeadline = (Get-Date).AddSeconds($MountVisibilityTimeoutSeconds)
     $mountedFile = $null
-    while ((Get-Date) -lt $mountDeadline) {
-        $mountedFileCandidate = Invoke-WslBash -Command $mountListingCommand | Select-Object -First 1
-        if ($null -ne $mountedFileCandidate) {
-            $mountedFile = $mountedFileCandidate.ToString().Trim()
-            if (-not [string]::IsNullOrWhiteSpace($mountedFile)) {
-                break
+    $statSize = $null
+    $bytesRead = $null
+
+    if ($useNativeWindowsMount) {
+        $nativeMountRoot = Get-NativeWindowsMountRoot
+        $nativeMountCategoryPath = Join-Path $nativeMountRoot $mountCategory
+        while ((Get-Date) -lt $mountDeadline) {
+            if (Test-Path -LiteralPath $nativeMountCategoryPath) {
+                $mountedFileCandidate = Get-ChildItem -LiteralPath $nativeMountCategoryPath -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.FullName.IndexOf($resolvedTitle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                    } |
+                    Select-Object -First 1
+                if ($null -ne $mountedFileCandidate) {
+                    $mountedFile = $mountedFileCandidate.FullName
+                    $statSize = [string] $mountedFileCandidate.Length
+                    $stream = [System.IO.File]::Open($mountedFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    try {
+                        $bufferSize = [Math]::Min([int64] $MountedReadBytes, [int64] $mountedFileCandidate.Length)
+                        $buffer = New-Object byte[] $bufferSize
+                        $readCount = $stream.Read($buffer, 0, $buffer.Length)
+                        $bytesRead = [string] $readCount
+                    }
+                    finally {
+                        $stream.Dispose()
+                    }
+                    break
+                }
             }
+            Start-Sleep -Seconds 2
         }
-        Start-Sleep -Seconds 2
+        if ([string]::IsNullOrWhiteSpace($mountedFile)) {
+            if (Test-Path -LiteralPath $nativeMountRoot) {
+                (Get-ChildItem -LiteralPath $nativeMountRoot -Recurse -File -ErrorAction SilentlyContinue |
+                    Select-Object -First 50 -ExpandProperty FullName) |
+                    Set-Content -Path (Join-Path $artifactDir 'mount-find.txt') -Encoding UTF8
+            }
+            throw ("No mounted {0} matching title '{1}' was found under {2}." -f $mountArtifactLabel, $resolvedTitle, $nativeMountRoot)
+        }
     }
-    if ([string]::IsNullOrWhiteSpace($mountedFile)) {
-        Invoke-WslBash -Command "find $quotedMountRoot -maxdepth 3 -type f 2>/dev/null | head -n 50" | Set-Content -Path (Join-Path $artifactDir 'mount-find.txt') -Encoding UTF8
-        throw ("No mounted {0} matching title '{1}' was found under {2}." -f $mountArtifactLabel, $resolvedTitle, $MountRoot)
+    else {
+        $quotedMountRoot = ConvertTo-BashSingleQuoted -Value $MountRoot
+        $quotedTitle = ConvertTo-BashSingleQuoted -Value $resolvedTitle
+        $mountListingCommand = "find $quotedMountRoot/$mountCategory -type f 2>/dev/null | grep -i --fixed-strings -- $quotedTitle | head -n 1"
+        while ((Get-Date) -lt $mountDeadline) {
+            $mountedFileCandidate = Invoke-WslBash -Command $mountListingCommand | Select-Object -First 1
+            if ($null -ne $mountedFileCandidate) {
+                $mountedFile = $mountedFileCandidate.ToString().Trim()
+                if (-not [string]::IsNullOrWhiteSpace($mountedFile)) {
+                    break
+                }
+            }
+            Start-Sleep -Seconds 2
+        }
+        if ([string]::IsNullOrWhiteSpace($mountedFile)) {
+            Invoke-WslBash -Command "find $quotedMountRoot -maxdepth 3 -type f 2>/dev/null | head -n 50" | Set-Content -Path (Join-Path $artifactDir 'mount-find.txt') -Encoding UTF8
+            throw ("No mounted {0} matching title '{1}' was found under {2}." -f $mountArtifactLabel, $resolvedTitle, $MountRoot)
+        }
+
+        $quotedMountedFile = ConvertTo-BashSingleQuoted -Value $mountedFile
+        $statSizeRaw = Invoke-WslBash -Command "stat -c '%s' $quotedMountedFile" | Select-Object -First 1
+        if ($null -eq $statSizeRaw) {
+            throw ("Failed to stat mounted file {0}." -f $mountedFile)
+        }
+        $bytesReadRaw = Invoke-WslBash -Command "head -c $MountedReadBytes $quotedMountedFile | wc -c" | Select-Object -First 1
+        if ($null -eq $bytesReadRaw) {
+            throw ("Failed to read mounted file {0}." -f $mountedFile)
+        }
+        $statSize = $statSizeRaw.ToString().Trim()
+        $bytesRead = $bytesReadRaw.ToString().Trim()
     }
 
     $summary.mount.file_path = $mountedFile
     Set-Content -Path (Join-Path $artifactDir 'mount-file.txt') -Encoding UTF8 -Value $mountedFile
-
-    $quotedMountedFile = ConvertTo-BashSingleQuoted -Value $mountedFile
-    $statSizeRaw = Invoke-WslBash -Command "stat -c '%s' $quotedMountedFile" | Select-Object -First 1
-    if ($null -eq $statSizeRaw) {
-        throw ("Failed to stat mounted file {0}." -f $mountedFile)
-    }
-    $bytesReadRaw = Invoke-WslBash -Command "head -c $MountedReadBytes $quotedMountedFile | wc -c" | Select-Object -First 1
-    if ($null -eq $bytesReadRaw) {
-        throw ("Failed to read mounted file {0}." -f $mountedFile)
-    }
-    $statSize = $statSizeRaw.ToString().Trim()
-    $bytesRead = $bytesReadRaw.ToString().Trim()
 
     $summary.mount.stat_size_bytes = $statSize
     $summary.mount.bytes_read = $bytesRead
@@ -3002,10 +3300,13 @@ try {
 
         $summary.media_server.library_id = if ($providerContext.PSObject.Properties.Name -contains 'library_id') { [string] $providerContext.library_id } else { $null }
         $providerSearchTerm = Get-MediaServerSearchTerm -Provider $MediaServerProvider -FallbackSearchTerm $summary.movie.resolved_title
+        if ([string] $providerContext.provider -eq 'plex') {
+            Invoke-PlexVisibilityRefreshHints -Context $providerContext -MountedFilePath $summary.mount.file_path
+        }
         $providerDeadline = (Get-Date).AddSeconds($MediaServerTimeoutSeconds)
         $providerSignal = $null
         while ((Get-Date) -lt $providerDeadline) {
-            $providerSignal = Get-MediaServerVisibilitySignal -Context $providerContext -SearchTerm $providerSearchTerm
+            $providerSignal = Get-MediaServerVisibilitySignal -Context $providerContext -SearchTerm $providerSearchTerm -MountedFilePath $summary.mount.file_path
             if ($null -ne $providerSignal) {
                 break
             }
@@ -3310,15 +3611,20 @@ try {
         Add-StepResult -Name 'stale_direct_refresh' -Status 'skipped' -Details 'Stale direct-refresh proof disabled for this run.'
     }
 
-    $finalStreamStatus = Get-BackendJson -Uri "$BackendUrl/api/v1/stream/status"
-    Write-JsonFile -Path (Join-Path $artifactDir 'stream-status-final.json') -Value $finalStreamStatus
-    Add-StepResult -Name 'stream_status_final' -Status 'passed' -Details 'Captured final `/api/v1/stream/status` snapshot.'
+    try {
+        $finalStreamStatus = Get-BackendJson -Uri "$BackendUrl/api/v1/stream/status" -TimeoutSec 60 -RetryCount 4 -RetryDelaySeconds 5
+        Write-JsonFile -Path (Join-Path $artifactDir 'stream-status-final.json') -Value $finalStreamStatus
+        Add-StepResult -Name 'stream_status_final' -Status 'passed' -Details 'Captured final `/api/v1/stream/status` snapshot.'
+    }
+    catch {
+        Add-StepResult -Name 'stream_status_final' -Status 'skipped' -Details ("Final `/api/v1/stream/status` snapshot timed out after retries: {0}" -f $_.Exception.Message)
+    }
 
-    Set-Content -Path (Join-Path $artifactDir 'final-stage-before-summary.txt') -Encoding UTF8 -Value 'before-summary'
+    Write-TextFileWithRetry -Path (Join-Path $artifactDir 'final-stage-before-summary.txt') -Value 'before-summary'
     Write-SummaryFile -Path (Join-Path $artifactDir 'summary.json') -Summary $summary
-    Set-Content -Path (Join-Path $artifactDir 'final-stage-after-summary.txt') -Encoding UTF8 -Value 'after-summary'
+    Write-TextFileWithRetry -Path (Join-Path $artifactDir 'final-stage-after-summary.txt') -Value 'after-summary'
     Save-DockerEvidence -ArtifactDir $artifactDir
-    Set-Content -Path (Join-Path $artifactDir 'final-stage-after-docker-evidence.txt') -Encoding UTF8 -Value 'after-docker-evidence'
+    Write-TextFileWithRetry -Path (Join-Path $artifactDir 'final-stage-after-docker-evidence.txt') -Value 'after-docker-evidence'
 
     Write-Host ('[playback-proof] PASS. Artifact directory: {0}' -f $artifactDir) -ForegroundColor Green
     Write-Host ('[playback-proof] Item ID: {0}' -f $summary.movie.item_id) -ForegroundColor White
@@ -3327,11 +3633,11 @@ try {
 }
 catch {
     Add-StepResult -Name 'playback_proof' -Status 'failed' -Details $_.Exception.Message
-    Set-Content -Path (Join-Path $artifactDir 'final-stage-before-fail-summary.txt') -Encoding UTF8 -Value 'before-fail-summary'
+    Write-TextFileWithRetry -Path (Join-Path $artifactDir 'final-stage-before-fail-summary.txt') -Value 'before-fail-summary'
     Write-SummaryFile -Path (Join-Path $artifactDir 'summary.json') -Summary $summary
-    Set-Content -Path (Join-Path $artifactDir 'final-stage-after-fail-summary.txt') -Encoding UTF8 -Value 'after-fail-summary'
+    Write-TextFileWithRetry -Path (Join-Path $artifactDir 'final-stage-after-fail-summary.txt') -Value 'after-fail-summary'
     Save-DockerEvidence -ArtifactDir $artifactDir
-    Set-Content -Path (Join-Path $artifactDir 'final-stage-after-fail-docker-evidence.txt') -Encoding UTF8 -Value 'after-fail-docker-evidence'
+    Write-TextFileWithRetry -Path (Join-Path $artifactDir 'final-stage-after-fail-docker-evidence.txt') -Value 'after-fail-docker-evidence'
     Write-Host ('[playback-proof] FAIL. Artifact directory: {0}' -f $artifactDir) -ForegroundColor Red
     throw
 }

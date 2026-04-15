@@ -366,6 +366,18 @@ class MediaItemSpecializationRecord:
     episode_number: int | None = None
 
 
+def _loaded_relationship(instance: object | None, attribute_name: str) -> object | None:
+    """Return one already-loaded ORM relationship without triggering lazy loads."""
+
+    if instance is None:
+        return None
+    state = getattr(instance, "__dict__", None)
+    if not isinstance(state, dict):
+        return None
+    value = state.get(attribute_name, NO_VALUE)
+    return None if value is NO_VALUE else value
+
+
 def _build_specialization_record(item: MediaItemORM) -> MediaItemSpecializationRecord:
     """Return specialization-backed item hierarchy above metadata fallbacks."""
 
@@ -378,44 +390,54 @@ def _build_specialization_record(item: MediaItemORM) -> MediaItemSpecializationR
     show_title = _extract_first_string(attributes, "show_title", "series_title", "parent_title")
     season_number = _extract_int_value(attributes, "season_number", "season", "parent_season_number")
     episode_number = _extract_int_value(attributes, "episode_number", "episode")
+    movie = cast(MovieORM | None, _loaded_relationship(item, "movie"))
+    show = cast(ShowORM | None, _loaded_relationship(item, "show"))
+    season = cast(SeasonORM | None, _loaded_relationship(item, "season"))
+    episode = cast(EpisodeORM | None, _loaded_relationship(item, "episode"))
 
-    if item.movie is not None:
+    if movie is not None:
         item_type = "movie"
-        tmdb_id = item.movie.tmdb_id or tmdb_id
-        imdb_id = item.movie.imdb_id or imdb_id
-    elif item.show is not None:
+        tmdb_id = movie.tmdb_id or tmdb_id
+        imdb_id = movie.imdb_id or imdb_id
+    elif show is not None:
         item_type = "show"
-        tmdb_id = item.show.tmdb_id or tmdb_id
-        tvdb_id = item.show.tvdb_id or tvdb_id
-        imdb_id = item.show.imdb_id or imdb_id
+        tmdb_id = show.tmdb_id or tmdb_id
+        tvdb_id = show.tvdb_id or tvdb_id
+        imdb_id = show.imdb_id or imdb_id
         show_title = item.title
-    elif item.season is not None:
+    elif season is not None:
         item_type = "season"
-        tmdb_id = item.season.tmdb_id or tmdb_id
-        tvdb_id = item.season.tvdb_id or tvdb_id
-        season_number = item.season.season_number or season_number
-        if item.season.show is not None:
-            show = item.season.show
-            show_title = show.media_item.title if show.media_item is not None else show_title or item.title
+        tmdb_id = season.tmdb_id or tmdb_id
+        tvdb_id = season.tvdb_id or tvdb_id
+        season_number = season.season_number or season_number
+        season_show = cast(ShowORM | None, _loaded_relationship(season, "show"))
+        if season_show is not None:
+            show_item = cast(MediaItemORM | None, _loaded_relationship(season_show, "media_item"))
+            show_title = show_item.title if show_item is not None else show_title or item.title
             parent_ids = ParentIdsRecord(
-                tmdb_id=show.tmdb_id or (parent_ids.tmdb_id if parent_ids is not None else None),
-                tvdb_id=show.tvdb_id or (parent_ids.tvdb_id if parent_ids is not None else None),
+                tmdb_id=season_show.tmdb_id
+                or (parent_ids.tmdb_id if parent_ids is not None else None),
+                tvdb_id=season_show.tvdb_id
+                or (parent_ids.tvdb_id if parent_ids is not None else None),
             )
-    elif item.episode is not None:
+    elif episode is not None:
         item_type = "episode"
-        tmdb_id = item.episode.tmdb_id or tmdb_id
-        tvdb_id = item.episode.tvdb_id or tvdb_id
-        imdb_id = item.episode.imdb_id or imdb_id
-        episode_number = item.episode.episode_number or episode_number
-        if item.episode.season is not None:
-            season = item.episode.season
-            season_number = season.season_number or season_number
-            if season.show is not None:
-                show = season.show
-                show_title = show.media_item.title if show.media_item is not None else show_title or item.title
+        tmdb_id = episode.tmdb_id or tmdb_id
+        tvdb_id = episode.tvdb_id or tvdb_id
+        imdb_id = episode.imdb_id or imdb_id
+        episode_number = episode.episode_number or episode_number
+        episode_season = cast(SeasonORM | None, _loaded_relationship(episode, "season"))
+        if episode_season is not None:
+            season_number = episode_season.season_number or season_number
+            season_show = cast(ShowORM | None, _loaded_relationship(episode_season, "show"))
+            if season_show is not None:
+                show_item = cast(MediaItemORM | None, _loaded_relationship(season_show, "media_item"))
+                show_title = show_item.title if show_item is not None else show_title or item.title
                 parent_ids = ParentIdsRecord(
-                    tmdb_id=show.tmdb_id or (parent_ids.tmdb_id if parent_ids is not None else None),
-                    tvdb_id=show.tvdb_id or (parent_ids.tvdb_id if parent_ids is not None else None),
+                    tmdb_id=season_show.tmdb_id
+                    or (parent_ids.tmdb_id if parent_ids is not None else None),
+                    tvdb_id=season_show.tvdb_id
+                    or (parent_ids.tvdb_id if parent_ids is not None else None),
                 )
         show_title = show_title or item.title
     elif item_type == "tv":
