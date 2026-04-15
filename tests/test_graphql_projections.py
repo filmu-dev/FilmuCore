@@ -25,6 +25,9 @@ from filmu_py.core.runtime_lifecycle import (
 )
 from filmu_py.db.models import StreamORM
 from filmu_py.graphql import GraphQLPluginRegistry, create_graphql_router
+from filmu_py.plugins import TestPluginContext
+from filmu_py.plugins.builtins import register_builtin_plugins
+from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.media import (
     CalendarProjectionRecord,
@@ -437,6 +440,11 @@ def _build_client(
     vfs_catalog_supplier: FakeVfsCatalogSupplier | None = None,
     redis: DummyRedis | None = None,
     runtime_lifecycle: RuntimeLifecycleState | None = None,
+    plugin_registry: object | None = None,
+    plugin_settings_payload: dict[str, Any] | None = None,
+    control_plane_service: object | None = None,
+    control_plane_automation: object | None = None,
+    replay_backplane: object | None = None,
     queued_direct_playback_refresh_controller: object | None = None,
     queued_hls_failed_lease_refresh_controller: object | None = None,
     queued_hls_restricted_fallback_refresh_controller: object | None = None,
@@ -455,8 +463,13 @@ def _build_client(
         media_service=media_service,  # type: ignore[arg-type]
         graphql_plugin_registry=GraphQLPluginRegistry(),
         runtime_lifecycle=runtime_lifecycle or RuntimeLifecycleState(),
+        plugin_registry=plugin_registry,  # type: ignore[arg-type]
+        plugin_settings_payload=plugin_settings_payload,
+        control_plane_service=control_plane_service,  # type: ignore[arg-type]
+        control_plane_automation=control_plane_automation,
         vfs_catalog_supplier=vfs_catalog_supplier,  # type: ignore[arg-type]
         playback_service=playback_service,  # type: ignore[arg-type]
+        replay_backplane=replay_backplane,
         queued_direct_playback_refresh_controller=queued_direct_playback_refresh_controller,
         queued_hls_failed_lease_refresh_controller=queued_hls_failed_lease_refresh_controller,
         queued_hls_restricted_fallback_refresh_controller=(
@@ -647,6 +660,226 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
     assert payload["proofRefs"] == ["ops/wave4/log-pipeline-rollout.md"]
     assert payload["requiredActions"] == []
     assert payload["remainingGaps"] == []
+
+
+def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
+    plugin_settings = {
+        "scraping": {
+            "comet": {
+                "enabled": True,
+                "url": "https://comet.example",
+            }
+        },
+        "content": {
+            "overseerr": {
+                "enabled": True,
+                "url": "https://seerr.example",
+                "api_key": "seerr-token",
+            },
+            "listrr": {
+                "enabled": False,
+                "url": "https://listrr.example",
+                "list_ids": ["list-1"],
+            },
+        },
+        "updaters": {
+            "plex": {
+                "enabled": True,
+                "url": "https://plex.example",
+                "token": "plex-token",
+            }
+        },
+    }
+    registry = PluginRegistry()
+    harness = TestPluginContext(settings=plugin_settings)
+    register_builtin_plugins(registry, context_provider=harness.provider())
+    client = _build_client(
+        FakeMediaService(),
+        plugin_registry=registry,
+        plugin_settings_payload=plugin_settings,
+        settings_overrides={
+            "FILMU_PY_SCRAPING": plugin_settings["scraping"],
+            "FILMU_PY_UPDATERS": plugin_settings["updaters"],
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  pluginIntegrationReadiness {
+                    status
+                    requiredActions
+                    remainingGaps
+                    plugins {
+                      name
+                      capabilityKind
+                      status
+                      registered
+                      enabled
+                      configured
+                      ready
+                      configSource
+                      requiredSettings
+                      missingSettings
+                      requiredActions
+                      remainingGaps
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["pluginIntegrationReadiness"]
+    assert payload["status"] == "partial"
+    assert payload["requiredActions"] == ["enable_listrr_integration"]
+    assert payload["remainingGaps"] == ["listrr integration is not enabled in runtime settings"]
+    by_name = {entry["name"]: entry for entry in payload["plugins"]}
+    assert by_name["comet"]["ready"] is True
+    assert by_name["seerr"]["configSource"] == "content.overseerr"
+    assert by_name["listrr"]["status"] == "partial"
+    assert by_name["listrr"]["requiredActions"] == ["enable_listrr_integration"]
+    assert by_name["plex"]["ready"] is True
+
+
+def test_graphql_control_plane_posture_returns_typed_summary_and_automation() -> None:
+    class FakeControlPlaneService:
+        async def summarize_subscribers(self, *, active_within_seconds: int) -> object:
+            _ = active_within_seconds
+            return SimpleNamespace(
+                total_subscribers=2,
+                active_subscribers=1,
+                stale_subscribers=1,
+                error_subscribers=0,
+                fenced_subscribers=0,
+                ack_pending_subscribers=1,
+                stream_count=1,
+                group_count=1,
+                node_count=1,
+                tenant_count=1,
+                oldest_heartbeat_age_seconds=45.0,
+                status_counts={"active": 1, "stale": 1},
+                required_actions=["recover_stale_control_plane_subscribers"],
+                remaining_gaps=["control-plane backlog needs recovery"],
+            )
+
+    class FakeAutomation:
+        def snapshot(self) -> object:
+            return SimpleNamespace(
+                enabled=True,
+                runner_status="running",
+                interval_seconds=30,
+                active_within_seconds=180,
+                pending_min_idle_ms=60000,
+                claim_limit=25,
+                max_claim_passes=2,
+                consumer_group="filmu-api",
+                consumer_name="automation",
+                service_attached=True,
+                backplane_attached=True,
+                last_run_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                last_success_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                last_failure_at=None,
+                consecutive_failures=0,
+                last_error=None,
+                remediation_updated_subscribers=1,
+                rewound_subscribers=1,
+                claimed_pending_events=2,
+                claim_passes=1,
+                pending_count_after=0,
+                summary=None,
+            )
+
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={"FILMU_PY_CONTROL_PLANE": {"automation": {"enabled": True}}},
+        control_plane_service=FakeControlPlaneService(),
+        control_plane_automation=FakeAutomation(),
+        replay_backplane=object(),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  controlPlaneSummary(activeWithinSeconds: 180) {
+                    totalSubscribers
+                    staleSubscribers
+                    ackPendingSubscribers
+                    statusCounts { status count }
+                    requiredActions
+                    remainingGaps
+                  }
+                  controlPlaneAutomation {
+                    enabled
+                    runnerStatus
+                    intervalSeconds
+                    activeWithinSeconds
+                    claimLimit
+                    maxClaimPasses
+                    consumerGroup
+                    consumerName
+                    serviceAttached
+                    backplaneAttached
+                    remediationUpdatedSubscribers
+                    rewoundSubscribers
+                    claimedPendingEvents
+                    claimPasses
+                    pendingCountAfter
+                    summary {
+                      totalSubscribers
+                      staleSubscribers
+                      ackPendingSubscribers
+                    }
+                    requiredActions
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["controlPlaneSummary"] == {
+        "totalSubscribers": 2,
+        "staleSubscribers": 1,
+        "ackPendingSubscribers": 1,
+        "statusCounts": [
+            {"status": "active", "count": 1},
+            {"status": "stale", "count": 1},
+        ],
+        "requiredActions": ["recover_stale_control_plane_subscribers"],
+        "remainingGaps": ["control-plane backlog needs recovery"],
+    }
+    assert payload["controlPlaneAutomation"] == {
+        "enabled": True,
+        "runnerStatus": "running",
+        "intervalSeconds": 30,
+        "activeWithinSeconds": 180,
+        "claimLimit": 25,
+        "maxClaimPasses": 2,
+        "consumerGroup": "filmu-api",
+        "consumerName": "automation",
+        "serviceAttached": True,
+        "backplaneAttached": True,
+        "remediationUpdatedSubscribers": 1,
+        "rewoundSubscribers": 1,
+        "claimedPendingEvents": 2,
+        "claimPasses": 1,
+        "pendingCountAfter": 0,
+        "summary": {
+            "totalSubscribers": 2,
+            "staleSubscribers": 1,
+            "ackPendingSubscribers": 1,
+        },
+        "requiredActions": ["recover_stale_control_plane_subscribers"],
+        "remainingGaps": ["control-plane backlog needs recovery"],
+    }
 
 
 def test_graphql_library_stats_returns_typed_breakdown() -> None:
