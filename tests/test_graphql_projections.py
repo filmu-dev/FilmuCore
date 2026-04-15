@@ -1136,6 +1136,152 @@ def test_graphql_vfs_snapshot_and_blocked_items_queries_use_catalog_snapshot() -
     ]
 
 
+def test_graphql_vfs_catalog_rollup_surfaces_query_and_provider_aggregates() -> None:
+    snapshot = VfsCatalogSnapshot(
+        generation_id="13",
+        published_at=datetime(2026, 4, 13, 13, 0, tzinfo=UTC),
+        entries=(
+            VfsCatalogEntry(
+                entry_id="dir-1",
+                parent_entry_id=None,
+                path="/Shows",
+                name="Shows",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/Shows"),
+            ),
+            VfsCatalogEntry(
+                entry_id="file-1",
+                parent_entry_id="dir-1",
+                path="/Shows/Example Show/Season 01/Episode 01.mkv",
+                name="Episode 01.mkv",
+                kind="file",
+                correlation=VfsCatalogCorrelationKeys(provider_file_path="/downloads/Show/S01E01.mkv"),
+                file=VfsCatalogFileEntry(
+                    item_id="item-1",
+                    item_title="Example Show",
+                    item_external_ref="tvdb:100",
+                    media_entry_id="entry-1",
+                    source_attachment_id=None,
+                    media_type="episode",
+                    transport="remote-direct",
+                    locator="https://cdn.example.test/e1",
+                    lease_state="ready",
+                    provider="realdebrid",
+                    provider_file_path="/downloads/Show/S01E01.mkv",
+                    active_roles=("direct", "hls"),
+                    query_strategy="persisted_media_entries",
+                    provider_family="debrid",
+                    locator_source="unrestricted_url",
+                    restricted_fallback=False,
+                ),
+            ),
+            VfsCatalogEntry(
+                entry_id="file-2",
+                parent_entry_id="dir-1",
+                path="/Shows/Example Show/Season 01/Episode 02.mkv",
+                name="Episode 02.mkv",
+                kind="file",
+                file=VfsCatalogFileEntry(
+                    item_id="item-2",
+                    item_title="Example Show",
+                    item_external_ref="tvdb:101",
+                    media_entry_id="entry-2",
+                    source_attachment_id=None,
+                    media_type="episode",
+                    transport="remote-direct",
+                    locator="https://api.example.test/restricted/e2",
+                    lease_state="stale",
+                    provider="stremthru",
+                    active_roles=("direct",),
+                    query_strategy="by-media-entry-id",
+                    provider_family="stremthru",
+                    locator_source="restricted_url",
+                    restricted_fallback=True,
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=1, file_count=2, blocked_item_count=2),
+        blocked_items=(
+            cast(
+                Any,
+                type(
+                    "BlockedItem",
+                    (),
+                    {
+                        "item_id": "item-blocked-1",
+                        "external_ref": "tmdb:999",
+                        "title": "Blocked One",
+                        "reason": "missing_lifecycle",
+                    },
+                )(),
+            ),
+            cast(
+                Any,
+                type(
+                    "BlockedItem",
+                    (),
+                    {
+                        "item_id": "item-blocked-2",
+                        "external_ref": "tmdb:1000",
+                        "title": "Blocked Two",
+                        "reason": "unresolved_query",
+                    },
+                )(),
+            ),
+        ),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(snapshot=snapshot, snapshots_by_generation={13: snapshot}),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsCatalogRollup(generationId: "13") {
+                    blockedReasons { key count }
+                    queryStrategies { key count }
+                    providerFamilies { key count }
+                    leaseStates { key count }
+                    locatorSources { key count }
+                    restrictedFallbackFileCount
+                    providerPathPreservedFileCount
+                    multiRoleFileCount
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["vfsCatalogRollup"]
+    assert payload["blockedReasons"] == [
+        {"key": "missing_lifecycle", "count": 1},
+        {"key": "unresolved_query", "count": 1},
+    ]
+    assert payload["queryStrategies"] == [
+        {"key": "by-media-entry-id", "count": 1},
+        {"key": "persisted_media_entries", "count": 1},
+    ]
+    assert payload["providerFamilies"] == [
+        {"key": "debrid", "count": 1},
+        {"key": "stremthru", "count": 1},
+    ]
+    assert payload["leaseStates"] == [
+        {"key": "ready", "count": 1},
+        {"key": "stale", "count": 1},
+    ]
+    assert payload["locatorSources"] == [
+        {"key": "restricted_url", "count": 1},
+        {"key": "unrestricted_url", "count": 1},
+    ]
+    assert payload["restrictedFallbackFileCount"] == 1
+    assert payload["providerPathPreservedFileCount"] == 1
+    assert payload["multiRoleFileCount"] == 1
+
+
 def test_graphql_operator_queries_expose_runtime_queue_and_metadata_history() -> None:
     current_ms = datetime.now(UTC).timestamp() * 1000
     redis = FakeOperatorRedis(

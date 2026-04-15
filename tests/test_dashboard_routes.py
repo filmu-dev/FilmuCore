@@ -2655,6 +2655,104 @@ def test_control_plane_summary_route_returns_ack_backlog_visibility() -> None:
     assert "drain_control_plane_ack_backlog" in body["required_actions"]
 
 
+def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "opensearch://logs-filmu",
+                "healthcheck_url": "https://ops.example.test/vector/health",
+                "field_mapping_version": "filmu-ecs-v1",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "required_correlation_fields": [
+                    "request.id",
+                    "trace.id",
+                    "tenant.id",
+                ],
+                "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
+            },
+        }
+    )
+
+    response = client.get("/api/v1/operations/observability/convergence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["structured_logging_enabled"] is True
+    assert body["otel_enabled"] is True
+    assert body["otel_endpoint_configured"] is True
+    assert body["log_shipper_enabled"] is True
+    assert body["log_shipper_type"] == "vector"
+    assert body["log_shipper_target_configured"] is True
+    assert body["log_shipper_healthcheck_configured"] is True
+    assert body["search_backend"] == "opensearch"
+    assert body["environment_shipping_enabled"] is True
+    assert body["alerting_enabled"] is True
+    assert body["rust_trace_correlation_enabled"] is True
+    assert body["correlation_contract_complete"] is True
+    assert body["required_correlation_fields"] == ["request.id", "trace.id", "tenant.id"]
+    assert body["proof_refs"] == ["ops/wave4/log-pipeline-rollout.md"]
+    assert body["required_actions"] == []
+    assert body["remaining_gaps"] == []
+
+
+def test_downloader_orchestration_route_surfaces_fixed_priority_and_plugin_gap() -> None:
+    plugin_registry = PluginRegistry()
+    harness = TestPluginContext(settings={"plugins": {}})
+    register_builtin_plugins(plugin_registry, context_provider=harness.provider())
+    client = _build_client(
+        plugin_registry=plugin_registry,
+        settings_overrides={
+            "FILMU_PY_DOWNLOADERS": {
+                "real_debrid": {"enabled": True, "api_key": "rd-token"},
+                "all_debrid": {"enabled": True, "api_key": "ad-token"},
+                "debrid_link": {"enabled": False, "api_key": ""},
+                "stremthru": {
+                    "enabled": True,
+                    "url": "https://stremthru.example.test",
+                    "token": "st-token",
+                },
+            }
+        },
+    )
+
+    response = client.get("/api/v1/operations/downloader-orchestration", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selection_mode"] == "fixed_priority_builtin_only"
+    assert body["selected_provider"] == "realdebrid"
+    assert body["multi_provider_enabled"] is True
+    assert body["plugin_downloaders_registered"] == 1
+    assert body["worker_plugin_dispatch_ready"] is False
+    assert body["fanout_ready"] is False
+    assert body["multi_container_ready"] is False
+    assert "replace_fixed_priority_builtin_selection_with_policy_driven_fanout" in body[
+        "required_actions"
+    ]
+    assert "wire_registered_downloader_plugins_into_debrid_worker" in body[
+        "required_actions"
+    ]
+    providers = {(row["name"], row["source"]): row for row in body["providers"]}
+    assert providers[("realdebrid", "builtin")]["enabled"] is True
+    assert providers[("realdebrid", "builtin")]["selected"] is True
+    assert providers[("alldebrid", "builtin")]["enabled"] is True
+    assert providers[("stremthru", "plugin")]["configured"] is True
+    assert (
+        "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
+        in body["remaining_gaps"]
+    )
+
+
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:
     client = _build_client(
         settings_overrides={

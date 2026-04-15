@@ -45,6 +45,8 @@ from ..models import (
     CalendarResponse,
     ControlPlaneSummaryResponse,
     ControlPlaneSubscriberResponse,
+    DownloaderOrchestrationResponse,
+    DownloaderProviderCandidateResponse,
     EnterpriseOperationsGovernanceResponse,
     EnterpriseOperationsSliceResponse,
     HealthResponse,
@@ -64,6 +66,7 @@ from ..models import (
     PluginStreamControlRequest,
     PluginStreamControlResponse,
     PlaybackGateEvidenceResponse,
+    ObservabilityConvergenceResponse,
     QueueAlertResponse,
     QueueStatusHistoryFiltersResponse,
     QueueStatusHistoryPointResponse,
@@ -435,6 +438,207 @@ def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
         canary_decision=cast(str, runtime_governance["vfs_runtime_rollout_canary_decision"]),
         merge_gate=cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"]),
         reasons=list(cast(list[str], runtime_governance["vfs_runtime_rollout_reasons"])),
+    )
+
+
+def _structured_log_path(settings: Any) -> str:
+    """Return the normalized structured log path for operator-facing responses."""
+
+    normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
+    return f"{normalized_log_dir}/{settings.logging.structured_filename}"
+
+
+def _operator_log_pipeline_ready(settings: Any) -> bool:
+    """Return whether the repo-side operator log pipeline exit gates are satisfied."""
+
+    observability_policy = settings.observability
+    return bool(
+        settings.logging.enabled
+        and settings.log_shipper.enabled
+        and bool(settings.log_shipper.target)
+        and bool(settings.log_shipper.healthcheck_url)
+        and settings.otel_enabled
+        and bool(settings.otel_exporter_otlp_endpoint)
+        and observability_policy.environment_shipping_enabled
+        and observability_policy.alerting_enabled
+        and observability_policy.rust_trace_correlation_enabled
+        and observability_policy.search_backend != "none"
+        and bool(observability_policy.required_correlation_fields)
+        and bool(observability_policy.proof_refs)
+    )
+
+
+def _observability_convergence_response(request: Request) -> ObservabilityConvergenceResponse:
+    """Return the current cross-process log/search/trace convergence posture."""
+
+    settings = request.app.state.resources.settings
+    observability_policy = settings.observability
+    structured_log_path = _structured_log_path(settings)
+    ready = _operator_log_pipeline_ready(settings)
+    correlation_contract_complete = bool(observability_policy.required_correlation_fields)
+
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if not settings.log_shipper.enabled:
+        required_actions.append("configure_log_shipper_for_structured_ndjson")
+        remaining_gaps.append("structured logs are not yet shipped out of process")
+    elif not settings.log_shipper.healthcheck_url:
+        required_actions.append("monitor_log_shipper_health")
+        remaining_gaps.append("log shipper health is not externally checked")
+    if not settings.log_shipper.target or observability_policy.search_backend == "none":
+        required_actions.append("define_search_index_mapping_and_retention_policy")
+        remaining_gaps.append("structured logs are not yet wired into a searchable backend")
+    if not (settings.otel_enabled and settings.otel_exporter_otlp_endpoint):
+        required_actions.append("configure_otlp_trace_export")
+        remaining_gaps.append("cross-process traces are not exported through OTLP")
+    if not observability_policy.environment_shipping_enabled:
+        required_actions.append("enable_environment_log_shipping")
+        remaining_gaps.append("environment-managed log shipping is not enabled")
+    if not observability_policy.alerting_enabled:
+        required_actions.append("enable_alerting_for_log_search_and_trace_pipeline")
+        remaining_gaps.append("search/trace alerting is not configured")
+    if not observability_policy.rust_trace_correlation_enabled:
+        required_actions.append("wire_rust_trace_correlation_fields")
+        remaining_gaps.append("Python and Rust traces are not yet forced onto one correlation contract")
+    if not correlation_contract_complete:
+        required_actions.append("define_required_cross_process_correlation_fields")
+        remaining_gaps.append("required correlation fields are not configured")
+    if not observability_policy.proof_refs:
+        required_actions.append("record_log_pipeline_rollout_evidence")
+        remaining_gaps.append("observability convergence has no retained rollout evidence references")
+
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready"
+        if ready
+        else (
+            "partial"
+            if settings.logging.enabled or settings.otel_enabled or settings.log_shipper.enabled
+            else "blocked"
+        )
+    )
+    return ObservabilityConvergenceResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=status,
+        structured_logging_enabled=settings.logging.enabled,
+        structured_log_path=structured_log_path,
+        otel_enabled=settings.otel_enabled,
+        otel_endpoint_configured=bool(settings.otel_exporter_otlp_endpoint),
+        log_shipper_enabled=settings.log_shipper.enabled,
+        log_shipper_type=settings.log_shipper.type,
+        log_shipper_target_configured=bool(settings.log_shipper.target),
+        log_shipper_healthcheck_configured=bool(settings.log_shipper.healthcheck_url),
+        search_backend=observability_policy.search_backend,
+        environment_shipping_enabled=observability_policy.environment_shipping_enabled,
+        alerting_enabled=observability_policy.alerting_enabled,
+        rust_trace_correlation_enabled=observability_policy.rust_trace_correlation_enabled,
+        correlation_contract_complete=correlation_contract_complete,
+        proof_refs=list(observability_policy.proof_refs),
+        required_correlation_fields=list(observability_policy.required_correlation_fields),
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrationResponse:
+    """Return the current downloader orchestration posture and known breadth gaps."""
+
+    resources = request.app.state.resources
+    settings = resources.settings
+    providers: list[DownloaderProviderCandidateResponse] = []
+    builtin_candidates: list[DownloaderProviderCandidateResponse] = []
+    provider_entries = (
+        ("realdebrid", settings.downloaders.real_debrid),
+        ("alldebrid", settings.downloaders.all_debrid),
+        ("debridlink", settings.downloaders.debrid_link),
+    )
+    for priority, (name, config) in enumerate(provider_entries, start=1):
+        configured = bool(config.api_key.strip())
+        enabled = bool(config.enabled and configured)
+        candidate = DownloaderProviderCandidateResponse(
+            name=name,
+            source="builtin",
+            enabled=enabled,
+            configured=configured,
+            selected=False,
+            priority=priority,
+            capabilities=["magnet_add", "file_select", "status_poll", "download_links"],
+        )
+        builtin_candidates.append(candidate)
+        providers.append(candidate)
+
+    selected_provider = next(
+        (candidate.name for candidate in builtin_candidates if candidate.enabled),
+        None,
+    )
+    if selected_provider is not None:
+        providers = [
+            candidate.model_copy(update={"selected": candidate.name == selected_provider})
+            if candidate.source == "builtin"
+            else candidate
+            for candidate in providers
+        ]
+
+    plugin_registry = resources.plugin_registry
+    plugin_downloaders_registered = 0
+    if plugin_registry is not None:
+        for plugin in plugin_registry.get_downloaders():
+            plugin_downloaders_registered += 1
+            plugin_name = str(getattr(plugin, "plugin_name", type(plugin).__name__))
+            configured = True
+            enabled = True
+            if plugin_name == "stremthru":
+                stremthru = settings.downloaders.stremthru
+                configured = bool(stremthru.enabled and stremthru.token.strip() and stremthru.url.strip())
+                enabled = configured
+            providers.append(
+                DownloaderProviderCandidateResponse(
+                    name=plugin_name,
+                    source="plugin",
+                    enabled=enabled,
+                    configured=configured,
+                    selected=False,
+                    priority=None,
+                    capabilities=["magnet_add", "status_poll", "download_links"],
+                )
+            )
+
+    multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
+    worker_plugin_dispatch_ready = False
+    fanout_ready = False
+    multi_container_ready = False
+
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if selected_provider is None:
+        required_actions.append("configure_at_least_one_builtin_downloader_provider")
+        remaining_gaps.append("debrid worker execution has no configured builtin downloader provider")
+    if multi_provider_enabled:
+        required_actions.append("replace_fixed_priority_builtin_selection_with_policy_driven_fanout")
+        remaining_gaps.append(
+            "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
+        )
+    if plugin_downloaders_registered > 0:
+        required_actions.append("wire_registered_downloader_plugins_into_debrid_worker")
+        remaining_gaps.append(
+            "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
+        )
+    required_actions.append("promote_multi_container_validation_and_provider_fallback")
+    remaining_gaps.append(
+        "multi-container validation and cross-provider fallback remain outside the live downloader worker path"
+    )
+
+    return DownloaderOrchestrationResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        selection_mode="fixed_priority_builtin_only",
+        selected_provider=selected_provider,
+        multi_provider_enabled=multi_provider_enabled,
+        plugin_downloaders_registered=plugin_downloaders_registered,
+        worker_plugin_dispatch_ready=worker_plugin_dispatch_ready,
+        fanout_ready=fanout_ready,
+        multi_container_ready=multi_container_ready,
+        providers=providers,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
     )
 
 
@@ -1124,23 +1328,9 @@ async def _enterprise_operations_governance(
     if auth_context.authorization_tenant_scope == "all":
         tenant_required_actions.append("review_global_tenant_scope_for_actor")
 
-    normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
-    structured_log_path = f"{normalized_log_dir}/{settings.logging.structured_filename}"
+    structured_log_path = _structured_log_path(settings)
     observability_policy = settings.observability
-    operator_log_pipeline_ready = (
-        settings.logging.enabled
-        and settings.log_shipper.enabled
-        and bool(settings.log_shipper.target)
-        and bool(settings.log_shipper.healthcheck_url)
-        and settings.otel_enabled
-        and bool(settings.otel_exporter_otlp_endpoint)
-        and observability_policy.environment_shipping_enabled
-        and observability_policy.alerting_enabled
-        and observability_policy.rust_trace_correlation_enabled
-        and observability_policy.search_backend != "none"
-        and bool(observability_policy.required_correlation_fields)
-        and bool(observability_policy.proof_refs)
-    )
+    operator_log_pipeline_ready = _operator_log_pipeline_ready(settings)
     plugin_governance_summary = _plugin_governance_summary(
         plugins,
         runtime_policy=settings.plugin_runtime,
@@ -2900,6 +3090,32 @@ async def write_vfs_rollout_control(
         },
     )
     return _vfs_rollout_control_response()
+
+
+@router.get(
+    "/operations/observability/convergence",
+    operation_id="default.observability_convergence",
+    response_model=ObservabilityConvergenceResponse,
+)
+async def get_observability_convergence(
+    request: Request,
+) -> ObservabilityConvergenceResponse:
+    """Return the current cross-process logging/search/tracing convergence posture."""
+
+    return _observability_convergence_response(request)
+
+
+@router.get(
+    "/operations/downloader-orchestration",
+    operation_id="default.downloader_orchestration",
+    response_model=DownloaderOrchestrationResponse,
+)
+async def get_downloader_orchestration(
+    request: Request,
+) -> DownloaderOrchestrationResponse:
+    """Return current downloader candidate selection and orchestration breadth posture."""
+
+    return _downloader_orchestration_response(request)
 
 
 @router.get(

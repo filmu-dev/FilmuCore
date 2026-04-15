@@ -460,6 +460,58 @@ class VfsRolloutControlResponse(BaseModel):
     reasons: list[str]
 
 
+class ObservabilityConvergenceResponse(BaseModel):
+    """Operator-facing cross-process log/search/trace convergence posture."""
+
+    generated_at: str
+    status: Literal["ready", "partial", "blocked"]
+    structured_logging_enabled: bool
+    structured_log_path: str
+    otel_enabled: bool
+    otel_endpoint_configured: bool
+    log_shipper_enabled: bool
+    log_shipper_type: str
+    log_shipper_target_configured: bool
+    log_shipper_healthcheck_configured: bool
+    search_backend: str
+    environment_shipping_enabled: bool
+    alerting_enabled: bool
+    rust_trace_correlation_enabled: bool
+    correlation_contract_complete: bool
+    proof_refs: list[str]
+    required_correlation_fields: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class DownloaderProviderCandidateResponse(BaseModel):
+    """One downloader candidate surfaced by the orchestration posture endpoint."""
+
+    name: str
+    source: Literal["builtin", "plugin"]
+    enabled: bool
+    configured: bool
+    selected: bool = False
+    priority: int | None = None
+    capabilities: list[str] = []
+
+
+class DownloaderOrchestrationResponse(BaseModel):
+    """Operator-facing downloader orchestration posture and known limitations."""
+
+    generated_at: str
+    selection_mode: str
+    selected_provider: str | None = None
+    multi_provider_enabled: bool
+    plugin_downloaders_registered: int
+    worker_plugin_dispatch_ready: bool
+    fanout_ready: bool
+    multi_container_ready: bool
+    providers: list[DownloaderProviderCandidateResponse]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
 class TenantQuotaPolicyResponse(BaseModel):
     """Current tenant quota policy and request-intake visibility."""
 
