@@ -94,6 +94,18 @@ def test_check_branch_hygiene_permanently_blocks_stale_review_branch_names() -> 
     assert "permanently blocked for this repository" in script
 
 
+def test_check_branch_hygiene_requires_semantic_review_branch_prefixes() -> None:
+    script = (REPO_ROOT / "scripts" / "check_branch_hygiene.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$allowedSemanticReviewBranchPrefixes" in script
+    assert "'fix/'" in script
+    assert "'feat/'" in script
+    assert "must start with a semantic prefix" in script
+    assert "Suggested PR title:" in script
+
+
 def test_push_review_branch_blocks_direct_main_target_and_uses_local_source_of_truth() -> None:
     script = (REPO_ROOT / "scripts" / "push_review_branch.ps1").read_text(
         encoding="utf-8"
@@ -103,6 +115,7 @@ def test_push_review_branch_blocks_direct_main_target_and_uses_local_source_of_t
     assert "dedicated remote review branch" in script
     assert "-NoFetch" in script
     assert "-LocalSourceOfTruth" in script
+    assert "Open the PR with title" in script
 
 
 def test_pr_branch_hygiene_warns_when_branch_is_behind_base() -> None:
