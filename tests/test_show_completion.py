@@ -814,12 +814,12 @@ def test_evaluate_show_completion_does_not_mark_partial_season_episode_as_full_s
 
 
 def test_infer_episode_number_from_path_extracts_episode_component() -> None:
-    from filmu_py.services.media import _infer_episode_number_from_path
+    from filmu_py.services.media_path_inference import infer_episode_number_from_path
 
-    assert _infer_episode_number_from_path("Invincible.S04E03.1080p.WEB-DL.mkv") == 3
-    assert _infer_episode_number_from_path("Invincible 4x04 WEB-DL.mkv") == 4
-    assert _infer_episode_number_from_path("Invincible Episode 05 WEB-DL.mkv") == 5
-    assert _infer_episode_number_from_path("Invincible Season 4 Pack.mkv") is None
+    assert infer_episode_number_from_path("Invincible.S04E03.1080p.WEB-DL.mkv") == 3
+    assert infer_episode_number_from_path("Invincible 4x04 WEB-DL.mkv") == 4
+    assert infer_episode_number_from_path("Invincible Episode 05 WEB-DL.mkv") == 5
+    assert infer_episode_number_from_path("Invincible Season 4 Pack.mkv") is None
 
 
 def test_extract_tmdb_episode_inventory_uses_next_episode_to_air_for_returning_series() -> None:

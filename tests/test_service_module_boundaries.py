@@ -49,7 +49,6 @@ def test_media_service_imports_path_inference_boundary_module() -> None:
         not in source
     )
     assert "_infer_season_range_from_path = _media_path_inference.infer_season_range_from_path" in source
-    assert "_infer_episode_number_from_path = _media_path_inference.infer_episode_number_from_path" in source
 
 
 def test_media_service_imports_show_completion_boundary_module() -> None:
