@@ -2146,7 +2146,6 @@ async def _evaluate_show_completion(
 ) -> ShowCompletionResult:
     return await _media_show_completion.evaluate_show_completion(item, db, settings)
 _infer_season_range_from_path = _media_path_inference.infer_season_range_from_path
-_infer_episode_number_from_path = _media_path_inference.infer_episode_number_from_path
 class CompletionStatus(enum.StrEnum):
     COMPLETE = "complete"
     INCOMPLETE = "incomplete"
