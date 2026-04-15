@@ -12,6 +12,18 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$allowedSemanticReviewBranchPrefixes = @(
+    'fix/',
+    'feat/',
+    'chore/',
+    'refactor/',
+    'docs/',
+    'test/',
+    'perf/',
+    'build/',
+    'ci/',
+    'revert/'
+)
 $permanentlyBlockedReviewBranches = @{
     'codex/windows-vfs-rollout-20260415' = 'Previously-used review branch retained only for history. Push local main to a fresh remote review branch instead.'
 }
@@ -37,6 +49,28 @@ function Resolve-GitHubRepository {
     }
 
     return ''
+}
+
+function Get-SuggestedPrTitle {
+    param([Parameter(Mandatory = $true)][string] $ReviewBranchName)
+
+    $prefix = $allowedSemanticReviewBranchPrefixes | Where-Object { $ReviewBranchName.StartsWith($_) } | Select-Object -First 1
+    if ($null -eq $prefix) {
+        return ''
+    }
+
+    $kind = $prefix.TrimEnd('/')
+    $subject = $ReviewBranchName.Substring($prefix.Length).Trim()
+    if ([string]::IsNullOrWhiteSpace($subject)) {
+        return ''
+    }
+
+    $subject = ($subject -replace '[-_]+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($subject)) {
+        return ''
+    }
+
+    return "$kind`: $subject"
 }
 
 if ([string]::IsNullOrWhiteSpace($Branch)) {
@@ -112,8 +146,13 @@ if ($reuseCheckStatus -eq 'checked') {
 
 $actions = New-Object System.Collections.Generic.List[string]
 $advisories = New-Object System.Collections.Generic.List[string]
+$suggestedPrTitle = Get-SuggestedPrTitle -ReviewBranchName $ReviewBranch
 if ($permanentlyBlockedReviewBranches.ContainsKey($ReviewBranch)) {
     $actions.Add("Review branch '$ReviewBranch' is permanently blocked for this repository. $($permanentlyBlockedReviewBranches[$ReviewBranch])")
+}
+if (-not $releasePleaseBranch -and -not ($allowedSemanticReviewBranchPrefixes | Where-Object { $ReviewBranch.StartsWith($_) })) {
+    $allowedPrefixesLabel = $allowedSemanticReviewBranchPrefixes -join ', '
+    $actions.Add("Review branch '$ReviewBranch' must start with a semantic prefix. Use one of: $allowedPrefixesLabel")
 }
 if ($behindBy -gt 0) {
     if ($LocalSourceOfTruth) {
@@ -130,6 +169,9 @@ if ($null -ne $closedReuse) {
     $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
     $actions.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Create a fresh single-use remote review branch from the current local source branch instead of reusing it.")
 }
+if (-not [string]::IsNullOrWhiteSpace($suggestedPrTitle)) {
+    $advisories.Add("Suggested PR title: '$suggestedPrTitle'")
+}
 
 $status = if ($actions.Count -eq 0) { 'ready' } else { 'not_ready' }
 $result = [ordered]@{
@@ -144,6 +186,7 @@ $result = [ordered]@{
     reuse_check_status = $reuseCheckStatus
     open_pr = $openPr
     closed_branch_reuse = $closedReuse
+    suggested_pr_title = if ([string]::IsNullOrWhiteSpace($suggestedPrTitle)) { $null } else { $suggestedPrTitle }
     status = $status
     advisories = @($advisories)
     actions = @($actions)
@@ -166,6 +209,9 @@ else {
     if ($null -ne $closedReuse) {
         $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
         Write-Output "closed_branch_reuse=#$($closedReuse.number) $stateLabel at $($closedReuse.closed_at)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($result.suggested_pr_title)) {
+        Write-Output "suggested_pr_title=$($result.suggested_pr_title)"
     }
     foreach ($action in $result.actions) {
         Write-Output "action=$action"
