@@ -2757,6 +2757,57 @@ def test_resolve_download_client_falls_back_to_registered_stremthru_plugin(
     assert links == ["https://cdn.example.test/st-1"]
 
 
+def test_resolve_download_clients_applies_shared_policy_order_across_builtin_and_plugin(
+    monkeypatch: Any,
+) -> None:
+    settings = _build_worker_settings()
+    settings.downloaders.real_debrid.enabled = True
+    settings.downloaders.real_debrid.api_key = "rd-token"
+    settings.orchestration.downloader_provider_priority = ["hyperdebrid", "realdebrid", "stremthru"]
+
+    class _FakeDownloaderPlugin:
+        plugin_name = "hyperdebrid"
+
+        async def add_magnet(self, request: object) -> object:
+            _ = request
+            return type("MagnetAddResult", (), {"download_id": "hd-1"})()
+
+        async def get_status(self, request: object) -> object:
+            _ = request
+            return type(
+                "DownloadStatusResult",
+                (),
+                {"download_id": "hd-1", "status": "ready", "files": ()},
+            )()
+
+        async def get_download_links(self, request: object) -> list[object]:
+            _ = request
+            return []
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([], downloaders=[_FakeDownloaderPlugin()])
+
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **kwargs: f"builtin:{kwargs['provider']}",
+    )
+
+    candidates = asyncio.run(
+        tasks._resolve_download_clients(
+            {},
+            settings=settings,
+            limiter=_AllowedLimiter(),
+            item_id="item-plugin-policy",
+            item_request_id="request-plugin-policy",
+        )
+    )
+
+    assert [provider for provider, _client in candidates] == ["hyperdebrid", "realdebrid"]
+    assert "builtin:realdebrid" in [client for _provider, client in candidates]
+
+
 def test_worker_runtime_settings_resolution_prefers_persisted_blob_when_ctx_has_no_settings(
     monkeypatch: Any,
 ) -> None:

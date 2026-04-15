@@ -1192,6 +1192,48 @@ def _configured_builtin_downloader_providers(settings: Settings) -> list[str]:
     return configured
 
 
+def _configured_plugin_downloader_providers(
+    settings: Settings,
+    *,
+    plugin_registry: PluginRegistry,
+) -> list[tuple[str, DebridDownloadClient]]:
+    """Return enabled plugin downloader adapters ordered by orchestration policy."""
+
+    plugin_by_name = {
+        str(getattr(plugin, "plugin_name", type(plugin).__name__)): plugin
+        for plugin in plugin_registry.get_downloaders()
+    }
+    ordered_names: list[str] = []
+    for provider in settings.orchestration.downloader_provider_priority:
+        if provider in plugin_by_name and provider not in ordered_names:
+            ordered_names.append(provider)
+    for provider in plugin_by_name:
+        if provider not in ordered_names:
+            ordered_names.append(provider)
+
+    configured: list[tuple[str, DebridDownloadClient]] = []
+    for provider in ordered_names:
+        plugin = plugin_by_name[provider]
+        if provider == "stremthru":
+            stremthru_settings = settings.downloaders.stremthru
+            if not (
+                stremthru_settings.enabled
+                and bool(stremthru_settings.token.strip())
+                and bool(stremthru_settings.url.strip())
+            ):
+                continue
+        configured.append(
+            (
+                provider,
+                PluginDownloaderClientAdapter(
+                    provider=provider,
+                    plugin=plugin,
+                ),
+            )
+        )
+    return configured
+
+
 async def _resolve_download_clients(
     ctx: dict[str, Any],
     *,
@@ -1202,44 +1244,36 @@ async def _resolve_download_clients(
 ) -> list[tuple[str, DebridDownloadClient]]:
     """Resolve ordered downloader candidates from builtin and plugin-backed providers."""
 
-    candidates: list[tuple[str, DebridDownloadClient]] = []
-    seen: set[str] = set()
+    candidate_by_provider: dict[str, DebridDownloadClient] = {}
+    discovery_order: list[str] = []
 
     for provider in _configured_builtin_downloader_providers(settings):
         api_key = _resolve_downloader_api_key(settings, provider=provider)
-        candidates.append(
-            (provider, _build_provider_client(provider=provider, api_key=api_key, limiter=limiter))
+        candidate_by_provider[provider] = _build_provider_client(
+            provider=provider,
+            api_key=api_key,
+            limiter=limiter,
         )
-        seen.add(provider)
+        discovery_order.append(provider)
 
     plugin_registry = await _resolve_plugin_registry(ctx)
-    stremthru_plugin = next(
-        (
-            plugin
-            for plugin in plugin_registry.get_downloaders()
-            if getattr(plugin, "plugin_name", "") == "stremthru"
-        ),
-        None,
-    )
-    stremthru_settings = settings.downloaders.stremthru
-    if (
-        "stremthru" not in seen
-        and stremthru_plugin is not None
-        and stremthru_settings.enabled
-        and bool(stremthru_settings.token.strip())
-        and bool(stremthru_settings.url.strip())
-        and "stremthru" in settings.orchestration.downloader_provider_priority
+    for provider, client in _configured_plugin_downloader_providers(
+        settings,
+        plugin_registry=plugin_registry,
     ):
-        candidates.append(
-            (
-                "stremthru",
-                PluginDownloaderClientAdapter(
-                    provider="stremthru",
-                    plugin=stremthru_plugin,
-                ),
-            )
-        )
-        seen.add("stremthru")
+        if provider in candidate_by_provider:
+            continue
+        candidate_by_provider[provider] = client
+        discovery_order.append(provider)
+
+    ordered_names: list[str] = []
+    for provider in settings.orchestration.downloader_provider_priority:
+        if provider in candidate_by_provider and provider not in ordered_names:
+            ordered_names.append(provider)
+    for provider in discovery_order:
+        if provider not in ordered_names:
+            ordered_names.append(provider)
+    candidates = [(provider, candidate_by_provider[provider]) for provider in ordered_names]
 
     if len(candidates) > 1 and settings.orchestration.downloader_selection_mode == "fixed_priority":
         logger.warning(
@@ -1256,7 +1290,7 @@ async def _resolve_download_clients(
     bounded = candidates[:attempt_limit]
     if len(bounded) > 1:
         logger.info(
-            "resolved ordered downloader candidates",
+            "resolved downloader candidates from orchestration policy",
             extra={
                 "item_id": item_id,
                 "item_request_id": item_request_id,

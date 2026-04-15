@@ -546,6 +546,10 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
 
     resources = request.app.state.resources
     settings = resources.settings
+    provider_priority = {
+        name: index
+        for index, name in enumerate(settings.orchestration.downloader_provider_priority, start=1)
+    }
     providers: list[DownloaderProviderCandidateResponse] = []
     builtin_candidates: list[DownloaderProviderCandidateResponse] = []
     provider_entries = (
@@ -562,24 +566,11 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
             enabled=enabled,
             configured=configured,
             selected=False,
-            priority=priority,
+            priority=provider_priority.get(name, priority),
             capabilities=["magnet_add", "file_select", "status_poll", "download_links"],
         )
         builtin_candidates.append(candidate)
         providers.append(candidate)
-
-    builtin_selected_provider = next(
-        (candidate.name for candidate in builtin_candidates if candidate.enabled),
-        None,
-    )
-    selected_provider = builtin_selected_provider
-    if builtin_selected_provider is not None:
-        providers = [
-            candidate.model_copy(update={"selected": candidate.name == builtin_selected_provider})
-            if candidate.source == "builtin"
-            else candidate
-            for candidate in providers
-        ]
 
     plugin_registry = resources.plugin_registry
     plugin_downloaders_registered = 0
@@ -600,32 +591,36 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
                     enabled=enabled,
                     configured=configured,
                     selected=False,
-                    priority=None,
+                    priority=provider_priority.get(plugin_name),
                     capabilities=["magnet_add", "status_poll", "download_links"],
                 )
             )
 
-    plugin_dispatch_fallback_ready = False
-    if plugin_downloaders_registered > 0 and selected_provider is None:
-        stremthru = settings.downloaders.stremthru
-        if stremthru.enabled and stremthru.token.strip() and stremthru.url.strip():
-            selected_provider = "stremthru"
-            plugin_dispatch_fallback_ready = True
-            providers = [
-                candidate.model_copy(update={"selected": candidate.name == "stremthru"})
-                if candidate.name == "stremthru" and candidate.source == "plugin"
-                else candidate
-                for candidate in providers
-            ]
-    elif plugin_downloaders_registered > 0:
-        stremthru = settings.downloaders.stremthru
-        plugin_dispatch_fallback_ready = bool(
-            stremthru.enabled and stremthru.token.strip() and stremthru.url.strip()
-        )
+    enabled_candidates = sorted(
+        [candidate for candidate in providers if candidate.enabled],
+        key=lambda candidate: (
+            candidate.priority if candidate.priority is not None else 10_000,
+            candidate.name,
+        ),
+    )
+    selected_provider = enabled_candidates[0].name if enabled_candidates else None
+    if selected_provider is not None:
+        providers = [
+            candidate.model_copy(update={"selected": candidate.name == selected_provider})
+            for candidate in providers
+        ]
+
+    plugin_policy_ready = any(
+        candidate.source == "plugin" and candidate.enabled for candidate in providers
+    )
 
     multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
-    worker_plugin_dispatch_ready = plugin_dispatch_fallback_ready
-    fanout_ready = False
+    worker_plugin_dispatch_ready = plugin_policy_ready
+    fanout_ready = bool(
+        settings.orchestration.downloader_selection_mode == "ordered_failover"
+        and len(enabled_candidates) > 1
+        and (plugin_downloaders_registered == 0 or plugin_policy_ready)
+    )
     multi_container_ready = True
     ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
 
@@ -635,12 +630,12 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         required_actions.append("configure_at_least_one_builtin_downloader_provider")
         remaining_gaps.append("debrid worker execution has no configured builtin downloader provider")
     if multi_provider_enabled:
-        if ordered_failover_ready:
+        if ordered_failover_ready and not fanout_ready:
             required_actions.append("promote_ordered_failover_into_policy_driven_fanout")
             remaining_gaps.append(
                 "multiple builtin downloaders now support ordered failover, but not policy-driven fan-out"
             )
-        else:
+        elif not ordered_failover_ready:
             required_actions.append("replace_fixed_priority_builtin_selection_with_policy_driven_fanout")
             remaining_gaps.append(
                 "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
@@ -650,20 +645,17 @@ def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrat
         remaining_gaps.append(
             "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
         )
-    elif plugin_downloaders_registered > 0:
-        required_actions.append("promote_plugin_downloader_dispatch_from_fallback_to_policy_fanout")
-        remaining_gaps.append(
-            "plugin-backed downloader execution now exists as fallback only and is not yet part of policy-driven fan-out"
-        )
 
     return DownloaderOrchestrationResponse(
         generated_at=datetime.now(UTC).isoformat(),
         selection_mode=(
-            "ordered_failover_with_plugin_fallback"
+            "ordered_failover_policy_fanout"
+            if ordered_failover_ready and worker_plugin_dispatch_ready and fanout_ready
+            else "ordered_failover_with_plugin_policy"
             if ordered_failover_ready and worker_plugin_dispatch_ready
             else "ordered_failover"
             if ordered_failover_ready
-            else "fixed_priority_builtin_then_plugin_fallback"
+            else "fixed_priority_builtin_then_plugin_policy"
             if worker_plugin_dispatch_ready
             else "fixed_priority_builtin_only"
         ),

@@ -2864,32 +2864,21 @@ def test_downloader_orchestration_route_surfaces_ordered_failover_and_plugin_gap
 
     assert response.status_code == 200
     body = response.json()
-    assert body["selection_mode"] == "ordered_failover_with_plugin_fallback"
+    assert body["selection_mode"] == "ordered_failover_policy_fanout"
     assert body["selected_provider"] == "realdebrid"
     assert body["multi_provider_enabled"] is True
     assert body["plugin_downloaders_registered"] == 1
     assert body["worker_plugin_dispatch_ready"] is True
-    assert body["fanout_ready"] is False
+    assert body["fanout_ready"] is True
     assert body["multi_container_ready"] is True
-    assert "promote_ordered_failover_into_policy_driven_fanout" in body[
-        "required_actions"
-    ]
-    assert "promote_plugin_downloader_dispatch_from_fallback_to_policy_fanout" in body[
-        "required_actions"
-    ]
+    assert body["required_actions"] == []
     providers = {(row["name"], row["source"]): row for row in body["providers"]}
     assert providers[("realdebrid", "builtin")]["enabled"] is True
     assert providers[("realdebrid", "builtin")]["selected"] is True
     assert providers[("alldebrid", "builtin")]["enabled"] is True
     assert providers[("stremthru", "plugin")]["configured"] is True
-    assert (
-        "multiple builtin downloaders now support ordered failover, but not policy-driven fan-out"
-        in body["remaining_gaps"]
-    )
-    assert (
-        "plugin-backed downloader execution now exists as fallback only and is not yet part of policy-driven fan-out"
-        in body["remaining_gaps"]
-    )
+    assert providers[("stremthru", "plugin")]["priority"] == 4
+    assert body["remaining_gaps"] == []
 
 
 def test_tenant_quota_route_returns_current_policy_visibility() -> None:
