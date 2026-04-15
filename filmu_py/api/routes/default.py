@@ -5,6 +5,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from secrets import token_hex
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
@@ -22,6 +23,11 @@ from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.replay import ReplayConsumerFencedError
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleHealth, RuntimeLifecyclePhase
+from filmu_py.observability_convergence import (
+    build_observability_convergence_snapshot,
+    operator_log_pipeline_ready,
+    structured_log_path,
+)
 from filmu_py.plugins.builtin.listrr import resolve_listrr_settings
 from filmu_py.plugins.builtin.plex import resolve_plex_settings
 from filmu_py.plugins.builtin.seerr import resolve_seerr_settings
@@ -90,7 +96,14 @@ from ..models import (
     StatsMediaYearRelease,
     StatsResponse,
     TenantQuotaPolicyResponse,
+    VfsCatalogBlockedItemResponse,
+    VfsCatalogCorrelationKeysResponse,
+    VfsCatalogDirectoryDetailResponse,
+    VfsCatalogEntryDetailResponse,
+    VfsCatalogEntryResponse,
+    VfsCatalogFileDetailResponse,
     VfsCatalogRollupResponse,
+    VfsCatalogStatsResponse,
     VfsRolloutControlRequest,
     VfsRolloutControlResponse,
 )
@@ -454,101 +467,30 @@ def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
     )
 
 
-def _structured_log_path(settings: Any) -> str:
-    """Return the normalized structured log path for operator-facing responses."""
-
-    normalized_log_dir = settings.logging.directory.rstrip("/\\") or "logs"
-    return f"{normalized_log_dir}/{settings.logging.structured_filename}"
-
-
-def _operator_log_pipeline_ready(settings: Any) -> bool:
-    """Return whether the repo-side operator log pipeline exit gates are satisfied."""
-
-    observability_policy = settings.observability
-    return bool(
-        settings.logging.enabled
-        and settings.log_shipper.enabled
-        and bool(settings.log_shipper.target)
-        and bool(settings.log_shipper.healthcheck_url)
-        and settings.otel_enabled
-        and bool(settings.otel_exporter_otlp_endpoint)
-        and observability_policy.environment_shipping_enabled
-        and observability_policy.alerting_enabled
-        and observability_policy.rust_trace_correlation_enabled
-        and observability_policy.search_backend != "none"
-        and bool(observability_policy.required_correlation_fields)
-        and bool(observability_policy.proof_refs)
-    )
-
-
 def _observability_convergence_response(request: Request) -> ObservabilityConvergenceResponse:
     """Return the current cross-process log/search/trace convergence posture."""
 
-    settings = request.app.state.resources.settings
-    observability_policy = settings.observability
-    structured_log_path = _structured_log_path(settings)
-    ready = _operator_log_pipeline_ready(settings)
-    correlation_contract_complete = bool(observability_policy.required_correlation_fields)
-
-    required_actions: list[str] = []
-    remaining_gaps: list[str] = []
-    if not settings.log_shipper.enabled:
-        required_actions.append("configure_log_shipper_for_structured_ndjson")
-        remaining_gaps.append("structured logs are not yet shipped out of process")
-    elif not settings.log_shipper.healthcheck_url:
-        required_actions.append("monitor_log_shipper_health")
-        remaining_gaps.append("log shipper health is not externally checked")
-    if not settings.log_shipper.target or observability_policy.search_backend == "none":
-        required_actions.append("define_search_index_mapping_and_retention_policy")
-        remaining_gaps.append("structured logs are not yet wired into a searchable backend")
-    if not (settings.otel_enabled and settings.otel_exporter_otlp_endpoint):
-        required_actions.append("configure_otlp_trace_export")
-        remaining_gaps.append("cross-process traces are not exported through OTLP")
-    if not observability_policy.environment_shipping_enabled:
-        required_actions.append("enable_environment_log_shipping")
-        remaining_gaps.append("environment-managed log shipping is not enabled")
-    if not observability_policy.alerting_enabled:
-        required_actions.append("enable_alerting_for_log_search_and_trace_pipeline")
-        remaining_gaps.append("search/trace alerting is not configured")
-    if not observability_policy.rust_trace_correlation_enabled:
-        required_actions.append("wire_rust_trace_correlation_fields")
-        remaining_gaps.append("Python and Rust traces are not yet forced onto one correlation contract")
-    if not correlation_contract_complete:
-        required_actions.append("define_required_cross_process_correlation_fields")
-        remaining_gaps.append("required correlation fields are not configured")
-    if not observability_policy.proof_refs:
-        required_actions.append("record_log_pipeline_rollout_evidence")
-        remaining_gaps.append("observability convergence has no retained rollout evidence references")
-
-    status: Literal["ready", "partial", "blocked"] = (
-        "ready"
-        if ready
-        else (
-            "partial"
-            if settings.logging.enabled or settings.otel_enabled or settings.log_shipper.enabled
-            else "blocked"
-        )
-    )
+    snapshot = build_observability_convergence_snapshot(request.app.state.resources.settings)
     return ObservabilityConvergenceResponse(
-        generated_at=datetime.now(UTC).isoformat(),
-        status=status,
-        structured_logging_enabled=settings.logging.enabled,
-        structured_log_path=structured_log_path,
-        otel_enabled=settings.otel_enabled,
-        otel_endpoint_configured=bool(settings.otel_exporter_otlp_endpoint),
-        log_shipper_enabled=settings.log_shipper.enabled,
-        log_shipper_type=settings.log_shipper.type,
-        log_shipper_target_configured=bool(settings.log_shipper.target),
-        log_shipper_healthcheck_configured=bool(settings.log_shipper.healthcheck_url),
-        search_backend=observability_policy.search_backend,
-        environment_shipping_enabled=observability_policy.environment_shipping_enabled,
-        alerting_enabled=observability_policy.alerting_enabled,
-        rust_trace_correlation_enabled=observability_policy.rust_trace_correlation_enabled,
-        correlation_contract_complete=correlation_contract_complete,
-        proof_refs=list(observability_policy.proof_refs),
-        required_correlation_fields=list(observability_policy.required_correlation_fields),
-        required_actions=required_actions,
-        remaining_gaps=remaining_gaps,
+        generated_at=snapshot.generated_at,
+        status=cast(Literal["ready", "partial", "blocked"], snapshot.status),
+        structured_logging_enabled=snapshot.structured_logging_enabled,
+        structured_log_path=snapshot.structured_log_path,
+        otel_enabled=snapshot.otel_enabled,
+        otel_endpoint_configured=snapshot.otel_endpoint_configured,
+        log_shipper_enabled=snapshot.log_shipper_enabled,
+        log_shipper_type=snapshot.log_shipper_type,
+        log_shipper_target_configured=snapshot.log_shipper_target_configured,
+        log_shipper_healthcheck_configured=snapshot.log_shipper_healthcheck_configured,
+        search_backend=snapshot.search_backend,
+        environment_shipping_enabled=snapshot.environment_shipping_enabled,
+        alerting_enabled=snapshot.alerting_enabled,
+        rust_trace_correlation_enabled=snapshot.rust_trace_correlation_enabled,
+        correlation_contract_complete=snapshot.correlation_contract_complete,
+        proof_refs=list(snapshot.proof_refs),
+        required_correlation_fields=list(snapshot.required_correlation_fields),
+        required_actions=list(snapshot.required_actions),
+        remaining_gaps=list(snapshot.remaining_gaps),
     )
 
 
@@ -934,7 +876,103 @@ def _vfs_catalog_rollup_response(
         remaining_gaps=remaining_gaps,
     )
 
+def _format_optional_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
 
+
+def _normalize_vfs_catalog_path(path: str) -> str:
+    stripped = path.strip()
+    if not stripped or stripped == "/":
+        return "/"
+    normalized = PurePosixPath(f"/{stripped.lstrip('/')}").as_posix()
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+def _vfs_catalog_correlation_response(record: Any) -> VfsCatalogCorrelationKeysResponse:
+    correlation = record.correlation
+    return VfsCatalogCorrelationKeysResponse(
+        item_id=correlation.item_id,
+        media_entry_id=correlation.media_entry_id,
+        source_attachment_id=correlation.source_attachment_id,
+        provider=correlation.provider,
+        provider_download_id=correlation.provider_download_id,
+        provider_file_id=correlation.provider_file_id,
+        provider_file_path=correlation.provider_file_path,
+        session_id=correlation.session_id,
+        handle_key=correlation.handle_key,
+        tenant_id=getattr(correlation, "tenant_id", None),
+    )
+
+
+def _vfs_catalog_entry_response(record: Any) -> VfsCatalogEntryResponse:
+    file_payload = record.file
+    directory_payload = record.directory
+    return VfsCatalogEntryResponse(
+        entry_id=record.entry_id,
+        parent_entry_id=record.parent_entry_id,
+        path=record.path,
+        name=record.name,
+        kind=record.kind,
+        correlation=_vfs_catalog_correlation_response(record),
+        directory=(
+            VfsCatalogDirectoryDetailResponse(path=directory_payload.path)
+            if directory_payload is not None
+            else None
+        ),
+        file=(
+            VfsCatalogFileDetailResponse(
+                item_id=file_payload.item_id,
+                item_title=file_payload.item_title,
+                item_external_ref=file_payload.item_external_ref,
+                media_entry_id=file_payload.media_entry_id,
+                source_attachment_id=file_payload.source_attachment_id,
+                media_type=file_payload.media_type,
+                transport=file_payload.transport,
+                locator=file_payload.locator,
+                local_path=file_payload.local_path,
+                restricted_url=file_payload.restricted_url,
+                unrestricted_url=file_payload.unrestricted_url,
+                original_filename=file_payload.original_filename,
+                size_bytes=file_payload.size_bytes,
+                lease_state=file_payload.lease_state,
+                expires_at=_format_optional_datetime(file_payload.expires_at),
+                last_refreshed_at=_format_optional_datetime(file_payload.last_refreshed_at),
+                last_refresh_error=file_payload.last_refresh_error,
+                provider=file_payload.provider,
+                provider_download_id=file_payload.provider_download_id,
+                provider_file_id=file_payload.provider_file_id,
+                provider_file_path=file_payload.provider_file_path,
+                active_roles=list(file_payload.active_roles),
+                source_key=file_payload.source_key,
+                query_strategy=file_payload.query_strategy,
+                provider_family=file_payload.provider_family,
+                locator_source=file_payload.locator_source,
+                match_basis=file_payload.match_basis,
+                restricted_fallback=file_payload.restricted_fallback,
+            )
+            if file_payload is not None
+            else None
+        ),
+    )
+
+
+def _vfs_catalog_stats_response(snapshot: Any) -> VfsCatalogStatsResponse:
+    return VfsCatalogStatsResponse(
+        directory_count=snapshot.stats.directory_count,
+        file_count=snapshot.stats.file_count,
+        blocked_item_count=snapshot.stats.blocked_item_count,
+    )
+
+
+def _vfs_catalog_blocked_item_response(item: Any) -> VfsCatalogBlockedItemResponse:
+    return VfsCatalogBlockedItemResponse(
+        item_id=str(item.item_id),
+        external_ref=str(item.external_ref),
+        title=str(item.title),
+        reason=str(item.reason),
+    )
 def _control_plane_summary_response(summary: Any) -> ControlPlaneSummaryResponse:
     """Normalize control-plane summary DTOs into the API response model."""
 
@@ -1642,9 +1680,9 @@ async def _enterprise_operations_governance(
     if auth_context.authorization_tenant_scope == "all":
         tenant_required_actions.append("review_global_tenant_scope_for_actor")
 
-    structured_log_path = _structured_log_path(settings)
+    structured_log_path_value = structured_log_path(settings)
     observability_policy = settings.observability
-    operator_log_pipeline_ready = _operator_log_pipeline_ready(settings)
+    log_pipeline_ready = operator_log_pipeline_ready(settings)
     plugin_governance_summary = _plugin_governance_summary(
         plugins,
         runtime_policy=settings.plugin_runtime,
@@ -2083,12 +2121,12 @@ async def _enterprise_operations_governance(
             name="Durable Operator Log Pipeline",
             status=(
                 "ready"
-                if operator_log_pipeline_ready
+                if log_pipeline_ready
                 else ("partial" if settings.logging.enabled else "blocked")
             ),
             evidence=[
                 f"structured_logging_enabled={settings.logging.enabled}",
-                f"structured_log_path={structured_log_path}",
+                f"structured_log_path={structured_log_path_value}",
                 f"retention_files={settings.logging.retention_files}",
                 f"otel_enabled={settings.otel_enabled}",
                 f"otel_endpoint_configured={bool(settings.otel_exporter_otlp_endpoint)}",
@@ -2110,7 +2148,7 @@ async def _enterprise_operations_governance(
             ],
             required_actions=(
                 []
-                if operator_log_pipeline_ready
+                if log_pipeline_ready
                 else [
                     "configure_log_shipper_for_structured_ndjson"
                     if not settings.log_shipper.enabled
@@ -2138,7 +2176,7 @@ async def _enterprise_operations_governance(
             ),
             remaining_gaps=(
                 []
-                if operator_log_pipeline_ready
+                if log_pipeline_ready
                 else [
                     "shipper/search backend still requires environment provisioning even though repo config is present",
                     "cross-process trace correlation is not fully enforced",
@@ -3931,7 +3969,91 @@ async def get_vfs_catalog_rollup(
         raise HTTPException(status_code=404, detail=f"Unknown VFS catalog generation '{generation_id}'")
     return _vfs_catalog_rollup_response(request, snapshot=snapshot)
 
+@router.get(
+    "/operations/vfs-catalog/entry",
+    operation_id="default.vfs_catalog_entry_detail",
+    response_model=VfsCatalogEntryDetailResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def get_vfs_catalog_entry_detail(
+    request: Request,
+    path: str = Query("/", description="Absolute mounted VFS path to inspect."),
+    generation_id: Annotated[int | None, Query(ge=1)] = None,
+) -> VfsCatalogEntryDetailResponse:
+    """Return one REST/operator detail view over a mounted VFS catalog path."""
 
+    normalized_path = _normalize_vfs_catalog_path(path)
+    supplier = request.app.state.resources.vfs_catalog_supplier
+    if supplier is None:
+        return VfsCatalogEntryDetailResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            requested_path=normalized_path,
+            found=False,
+            directories=[],
+            files=[],
+            blocked_items=[],
+            required_actions=["attach_vfs_catalog_supplier"],
+            remaining_gaps=["the proto-first VFS catalog supplier is not attached"],
+        )
+
+    snapshot = (
+        await supplier.snapshot_for_generation(generation_id)
+        if generation_id is not None
+        else await supplier.build_snapshot()
+    )
+    if generation_id is not None and snapshot is None:
+        raise HTTPException(status_code=404, detail=f"Unknown VFS catalog generation '{generation_id}'")
+    assert snapshot is not None
+
+    entry = next((candidate for candidate in snapshot.entries if candidate.path == normalized_path), None)
+    if entry is None:
+        return VfsCatalogEntryDetailResponse(
+            generated_at=datetime.now(UTC).isoformat(),
+            requested_path=normalized_path,
+            generation_id=snapshot.generation_id,
+            published_at=snapshot.published_at.isoformat(),
+            found=False,
+            stats=_vfs_catalog_stats_response(snapshot),
+            directories=[],
+            files=[],
+            blocked_items=[
+                _vfs_catalog_blocked_item_response(item) for item in snapshot.blocked_items
+            ],
+            required_actions=["inspect_vfs_catalog_path_projection"],
+            remaining_gaps=[f"no VFS catalog entry exists at path {normalized_path}"],
+        )
+
+    children = [
+        candidate for candidate in snapshot.entries if candidate.parent_entry_id == entry.entry_id
+    ]
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if snapshot.stats.blocked_item_count > 0:
+        required_actions.append("investigate_vfs_blocked_items")
+        remaining_gaps.append("one or more media items are still blocked from the VFS catalog")
+
+    return VfsCatalogEntryDetailResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        requested_path=normalized_path,
+        generation_id=snapshot.generation_id,
+        published_at=snapshot.published_at.isoformat(),
+        found=True,
+        entry=_vfs_catalog_entry_response(entry),
+        stats=_vfs_catalog_stats_response(snapshot),
+        directories=[
+            _vfs_catalog_entry_response(candidate)
+            for candidate in children
+            if candidate.kind == "directory"
+        ],
+        files=[
+            _vfs_catalog_entry_response(candidate)
+            for candidate in children
+            if candidate.kind == "file"
+        ],
+        blocked_items=[_vfs_catalog_blocked_item_response(item) for item in snapshot.blocked_items],
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
 @router.post(
     "/plugins/stream-control",
     operation_id="default.plugin_stream_control",

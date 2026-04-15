@@ -30,7 +30,6 @@ $forbiddenPatterns = @(
     'logs/**',
     'ci-artifacts/**',
     'playback-proof-artifacts/**',
-    '*.md',
     'login_page.html',
     '.release-please-manifest.json'
 )

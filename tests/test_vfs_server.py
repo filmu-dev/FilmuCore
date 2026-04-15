@@ -27,11 +27,17 @@ from filmuvfs.catalog.v1 import catalog_pb2
 
 
 class _FakeContext:
+    def __init__(self, metadata: list[tuple[str, str]] | None = None) -> None:
+        self._metadata = metadata or []
+
     def done(self) -> bool:
         return False
 
     async def abort(self, code: object, details: str) -> None:
         raise RuntimeError(f"aborted: {code}: {details}")
+
+    def invocation_metadata(self) -> list[tuple[str, str]]:
+        return list(self._metadata)
 
 
 class _StubSupplier:
@@ -183,11 +189,13 @@ def _catalog_snapshot(*, generation_id: str, file_url: str) -> VfsCatalogSnapsho
 async def _first_watch_event(
     servicer: FilmuVfsCatalogGrpcServicer,
     request: catalog_pb2.WatchCatalogRequest,
+    *,
+    context: _FakeContext | None = None,
 ) -> catalog_pb2.WatchCatalogEvent:
     async def request_iterator() -> AsyncIterator[catalog_pb2.WatchCatalogRequest]:
         yield request
 
-    stream = servicer.WatchCatalog(request_iterator(), cast(Any, _FakeContext()))
+    stream = servicer.WatchCatalog(request_iterator(), cast(Any, context or _FakeContext()))
     return await anext(stream)
 
 
@@ -312,6 +320,49 @@ def test_watch_catalog_reuses_current_generation_without_snapshot_fallback() -> 
     assert snapshot["vfs_catalog_reconnect_requested"] == 1
     assert snapshot["vfs_catalog_reconnect_current_generation_reused"] == 1
     assert snapshot["vfs_catalog_reconnect_snapshot_fallback"] == 0
+
+
+def test_watch_catalog_binds_cross_process_observability_metadata(monkeypatch: Any) -> None:
+    supplier = _StubSupplier(
+        current_snapshot=_catalog_snapshot(generation_id="1", file_url="https://cdn.example.com/movie-a")
+    )
+    servicer = FilmuVfsCatalogGrpcServicer(cast(Any, supplier))
+    bound: dict[str, str] = {}
+
+    def _capture_bindings(**kwargs: str) -> None:
+        bound.update(kwargs)
+
+    monkeypatch.setattr(
+        "filmu_py.services.vfs_server.structlog.contextvars.bind_contextvars",
+        _capture_bindings,
+    )
+
+    event = asyncio.run(
+        _first_watch_event(
+            servicer,
+            catalog_pb2.WatchCatalogRequest(
+                subscribe=catalog_pb2.CatalogSubscribe(
+                    daemon_id="pytest-daemon",
+                    want_full_snapshot=True,
+                    correlation=catalog_pb2.CatalogCorrelationKeys(),
+                )
+            ),
+            context=_FakeContext(
+                [
+                    ("x-request-id", "req-watch-1"),
+                    ("x-tenant-id", "tenant-main"),
+                    ("x-filmu-vfs-session-id", "session-1"),
+                    ("x-filmu-vfs-daemon-id", "daemon-1"),
+                ]
+            ),
+        )
+    )
+
+    assert event.WhichOneof("payload") == "snapshot"
+    assert bound["request_id"] == "req-watch-1"
+    assert bound["tenant_id"] == "tenant-main"
+    assert bound["vfs_session_id"] == "session-1"
+    assert bound["vfs_daemon_id"] == "daemon-1"
 
 
 def test_refresh_catalog_entry_forces_provider_refresh_and_returns_new_url() -> None:

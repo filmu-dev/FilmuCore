@@ -25,6 +25,7 @@ from filmu_py.graphql.types import (
     GQLActiveStream,
     GQLActiveStreamOwner,
     GQLCalendarEntry,
+    GQLCalendarReleaseWindow,
     GQLFilmuSettings,
     GQLHealthCheck,
     GQLItemEvent,
@@ -35,6 +36,7 @@ from filmu_py.graphql.types import (
     GQLMediaItemDetail,
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
+    GQLObservabilityConvergence,
     GQLPersistMediaEntryControlResult,
     GQLPersistPlaybackAttachmentControlResult,
     GQLPlaybackAttachment,
@@ -71,6 +73,7 @@ from filmu_py.graphql.types import (
     RetryItemResult,
     SettingsUpdateInput,
 )
+from filmu_py.observability_convergence import build_observability_convergence_snapshot
 from filmu_py.services.media import (
     ArqNotEnabledError,
     CalendarProjectionRecord,
@@ -165,6 +168,7 @@ def _media_kind(media_type: str) -> MediaKind:
 
 def _build_calendar_entry(record: CalendarProjectionRecord) -> GQLCalendarEntry:
     specialization = record.specialization
+    release_data = record.release_data
     return GQLCalendarEntry(
         item_id=strawberry.ID(record.item_id),
         show_title=record.title,
@@ -187,6 +191,44 @@ def _build_calendar_entry(record: CalendarProjectionRecord) -> GQLCalendarEntry:
             else None
         ),
         release_data=_serialize_release_data(record),
+        release_window=(
+            GQLCalendarReleaseWindow(
+                next_aired=(release_data.next_aired or release_data.nextAired),
+                last_aired=(release_data.last_aired or release_data.lastAired),
+            )
+            if release_data is not None
+            else None
+        ),
+    )
+
+
+def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLObservabilityConvergence:
+    snapshot = build_observability_convergence_snapshot(info.context.resources.settings)
+    return GQLObservabilityConvergence(
+        generated_at=snapshot.generated_at,
+        status=snapshot.status,
+        structured_logging_enabled=snapshot.structured_logging_enabled,
+        structured_log_path=snapshot.structured_log_path,
+        otel_enabled=snapshot.otel_enabled,
+        otel_endpoint_configured=snapshot.otel_endpoint_configured,
+        log_shipper_enabled=snapshot.log_shipper_enabled,
+        log_shipper_type=snapshot.log_shipper_type,
+        log_shipper_target_configured=snapshot.log_shipper_target_configured,
+        log_shipper_healthcheck_configured=snapshot.log_shipper_healthcheck_configured,
+        search_backend=snapshot.search_backend,
+        environment_shipping_enabled=snapshot.environment_shipping_enabled,
+        alerting_enabled=snapshot.alerting_enabled,
+        rust_trace_correlation_enabled=snapshot.rust_trace_correlation_enabled,
+        correlation_contract_complete=snapshot.correlation_contract_complete,
+        proof_refs=list(snapshot.proof_refs),
+        required_correlation_fields=list(snapshot.required_correlation_fields),
+        required_actions=list(snapshot.required_actions),
+        remaining_gaps=list(snapshot.remaining_gaps),
+        trace_context_headers=list(snapshot.trace_context_headers),
+        correlation_headers=list(snapshot.correlation_headers),
+        shared_cross_process_headers=list(snapshot.shared_cross_process_headers),
+        expected_correlation_fields=list(snapshot.expected_correlation_fields),
+        expected_correlation_fields_ready=snapshot.expected_correlation_fields_ready,
     )
 
 
@@ -1046,6 +1088,15 @@ class CoreQueryResolver:
         if snapshot is None:
             return []
         return [_build_vfs_blocked_item(item) for item in snapshot.blocked_items]
+
+    @strawberry.field(
+        description="Typed cross-process observability convergence posture for GraphQL-first clients"
+    )
+    async def observability_convergence(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLObservabilityConvergence:
+        return _build_observability_convergence(info)
 
     @strawberry.field(description="Current runtime lifecycle graph and bounded transition history")
     async def runtime_lifecycle(

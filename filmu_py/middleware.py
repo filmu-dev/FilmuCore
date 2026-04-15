@@ -9,7 +9,7 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-REQUEST_ID_HEADER = "X-Request-ID"
+from .observability_contract import REQUEST_ID_HEADER
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):

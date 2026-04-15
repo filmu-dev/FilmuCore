@@ -16,7 +16,10 @@ use opentelemetry::{
     KeyValue,
 };
 use opentelemetry_otlp::{MetricExporter, SpanExporter};
-use opentelemetry_sdk::{metrics::SdkMeterProvider, trace::SdkTracerProvider, Resource};
+use opentelemetry_sdk::{
+    metrics::SdkMeterProvider, propagation::TraceContextPropagator, trace::SdkTracerProvider,
+    Resource,
+};
 use serde::Serialize;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -1524,6 +1527,7 @@ impl TelemetryGuard {
                 KeyValue::new("filmuvfs.session_id", config.session_id.clone()),
             ])
             .build();
+        global::set_text_map_propagator(TraceContextPropagator::new());
 
         let mut tracer_provider = None;
         let mut meter_provider = None;
