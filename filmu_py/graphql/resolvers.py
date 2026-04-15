@@ -1223,7 +1223,6 @@ class CoreQueryResolver:
         return _build_control_plane_automation(
             await build_control_plane_automation_posture(info.context.resources)
         )
-
     @strawberry.field(description="Current runtime lifecycle graph and bounded transition history")
     async def runtime_lifecycle(
         self,

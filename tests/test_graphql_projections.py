@@ -880,8 +880,6 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
     }
-
-
 def test_graphql_library_stats_returns_typed_breakdown() -> None:
     client = _build_client(
         FakeMediaService(
