@@ -43,6 +43,7 @@ class TorrentFile:
 
     file_id: str
     file_name: str
+    file_path: str | None = None
     file_size_bytes: int | None = None
     selected: bool = False
     download_url: str | None = None
@@ -112,11 +113,12 @@ def filter_torrent_files(
     }
     filtered: list[TorrentFile] = []
     for file in files:
-        extension = file.file_name.rsplit(".", 1)[-1].lower() if "." in file.file_name else ""
+        identity_path = file.file_path or file.file_name
+        extension = identity_path.rsplit(".", 1)[-1].lower() if "." in identity_path else ""
         if extension not in allowed_extensions:
             continue
 
-        media_type = file.media_type or _infer_media_type(file.file_name)
+        media_type = file.media_type or _infer_media_type(identity_path)
         size_mb = None
         if file.file_size_bytes is not None:
             size_bytes = file.file_size_bytes
@@ -150,6 +152,9 @@ def _normalize_torrent_file(
     )
     if not isinstance(path_value, str) or not path_value:
         return None
+    normalized_path = path_value.strip()
+    if not normalized_path:
+        return None
     file_size_value = (
         file_payload.get("bytes")
         or file_payload.get("size")
@@ -162,11 +167,12 @@ def _normalize_torrent_file(
     file_id = str(file_id_value) if file_id_value is not None else path_value
     return TorrentFile(
         file_id=file_id,
-        file_name=path_value.rsplit("/", 1)[-1],
+        file_name=normalized_path.rsplit("/", 1)[-1],
+        file_path=normalized_path,
         file_size_bytes=size_bytes,
         selected=selected,
         download_url=download_url,
-        media_type=_infer_media_type(path_value),
+        media_type=_infer_media_type(normalized_path),
     )
 
 

@@ -335,6 +335,25 @@ class ControlPlaneSubscriberResponse(BaseModel):
     updated_at: str
 
 
+class ControlPlaneSummaryResponse(BaseModel):
+    """Operator-visible control-plane rollup across durable subscribers."""
+
+    total_subscribers: int
+    active_subscribers: int
+    stale_subscribers: int
+    error_subscribers: int
+    fenced_subscribers: int
+    ack_pending_subscribers: int
+    stream_count: int
+    group_count: int
+    node_count: int
+    tenant_count: int
+    oldest_heartbeat_age_seconds: float | None = None
+    status_counts: dict[str, int]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
 class EnterpriseOperationsSliceResponse(BaseModel):
     """One enterprise-operations workstream posture summary."""
 
@@ -392,6 +411,53 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
     plugin_runtime_isolation: EnterpriseOperationsSliceResponse
     heavy_stage_workload_isolation: EnterpriseOperationsSliceResponse
     release_metadata_performance: EnterpriseOperationsSliceResponse
+
+
+class PlaybackGateEvidenceResponse(BaseModel):
+    """Current playback-gate artifact posture with operator actions and gaps."""
+
+    generated_at: str
+    rollout_readiness: str
+    next_action: str
+    reasons: list[str]
+    runner_status: str
+    runner_ready: bool
+    policy_validation_status: str
+    policy_ready: bool
+    provider_gate_required: bool
+    provider_gate_ran: bool
+    windows_provider_ready: bool
+    windows_provider_coverage: list[str]
+    windows_soak_ready: bool
+    windows_soak_profiles: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+class VfsRolloutControlRequest(BaseModel):
+    """Operator-managed VFS rollout-control state persisted for canary decisions."""
+
+    environment_class: str | None = None
+    runtime_status_path: str | None = None
+    promotion_paused: bool | None = None
+    rollback_requested: bool | None = None
+    notes: str | None = None
+
+
+class VfsRolloutControlResponse(BaseModel):
+    """Current VFS rollout-control state plus the derived canary posture."""
+
+    generated_at: str
+    environment_class: str
+    runtime_status_path: str | None = None
+    promotion_paused: bool
+    rollback_requested: bool
+    notes: str | None = None
+    rollout_readiness: str
+    next_action: str
+    canary_decision: str
+    merge_gate: str
+    reasons: list[str]
 
 
 class TenantQuotaPolicyResponse(BaseModel):

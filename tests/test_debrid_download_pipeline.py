@@ -242,6 +242,7 @@ def test_realdebrid_get_torrent_info_maps_provider_response(monkeypatch: Any) ->
     assert info.info_hash == "abc123"
     assert info.links == ["https://cdn.example.com/movie"]
     assert info.files[0].file_name == "Movie.mkv"
+    assert info.files[0].file_path == "Movie.mkv"
     assert info.files[0].download_url == "https://cdn.example.com/movie"
     assert limiter.calls[0]["bucket_key"] == "ratelimit:realdebrid:download"
 
@@ -374,3 +375,26 @@ def test_debridlink_download_pipeline_methods_rate_limit(monkeypatch: Any) -> No
         "ratelimit:debridlink:download",
         "ratelimit:debridlink:download",
     ]
+
+
+def test_filter_torrent_files_preserves_nested_provider_path_for_pack_files() -> None:
+    settings = DownloadersSettings(
+        movie_filesize_mb_min=700,
+        movie_filesize_mb_max=-1,
+        episode_filesize_mb_min=100,
+        episode_filesize_mb_max=-1,
+        video_extensions=["mkv"],
+    )
+    files = [
+        TorrentFile(
+            file_id="1",
+            file_name="Episode 01.mkv",
+            file_path="Show/Season 01/Episode 01.mkv",
+            file_size_bytes=800 * 1024 * 1024,
+            media_type="episode",
+        )
+    ]
+
+    filtered = filter_torrent_files(files, settings)
+
+    assert filtered[0].file_path == "Show/Season 01/Episode 01.mkv"

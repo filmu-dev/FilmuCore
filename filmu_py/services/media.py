@@ -3632,13 +3632,14 @@ class MediaService:
 
                 file_id_key = _normalized_entry_text(file.file_id)
                 file_name_key = _normalized_entry_text(file.file_name)
+                file_path_key = _normalized_entry_text(file.file_path) or file_name_key
 
                 existing: MediaEntryORM | None = None
                 if provider_download_key and file_id_key and file_name_key:
                     strict_key = (provider_download_key, file_id_key, file_name_key)
                     existing = existing_by_strict_key.get(strict_key)
-                if existing is None and provider_key and file_name_key:
-                    existing = existing_by_provider_path_key.get((provider_key, file_name_key))
+                if existing is None and provider_key and file_path_key:
+                    existing = existing_by_provider_path_key.get((provider_key, file_path_key))
                 if (
                     existing is None
                     and provider_key
@@ -3660,7 +3661,7 @@ class MediaService:
                         provider=provider,
                         provider_download_id=provider_download_id,
                         provider_file_id=file.file_id,
-                        provider_file_path=file.file_name,
+                        provider_file_path=file_path_key,
                         size_bytes=file.file_size_bytes,
                         refresh_state="stale",
                     )
@@ -3674,7 +3675,7 @@ class MediaService:
                     existing.provider = provider
                     existing.provider_download_id = provider_download_id
                     existing.provider_file_id = file.file_id
-                    existing.provider_file_path = file.file_name
+                    existing.provider_file_path = file_path_key
                     existing.size_bytes = file.file_size_bytes
                     existing.refresh_state = "stale"
                     existing.last_refresh_error = None

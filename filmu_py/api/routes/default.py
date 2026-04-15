@@ -43,6 +43,7 @@ from ..models import (
     CalendarItemResponse,
     CalendarReleaseDataResponse,
     CalendarResponse,
+    ControlPlaneSummaryResponse,
     ControlPlaneSubscriberResponse,
     EnterpriseOperationsGovernanceResponse,
     EnterpriseOperationsSliceResponse,
@@ -62,6 +63,7 @@ from ..models import (
     PluginGovernanceSummaryResponse,
     PluginStreamControlRequest,
     PluginStreamControlResponse,
+    PlaybackGateEvidenceResponse,
     QueueAlertResponse,
     QueueStatusHistoryFiltersResponse,
     QueueStatusHistoryPointResponse,
@@ -73,8 +75,15 @@ from ..models import (
     StatsMediaYearRelease,
     StatsResponse,
     TenantQuotaPolicyResponse,
+    VfsRolloutControlRequest,
+    VfsRolloutControlResponse,
 )
-from .runtime_governance import playback_gate_governance_snapshot, vfs_runtime_governance_snapshot
+from .runtime_governance import (
+    managed_windows_vfs_state_snapshot,
+    persist_managed_windows_vfs_state,
+    playback_gate_governance_snapshot,
+    vfs_runtime_governance_snapshot,
+)
 
 router = APIRouter(tags=["default"])
 _MAX_API_KEY_ID_LENGTH = 128
@@ -342,6 +351,91 @@ def _has_unresolved_fence(record: Any) -> bool:
     if last_heartbeat_at is None or updated_at is None:
         return False
     return bool(last_heartbeat_at <= updated_at)
+
+
+def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
+    """Return a dedicated playback-gate artifact and readiness summary."""
+
+    governance = playback_gate_governance_snapshot()
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+
+    if cast(int, governance["playback_gate_runner_ready"]) == 0:
+        required_actions.append("record_playback_gate_runner_readiness")
+        remaining_gaps.append(
+            "playback-gate runner readiness is not yet recorded as ready for the current environment"
+        )
+    if cast(str, governance["playback_gate_policy_validation_status"]) != "ready":
+        required_actions.append("record_github_main_policy_validation")
+        remaining_gaps.append(
+            "live GitHub protected-branch policy is not yet recorded as ready from an admin-authenticated host"
+        )
+    if cast(int, governance["playback_gate_windows_provider_movie_ready"]) == 0:
+        required_actions.append("rerun_native_windows_provider_proof_movie")
+        remaining_gaps.append(
+            "native Windows provider proof coverage is incomplete for movie across Emby/Plex"
+        )
+    if cast(int, governance["playback_gate_windows_provider_tv_ready"]) == 0:
+        required_actions.append("rerun_native_windows_provider_proof_tv")
+        remaining_gaps.append(
+            "native Windows provider proof coverage is incomplete for tv across Emby/Plex"
+        )
+    if cast(int, governance["playback_gate_windows_soak_ready"]) == 0:
+        required_actions.append("run_windows_vfs_soak_enterprise_profiles")
+        remaining_gaps.append(
+            "Windows soak evidence is not yet green across the full enterprise profile set"
+        )
+
+    return PlaybackGateEvidenceResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        rollout_readiness=cast(str, governance["playback_gate_rollout_readiness"]),
+        next_action=cast(str, governance["playback_gate_rollout_next_action"]),
+        reasons=list(cast(list[str], governance["playback_gate_rollout_reasons"])),
+        runner_status=cast(str, governance["playback_gate_runner_status"]),
+        runner_ready=bool(cast(int, governance["playback_gate_runner_ready"])),
+        policy_validation_status=cast(str, governance["playback_gate_policy_validation_status"]),
+        policy_ready=bool(cast(int, governance["playback_gate_policy_ready"])),
+        provider_gate_required=bool(cast(int, governance["playback_gate_provider_gate_required"])),
+        provider_gate_ran=bool(cast(int, governance["playback_gate_provider_gate_ran"])),
+        windows_provider_ready=bool(cast(int, governance["playback_gate_windows_provider_ready"])),
+        windows_provider_coverage=list(
+            cast(list[str], governance["playback_gate_windows_provider_coverage"])
+        ),
+        windows_soak_ready=bool(cast(int, governance["playback_gate_windows_soak_ready"])),
+        windows_soak_profiles=list(
+            cast(list[str], governance["playback_gate_windows_soak_profile_coverage"])
+        ),
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
+    """Return the persisted rollout-control state plus the derived VFS canary posture."""
+
+    playback_gate_governance = playback_gate_governance_snapshot()
+    runtime_governance = vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate_governance,
+    )
+    state = managed_windows_vfs_state_snapshot()
+    environment_class = (
+        str(state.get("environment_class") or "").strip()
+        or cast(str, runtime_governance["vfs_runtime_rollout_environment_class"])
+    )
+    runtime_status_path = state.get("runtime_status_path")
+    return VfsRolloutControlResponse(
+        generated_at=datetime.now(UTC).isoformat(),
+        environment_class=environment_class,
+        runtime_status_path=runtime_status_path if isinstance(runtime_status_path, str) else None,
+        promotion_paused=bool(state.get("promotion_paused")),
+        rollback_requested=bool(state.get("rollback_requested")),
+        notes=(state.get("notes") if isinstance(state.get("notes"), str) else None),
+        rollout_readiness=cast(str, runtime_governance["vfs_runtime_rollout_readiness"]),
+        next_action=cast(str, runtime_governance["vfs_runtime_rollout_next_action"]),
+        canary_decision=cast(str, runtime_governance["vfs_runtime_rollout_canary_decision"]),
+        merge_gate=cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"]),
+        reasons=list(cast(list[str], runtime_governance["vfs_runtime_rollout_reasons"])),
+    )
 
 
 def _next_api_key_id(auth_context: Any) -> str:
@@ -2753,6 +2847,62 @@ async def get_enterprise_operations_governance(
 
 
 @router.get(
+    "/operations/playback-gate/evidence",
+    operation_id="default.playback_gate_evidence",
+    response_model=PlaybackGateEvidenceResponse,
+)
+async def get_playback_gate_evidence() -> PlaybackGateEvidenceResponse:
+    """Return a dedicated playback-gate artifact/evidence readiness summary."""
+
+    return _playback_gate_evidence_response()
+
+
+@router.get(
+    "/operations/vfs-rollout/control",
+    operation_id="default.vfs_rollout_control",
+    response_model=VfsRolloutControlResponse,
+)
+async def get_vfs_rollout_control() -> VfsRolloutControlResponse:
+    """Return persisted VFS rollout-control state plus the live canary decision."""
+
+    return _vfs_rollout_control_response()
+
+
+@router.post(
+    "/operations/vfs-rollout/control",
+    operation_id="default.write_vfs_rollout_control",
+    response_model=VfsRolloutControlResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def write_vfs_rollout_control(
+    request: Request,
+    payload: VfsRolloutControlRequest,
+) -> VfsRolloutControlResponse:
+    """Persist VFS rollout-control state used by operator-managed canary promotion."""
+
+    updates: dict[str, object | None] = {
+        "environment_class": payload.environment_class,
+        "runtime_status_path": payload.runtime_status_path,
+        "promotion_paused": payload.promotion_paused,
+        "rollback_requested": payload.rollback_requested,
+        "notes": payload.notes,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    persist_managed_windows_vfs_state(updates)
+    audit_action(
+        request,
+        action="operations.vfs_rollout.write_control",
+        target="operations.vfs_rollout",
+        details={
+            "promotion_paused": payload.promotion_paused,
+            "rollback_requested": payload.rollback_requested,
+            "environment_class": payload.environment_class,
+        },
+    )
+    return _vfs_rollout_control_response()
+
+
+@router.get(
     "/operations/control-plane/subscribers",
     operation_id="default.control_plane_subscribers",
     response_model=list[ControlPlaneSubscriberResponse],
@@ -2817,6 +2967,55 @@ async def get_plugin_events(request: Request) -> list[PluginEventStatusResponse]
         )
         for plugin_name in sorted(plugin_registry.all_plugin_names())
     ]
+
+
+@router.get(
+    "/operations/control-plane/summary",
+    operation_id="default.control_plane_summary",
+    response_model=ControlPlaneSummaryResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def get_control_plane_summary(
+    request: Request,
+    active_within_seconds: Annotated[int, Query(ge=1, le=3600)] = 120,
+) -> ControlPlaneSummaryResponse:
+    """Return a bounded control-plane health rollup across durable subscribers."""
+
+    service = request.app.state.resources.control_plane_service
+    if service is None:
+        return ControlPlaneSummaryResponse(
+            total_subscribers=0,
+            active_subscribers=0,
+            stale_subscribers=0,
+            error_subscribers=0,
+            fenced_subscribers=0,
+            ack_pending_subscribers=0,
+            stream_count=0,
+            group_count=0,
+            node_count=0,
+            tenant_count=0,
+            oldest_heartbeat_age_seconds=None,
+            status_counts={},
+            required_actions=["attach_control_plane_service"],
+            remaining_gaps=["durable replay/control-plane ownership is not configured"],
+        )
+    summary = await service.summarize_subscribers(active_within_seconds=active_within_seconds)
+    return ControlPlaneSummaryResponse(
+        total_subscribers=summary.total_subscribers,
+        active_subscribers=summary.active_subscribers,
+        stale_subscribers=summary.stale_subscribers,
+        error_subscribers=summary.error_subscribers,
+        fenced_subscribers=summary.fenced_subscribers,
+        ack_pending_subscribers=summary.ack_pending_subscribers,
+        stream_count=summary.stream_count,
+        group_count=summary.group_count,
+        node_count=summary.node_count,
+        tenant_count=summary.tenant_count,
+        oldest_heartbeat_age_seconds=summary.oldest_heartbeat_age_seconds,
+        status_counts=dict(summary.status_counts),
+        required_actions=list(summary.required_actions),
+        remaining_gaps=list(summary.remaining_gaps),
+    )
 
 
 @router.post(

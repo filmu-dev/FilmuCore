@@ -28,6 +28,7 @@ def _build_torrent_info(
     provider_torrent_id: str,
     file_name: str,
     file_id: str = "1",
+    file_path: str | None = None,
     download_url: str,
     file_size_bytes: int = 1024,
 ) -> TorrentInfo:
@@ -38,6 +39,7 @@ def _build_torrent_info(
             TorrentFile(
                 file_id=file_id,
                 file_name=file_name,
+                file_path=file_path or file_name,
                 file_size_bytes=file_size_bytes,
                 selected=True,
                 download_url=download_url,
@@ -183,4 +185,31 @@ def test_persist_debrid_download_entries_keeps_distinct_rows_for_distinct_files(
     }
     assert all(entry.unrestricted_url is None for entry in item.media_entries)
     assert all(entry.refresh_state == "stale" for entry in item.media_entries)
+
+
+def test_persist_debrid_download_entries_preserves_nested_provider_file_path() -> None:
+    item = _build_item(item_id="item-nested-path")
+    runtime = _DummyDatabaseRuntime(item=item)
+    service = _build_media_service(runtime)
+
+    torrent = _build_torrent_info(
+        provider_torrent_id="download-pack",
+        file_name="Episode 01.mkv",
+        file_path="Show/Season 01/Episode 01.mkv",
+        download_url="https://cdn.example.com/pack/episode-01",
+    )
+
+    persisted = asyncio.run(
+        service.persist_debrid_download_entries(
+            media_item_id=item.id,
+            provider="realdebrid",
+            provider_download_id="download-pack",
+            torrent_info=torrent,
+            download_urls=["https://cdn.example.com/pack/episode-01"],
+        )
+    )
+
+    assert len(persisted) == 1
+    assert persisted[0].provider_file_path == "Show/Season 01/Episode 01.mkv"
+    assert persisted[0].original_filename == "Episode 01.mkv"
 
