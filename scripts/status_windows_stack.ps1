@@ -172,6 +172,69 @@ function Test-GrpcReady {
     return $false
 }
 
+function Get-ContainerHealthStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ContainerName
+    )
+
+    try {
+        $status = (& docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' $ContainerName 2>$null | Select-Object -First 1).Trim()
+        if ([string]::IsNullOrWhiteSpace($status)) {
+            return $null
+        }
+
+        return $status
+    }
+    catch {
+        return $null
+    }
+}
+
+function Format-ByteCount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double] $Bytes
+    )
+
+    if ($Bytes -lt 1KB) {
+        return ('{0:N0} B' -f $Bytes)
+    }
+
+    if ($Bytes -lt 1MB) {
+        return ('{0:N1} KiB' -f ($Bytes / 1KB))
+    }
+
+    if ($Bytes -lt 1GB) {
+        return ('{0:N1} MiB' -f ($Bytes / 1MB))
+    }
+
+    return ('{0:N2} GiB' -f ($Bytes / 1GB))
+}
+
+function Get-DockerDesktopMemoryBytes {
+    try {
+        $raw = (& docker info --format '{{json .MemTotal}}' 2>$null | Select-Object -First 1).Trim()
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return $null
+        }
+
+        $parsed = 0L
+        if (-not [long]::TryParse($raw, [ref] $parsed)) {
+            return $null
+        }
+
+        if ($parsed -le 0) {
+            return $null
+        }
+
+        return $parsed
+    }
+    catch {
+        return $null
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $composeFile = Join-Path $repoRoot 'docker-compose.windows.yml'
 $stateDirectory = Join-Path $repoRoot 'playback-proof-artifacts\windows-native-stack'
@@ -228,17 +291,35 @@ if (($null -ne $runtimeStatusPath) -and (Test-Path -LiteralPath $runtimeStatusPa
 Write-Host '==> FilmuCore Windows-native stack status' -ForegroundColor Cyan
 Write-Host ''
 
+Write-Host '[Docker Desktop]' -ForegroundColor Yellow
+$dockerMemoryBytes = Get-DockerDesktopMemoryBytes
+$recommendedFullStackDockerMemoryBytes = 5000000000L
+if ($null -ne $dockerMemoryBytes) {
+    Write-Host ("  Memory:        {0}" -f (Format-ByteCount -Bytes $dockerMemoryBytes)) -ForegroundColor White
+    Write-Host ("  Full Stack:    {0}" -f $(if ($dockerMemoryBytes -ge $recommendedFullStackDockerMemoryBytes) { 'meets recommended floor' } else { 'below recommended 5 GB floor' })) -ForegroundColor White
+}
+else {
+    Write-Host '  Memory:        unavailable' -ForegroundColor Yellow
+}
+
+Write-Host ''
 Write-Host '[Docker Compose]' -ForegroundColor Yellow
 docker compose -f $composeFile ps postgres redis zilean-postgres zilean filmu-python arq-worker frontend prowlarr
 
 Write-Host ''
 Write-Host '[Backend API]' -ForegroundColor Yellow
-try {
-    $response = Invoke-WebRequest -Uri 'http://localhost:8000/openapi.json' -UseBasicParsing -TimeoutSec 3
-    Write-Host ('  [OK] HTTP ready ({0})' -f $response.StatusCode) -ForegroundColor Green
+$backendContainerStatus = Get-ContainerHealthStatus -ContainerName 'filmu-python'
+if ($backendContainerStatus -eq 'healthy' -or $backendContainerStatus -eq 'running') {
+    Write-Host ("  [OK] Container ready ({0})" -f $backendContainerStatus) -ForegroundColor Green
 }
-catch {
-    Write-Host '  [FAIL] HTTP not ready' -ForegroundColor Red
+else {
+    try {
+        $response = Invoke-WebRequest -Uri 'http://localhost:8000/openapi.json' -UseBasicParsing -TimeoutSec 3
+        Write-Host ('  [OK] Host HTTP ready ({0})' -f $response.StatusCode) -ForegroundColor Green
+    }
+    catch {
+        Write-Host '  [FAIL] Backend API not ready' -ForegroundColor Red
+    }
 }
 
 Write-Host ''
@@ -269,6 +350,9 @@ else {
     }
     if (-not [string]::IsNullOrWhiteSpace([string]$state.mount_status)) {
         Write-Host ("  Mount Status:  {0}" -f ([string]$state.mount_status)) -ForegroundColor White
+    }
+    if ($state.PSObject.Properties.Match('transport_mode').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$state.transport_mode)) {
+        Write-Host ("  Transport:     {0}" -f ([string]$state.transport_mode)) -ForegroundColor White
     }
     if ($null -ne $binaryCapabilities) {
         Write-Host ("  WinFSP Built:  {0}" -f ([bool]$binaryCapabilities.windows_winfsp_compiled)) -ForegroundColor White

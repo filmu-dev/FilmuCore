@@ -59,6 +59,7 @@ from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.media import StatsProjection, StatsYearReleaseRecord
 from filmu_py.workers import retry as retry_helpers
+from filmu_py.workers import stage_observability as worker_stage_observability
 from filmu_py.workers import tasks as worker_tasks
 
 
@@ -242,6 +243,41 @@ def _build_settings() -> Settings:
         FILMU_PY_REDIS_URL=AnyUrl("redis://localhost:6379/0"),
         FILMU_PY_RUN_MIGRATIONS_ON_STARTUP=False,
         FILMU_PY_LOG_LEVEL="INFO",
+        FILMU_PY_OTEL_ENABLED=False,
+        FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT=None,
+        FILMU_PY_OIDC={
+            "enabled": False,
+            "rollout_stage": "disabled",
+            "rollout_evidence_refs": [],
+            "subject_mapping_ready": False,
+            "issuer": None,
+            "audience": None,
+            "jwks_url": None,
+            "jwks_json": None,
+            "allowed_algorithms": ["RS256", "ES256"],
+            "allow_api_key_fallback": True,
+        },
+        FILMU_PY_LOG_SHIPPER={
+            "enabled": False,
+            "type": "external_ndjson_tail",
+            "target": None,
+            "healthcheck_url": None,
+            "field_mapping_version": "filmu-ecs-v1",
+        },
+        FILMU_PY_OBSERVABILITY={
+            "environment_shipping_enabled": False,
+            "search_backend": "none",
+            "alerting_enabled": False,
+            "rust_trace_correlation_enabled": False,
+            "proof_refs": [],
+        },
+        FILMU_PY_PLUGIN_RUNTIME={
+            "enforcement_mode": "report_only",
+            "health_rollup_enabled": True,
+            "require_strict_signatures": False,
+            "require_source_digest": False,
+            "proof_refs": [],
+        },
         FILMU_PY_PROMETHEUS_ENABLED=True,
     )
 
@@ -984,3 +1020,59 @@ def test_worker_queue_metrics_track_status_cleanup_and_enqueue_decisions(monkeyp
         worker_tasks.WORKER_ENQUEUE_DEFER_SECONDS,
         stage="scrape_item",
     ) == defer_before + 1.0
+
+
+def test_worker_blocker_snapshot_tracks_rank_and_debrid_pressure() -> None:
+    rank_counter_before = _counter_value(
+        worker_stage_observability.WORKER_BLOCKER_EVENTS_TOTAL,
+        stage="rank_streams",
+        blocker="no_winner",
+        reason="no_candidates_passing_fetch",
+    )
+    debrid_counter_before = _counter_value(
+        worker_stage_observability.WORKER_BLOCKER_EVENTS_TOTAL,
+        stage="debrid_item",
+        blocker="rate_limited",
+        reason="retry_after_present",
+    )
+
+    worker_stage_observability.reset_worker_blocker_snapshot()
+    try:
+        worker_stage_observability.record_rank_no_winner(
+            failure_reason="no_candidates_passing_fetch"
+        )
+        worker_stage_observability.record_debrid_rate_limited(
+            provider="realdebrid",
+            retry_after_seconds=30.0,
+        )
+        snapshot = worker_stage_observability.worker_blocker_snapshot()
+
+        assert snapshot["rank_streams_no_winner_total"] == 1
+        assert snapshot["rank_streams_no_winner_last_reason"] == "no_candidates_passing_fetch"
+        assert snapshot["rank_streams_no_winner_reason_counts"] == {
+            "no_candidates_passing_fetch": 1
+        }
+        assert snapshot["debrid_rate_limited_total"] == 1
+        assert snapshot["debrid_rate_limited_last_provider"] == "realdebrid"
+        assert snapshot["debrid_rate_limited_provider_counts"] == {"realdebrid": 1}
+        assert snapshot["debrid_rate_limited_last_retry_after_seconds"] == 30.0
+        assert _counter_value(
+            worker_stage_observability.WORKER_BLOCKER_EVENTS_TOTAL,
+            stage="rank_streams",
+            blocker="no_winner",
+            reason="no_candidates_passing_fetch",
+        ) == rank_counter_before + 1.0
+        assert _counter_value(
+            worker_stage_observability.WORKER_BLOCKER_EVENTS_TOTAL,
+            stage="debrid_item",
+            blocker="rate_limited",
+            reason="retry_after_present",
+        ) == debrid_counter_before + 1.0
+    finally:
+        worker_stage_observability.reset_worker_blocker_snapshot()
+
+    reset_snapshot = worker_stage_observability.worker_blocker_snapshot()
+    assert reset_snapshot["rank_streams_no_winner_total"] == 0
+    assert reset_snapshot["rank_streams_no_winner_reason_counts"] == {}
+    assert reset_snapshot["debrid_rate_limited_total"] == 0
+    assert reset_snapshot["debrid_rate_limited_provider_counts"] == {}

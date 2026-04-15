@@ -85,6 +85,7 @@ def test_item_detail_record_includes_request_summary() -> None:
             media_type="show",
             requested_seasons=[1, 2],
             is_partial=True,
+            request_source="webhook:overseerr",
             requested_at=datetime(2026, 3, 20, 12, 0, tzinfo=UTC),
         )
     ]
@@ -95,6 +96,7 @@ def test_item_detail_record_includes_request_summary() -> None:
     assert detail.request.is_partial is True
     assert detail.request.requested_seasons == [1, 2]
     assert detail.request.requested_episodes is None
+    assert detail.request.request_source == "webhook:overseerr"
 
 
 def test_item_detail_record_has_null_request_without_request_row() -> None:

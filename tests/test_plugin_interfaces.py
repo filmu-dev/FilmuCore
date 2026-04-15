@@ -33,6 +33,10 @@ from filmu_py.plugins import (
     ScraperPlugin,
     ScraperResult,
     ScraperSearchInput,
+    StreamControlAction,
+    StreamControlInput,
+    StreamControlPlugin,
+    StreamControlResult,
     TestPluginContext,
     load_plugins,
 )
@@ -150,6 +154,31 @@ class ExampleContentService:
 """,
     )
     _write_plugin(
+        plugins_dir / "stream-control-plugin",
+        manifest={
+            "name": "stream-control-plugin",
+            "version": "1.0.0",
+            "api_version": "1",
+            "capabilities": ["stream_control"],
+            "entry_module": "plugin.py",
+            "stream_control": "ExampleStreamControl",
+        },
+        module_source="""from filmu_py.plugins import StreamControlResult
+
+class ExampleStreamControl:
+    async def initialize(self, ctx):
+        self.plugin_name = ctx.plugin_name
+
+    async def control(self, request):
+        return StreamControlResult(
+            action=request.action,
+            item_identifier=request.item_identifier,
+            accepted=True,
+            outcome="handled",
+        )
+""",
+    )
+    _write_plugin(
         plugins_dir / "notification-plugin",
         manifest={
             "name": "notification-plugin",
@@ -174,13 +203,14 @@ class ExampleContentService:
 
     report = load_plugins(plugins_dir, registry, context_provider=harness.provider())
 
-    assert len(report.loaded) == 5
+    assert len(report.loaded) == 6
     assert report.failed == []
     assert {item.plugin_name for item in report.loaded} == {
         "scraper-plugin",
         "downloader-plugin",
         "indexer-plugin",
         "content-plugin",
+        "stream-control-plugin",
         "notification-plugin",
     }
     assert [cast(Any, plugin).plugin_name for plugin in registry.get_scrapers()] == [
@@ -197,6 +227,9 @@ class ExampleContentService:
     ]
     assert [cast(Any, plugin).plugin_name for plugin in registry.get_notifications()] == [
         "notification-plugin"
+    ]
+    assert [cast(Any, plugin).plugin_name for plugin in registry.get_stream_controls()] == [
+        "stream-control-plugin"
     ]
 
 
@@ -467,11 +500,33 @@ def test_protocol_dataclasses_are_runtime_friendly() -> None:
         async def send(self, event: NotificationEvent) -> None:
             self.event = event
 
+    class LocalStreamControl:
+        async def initialize(self, ctx: object) -> None:
+            self.ctx = ctx
+
+        async def control(self, request: StreamControlInput) -> StreamControlResult:
+            return StreamControlResult(
+                action=request.action,
+                item_identifier=request.item_identifier,
+                accepted=True,
+                outcome="handled",
+            )
+
     assert isinstance(LocalScraper(), ScraperPlugin)
     assert isinstance(LocalDownloader(), DownloaderPlugin)
     assert isinstance(LocalIndexer(), IndexerPlugin)
     assert isinstance(LocalContentService(), ContentServicePlugin)
     notifier = LocalNotification()
     assert isinstance(notifier, NotificationPlugin)
+    assert isinstance(LocalStreamControl(), StreamControlPlugin)
     asyncio.run(notifier.send(event))
     assert notifier.event == event
+    stream_result = asyncio.run(
+        LocalStreamControl().control(
+            StreamControlInput(
+                action=StreamControlAction.SERVING_STATUS_SNAPSHOT,
+                item_identifier=None,
+            )
+        )
+    )
+    assert stream_result.outcome == "handled"

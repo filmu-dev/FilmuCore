@@ -7,7 +7,7 @@ use tracing::info;
 use crate::{
     catalog::state::CatalogStateStore,
     config::SidecarConfig,
-    mount::{GrpcCatalogEntryRefreshClient, MountRuntime, Session},
+    mount::{build_catalog_entry_refresh_client, MountRuntime, Session},
     upstream::UpstreamReader,
 };
 
@@ -27,12 +27,7 @@ impl SidecarRuntime {
             &config,
             upstream_reader,
         )?);
-        mount_runtime.set_refresh_client(Arc::new(GrpcCatalogEntryRefreshClient::new(
-            config.grpc_endpoint.clone(),
-            config.connect_timeout,
-            config.rpc_timeout,
-            config.heartbeat_interval,
-        )));
+        mount_runtime.set_refresh_client(build_catalog_entry_refresh_client(&config));
         Ok(Self {
             config,
             mount_runtime,

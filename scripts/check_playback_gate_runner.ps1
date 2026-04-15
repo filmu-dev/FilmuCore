@@ -1,7 +1,8 @@
 param(
     [switch] $RequireProviderGate,
     [switch] $AsJson,
-    [switch] $NoExitOnFailure
+    [switch] $NoExitOnFailure,
+    [string] $OutputPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -136,6 +137,40 @@ $result = [pscustomobject]@{
     browser_executable_path = $browserPath
     status = $status
     checks = $checks
+}
+
+if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    $directory = Split-Path -Parent $OutputPath
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+    $serialized = $result | ConvertTo-Json -Depth 6
+    $tempOutputPath = "{0}.{1}.{2}.tmp" -f $OutputPath, $PID, ([guid]::NewGuid().ToString('N'))
+    try {
+        $serialized | Set-Content -Path $tempOutputPath -Encoding UTF8
+        $writeSucceeded = $false
+        for ($attempt = 0; $attempt -lt 5; $attempt++) {
+            try {
+                Move-Item -LiteralPath $tempOutputPath -Destination $OutputPath -Force
+                $writeSucceeded = $true
+                break
+            }
+            catch {
+                if ($attempt -eq 4) {
+                    throw
+                }
+                Start-Sleep -Milliseconds (100 * ($attempt + 1))
+            }
+        }
+        if (-not $writeSucceeded) {
+            throw ("Failed to persist playback gate runner readiness artifact: {0}" -f $OutputPath)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempOutputPath) {
+            Remove-Item -LiteralPath $tempOutputPath -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 if ($AsJson) {

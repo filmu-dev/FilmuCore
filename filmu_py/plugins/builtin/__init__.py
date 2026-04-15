@@ -5,6 +5,7 @@ from .notifications import NOTIFICATIONS_PLUGIN_NAME, WebhookNotificationPlugin
 from .prowlarr import PROWLARR_PLUGIN_NAME, ProwlarrScraper
 from .rarbg import RARBG_PLUGIN_NAME, RarbgScraper
 from .stremthru import STREMTHRU_PLUGIN_NAME, StremThruDownloader
+from .stream_control import STREAM_CONTROL_PLUGIN_NAME, HostStreamControlPlugin
 from .torrentio import TORRENTIO_PLUGIN_NAME, TorrentioScraper, build_example_manifest
 
 __all__ = [
@@ -13,11 +14,13 @@ __all__ = [
     "PROWLARR_PLUGIN_NAME",
     "RARBG_PLUGIN_NAME",
     "STREMTHRU_PLUGIN_NAME",
+    "STREAM_CONTROL_PLUGIN_NAME",
     "TORRENTIO_PLUGIN_NAME",
     "MDBListContentService",
     "ProwlarrScraper",
     "RarbgScraper",
     "StremThruDownloader",
+    "HostStreamControlPlugin",
     "TorrentioScraper",
     "WebhookNotificationPlugin",
     "build_example_manifest",

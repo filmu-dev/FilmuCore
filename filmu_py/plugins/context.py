@@ -6,10 +6,13 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from filmu_py.plugins.interfaces import PluginDatasource
 from filmu_py.plugins.settings import PluginSettingsRegistry
+
+if TYPE_CHECKING:
+    from filmu_py.plugins.interfaces import StreamControlInput, StreamControlResult
 
 
 class PluginRateLimitDecision(Protocol):
@@ -70,6 +73,12 @@ class PluginLogger(Protocol):
     def exception(self, message: object, *args: object, **kwargs: Any) -> None: ...
 
 
+class PluginStreamControlGateway(Protocol):
+    """Host-controlled stream/status gateway exposed to authorized plugins."""
+
+    async def control(self, request: StreamControlInput) -> StreamControlResult: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PluginContext:
     """Scoped runtime context injected into one plugin implementation."""
@@ -90,6 +99,7 @@ class HostPluginDatasource:
 
     session_factory: Callable[[], Any] | None = None
     http_client_factory: Callable[[], Any] | None = None
+    stream_control: PluginStreamControlGateway | None = None
 
     async def initialize(self, ctx: PluginContext) -> None:
         _ = ctx

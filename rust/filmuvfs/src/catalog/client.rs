@@ -2,10 +2,22 @@ use std::{cmp, sync::Arc};
 
 use anyhow::{Context, Result};
 use async_stream::stream;
+#[cfg(not(target_os = "windows"))]
+use bytes::Bytes;
+#[cfg(not(target_os = "windows"))]
+use http_body_util::{BodyExt, Full};
+#[cfg(not(target_os = "windows"))]
+use hyper::{header::CONTENT_TYPE, Request as HttpRequest, StatusCode, Uri};
+#[cfg(not(target_os = "windows"))]
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+#[cfg(not(target_os = "windows"))]
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use moka::sync::Cache;
+use prost::Message;
 use tokio::{
+    process::Command,
     sync::{mpsc, oneshot},
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Endpoint, Request};
@@ -25,6 +37,10 @@ use crate::{
     },
 };
 
+const HTTP_POLL_FALLBACK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(not(target_os = "windows"))]
+const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
+
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogWatchError {
     #[error("received a WatchCatalog event with no payload")]
@@ -33,6 +49,142 @@ pub enum CatalogWatchError {
     State(#[from] CatalogStateError),
     #[error("remote catalog problem {code}: {message}")]
     RemoteProblem { code: String, message: String },
+}
+
+#[derive(Clone)]
+struct CatalogHttpFallbackClient {
+    api_key: String,
+    rpc_timeout: std::time::Duration,
+    #[cfg(target_os = "windows")]
+    container_name: String,
+    #[cfg(not(target_os = "windows"))]
+    endpoint: String,
+    #[cfg(not(target_os = "windows"))]
+    client: Client<HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, Full<Bytes>>,
+}
+
+impl CatalogHttpFallbackClient {
+    fn new(_endpoint: String, api_key: String, rpc_timeout: std::time::Duration) -> Self {
+        #[cfg(not(target_os = "windows"))]
+        let connector = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build();
+        #[cfg(not(target_os = "windows"))]
+        let client = Client::builder(TokioExecutor::new()).build(connector);
+        Self {
+            api_key,
+            rpc_timeout,
+            #[cfg(target_os = "windows")]
+            container_name: std::env::var("FILMUVFS_WINDOWS_BACKEND_CONTAINER")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "filmu-python".to_owned()),
+            #[cfg(not(target_os = "windows"))]
+            endpoint: _endpoint,
+            #[cfg(not(target_os = "windows"))]
+            client,
+        }
+    }
+
+    async fn fetch_event(
+        &self,
+        last_applied_generation_id: Option<&str>,
+    ) -> Result<WatchCatalogEvent> {
+        #[cfg(target_os = "windows")]
+        {
+            return self
+                .fetch_event_via_docker_exec(last_applied_generation_id)
+                .await;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut url = format!(
+                "{}/internal/vfs/watch-event.pb",
+                self.endpoint.trim_end_matches('/')
+            );
+            if let Some(generation_id) = last_applied_generation_id {
+                let normalized = generation_id.trim();
+                if !normalized.is_empty() && normalized.chars().all(|ch| ch.is_ascii_digit()) {
+                    url.push_str("?last_applied_generation_id=");
+                    url.push_str(normalized);
+                }
+            }
+
+            let uri = url
+                .parse::<Uri>()
+                .context("failed to parse catalog HTTP fallback endpoint")?;
+            let request = HttpRequest::builder()
+                .method("GET")
+                .uri(uri)
+                .header("x-filmu-vfs-key", self.api_key.as_str())
+                .header(CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)
+                .body(Full::new(Bytes::new()))
+                .context("failed to build catalog HTTP fallback request")?;
+            let response = timeout(self.rpc_timeout, self.client.request(request))
+                .await
+                .context("catalog HTTP fallback request timed out")?
+                .context("catalog HTTP fallback request failed")?;
+            let status = response.status();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .context("failed to collect catalog HTTP fallback response body")?
+                .to_bytes();
+            if status != StatusCode::OK {
+                let detail = String::from_utf8_lossy(body.as_ref()).trim().to_owned();
+                anyhow::bail!("catalog HTTP fallback returned status {status}: {detail}");
+            }
+
+            WatchCatalogEvent::decode(body.as_ref())
+                .context("failed to decode catalog HTTP fallback protobuf payload")
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn fetch_event_via_docker_exec(
+        &self,
+        last_applied_generation_id: Option<&str>,
+    ) -> Result<WatchCatalogEvent> {
+        let mut command = Command::new("docker");
+        command
+            .arg("exec")
+            .arg(&self.container_name)
+            .arg("python")
+            .arg("-m")
+            .arg("filmu_py.tools.vfs_http_bridge")
+            .arg("--key")
+            .arg(&self.api_key)
+            .arg("--timeout-seconds")
+            .arg(self.rpc_timeout.as_secs().to_string())
+            .arg("watch-event");
+        if let Some(generation_id) = last_applied_generation_id {
+            let normalized = generation_id.trim();
+            if !normalized.is_empty() && normalized.chars().all(|ch| ch.is_ascii_digit()) {
+                command.arg("--last-applied-generation-id").arg(normalized);
+            }
+        }
+
+        let output = timeout(self.rpc_timeout, command.output())
+            .await
+            .context("catalog docker bridge watch-event timed out")?
+            .context("failed to execute catalog docker bridge watch-event command")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            anyhow::bail!(
+                "catalog docker bridge watch-event failed with status {}: {}",
+                output.status,
+                stderr
+            );
+        }
+
+        WatchCatalogEvent::decode(output.stdout.as_ref())
+            .context("failed to decode catalog docker bridge watch-event payload")
+    }
 }
 
 #[derive(Clone)]
@@ -77,6 +229,48 @@ impl CatalogWatchRuntime {
                 return Ok(());
             }
 
+            if self.config.windows_force_docker_bridge {
+                if let Some(http_fallback) = self.http_fallback_client() {
+                    info!(
+                        daemon_id = %self.config.daemon_id,
+                        session_id = %self.config.session_id,
+                        fallback_target = %format!("docker exec {}", http_fallback.container_name),
+                        "windows docker bridge transport forced; skipping direct gRPC WatchCatalog session"
+                    );
+                    match self
+                        .run_http_poll_fallback_until_cancelled(
+                            cancel.child_token(),
+                            &http_fallback,
+                            &mut initial_sync,
+                        )
+                        .await
+                    {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            if let Some(sender) = initial_sync.take() {
+                                let _ = sender.send(Err(error.to_string()));
+                            }
+                            warn!(
+                                daemon_id = %self.config.daemon_id,
+                                session_id = %self.config.session_id,
+                                error = %error,
+                                backoff_seconds = backoff.as_secs(),
+                                "windows docker bridge transport failed; retrying after backoff"
+                            );
+                            tokio::select! {
+                                _ = cancel.cancelled() => return Ok(()),
+                                _ = sleep(backoff) => {}
+                            }
+                            backoff = cmp::min(
+                                backoff.saturating_mul(2),
+                                self.config.reconnect_backoff_max,
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+
             match self
                 .run_session(cancel.child_token(), &mut initial_sync)
                 .await
@@ -85,7 +279,42 @@ impl CatalogWatchRuntime {
                     backoff = self.config.reconnect_backoff_initial;
                 }
                 Err(error) => {
-                    if let Some(sender) = initial_sync.take() {
+                    if let Some(http_fallback) = self.http_fallback_client() {
+                        #[cfg(target_os = "windows")]
+                        let fallback_target =
+                            format!("docker exec {}", http_fallback.container_name);
+                        #[cfg(not(target_os = "windows"))]
+                        let fallback_target = http_fallback.endpoint.clone();
+                        warn!(
+                            daemon_id = %self.config.daemon_id,
+                            session_id = %self.config.session_id,
+                            grpc_error = %error,
+                            fallback_target = %fallback_target,
+                            "catalog gRPC watch failed; switching to HTTP polling fallback"
+                        );
+                        match self
+                            .run_http_poll_fallback_until_cancelled(
+                                cancel.child_token(),
+                                &http_fallback,
+                                &mut initial_sync,
+                            )
+                            .await
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(http_error) => {
+                                if let Some(sender) = initial_sync.take() {
+                                    let _ = sender.send(Err(http_error.to_string()));
+                                }
+                                warn!(
+                                    daemon_id = %self.config.daemon_id,
+                                    session_id = %self.config.session_id,
+                                    error = %http_error,
+                                    backoff_seconds = backoff.as_secs(),
+                                    "catalog HTTP polling fallback failed; retrying after backoff"
+                                );
+                            }
+                        }
+                    } else if let Some(sender) = initial_sync.take() {
                         let _ = sender.send(Err(error.to_string()));
                     }
 
@@ -109,6 +338,19 @@ impl CatalogWatchRuntime {
         }
     }
 
+    fn http_fallback_client(&self) -> Option<CatalogHttpFallbackClient> {
+        if !cfg!(target_os = "windows") {
+            return None;
+        }
+        let endpoint = self.config.backend_http_base_url.clone()?;
+        let api_key = self.config.backend_api_key.clone()?;
+        Some(CatalogHttpFallbackClient::new(
+            endpoint,
+            api_key,
+            self.config.rpc_timeout,
+        ))
+    }
+
     async fn run_session(
         &self,
         cancel: CancellationToken,
@@ -117,7 +359,6 @@ impl CatalogWatchRuntime {
         let endpoint = Endpoint::from_shared(self.config.grpc_endpoint.clone())
             .context("failed to parse catalog gRPC endpoint")?
             .connect_timeout(self.config.connect_timeout)
-            .timeout(self.config.rpc_timeout)
             .tcp_nodelay(true)
             .tcp_keepalive(Some(self.config.heartbeat_interval))
             .http2_keep_alive_interval(self.config.heartbeat_interval)
@@ -194,6 +435,49 @@ impl CatalogWatchRuntime {
         heartbeat_task
             .await
             .context("heartbeat task join failed")??;
+        Ok(())
+    }
+
+    async fn run_http_poll_fallback_until_cancelled(
+        &self,
+        cancel: CancellationToken,
+        client: &CatalogHttpFallbackClient,
+        initial_sync: &mut Option<oneshot::Sender<std::result::Result<(), String>>>,
+    ) -> Result<()> {
+        loop {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+
+            let event = client
+                .fetch_event(self.state.generation_id().as_deref())
+                .await?;
+            self.handle_http_event(event, initial_sync).await?;
+
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = sleep(HTTP_POLL_FALLBACK_INTERVAL) => {}
+            }
+        }
+    }
+
+    async fn handle_http_event(
+        &self,
+        event: WatchCatalogEvent,
+        initial_sync: &mut Option<oneshot::Sender<std::result::Result<(), String>>>,
+    ) -> Result<()> {
+        if self.applied_events.contains_key(&event.event_id) {
+            return Ok(());
+        }
+
+        if let Err(error) = self.apply_event_payload(&event, initial_sync).await {
+            if let Some(sender) = initial_sync.take() {
+                let _ = sender.send(Err(error.to_string()));
+            }
+            return Err(error);
+        }
+
+        self.applied_events.insert(event.event_id.clone(), ());
         Ok(())
     }
 

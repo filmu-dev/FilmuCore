@@ -8,6 +8,7 @@ import httpx
 from filmu_py.plugins import (
     MDBLIST_PLUGIN_NAME,
     NOTIFICATIONS_PLUGIN_NAME,
+    STREAM_CONTROL_PLUGIN_NAME,
     STREMTHRU_PLUGIN_NAME,
     DownloadStatusInput,
     ExternalIdentifiers,
@@ -42,6 +43,7 @@ def test_register_builtin_plugins_registers_all_builtin_scrapers() -> None:
         RARBG_PLUGIN_NAME,
         MDBLIST_PLUGIN_NAME,
         STREMTHRU_PLUGIN_NAME,
+        STREAM_CONTROL_PLUGIN_NAME,
         NOTIFICATIONS_PLUGIN_NAME,
     )
     assert [plugin.__class__.__name__ for plugin in registry.get_scrapers()] == [
@@ -57,6 +59,9 @@ def test_register_builtin_plugins_registers_all_builtin_scrapers() -> None:
     ]
     assert [plugin.__class__.__name__ for plugin in registry.get_notifications()] == [
         "WebhookNotificationPlugin"
+    ]
+    assert [plugin.__class__.__name__ for plugin in registry.get_stream_controls()] == [
+        "HostStreamControlPlugin"
     ]
 
 

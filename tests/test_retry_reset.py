@@ -418,6 +418,29 @@ async def test_reset_item_enqueues_scrape_immediately() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_item_for_scrape_retry_blacklists_selected_stream() -> None:
+    service = _build_media_service(tmdb_client=FakeTmdbClient())
+    session = FakeAsyncSession(item=_build_item(state=ItemState.DOWNLOADED.value))
+
+    @asynccontextmanager
+    async def fake_session() -> AsyncGenerator[FakeAsyncSession, None]:
+        yield session
+
+    service._db.session = fake_session  # type: ignore[method-assign]
+
+    item = await service.prepare_item_for_scrape_retry(
+        "item-1",
+        message="debrid_item retry scheduled: debrid_poll_timeout",
+        blacklist_stream_ids=["stream-1", "stream-1"],
+    )
+
+    blacklisted = [obj for obj in session.added if isinstance(obj, StreamBlacklistRelationORM)]
+    assert item.state is ItemState.REQUESTED
+    assert len(blacklisted) == 1
+    assert blacklisted[0].stream_id == "stream-1"
+
+
+@pytest.mark.asyncio
 async def test_reset_item_enriches_imdb_when_missing() -> None:
     tmdb_client = FakeTmdbClient(imdb_id="tt0137523")
     service = _build_media_service(tmdb_client=tmdb_client)

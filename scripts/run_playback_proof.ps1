@@ -396,6 +396,80 @@ function Get-BackendJson {
     return Invoke-RestMethod -Method Get -Uri $Uri -Headers $script:BackendHeaders -TimeoutSec 15
 }
 
+function Get-JsonObjectFromString {
+    param([string] $Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    try {
+        return $Value | ConvertFrom-Json -Depth 12
+    }
+    catch {
+        throw ("[playback-proof] Invalid JSON configuration payload: {0}" -f $_.Exception.Message)
+    }
+}
+
+function ConvertTo-Base64Url {
+    param([byte[]] $Bytes)
+
+    $encoded = [Convert]::ToBase64String($Bytes)
+    return $encoded.TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function ConvertFrom-Base64Url {
+    param([string] $Value)
+
+    $normalized = $Value.Replace('-', '+').Replace('_', '/')
+    $padding = $normalized.Length % 4
+    if ($padding -ne 0) {
+        $normalized += ('=' * (4 - $padding))
+    }
+    return [Convert]::FromBase64String($normalized)
+}
+
+function New-Hs256Jwt {
+    param(
+        [string] $Issuer,
+        [string] $Audience,
+        [byte[]] $SymmetricKeyBytes,
+        [string] $Subject
+    )
+
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $headerJson = [ordered]@{
+        alg = 'HS256'
+        kid = 'local-playback-proof'
+        typ = 'JWT'
+    } | ConvertTo-Json -Compress
+    $payloadJson = [ordered]@{
+        iss = $Issuer
+        sub = $Subject
+        aud = $Audience
+        exp = $now + 3600
+        iat = $now
+        tenant_id = 'global'
+        actor_type = 'service'
+        authorized_tenants = @('global')
+        roles = @('platform:admin')
+        scope = 'library:write playback:operate settings:write security:policy.approve'
+    } | ConvertTo-Json -Compress -Depth 8
+
+    $headerSegment = ConvertTo-Base64Url -Bytes ([Text.Encoding]::UTF8.GetBytes($headerJson))
+    $payloadSegment = ConvertTo-Base64Url -Bytes ([Text.Encoding]::UTF8.GetBytes($payloadJson))
+    $signingInput = '{0}.{1}' -f $headerSegment, $payloadSegment
+    $hmac = [System.Security.Cryptography.HMACSHA256]::new($SymmetricKeyBytes)
+    try {
+        $signatureBytes = $hmac.ComputeHash([Text.Encoding]::ASCII.GetBytes($signingInput))
+    }
+    finally {
+        $hmac.Dispose()
+    }
+    $signatureSegment = ConvertTo-Base64Url -Bytes $signatureBytes
+    return '{0}.{1}' -f $signingInput, $signatureSegment
+}
+
 function Get-BackendHeaders {
     param(
         [Parameter(Mandatory = $true)]
@@ -406,7 +480,28 @@ function Get-BackendHeaders {
         [string] $ActorScopes = ''
     )
 
-    $headers = @{ 'x-api-key' = $ApiKey }
+    $headers = @{}
+    $oidcConfig = $null
+    if ($script:DotEnv.ContainsKey('FILMU_PY_OIDC')) {
+        $oidcConfig = Get-JsonObjectFromString -Value ([string] $script:DotEnv['FILMU_PY_OIDC'])
+    }
+    if ($null -ne $oidcConfig -and [bool] $oidcConfig.enabled -and -not [bool] $oidcConfig.allow_api_key_fallback) {
+        $octKey = @($oidcConfig.jwks_json.keys) | Where-Object {
+            $_.kty -eq 'oct' -and -not [string]::IsNullOrWhiteSpace([string] $_.k)
+        } | Select-Object -First 1
+        if ($null -eq $octKey) {
+            throw '[playback-proof] FILMU_PY_OIDC requires one oct JWKS key for local bearer-token proof traffic.'
+        }
+        $jwt = New-Hs256Jwt `
+            -Issuer ([string] $oidcConfig.issuer) `
+            -Audience ([string] $oidcConfig.audience) `
+            -SymmetricKeyBytes (ConvertFrom-Base64Url -Value ([string] $octKey.k)) `
+            -Subject 'ops://playback-proof'
+        $headers.authorization = "Bearer $jwt"
+    }
+    else {
+        $headers['x-api-key'] = $ApiKey
+    }
     if (-not [string]::IsNullOrWhiteSpace($ActorId)) {
         $headers['x-actor-id'] = $ActorId
     }
@@ -420,6 +515,17 @@ function Get-BackendHeaders {
         $headers['x-actor-scopes'] = $ActorScopes
     }
     return $headers
+}
+
+function Convert-HeadersToCurlArgs {
+    param([hashtable] $Headers)
+
+    $args = @()
+    foreach ($entry in $Headers.GetEnumerator() | Sort-Object Key) {
+        $args += '-H'
+        $args += ("{0}: {1}" -f $entry.Key, $entry.Value)
+    }
+    return $args
 }
 
 function Post-BackendJson {
@@ -2124,20 +2230,20 @@ function Invoke-DirectPlaybackRouteRangeRead {
     if (Test-Path $headersPath) { Remove-Item $headersPath -Force }
     if (Test-Path $bodyPath) { Remove-Item $bodyPath -Force }
 
+    $requestHeaders = Get-BackendHeaders `
+        -ApiKey $ApiKey `
+        -ActorId $BackendActorId `
+        -ActorType $BackendActorType `
+        -ActorRoles $BackendActorRoles `
+        -ActorScopes $BackendActorScopes
     $curlArgs = @(
         '-sS',
-        '-D', $headersPath,
-        '-H', ("x-api-key: {0}" -f $ApiKey),
-        '-H', ("x-actor-id: {0}" -f $BackendActorId),
-        '-H', ("x-actor-type: {0}" -f $BackendActorType),
-        '-H', ("x-actor-roles: {0}" -f $BackendActorRoles),
+        '-D', $headersPath
+    ) + (Convert-HeadersToCurlArgs -Headers $requestHeaders) + @(
         '-H', ("Range: bytes=0-{0}" -f ($Bytes - 1)),
         $url,
         '-o', $bodyPath
     )
-    if (-not [string]::IsNullOrWhiteSpace($BackendActorScopes)) {
-        $curlArgs = @($curlArgs[0..5] + @('-H', ("x-actor-scopes: {0}" -f $BackendActorScopes)) + $curlArgs[6..($curlArgs.Count - 1)])
-    }
 
     & curl.exe @curlArgs
     if ($LASTEXITCODE -ne 0) {

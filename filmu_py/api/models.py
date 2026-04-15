@@ -231,6 +231,36 @@ class PluginEventStatusResponse(BaseModel):
     hook_subscriptions: list[str]
 
 
+class PluginStreamControlRequest(BaseModel):
+    """Operator request payload for one controlled plugin stream action."""
+
+    plugin_name: str
+    action: Literal[
+        "serving_status_snapshot",
+        "trigger_direct_playback_refresh",
+        "trigger_hls_failed_lease_refresh",
+        "trigger_hls_restricted_fallback_refresh",
+        "mark_selected_hls_media_entry_stale",
+    ]
+    item_identifier: str | None = None
+    prefer_queued: bool | None = None
+    metadata: dict[str, Any] = {}
+
+
+class PluginStreamControlResponse(BaseModel):
+    """Normalized stream-control execution result returned by plugin endpoints."""
+
+    plugin_name: str
+    action: str
+    item_identifier: str | None = None
+    accepted: bool
+    outcome: str
+    detail: str | None = None
+    controller_attached: bool | None = None
+    retry_after_seconds: float | None = None
+    metadata: dict[str, Any] = {}
+
+
 class PluginGovernanceSummaryResponse(BaseModel):
     """Derived plugin trust/isolation rollup for operator views."""
 
@@ -351,6 +381,7 @@ class EnterpriseOperationsGovernanceResponse(BaseModel):
 
     generated_at: str
     playback_gate: EnterpriseOperationsSliceResponse
+    operational_evidence: EnterpriseOperationsSliceResponse
     identity_authz: EnterpriseOperationsSliceResponse
     tenant_boundary: EnterpriseOperationsSliceResponse
     vfs_data_plane: EnterpriseOperationsSliceResponse
@@ -1119,6 +1150,7 @@ class ItemRequestSummaryResponse(BaseModel):
     is_partial: bool
     requested_seasons: list[int] | None = None
     requested_episodes: dict[str, list[int]] | None = None
+    request_source: str = "api"
 
 
 class SubtitleEntryResponse(BaseModel):

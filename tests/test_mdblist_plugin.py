@@ -143,6 +143,7 @@ class _MediaServiceStub:
         tvdb_ids: list[str] | None = None,
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
+        request_source: str = "api",
     ) -> object:
         self.calls.append(
             {
@@ -152,6 +153,7 @@ class _MediaServiceStub:
                 "tvdb_ids": tvdb_ids,
                 "requested_seasons": requested_seasons,
                 "requested_episodes": requested_episodes,
+                "request_source": request_source,
             }
         )
         return object()
@@ -160,7 +162,12 @@ class _MediaServiceStub:
 def test_poll_content_services_worker_fans_out_requests() -> None:
     plugin = _PluginStub(
         requests=[
-            ContentRequest(external_ref="tmdb:123", media_type="movie", source="mdblist"),
+            ContentRequest(
+                external_ref="tmdb:123",
+                media_type="movie",
+                source="mdblist",
+                source_list_id="list-a",
+            ),
             ContentRequest(external_ref="tmdb:456", media_type="tv", source="mdblist"),
         ]
     )
@@ -180,6 +187,7 @@ def test_poll_content_services_worker_fans_out_requests() -> None:
             "tvdb_ids": None,
             "requested_seasons": None,
             "requested_episodes": None,
+            "request_source": "mdblist:list-a",
         },
         {
             "media_type": "tv",
@@ -188,5 +196,6 @@ def test_poll_content_services_worker_fans_out_requests() -> None:
             "tvdb_ids": None,
             "requested_seasons": None,
             "requested_episodes": None,
+            "request_source": "mdblist",
         },
     ]

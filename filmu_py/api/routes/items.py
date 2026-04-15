@@ -236,6 +236,7 @@ def _to_item_request_summary(request: ItemRequestSummaryRecord) -> ItemRequestSu
                 for season, episodes in request.requested_episodes.items()
             }
         ),
+        request_source=request.request_source,
     )
 
 

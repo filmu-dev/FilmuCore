@@ -14,8 +14,19 @@ use bytes::Bytes;
 use dashmap::DashMap;
 #[cfg(target_os = "linux")]
 use fuse3 as _;
+#[cfg(not(target_os = "windows"))]
+use http_body_util::{BodyExt, Full};
+#[cfg(not(target_os = "windows"))]
+use hyper::{header::CONTENT_TYPE, Request as HttpRequest, StatusCode, Uri};
+#[cfg(not(target_os = "windows"))]
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+#[cfg(not(target_os = "windows"))]
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use prost::Message;
 use thiserror::Error;
+use tokio::process::Command;
 use tokio::sync::Notify;
+use tokio::time::timeout;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -47,7 +58,7 @@ use crate::{
         catalog_entry::Details as CatalogEntryDetails,
         filmu::vfs::catalog::v1::{
             filmu_vfs_catalog_service_client::FilmuVfsCatalogServiceClient,
-            RefreshCatalogEntryRequest,
+            RefreshCatalogEntryRequest, RefreshCatalogEntryResponse,
         },
         CatalogEntry, CatalogEntryKind, CatalogFileTransport, FileEntry,
     },
@@ -65,6 +76,8 @@ pub const ROOT_PATH: &str = "/";
 const ATTRIBUTE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
 const INLINE_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(target_os = "windows"))]
+const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
 #[derive(Debug, Error)]
 pub enum MountRuntimeError {
@@ -256,6 +269,43 @@ pub struct GrpcCatalogEntryRefreshClient {
     heartbeat_interval: Duration,
 }
 
+#[derive(Debug, Clone)]
+pub struct HttpCatalogEntryRefreshClient {
+    #[cfg(not(target_os = "windows"))]
+    endpoint: String,
+    api_key: String,
+    rpc_timeout: Duration,
+    container_name: String,
+    #[cfg(not(target_os = "windows"))]
+    client: Client<HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, Full<Bytes>>,
+}
+
+impl HttpCatalogEntryRefreshClient {
+    pub fn new(_endpoint: String, api_key: String, rpc_timeout: Duration) -> Self {
+        #[cfg(not(target_os = "windows"))]
+        let connector = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build();
+        #[cfg(not(target_os = "windows"))]
+        let client = Client::builder(TokioExecutor::new()).build(connector);
+        Self {
+            #[cfg(not(target_os = "windows"))]
+            endpoint: _endpoint,
+            api_key,
+            rpc_timeout,
+            container_name: std::env::var("FILMUVFS_WINDOWS_BACKEND_CONTAINER")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "filmu-python".to_owned()),
+            #[cfg(not(target_os = "windows"))]
+            client,
+        }
+    }
+}
+
 impl GrpcCatalogEntryRefreshClient {
     pub fn new(
         endpoint: String,
@@ -314,6 +364,144 @@ impl CatalogEntryRefreshClient for GrpcCatalogEntryRefreshClient {
     }
 }
 
+#[tonic::async_trait]
+impl CatalogEntryRefreshClient for HttpCatalogEntryRefreshClient {
+    async fn refresh_catalog_entry(
+        &self,
+        provider_file_id: &str,
+        handle_key: &str,
+        entry_id: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        #[cfg(target_os = "windows")]
+        {
+            return self
+                .refresh_catalog_entry_via_docker_exec(provider_file_id, handle_key, entry_id)
+                .await;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let uri = format!(
+                "{}/internal/vfs/refresh-entry.pb",
+                self.endpoint.trim_end_matches('/')
+            )
+            .parse::<Uri>()
+            .map_err(|error| error.to_string())?;
+            let payload = RefreshCatalogEntryRequest {
+                provider_file_id: provider_file_id.to_owned(),
+                handle_key: handle_key.to_owned(),
+                entry_id: entry_id.to_owned(),
+            }
+            .encode_to_vec();
+            let request = HttpRequest::builder()
+                .method("POST")
+                .uri(uri)
+                .header("x-filmu-vfs-key", self.api_key.as_str())
+                .header(CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)
+                .body(Full::new(Bytes::from(payload)))
+                .map_err(|error| error.to_string())?;
+            let response = timeout(self.rpc_timeout, self.client.request(request))
+                .await
+                .map_err(|_| "catalog HTTP refresh request timed out".to_owned())?
+                .map_err(|error| error.to_string())?;
+            let status = response.status();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map_err(|error| error.to_string())?
+                .to_bytes();
+            if status != StatusCode::OK {
+                let detail = String::from_utf8_lossy(body.as_ref()).trim().to_owned();
+                return Err(format!(
+                    "catalog HTTP refresh request failed with status {status}: {detail}"
+                ));
+            }
+
+            let response = RefreshCatalogEntryResponse::decode(body.as_ref())
+                .map_err(|error| error.to_string())?;
+            if response.success && !response.new_url.trim().is_empty() {
+                Ok(Some(response.new_url))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl HttpCatalogEntryRefreshClient {
+    #[cfg(target_os = "windows")]
+    async fn refresh_catalog_entry_via_docker_exec(
+        &self,
+        provider_file_id: &str,
+        handle_key: &str,
+        entry_id: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        let mut command = Command::new("docker");
+        command
+            .arg("exec")
+            .arg(&self.container_name)
+            .arg("python")
+            .arg("-m")
+            .arg("filmu_py.tools.vfs_http_bridge")
+            .arg("--key")
+            .arg(&self.api_key)
+            .arg("--timeout-seconds")
+            .arg(self.rpc_timeout.as_secs().to_string())
+            .arg("refresh-entry")
+            .arg("--provider-file-id")
+            .arg(provider_file_id)
+            .arg("--handle-key")
+            .arg(handle_key)
+            .arg("--entry-id")
+            .arg(entry_id);
+
+        let output = timeout(self.rpc_timeout, command.output())
+            .await
+            .map_err(|_| "catalog docker bridge refresh-entry timed out".to_owned())?
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(format!(
+                "catalog docker bridge refresh-entry failed with status {}: {}",
+                output.status, stderr
+            ));
+        }
+
+        let response = RefreshCatalogEntryResponse::decode(output.stdout.as_ref())
+            .map_err(|error| error.to_string())?;
+        if response.success && !response.new_url.trim().is_empty() {
+            Ok(Some(response.new_url))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+pub fn build_catalog_entry_refresh_client(
+    config: &SidecarConfig,
+) -> Arc<dyn CatalogEntryRefreshClient> {
+    if cfg!(target_os = "windows") {
+        if let (Some(base_url), Some(api_key)) = (
+            config.backend_http_base_url.as_ref(),
+            config.backend_api_key.as_ref(),
+        ) {
+            return Arc::new(HttpCatalogEntryRefreshClient::new(
+                base_url.clone(),
+                api_key.clone(),
+                config.rpc_timeout,
+            ));
+        }
+    }
+
+    Arc::new(GrpcCatalogEntryRefreshClient::new(
+        config.grpc_endpoint.clone(),
+        config.connect_timeout,
+        config.rpc_timeout,
+        config.heartbeat_interval,
+    ))
+}
+
 #[derive(Clone)]
 pub struct MountRuntime {
     catalog_state: Arc<CatalogStateStore>,
@@ -333,6 +521,7 @@ pub struct MountRuntime {
     session_id: Arc<String>,
     backend_http_base_url: Option<Arc<String>>,
     backend_api_key: Option<Arc<String>>,
+    windows_force_docker_bridge: bool,
 }
 
 impl std::fmt::Debug for MountRuntime {
@@ -367,6 +556,7 @@ impl MountRuntime {
             chunk_engine,
             None,
             None,
+            false,
         )
     }
 
@@ -392,6 +582,7 @@ impl MountRuntime {
                 .backend_api_key
                 .as_ref()
                 .map(|value| Arc::new(value.clone())),
+            config.windows_force_docker_bridge,
         ))
     }
 
@@ -403,6 +594,7 @@ impl MountRuntime {
         chunk_engine: Arc<ChunkEngine>,
         backend_http_base_url: Option<Arc<String>>,
         backend_api_key: Option<Arc<String>>,
+        windows_force_docker_bridge: bool,
     ) -> Self {
         Self {
             catalog_state,
@@ -422,6 +614,7 @@ impl MountRuntime {
             session_id: Arc::new(session_id),
             backend_http_base_url,
             backend_api_key,
+            windows_force_docker_bridge,
         }
     }
 
@@ -1182,6 +1375,9 @@ impl MountRuntime {
         if !request.remote_direct || request.item_id.trim().is_empty() {
             return None;
         }
+        if cfg!(target_os = "windows") && self.windows_force_docker_bridge {
+            return None;
+        }
         let base_url = self.backend_http_base_url.as_ref()?;
         let api_key = self.backend_api_key.as_ref()?;
         Some(format!(
@@ -1893,12 +2089,7 @@ impl Session {
 
         async move {
             let cancel = CancellationToken::new();
-            mount_runtime.set_refresh_client(Arc::new(GrpcCatalogEntryRefreshClient::new(
-                config.grpc_endpoint.clone(),
-                config.connect_timeout,
-                config.rpc_timeout,
-                config.heartbeat_interval,
-            )));
+            mount_runtime.set_refresh_client(build_catalog_entry_refresh_client(&config));
             let watch_runtime = CatalogWatchRuntime::new(
                 config.clone(),
                 Arc::clone(&catalog_state),
@@ -1913,10 +2104,13 @@ impl Session {
                     .await
             });
 
-            let initial_sync = tokio::time::timeout(config.rpc_timeout, initial_sync_rx)
-                .await
-                .map_err(|_| anyhow::anyhow!("timed out waiting for initial catalog snapshot"))?
-                .map_err(|_| anyhow::anyhow!("catalog watch task ended before initial snapshot"))?;
+            let initial_sync =
+                tokio::time::timeout(config.initial_catalog_sync_timeout, initial_sync_rx)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("timed out waiting for initial catalog snapshot"))?
+                    .map_err(|_| {
+                        anyhow::anyhow!("catalog watch task ended before initial snapshot")
+                    })?;
 
             match initial_sync {
                 Ok(()) => {

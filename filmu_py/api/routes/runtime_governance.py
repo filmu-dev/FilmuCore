@@ -13,6 +13,9 @@ _MANAGED_WINDOWS_VFS_STATE_PATH = (
     _PLAYBACK_PROOF_ARTIFACTS_ROOT / "windows-native-stack" / "filmuvfs-windows-state.json"
 )
 _STREAM_REFRESH_LATENCY_SLO_MS = 250
+_REQUIRED_WINDOWS_PROVIDER_MEDIA_TYPES = ("movie", "tv")
+_REQUIRED_WINDOWS_PROVIDER_NAMES = ("emby", "plex")
+_REQUIRED_WINDOWS_SOAK_PROFILES = ("continuous", "seek", "concurrent", "full")
 
 def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str]]:
     """Return the default Rust runtime governance payload for /stream/status."""
@@ -385,6 +388,27 @@ def _candidate_github_main_policy_paths() -> list[Path]:
     return unique_paths
 
 
+def _candidate_playback_gate_runner_paths() -> list[Path]:
+    """Return candidate playback-gate runner readiness artifact paths."""
+
+    paths: list[Path] = []
+    env_path = os.getenv("FILMU_PY_PLAYBACK_GATE_RUNNER_READINESS_PATH")
+    if env_path and env_path.strip():
+        paths.append(Path(env_path.strip()))
+    for root in _candidate_playback_artifacts_roots():
+        paths.append(root / "playback-gate-runner-readiness.json")
+
+    unique_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        normalized = path.expanduser()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_paths.append(normalized)
+    return unique_paths
+
+
 def _load_json_file(path: Path) -> dict[str, object] | None:
     """Load one JSON file if it exists and contains an object payload."""
 
@@ -434,6 +458,101 @@ def _load_current_github_main_policy_artifact() -> dict[str, object] | None:
     return None
 
 
+def _load_playback_gate_runner_readiness_artifact() -> dict[str, object] | None:
+    """Load the newest available playback-gate runner readiness artifact, if present."""
+
+    for path in _candidate_playback_gate_runner_paths():
+        payload = _load_json_file(path)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _load_matching_json_artifacts(*, prefix: str, subdir: str | None = None) -> list[dict[str, object]]:
+    """Load all matching JSON artifacts newest-first across candidate roots."""
+
+    payloads: list[tuple[float, dict[str, object]]] = []
+    for root in _candidate_playback_artifacts_roots():
+        candidate_root = root / subdir if subdir is not None else root
+        try:
+            matches = list(candidate_root.glob(f"{prefix}*.json"))
+        except OSError:
+            continue
+        for path in matches:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            payload = _load_json_file(path)
+            if payload is not None:
+                payloads.append((stat.st_mtime, payload))
+    payloads.sort(key=lambda item: item[0], reverse=True)
+    return [payload for _, payload in payloads]
+
+
+def _windows_provider_media_gate_snapshot() -> dict[str, int | str | list[str]]:
+    """Return bounded native Windows media-server coverage across provider/media-type pairs."""
+
+    covered_pairs: set[tuple[str, str]] = set()
+    artifacts = _load_matching_json_artifacts(prefix="windows-media-server-gate-")
+    for payload in artifacts:
+        media_type = _as_str(payload.get("media_type")).strip().lower()
+        if media_type not in _REQUIRED_WINDOWS_PROVIDER_MEDIA_TYPES:
+            continue
+        results = payload.get("results")
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            provider = _as_str(result.get("provider")).strip().lower()
+            status = _as_str(result.get("status")).strip().lower()
+            if provider in _REQUIRED_WINDOWS_PROVIDER_NAMES and status == "passed":
+                covered_pairs.add((provider, media_type))
+
+    covered_labels = sorted(f"{provider}:{media_type}" for provider, media_type in covered_pairs)
+    movie_ready = all(
+        (provider, "movie") in covered_pairs for provider in _REQUIRED_WINDOWS_PROVIDER_NAMES
+    )
+    tv_ready = all((provider, "tv") in covered_pairs for provider in _REQUIRED_WINDOWS_PROVIDER_NAMES)
+    fully_ready = movie_ready and tv_ready
+    return {
+        "playback_gate_windows_provider_movie_ready": int(movie_ready),
+        "playback_gate_windows_provider_tv_ready": int(tv_ready),
+        "playback_gate_windows_provider_ready": int(fully_ready),
+        "playback_gate_windows_provider_coverage": covered_labels,
+    }
+
+
+def _windows_soak_profile_gate_snapshot(
+    windows_soak_summary: dict[str, object] | None,
+) -> dict[str, int | str | list[str]]:
+    """Return bounded native Windows soak-profile coverage posture."""
+
+    if windows_soak_summary is None:
+        return {
+            "playback_gate_windows_soak_ready": 0,
+            "playback_gate_windows_soak_repeat_count": 0,
+            "playback_gate_windows_soak_profile_coverage_complete": 0,
+            "playback_gate_windows_soak_profile_coverage": [],
+        }
+
+    raw_profiles = windows_soak_summary.get("profiles")
+    profiles = {
+        profile.strip().lower()
+        for profile in _as_str_list(raw_profiles)
+        if profile.strip().lower() in _REQUIRED_WINDOWS_SOAK_PROFILES
+    }
+    coverage_complete = all(profile in profiles for profile in _REQUIRED_WINDOWS_SOAK_PROFILES)
+    all_green = bool(windows_soak_summary.get("all_green"))
+    return {
+        "playback_gate_windows_soak_ready": int(all_green and coverage_complete),
+        "playback_gate_windows_soak_repeat_count": _as_int(windows_soak_summary.get("repeat_count")),
+        "playback_gate_windows_soak_profile_coverage_complete": int(coverage_complete),
+        "playback_gate_windows_soak_profile_coverage": sorted(profiles),
+    }
+
+
 def _load_playback_artifact_at_relative_path(relative_path: str) -> dict[str, object] | None:
     """Load one playback-proof artifact by relative path across candidate roots."""
 
@@ -453,12 +572,21 @@ def _empty_playback_gate_governance_snapshot() -> dict[str, int | str | list[str
         "playback_gate_environment_class": "",
         "playback_gate_repeat_count": 0,
         "playback_gate_gate_mode": "unknown",
+        "playback_gate_runner_status": "unknown",
+        "playback_gate_runner_ready": 0,
+        "playback_gate_runner_required_failures": 0,
         "playback_gate_provider_gate_required": 0,
         "playback_gate_provider_gate_ran": 0,
         "playback_gate_stability_ready": 0,
         "playback_gate_provider_parity_ready": 0,
         "playback_gate_windows_provider_ready": 0,
+        "playback_gate_windows_provider_movie_ready": 0,
+        "playback_gate_windows_provider_tv_ready": 0,
+        "playback_gate_windows_provider_coverage": [],
         "playback_gate_windows_soak_ready": 0,
+        "playback_gate_windows_soak_repeat_count": 0,
+        "playback_gate_windows_soak_profile_coverage_complete": 0,
+        "playback_gate_windows_soak_profile_coverage": [],
         "playback_gate_policy_validation_status": "unverified",
         "playback_gate_policy_ready": 0,
         "playback_gate_rollout_readiness": "not_ready",
@@ -480,6 +608,7 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
         subdir="windows-native-stack",
     )
     policy_summary = _load_current_github_main_policy_artifact()
+    runner_summary = _load_playback_gate_runner_readiness_artifact()
 
     if stability_summary is not None:
         governance["playback_gate_snapshot_available"] = 1
@@ -505,28 +634,31 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
             ci_summary.get("provider_gate_ran"),
         )
 
+    if runner_summary is not None:
+        runner_status = _as_str(runner_summary.get("status"), default="unknown")
+        checks = runner_summary.get("checks")
+        required_failures = 0
+        if isinstance(checks, list):
+            required_failures = sum(
+                1
+                for check in checks
+                if isinstance(check, dict)
+                and bool(check.get("required"))
+                and not bool(check.get("ok"))
+            )
+        governance["playback_gate_runner_status"] = runner_status
+        governance["playback_gate_runner_ready"] = int(runner_status == "ready")
+        governance["playback_gate_runner_required_failures"] = required_failures
+
     provider_summary_available = provider_summary is not None
     if provider_summary is not None and bool(provider_summary.get("all_green")):
         governance["playback_gate_provider_parity_ready"] = 1
 
     windows_provider_summary_available = windows_provider_summary is not None
-    if windows_provider_summary is not None:
-        results = windows_provider_summary.get("results")
-        if (
-            isinstance(results, list)
-            and any(
-                isinstance(result, dict) and result.get("status") == "passed" for result in results
-            )
-            and all(
-                not isinstance(result, dict) or result.get("status") in {"passed", "skipped"}
-                for result in results
-            )
-        ):
-            governance["playback_gate_windows_provider_ready"] = 1
+    governance.update(_windows_provider_media_gate_snapshot())
 
     windows_soak_summary_available = windows_soak_summary is not None
-    if windows_soak_summary is not None and bool(windows_soak_summary.get("all_green")):
-        governance["playback_gate_windows_soak_ready"] = 1
+    governance.update(_windows_soak_profile_gate_snapshot(windows_soak_summary))
 
     if policy_summary is not None:
         validation = policy_summary.get("validation")
@@ -544,6 +676,11 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
     elif governance["playback_gate_stability_ready"] == 0:
         rollout_reasons.append("playback_gate_failed_or_incomplete")
 
+    if runner_summary is None:
+        rollout_reasons.append("runner_readiness_artifact_missing")
+    elif _as_int(governance["playback_gate_runner_ready"]) == 0:
+        rollout_reasons.append("runner_readiness_not_ready")
+
     provider_gate_required = _as_int(governance["playback_gate_provider_gate_required"]) > 0
     provider_gate_ran = _as_int(governance["playback_gate_provider_gate_ran"]) > 0
     if provider_gate_required and not provider_gate_ran:
@@ -556,11 +693,17 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
 
     if not windows_provider_summary_available:
         rollout_reasons.append("windows_provider_gate_artifact_missing")
+    elif _as_int(governance["playback_gate_windows_provider_movie_ready"]) == 0:
+        rollout_reasons.append("windows_provider_movie_coverage_missing")
+    elif _as_int(governance["playback_gate_windows_provider_tv_ready"]) == 0:
+        rollout_reasons.append("windows_provider_tv_coverage_missing")
     elif _as_int(governance["playback_gate_windows_provider_ready"]) == 0:
         rollout_reasons.append("windows_provider_gate_not_green")
 
     if not windows_soak_summary_available:
         rollout_reasons.append("windows_vfs_soak_artifact_missing")
+    elif _as_int(governance["playback_gate_windows_soak_profile_coverage_complete"]) == 0:
+        rollout_reasons.append("windows_vfs_soak_profile_coverage_incomplete")
     elif _as_int(governance["playback_gate_windows_soak_ready"]) == 0:
         rollout_reasons.append("windows_vfs_soak_not_green")
 
@@ -573,7 +716,11 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
     blocked_reasons = {
         "playback_gate_failed_or_incomplete",
         "provider_gate_not_green",
+        "runner_readiness_not_ready",
+        "windows_provider_movie_coverage_missing",
+        "windows_provider_tv_coverage_missing",
         "windows_provider_gate_not_green",
+        "windows_vfs_soak_profile_coverage_incomplete",
         "windows_vfs_soak_not_green",
         "github_main_policy_not_ready",
     }
@@ -582,6 +729,7 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
         "playback_gate_dry_run_mode",
         "provider_gate_not_run",
         "provider_gate_artifact_missing",
+        "runner_readiness_artifact_missing",
         "windows_provider_gate_artifact_missing",
         "windows_vfs_soak_artifact_missing",
         "github_main_policy_unverified",

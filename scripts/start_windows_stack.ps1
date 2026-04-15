@@ -15,6 +15,7 @@ param(
     [switch] $WinFspMountElevationAttempted,
     [string] $ProjFsAutoEnableResultPath = '',
     [string] $WinFspAutoInstallResultPath = '',
+    [switch] $IncludeOptionalServices,
     [switch] $SkipBackendStart,
     [switch] $SkipBuild
 )
@@ -52,6 +53,214 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Format-ByteCount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double] $Bytes
+    )
+
+    if ($Bytes -lt 1KB) {
+        return ('{0:N0} B' -f $Bytes)
+    }
+
+    if ($Bytes -lt 1MB) {
+        return ('{0:N1} KiB' -f ($Bytes / 1KB))
+    }
+
+    if ($Bytes -lt 1GB) {
+        return ('{0:N1} MiB' -f ($Bytes / 1MB))
+    }
+
+    return ('{0:N2} GiB' -f ($Bytes / 1GB))
+}
+
+function Get-DockerDesktopMemoryBytes {
+    try {
+        $raw = (& docker info --format '{{json .MemTotal}}' 2>$null | Select-Object -First 1).Trim()
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return $null
+        }
+
+        $parsed = 0L
+        if (-not [long]::TryParse($raw, [ref] $parsed)) {
+            return $null
+        }
+
+        if ($parsed -le 0) {
+            return $null
+        }
+
+        return $parsed
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-WindowsBackendServicePlan {
+    param(
+        [bool] $IncludeOptionalServices,
+        [Nullable[long]] $DockerMemoryBytes
+    )
+
+    $recommendedDockerMemoryBytes = 5000000000L
+    $coreInfrastructureServices = @('postgres', 'redis')
+    $coreApplicationServices = @('filmu-python', 'arq-worker')
+    $frontendServices = @('frontend')
+    $optionalServices = @('zilean-postgres', 'zilean', 'prowlarr')
+
+    $startOptionalServices = $IncludeOptionalServices
+    $memoryDecision = 'forced'
+    if (-not $IncludeOptionalServices) {
+        if ($null -eq $DockerMemoryBytes) {
+            $memoryDecision = 'unknown'
+        }
+        elseif ($DockerMemoryBytes -ge $recommendedDockerMemoryBytes) {
+            $startOptionalServices = $true
+            $memoryDecision = 'sufficient'
+        }
+        else {
+            $startOptionalServices = $false
+            $memoryDecision = 'insufficient'
+        }
+    }
+
+    return [pscustomobject]@{
+        RecommendedDockerMemoryBytes = $recommendedDockerMemoryBytes
+        DockerMemoryBytes            = $DockerMemoryBytes
+        CoreInfrastructureServices   = $coreInfrastructureServices
+        CoreApplicationServices      = $coreApplicationServices
+        FrontendServices             = $frontendServices
+        OptionalServices             = $optionalServices
+        StartOptionalServices        = $startOptionalServices
+        MemoryDecision               = $memoryDecision
+    }
+}
+
+function Start-DockerComposeServices {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ComposeFile,
+        [Parameter(Mandatory = $true)]
+        [string[]] $Services,
+        [Parameter(Mandatory = $true)]
+        [string] $Label
+    )
+
+    if ($Services.Count -eq 0) {
+        return
+    }
+
+    Write-Host ("      -> {0}: {1}" -f $Label, ($Services -join ', ')) -ForegroundColor DarkGray
+    docker compose -f $ComposeFile up -d @Services
+    if ($LASTEXITCODE -ne 0) {
+        throw ("docker compose failed while starting {0}" -f $Label)
+    }
+}
+
+function Try-ParseHttpEndpoint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Endpoint,
+        [Parameter(Mandatory = $true)]
+        [int] $DefaultPort
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Endpoint)) {
+        return $null
+    }
+
+    try {
+        $candidate = $Endpoint.Trim()
+        if ($candidate -notmatch '^[a-z][a-z0-9+\-.]*://') {
+            $candidate = "http://$candidate"
+        }
+
+        $uri = [System.Uri] $candidate
+        if (-not $uri.IsAbsoluteUri) {
+            return $null
+        }
+
+        $port = $uri.Port
+        if ($port -le 0) {
+            $port = $DefaultPort
+        }
+
+        return [pscustomobject]@{
+            Scheme = $uri.Scheme
+            Host   = $uri.Host
+            Port   = $port
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-LoopbackEndpointHost {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $HostName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HostName)) {
+        return $false
+    }
+
+    return $HostName -in @('localhost', '127.0.0.1', '::1')
+}
+
+function Get-DockerContainerIpv4Address {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ContainerName
+    )
+
+    try {
+        $ip = (& docker inspect --format '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $ContainerName 2>$null | Select-Object -First 1).Trim()
+        if ([string]::IsNullOrWhiteSpace($ip)) {
+            return $null
+        }
+
+        return $ip
+    }
+    catch {
+        return $null
+    }
+}
+
+function Resolve-ContainerBackedEndpoint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ConfiguredEndpoint,
+        [Parameter(Mandatory = $true)]
+        [string] $ContainerName,
+        [Parameter(Mandatory = $true)]
+        [int] $DefaultPort
+    )
+
+    $directContainerEndpointsEnabled = [System.Environment]::GetEnvironmentVariable('FILMU_WINDOWS_DOCKER_DIRECT_ENDPOINTS')
+    if ([string]::IsNullOrWhiteSpace($directContainerEndpointsEnabled) -or ($directContainerEndpointsEnabled.Trim().ToLowerInvariant() -notin @('1', 'true', 'yes', 'on'))) {
+        return $ConfiguredEndpoint
+    }
+
+    $parsed = Try-ParseHttpEndpoint -Endpoint $ConfiguredEndpoint -DefaultPort $DefaultPort
+    if ($null -eq $parsed) {
+        return $ConfiguredEndpoint
+    }
+
+    if (-not (Test-LoopbackEndpointHost -HostName $parsed.Host)) {
+        return ('{0}://{1}:{2}' -f $parsed.Scheme, $parsed.Host, $parsed.Port)
+    }
+
+    $containerIp = Get-DockerContainerIpv4Address -ContainerName $ContainerName
+    if ([string]::IsNullOrWhiteSpace($containerIp)) {
+        return ('{0}://{1}:{2}' -f $parsed.Scheme, $parsed.Host, $parsed.Port)
+    }
+
+    return ('{0}://{1}:{2}' -f $parsed.Scheme, $containerIp, $parsed.Port)
 }
 
 function Invoke-SelfElevatedForProjFs {
@@ -988,6 +1197,21 @@ function Wait-ContainerHealthy {
     return $false
 }
 
+function Test-ContainerHealthy {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ContainerName
+    )
+
+    try {
+        $status = (& docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' $ContainerName 2>$null | Select-Object -First 1).Trim()
+        return ($status -eq 'healthy' -or $status -eq 'running')
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-StateDirectory {
     param(
         [Parameter(Mandatory = $true)]
@@ -1464,10 +1688,38 @@ Write-Host ''
 
 if (-not $SkipBackendStart) {
     Write-Host '[1/4] Starting Docker backend services...' -ForegroundColor Yellow
-    docker compose -f $composeFile up -d postgres redis zilean-postgres zilean filmu-python arq-worker frontend prowlarr
-    if ($LASTEXITCODE -ne 0) {
-        throw 'docker compose failed to start the Windows backend services'
+
+    $dockerMemoryBytes = Get-DockerDesktopMemoryBytes
+    $servicePlan = Get-WindowsBackendServicePlan `
+        -IncludeOptionalServices $IncludeOptionalServices.IsPresent `
+        -DockerMemoryBytes $dockerMemoryBytes
+
+    if ($null -ne $dockerMemoryBytes) {
+        Write-Host ("      Docker Desktop memory: {0}" -f (Format-ByteCount -Bytes $dockerMemoryBytes)) -ForegroundColor White
+        Write-Host ("      Recommended minimum for full Windows stack: {0}" -f (Format-ByteCount -Bytes $servicePlan.RecommendedDockerMemoryBytes)) -ForegroundColor White
     }
+    else {
+        Write-Host '      Docker Desktop memory could not be detected; using the conservative startup plan.' -ForegroundColor Yellow
+    }
+
+    Start-DockerComposeServices -ComposeFile $composeFile -Services $servicePlan.CoreInfrastructureServices -Label 'core infrastructure'
+    Start-DockerComposeServices -ComposeFile $composeFile -Services $servicePlan.CoreApplicationServices -Label 'core application'
+    Start-DockerComposeServices -ComposeFile $composeFile -Services $servicePlan.FrontendServices -Label 'frontend'
+
+    if ($servicePlan.StartOptionalServices) {
+        Start-DockerComposeServices -ComposeFile $composeFile -Services $servicePlan.OptionalServices -Label 'optional provider services'
+    }
+    else {
+        switch ($servicePlan.MemoryDecision) {
+            'insufficient' {
+                Write-Host ("      Skipping optional provider services because Docker Desktop memory is below the recommended full-stack floor. Use -IncludeOptionalServices after raising memory if you need Zilean/Prowlarr locally.") -ForegroundColor Yellow
+            }
+            'unknown' {
+                Write-Host '      Skipping optional provider services because Docker Desktop memory could not be verified. Use -IncludeOptionalServices if you want to force the full Windows stack.' -ForegroundColor Yellow
+            }
+        }
+    }
+
     Write-Host '      [OK] Docker backend services started' -ForegroundColor Green
 }
 else {
@@ -1475,17 +1727,64 @@ else {
     Write-Host '      [OK] Using existing backend services' -ForegroundColor Green
 }
 
+$configuredBackendHttpBaseUrl = [System.Environment]::GetEnvironmentVariable('FILMUVFS_BACKEND_HTTP_BASE_URL')
+if ([string]::IsNullOrWhiteSpace($configuredBackendHttpBaseUrl)) {
+    $configuredBackendHttpBaseUrl = 'http://127.0.0.1:8000'
+}
+$effectiveGrpcServer = Resolve-ContainerBackedEndpoint `
+    -ConfiguredEndpoint $GrpcServer `
+    -ContainerName 'filmu-python' `
+    -DefaultPort 50051
+$effectiveBackendHttpBaseUrl = Resolve-ContainerBackedEndpoint `
+    -ConfiguredEndpoint $configuredBackendHttpBaseUrl `
+    -ContainerName 'filmu-python' `
+    -DefaultPort 8000
+$effectiveBackendApiKey = [System.Environment]::GetEnvironmentVariable('FILMUVFS_BACKEND_API_KEY')
+if ([string]::IsNullOrWhiteSpace($effectiveBackendApiKey)) {
+    $effectiveBackendApiKey = [System.Environment]::GetEnvironmentVariable('FILMU_PY_API_KEY')
+}
+if ([string]::IsNullOrWhiteSpace($effectiveBackendApiKey)) {
+    $effectiveBackendApiKey = '32_character_filmu_api_key_local_'
+}
+$configuredWindowsForceDockerBridge = [System.Environment]::GetEnvironmentVariable('FILMUVFS_WINDOWS_FORCE_DOCKER_BRIDGE')
+$forceWindowsDockerBridge = $false
+if (-not [string]::IsNullOrWhiteSpace($configuredWindowsForceDockerBridge)) {
+    $forceWindowsDockerBridge = ($configuredWindowsForceDockerBridge.Trim().ToLowerInvariant() -in @('1', 'true', 'yes', 'on'))
+}
+
+if ($effectiveGrpcServer -ne $GrpcServer) {
+    Write-Host ("      Using Docker container gRPC endpoint for Windows host mount: {0}" -f $effectiveGrpcServer) -ForegroundColor DarkGray
+}
+if ($effectiveBackendHttpBaseUrl -ne $configuredBackendHttpBaseUrl) {
+    Write-Host ("      Using Docker container backend HTTP endpoint for Windows host mount: {0}" -f $effectiveBackendHttpBaseUrl) -ForegroundColor DarkGray
+}
+
 Write-Host ''
 Write-Host '[2/4] Waiting for backend API and gRPC supplier...' -ForegroundColor Yellow
-if (-not (Wait-HttpReady -Uri 'http://localhost:8000/openapi.json' -TimeoutSeconds 45)) {
-    throw 'backend API did not become ready at http://localhost:8000/openapi.json'
+$backendApiReady = $false
+if (Test-ContainerHealthy -ContainerName 'filmu-python') {
+    $backendApiReady = $true
 }
-if (-not (Test-GrpcReady -HostName '127.0.0.1' -Port 50051 -TimeoutSeconds 45)) {
-    throw 'gRPC catalog supplier did not become ready on localhost:50051'
+elseif (Wait-ContainerHealthy -ContainerName 'filmu-python' -TimeoutSeconds 45) {
+    $backendApiReady = $true
 }
-if (-not $SkipBackendStart) {
-    if (-not (Wait-ContainerHealthy -ContainerName 'filmu-python' -TimeoutSeconds 45)) {
-        throw 'filmu-python did not report a healthy container state after backend startup'
+elseif (Wait-HttpReady -Uri 'http://localhost:8000/openapi.json' -TimeoutSeconds 45) {
+    $backendApiReady = $true
+}
+
+if (-not $backendApiReady) {
+    throw 'backend API did not become ready through container health or host HTTP probe'
+}
+$grpcTarget = Try-ParseHttpEndpoint -Endpoint $effectiveGrpcServer -DefaultPort 50051
+if (($null -eq $grpcTarget) -or (-not (Test-GrpcReady -HostName $grpcTarget.Host -Port $grpcTarget.Port -TimeoutSeconds 45))) {
+    throw ("gRPC catalog supplier did not become ready on {0}" -f $effectiveGrpcServer)
+}
+if (-not $forceWindowsDockerBridge) {
+    $hostPublishedBackendUsable = Wait-HttpReady -Uri 'http://127.0.0.1:8000/openapi.json' -TimeoutSeconds 5
+    if (-not $hostPublishedBackendUsable) {
+        $forceWindowsDockerBridge = $true
+        Write-Host '      Windows host access to Docker published backend ports is failing on this machine.' -ForegroundColor DarkYellow
+        Write-Host '      Forcing Docker bridge transport for FilmuVFS catalog sync and inline refresh.' -ForegroundColor DarkYellow
     }
 }
 Write-Host '      [OK] Backend API and gRPC supplier are ready' -ForegroundColor Green
@@ -1565,7 +1864,7 @@ $startArguments.Add($runtimeMountPath)
 $startArguments.Add('--mount-adapter')
 $startArguments.Add($effectiveMountAdapter)
 $startArguments.Add('--grpc-server')
-$startArguments.Add($GrpcServer)
+$startArguments.Add($effectiveGrpcServer)
 $startArguments.Add('--windows-projfs-summary-interval-seconds')
 $startArguments.Add($SummaryIntervalSeconds.ToString())
 if ($PrefetchMinChunks -gt 0) {
@@ -1590,6 +1889,9 @@ $process = Start-Process -FilePath $binaryPath `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
     -Environment @{
+        FILMUVFS_BACKEND_HTTP_BASE_URL = $effectiveBackendHttpBaseUrl
+        FILMUVFS_BACKEND_API_KEY = $effectiveBackendApiKey
+        FILMUVFS_WINDOWS_FORCE_DOCKER_BRIDGE = $(if ($forceWindowsDockerBridge) { '1' } else { '0' })
         FILMUVFS_WINDOWS_TRACE_PATH = $callbackTracePath
         FILMUVFS_WINFSP_WRAPPER_LOG = $wrapperTracePath
         FILMUVFS_RUNTIME_STATUS_PATH = $runtimeStatusPath
@@ -1607,7 +1909,10 @@ $state = [pscustomobject]@{
     binary_capabilities = $filmuvfsCapabilities
     drive_letter = $normalizedDriveLetter
     drive_mapping_kind = $driveMappingKind
-    grpc_server = $GrpcServer
+    grpc_server = $effectiveGrpcServer
+    backend_http_base_url = $effectiveBackendHttpBaseUrl
+    windows_force_docker_bridge = $forceWindowsDockerBridge
+    transport_mode = $(if ($forceWindowsDockerBridge) { 'docker_bridge' } else { 'direct' })
     summary_interval_seconds = $SummaryIntervalSeconds
     prefetch_min_chunks = $PrefetchMinChunks
     prefetch_max_chunks = $PrefetchMaxChunks
@@ -1651,6 +1956,15 @@ try {
     }
 
     $state | Add-Member -NotePropertyName root_entries -NotePropertyValue @($rootEntries) -Force
+    if (Test-Path -LiteralPath $stdoutPath) {
+        $stdoutContent = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($stdoutContent)) {
+            if ($stdoutContent -match 'windows docker bridge transport forced; skipping direct gRPC WatchCatalog session' -or $stdoutContent -match 'switching to HTTP polling fallback') {
+                $state.windows_force_docker_bridge = $true
+                $state.transport_mode = 'docker_bridge'
+            }
+        }
+    }
     $state.mount_status = 'ready'
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
 }
@@ -1669,7 +1983,8 @@ Write-Host ''
 Write-Host 'Services:' -ForegroundColor Cyan
 Write-Host '  Backend API:   http://localhost:8000' -ForegroundColor White
 Write-Host '  API Docs:      http://localhost:8000/docs' -ForegroundColor White
-Write-Host '  gRPC Catalog:  localhost:50051' -ForegroundColor White
+Write-Host ("  gRPC Catalog:  {0}" -f $effectiveGrpcServer) -ForegroundColor White
+Write-Host ("  Sidecar HTTP:  {0}" -f $effectiveBackendHttpBaseUrl) -ForegroundColor White
 Write-Host ''
 Write-Host 'Mount:' -ForegroundColor Cyan
 Write-Host ("  Windows Path:  {0}" -f $MountPath) -ForegroundColor White

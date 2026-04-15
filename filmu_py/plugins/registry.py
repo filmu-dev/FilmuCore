@@ -26,6 +26,7 @@ from filmu_py.plugins.interfaces import (
     NotificationPlugin,
     PluginEventHookWorker,
     ScraperPlugin,
+    StreamControlPlugin,
 )
 from filmu_py.plugins.manifest import PluginManifest
 
@@ -41,6 +42,7 @@ class PluginCapabilityKind(StrEnum):
     CONTENT_SERVICE = "content_service"
     NOTIFICATION = "notification"
     EVENT_HOOK = "event_hook"
+    STREAM_CONTROL = "stream_control"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,7 @@ _PROTOCOLS_BY_KIND: dict[PluginCapabilityKind, type[object]] = {
     PluginCapabilityKind.CONTENT_SERVICE: ContentServicePlugin,
     PluginCapabilityKind.NOTIFICATION: NotificationPlugin,
     PluginCapabilityKind.EVENT_HOOK: PluginEventHookWorker,
+    PluginCapabilityKind.STREAM_CONTROL: StreamControlPlugin,
 }
 
 
@@ -248,6 +251,15 @@ class PluginRegistry:
             plugin
             for plugin in self._capabilities_by_kind[PluginCapabilityKind.EVENT_HOOK]
             if isinstance(plugin, PluginEventHookWorker)
+        ]
+
+    def get_stream_controls(self) -> list[StreamControlPlugin]:
+        """Return registered stream-control plugins in registration order."""
+
+        return [
+            plugin
+            for plugin in self._capabilities_by_kind[PluginCapabilityKind.STREAM_CONTROL]
+            if isinstance(plugin, StreamControlPlugin)
         ]
 
     def all_plugin_names(self) -> set[str]:

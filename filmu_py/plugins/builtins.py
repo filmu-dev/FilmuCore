@@ -9,8 +9,10 @@ from filmu_py.plugins.builtin import (
     NOTIFICATIONS_PLUGIN_NAME,
     PROWLARR_PLUGIN_NAME,
     RARBG_PLUGIN_NAME,
+    STREAM_CONTROL_PLUGIN_NAME,
     STREMTHRU_PLUGIN_NAME,
     TORRENTIO_PLUGIN_NAME,
+    HostStreamControlPlugin,
     MDBListContentService,
     ProwlarrScraper,
     RarbgScraper,
@@ -131,6 +133,20 @@ def _builtin_capability_definitions() -> Sequence[tuple[PluginManifest, PluginCa
             ),
             PluginCapabilityKind.DOWNLOADER,
             StremThruDownloader,
+        ),
+        (
+            _manifest(
+                name=STREAM_CONTROL_PLUGIN_NAME,
+                version="1.0.0",
+                api_version="1",
+                capabilities=["stream_control"],
+                permission_scopes=["playback:operate", "datasource:host"],
+                entry_module="plugin.py",
+                stream_control="HostStreamControlPlugin",
+                datasource="host",
+            ),
+            PluginCapabilityKind.STREAM_CONTROL,
+            HostStreamControlPlugin,
         ),
         (
             _manifest(
