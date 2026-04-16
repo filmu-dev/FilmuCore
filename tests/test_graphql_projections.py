@@ -27,7 +27,8 @@ from filmu_py.db.models import StreamORM
 from filmu_py.graphql import GraphQLPluginRegistry, create_graphql_router
 from filmu_py.plugins import TestPluginContext
 from filmu_py.plugins.builtins import register_builtin_plugins
-from filmu_py.plugins.registry import PluginRegistry
+from filmu_py.plugins.manifest import PluginManifest
+from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.media import (
     CalendarProjectionRecord,
@@ -880,6 +881,297 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
     }
+
+
+def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_surfaces() -> None:
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "external-scraper",
+                "version": "1.0.0",
+                "api_version": "1",
+                "distribution": "filesystem",
+                "publisher": "community",
+                "release_channel": "stable",
+                "trust_level": "community",
+                "sandbox_profile": "restricted",
+                "tenancy_mode": "tenant",
+                "entry_module": "plugin.py",
+                "scraper": "ExternalScraper",
+                "publishable_events": ["external.scan.completed"],
+            }
+        )
+    )
+
+    class ExampleHook:
+        subscribed_events = frozenset({"item.completed", "item.state.changed"})
+
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "hook-plugin",
+                "version": "1.0.0",
+                "api_version": "1",
+                "entry_module": "plugin.py",
+                "event_hook": "ExampleHook",
+            }
+        )
+    )
+    plugin_registry.register_capability(
+        plugin_name="external-scraper",
+        kind=PluginCapabilityKind.SCRAPER,
+        implementation=object(),
+    )
+    plugin_registry.register_capability(
+        plugin_name="hook-plugin",
+        kind=PluginCapabilityKind.EVENT_HOOK,
+        implementation=ExampleHook(),
+    )
+
+    client = _build_client(
+        FakeMediaService(),
+        plugin_registry=plugin_registry,
+        settings_overrides={
+            "FILMU_PY_DOWNLOADERS": {
+                "real_debrid": {"enabled": True, "api_key": "rd-token"},
+                "all_debrid": {"enabled": True, "api_key": "ad-token"},
+                "debrid_link": {"enabled": False, "api_key": ""},
+            },
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "report_only",
+            },
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  downloaderOrchestration {
+                    selectionMode
+                    selectedProvider
+                    multiProviderEnabled
+                    pluginDownloadersRegistered
+                    workerPluginDispatchReady
+                    fanoutReady
+                    multiContainerReady
+                    requiredActions
+                    remainingGaps
+                    providers {
+                      name
+                      source
+                      enabled
+                      configured
+                      selected
+                      priority
+                    }
+                  }
+                  pluginEvents {
+                    name
+                    publisher
+                    publishableEvents
+                    hookSubscriptions
+                  }
+                  pluginGovernance {
+                    summary {
+                      totalPlugins
+                      nonBuiltinPlugins
+                      unsignedExternalPlugins
+                      runtimePolicyMode
+                      runtimeIsolationReady
+                      recommendedActions
+                      remainingGaps
+                      sandboxProfileCounts { key count }
+                      tenancyModeCounts { key count }
+                    }
+                    plugins {
+                      name
+                      status
+                      ready
+                      publisher
+                      releaseChannel
+                      trustLevel
+                      sandboxProfile
+                      tenancyMode
+                      signaturePresent
+                      warnings
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["downloaderOrchestration"] == {
+        "selectionMode": "ordered_failover",
+        "selectedProvider": "realdebrid",
+        "multiProviderEnabled": True,
+        "pluginDownloadersRegistered": 0,
+        "workerPluginDispatchReady": False,
+        "fanoutReady": True,
+        "multiContainerReady": True,
+        "requiredActions": [],
+        "remainingGaps": [],
+        "providers": [
+            {
+                "name": "realdebrid",
+                "source": "builtin",
+                "enabled": True,
+                "configured": True,
+                "selected": True,
+                "priority": 1,
+            },
+            {
+                "name": "alldebrid",
+                "source": "builtin",
+                "enabled": True,
+                "configured": True,
+                "selected": False,
+                "priority": 2,
+            },
+            {
+                "name": "debridlink",
+                "source": "builtin",
+                "enabled": False,
+                "configured": False,
+                "selected": False,
+                "priority": 3,
+            },
+        ],
+    }
+    assert payload["pluginEvents"] == [
+        {
+            "name": "external-scraper",
+            "publisher": "community",
+            "publishableEvents": ["external.scan.completed"],
+            "hookSubscriptions": [],
+        },
+        {
+            "name": "hook-plugin",
+            "publisher": None,
+            "publishableEvents": [],
+            "hookSubscriptions": ["item.completed", "item.state.changed"],
+        },
+    ]
+    governance = payload["pluginGovernance"]
+    assert governance["summary"] == {
+        "totalPlugins": 2,
+        "nonBuiltinPlugins": 2,
+        "unsignedExternalPlugins": 2,
+        "runtimePolicyMode": "report_only",
+        "runtimeIsolationReady": False,
+        "recommendedActions": ["require_external_plugin_signature"],
+        "remainingGaps": [
+            "non-builtin plugin runtime isolation exit gates are not fully satisfied",
+            "operator quarantine/revocation still depends on runtime policy enforcement",
+            "external plugin artifact provenance or signature verification is still incomplete",
+        ],
+        "sandboxProfileCounts": [{"key": "restricted", "count": 2}],
+        "tenancyModeCounts": [{"key": "shared", "count": 1}, {"key": "tenant", "count": 1}],
+    }
+    assert governance["plugins"][0] == {
+        "name": "external-scraper",
+        "status": "loaded",
+        "ready": True,
+        "publisher": "community",
+        "releaseChannel": "stable",
+        "trustLevel": "community",
+        "sandboxProfile": "restricted",
+        "tenancyMode": "tenant",
+        "signaturePresent": False,
+        "warnings": [],
+    }
+    assert governance["plugins"][1] == {
+        "name": "hook-plugin",
+        "status": "loaded",
+        "ready": True,
+        "publisher": None,
+        "releaseChannel": "stable",
+        "trustLevel": "community",
+        "sandboxProfile": "restricted",
+        "tenancyMode": "shared",
+        "signaturePresent": False,
+        "warnings": [],
+    }
+
+
+def test_graphql_enterprise_operations_governance_returns_typed_slice_posture() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel.example.test/v1/traces",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "http://logs.example.test",
+                "healthcheck_url": "http://logs.example.test/health",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "proof_refs": ["ops/wave4/log-pipeline-rollout.md"],
+            },
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "enforcement_mode": "isolated_runtime_required",
+                "require_strict_signatures": True,
+                "require_source_digest": True,
+                "proof_refs": ["ops/wave4/plugin-runtime-isolation.md"],
+            },
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  enterpriseOperationsGovernance {
+                    operatorLogPipeline {
+                      status
+                      requiredActions
+                      remainingGaps
+                      evidence
+                    }
+                    pluginRuntimeIsolation {
+                      status
+                      requiredActions
+                      remainingGaps
+                      evidence
+                    }
+                    identityAuthz {
+                      evidence
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["enterpriseOperationsGovernance"]
+    assert payload["operatorLogPipeline"]["status"] == "ready"
+    assert payload["operatorLogPipeline"]["requiredActions"] == []
+    assert payload["operatorLogPipeline"]["remainingGaps"] == []
+    assert "log_search_backend=opensearch" in payload["operatorLogPipeline"]["evidence"]
+    assert "rust_trace_correlation_enabled=True" in payload["operatorLogPipeline"]["evidence"]
+    assert payload["pluginRuntimeIsolation"]["status"] == "ready"
+    assert payload["pluginRuntimeIsolation"]["requiredActions"] == []
+    assert payload["pluginRuntimeIsolation"]["remainingGaps"] == []
+    assert (
+        "plugin_runtime_enforcement_mode=isolated_runtime_required"
+        in payload["pluginRuntimeIsolation"]["evidence"]
+    )
+    assert "plugin_runtime_exit_ready=1" in payload["pluginRuntimeIsolation"]["evidence"]
+    assert "resource_scope_constraint_coverage=True" in payload["identityAuthz"]["evidence"]
+
+
 def test_graphql_library_stats_returns_typed_breakdown() -> None:
     client = _build_client(
         FakeMediaService(
@@ -1342,6 +1634,16 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                     correlation { itemId mediaEntryId providerDownloadId }
                     file { mediaEntryId providerDownloadId restrictedFallback }
                   }
+                  vfsOverview(path: "/Shows/Example Show (2024)/Season 01", generationId: "7") {
+                    snapshot {
+                      generationId
+                      stats { directoryCount fileCount blockedItemCount }
+                    }
+                    directory {
+                      path
+                      files { path name kind }
+                    }
+                  }
                 }
             """
         },
@@ -1410,6 +1712,26 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
             "mediaEntryId": "entry-1",
             "providerDownloadId": "torrent-123",
             "restrictedFallback": False,
+        },
+    }
+    assert payload["vfsOverview"] == {
+        "snapshot": {
+            "generationId": "7",
+            "stats": {
+                "directoryCount": 4,
+                "fileCount": 1,
+                "blockedItemCount": 0,
+            },
+        },
+        "directory": {
+            "path": "/Shows/Example Show (2024)/Season 01",
+            "files": [
+                {
+                    "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                    "name": "Example Show S01E01.mkv",
+                    "kind": "file",
+                }
+            ],
         },
     }
 
