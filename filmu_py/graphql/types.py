@@ -209,6 +209,21 @@ class GQLObservabilityRolloutSummary:
 
 
 @strawberry.type
+class GQLObservabilityFieldContractSummary:
+    """Compact summary of cross-process field/header contract coverage."""
+
+    total_required_correlation_fields: int = strawberry.field(
+        name="totalRequiredCorrelationFields"
+    )
+    expected_field_count: int = strawberry.field(name="expectedFieldCount")
+    configured_expected_field_count: int = strawberry.field(name="configuredExpectedFieldCount")
+    missing_expected_field_count: int = strawberry.field(name="missingExpectedFieldCount")
+    trace_context_header_count: int = strawberry.field(name="traceContextHeaderCount")
+    correlation_header_count: int = strawberry.field(name="correlationHeaderCount")
+    shared_header_count: int = strawberry.field(name="sharedHeaderCount")
+
+
+@strawberry.type
 class GQLGovernanceEvidenceCheck:
     """One retained rollout-evidence check for Director/operator governance views."""
 
@@ -468,6 +483,34 @@ class GQLControlPlaneRecoveryReadiness:
     proof_ready: bool = strawberry.field(name="proofReady")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLControlPlaneConsumerSummary:
+    """Grouped control-plane ownership summary per consumer."""
+
+    consumer_name: str = strawberry.field(name="consumerName")
+    subscriber_count: int = strawberry.field(name="subscriberCount")
+    active_subscribers: int = strawberry.field(name="activeSubscribers")
+    ack_pending_subscribers: int = strawberry.field(name="ackPendingSubscribers")
+    fenced_subscribers: int = strawberry.field(name="fencedSubscribers")
+    error_subscribers: int = strawberry.field(name="errorSubscribers")
+    latest_heartbeat_at: str | None = strawberry.field(name="latestHeartbeatAt", default=None)
+
+
+@strawberry.type
+class GQLControlPlaneOwnershipSummary:
+    """Aggregated subscriber ownership and backlog summary."""
+
+    total_subscribers: int = strawberry.field(name="totalSubscribers")
+    active_subscribers: int = strawberry.field(name="activeSubscribers")
+    stale_subscribers: int = strawberry.field(name="staleSubscribers")
+    error_subscribers: int = strawberry.field(name="errorSubscribers")
+    fenced_subscribers: int = strawberry.field(name="fencedSubscribers")
+    ack_pending_subscribers: int = strawberry.field(name="ackPendingSubscribers")
+    unique_consumers: int = strawberry.field(name="uniqueConsumers")
+    unique_nodes: int = strawberry.field(name="uniqueNodes")
+    unique_tenants: int = strawberry.field(name="uniqueTenants")
 
 
 @strawberry.type
@@ -757,6 +800,37 @@ class GQLDownloaderReasonSummary:
 
 
 @strawberry.type
+class GQLDownloaderDeadLetterTimelinePoint:
+    """Time-bucketed downloader dead-letter posture."""
+
+    bucket_at: str = strawberry.field(name="bucketAt")
+    sample_count: int = strawberry.field(name="sampleCount")
+    provider_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerCounts")
+    reason_code_counts: list[GQLNamedCountBucket] = strawberry.field(name="reasonCodeCounts")
+    failure_kind_counts: list[GQLNamedCountBucket] = strawberry.field(name="failureKindCounts")
+
+
+@strawberry.type
+class GQLDownloaderFailureKindSummary:
+    """Failure-kind grouped downloader summary."""
+
+    failure_kind: str = strawberry.field(name="failureKind")
+    sample_count: int = strawberry.field(name="sampleCount")
+    provider_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerCounts")
+    reason_code_counts: list[GQLNamedCountBucket] = strawberry.field(name="reasonCodeCounts")
+
+
+@strawberry.type
+class GQLDownloaderStatusCodeSummary:
+    """Status-code grouped downloader summary."""
+
+    status_code: int = strawberry.field(name="statusCode")
+    sample_count: int = strawberry.field(name="sampleCount")
+    provider_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerCounts")
+    reason_code_counts: list[GQLNamedCountBucket] = strawberry.field(name="reasonCodeCounts")
+
+
+@strawberry.type
 class GQLPluginCapabilityStatus:
     """Loaded plugin runtime row with trust and readiness posture."""
 
@@ -845,6 +919,18 @@ class GQLPluginGovernance:
 
     summary: GQLPluginGovernanceSummary
     plugins: list[GQLPluginCapabilityStatus]
+
+
+@strawberry.type
+class GQLPluginRuntimePublisherSummary:
+    """Publisher-grouped runtime and proof posture summary."""
+
+    publisher: str
+    plugin_count: int = strawberry.field(name="pluginCount")
+    ready_plugins: int = strawberry.field(name="readyPlugins")
+    quarantined_plugins: int = strawberry.field(name="quarantinedPlugins")
+    warning_count: int = strawberry.field(name="warningCount")
+    capability_counts: list[GQLNamedCountBucket] = strawberry.field(name="capabilityCounts")
 
 
 @strawberry.type
@@ -1193,6 +1279,21 @@ class GQLVfsGenerationHistorySummary:
     blocked_generation_count: int = strawberry.field(name="blockedGenerationCount")
     total_delta_upsert_count: int = strawberry.field(name="totalDeltaUpsertCount")
     total_delta_removal_count: int = strawberry.field(name="totalDeltaRemovalCount")
+    provider_family_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerFamilyCounts")
+    lease_state_counts: list[GQLNamedCountBucket] = strawberry.field(name="leaseStateCounts")
+
+
+@strawberry.type
+class GQLVfsCatalogDeltaHistorySummary:
+    """Aggregate rollup over sequential retained VFS deltas."""
+
+    delta_count: int = strawberry.field(name="deltaCount")
+    max_upsert_count: int = strawberry.field(name="maxUpsertCount")
+    max_removal_count: int = strawberry.field(name="maxRemovalCount")
+    total_upsert_count: int = strawberry.field(name="totalUpsertCount")
+    total_removal_count: int = strawberry.field(name="totalRemovalCount")
+    total_upsert_file_count: int = strawberry.field(name="totalUpsertFileCount")
+    total_removal_file_count: int = strawberry.field(name="totalRemovalFileCount")
     provider_family_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerFamilyCounts")
     lease_state_counts: list[GQLNamedCountBucket] = strawberry.field(name="leaseStateCounts")
 
