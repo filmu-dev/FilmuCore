@@ -18,19 +18,24 @@ New product-facing runtime, governance, browse, search, and readiness work shoul
 - GraphQL-native VFS search facets and exact-match/directory/file counts for Director browse/search screens.
 - GraphQL-native live FilmuVFS gRPC governance counters and refresh/reconnect diagnostics for Director operator screens.
 - GraphQL-native replay-claim posture, including claim limits, max claim passes, and pending-recovery readiness.
+- GraphQL-native downloader execution evidence, including retained dead-letter samples, provider/failure rollups, and bounded queue-history summaries for failover inspection.
+- GraphQL-native compact observability rollout summaries for Director/operator closure dashboards above the deeper convergence graph.
+- GraphQL-native VFS catalog delta rollups backed by retained mounted generations instead of compatibility route shaping.
+- GraphQL-native VFS mount diagnostics combining retained generation history with live FilmuVFS gRPC governance counters.
+- GraphQL bootstrap hardening so plugin/worker imports no longer eagerly load the full GraphQL schema during runtime startup.
 
 ## Next GraphQL Slices
 
 1. Move the remaining Director screens that still rely on compatibility REST browse/detail payloads onto `vfsOverview`, `vfsSearch`, `vfsFileContext`, and the typed blocked-item graph.
 2. Add GraphQL-native calendar/detail/library projections for any remaining Director screens that still depend on compatibility route shaping.
-3. Expose GraphQL-native downloader execution history and provider failover evidence so Director can inspect orchestration results without REST.
-4. Add GraphQL-native plugin runtime/event feeds that summarize recent plugin activity, health, and retry posture over time, not just current declared wiring.
-5. Add GraphQL-native governance evidence for rollout gates, playback proof posture, and retained operational artifacts.
-6. Expand VFS graph projections for catalog delta visibility and mount diagnostics beyond the current governance counters.
-7. Add GraphQL-native trace/export posture summaries for Python -> gRPC -> Rust observability rollout evidence.
-8. Add GraphQL-native control-plane replay ergonomics for stale ownership transfer and retained recovery evidence beyond the current claim posture.
-9. Add richer GraphQL-native browse/detail projections for any remaining Director screens still using compatibility shaping.
-10. Remove GraphQL dependencies on any remaining REST helper imports by promoting shared read-model builders into services first.
+3. Add GraphQL-native plugin runtime/event feeds that summarize recent plugin activity, health, retry posture, and recent failures over time, not just current declared wiring.
+4. Add GraphQL-native governance evidence for rollout gates, playback proof posture, and retained operational artifacts.
+5. Expand GraphQL-native observability views from rollout summaries to retained environment/export/search evidence histories and alert rollout timelines.
+6. Add GraphQL-native control-plane replay ergonomics for stale ownership transfer and retained recovery evidence beyond the current claim posture.
+7. Add richer GraphQL-native browse/detail projections for any remaining Director screens still using compatibility shaping.
+8. Remove GraphQL dependencies on any remaining REST helper imports by promoting shared read-model builders into services first.
+9. Add GraphQL-native downloader execution history over time, not just the current bounded summary and recent dead-letter samples.
+10. Surface GraphQL-native VFS refresh/problem timelines so Director/operator screens can inspect mount health longitudinally without compatibility endpoints.
 
 ## Gate-Closure Work Still Outstanding
 

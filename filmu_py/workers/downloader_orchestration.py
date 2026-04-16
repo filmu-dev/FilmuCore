@@ -145,6 +145,30 @@ def resolve_downloader_api_key(settings: Settings, *, provider: str) -> str:
     return api_key
 
 
+def build_dead_letter_metadata(
+    *,
+    provider: str | None,
+    item_request_id: str | None,
+    selected_stream_id: str | None,
+    failure_kind: str,
+    status_code: int | None = None,
+    retry_after_seconds: int | None = None,
+) -> dict[str, object]:
+    """Build normalized downloader/debrid dead-letter metadata for retained evidence."""
+
+    metadata: dict[str, object] = {
+        "provider": provider or "",
+        "item_request_id": item_request_id or "",
+        "selected_stream_id": selected_stream_id or "",
+        "failure_kind": failure_kind,
+    }
+    if status_code is not None:
+        metadata["status_code"] = int(status_code)
+    if retry_after_seconds is not None:
+        metadata["retry_after_seconds"] = int(retry_after_seconds)
+    return metadata
+
+
 def resolve_download_clients(
     *,
     settings: Settings,

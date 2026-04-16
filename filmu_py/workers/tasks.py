@@ -34,7 +34,7 @@ from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
 from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.rtn import RankingProfile
-from filmu_py.services.debrid import DebridDownloadClient, DebridRateLimitError, TorrentInfo
+from filmu_py.services.debrid import DebridRateLimitError, TorrentInfo
 from filmu_py.services.media import (
     MediaItemRecord,
     MediaService,
@@ -55,18 +55,18 @@ from filmu_py.workers import stage_job_ids as _stage_job_ids
 from filmu_py.workers import stage_observability as _stage_observability
 from filmu_py.workers import stage_scope as _stage_scope
 from filmu_py.workers.downloader_orchestration import (
-    build_provider_client as orchestration_build_provider_client,
-)
-from filmu_py.workers.downloader_orchestration import (
+    build_dead_letter_metadata,
     build_rank_no_winner_diagnostics,
     execute_debrid_download,
     rank_failure_cooldown_seconds,
-    resolve_download_client,
     resolve_download_clients,
     resolve_downloader_api_key,
     resolve_enabled_downloader,
     selection_failure_reason,
     should_failover_downloader,
+)
+from filmu_py.workers.downloader_orchestration import (
+    build_provider_client as _build_provider_client,
 )
 from filmu_py.workers.retry import (
     RetryPolicy,
@@ -76,6 +76,29 @@ from filmu_py.workers.retry import (
     timed_stage,
 )
 
+_resolve_enabled_downloader = resolve_enabled_downloader
+_resolve_downloader_api_key = resolve_downloader_api_key
+async def _resolve_download_clients(
+    ctx: dict[str, Any],
+    *,
+    settings: Settings,
+    limiter: DistributedRateLimiter,
+    item_id: str | None = None,
+    item_request_id: str | None = None,
+) -> list[tuple[str, object]]:
+    return resolve_download_clients(settings=settings, limiter=limiter, plugin_registry=await _resolve_plugin_registry(ctx), provider_client_builder=_build_provider_client, item_id=item_id, item_request_id=item_request_id)
+async def _resolve_download_client(
+    ctx: dict[str, Any],
+    *,
+    settings: Settings,
+    limiter: DistributedRateLimiter,
+    item_id: str | None = None,
+    item_request_id: str | None = None,
+) -> tuple[str, object]:
+    candidates = await _resolve_download_clients(ctx, settings=settings, limiter=limiter, item_id=item_id, item_request_id=item_request_id)
+    if not candidates:
+        raise ValueError("no_enabled_downloader")
+    return candidates[0]
 logger = logging.getLogger(__name__)
 INDEX_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
@@ -128,14 +151,9 @@ _partial_scope_rejection_reason = _stage_scope.partial_scope_rejection_reason
 _post_rank_expected_scope_reason = _stage_scope.post_rank_expected_scope_reason
 _build_scraper_search_input = _stage_scope.build_scraper_search_input
 _scrape_candidate_from_plugin_result = _stage_scope.scrape_candidate_from_plugin_result
-
-
 def _redis_from_settings(settings: Settings) -> Redis:
     """Build Redis client for worker-side limiter usage."""
-
     return cast(Redis, Redis.from_url(str(settings.redis_url), decode_responses=False))
-
-
 async def _enqueue_arq_job(
     redis: ArqRedis,
     function: str,
@@ -143,11 +161,8 @@ async def _enqueue_arq_job(
     **kwargs: object,
 ) -> object | None:
     """Preserve ARQ runtime keyword payloads while containing the local Any cast."""
-
     enqueued_job = await cast(Any, redis).enqueue_job(function, *args, **kwargs)
     return cast(object | None, enqueued_job)
-
-
 async def _enforce_tenant_worker_enqueue_quota(
     redis: object,
     *,
@@ -1128,60 +1143,6 @@ def _dubbed_anime_only(settings: Settings) -> bool:
     raw = settings.scraping.dubbed_anime_only
     return bool(raw)
 
-
-def _resolve_enabled_downloader(
-    settings: Settings,
-    *,
-    item_id: str | None = None,
-    item_request_id: str | None = None,
-) -> str:
-    return resolve_enabled_downloader(settings, item_id=item_id, item_request_id=item_request_id)
-
-
-def _build_provider_client(
-    *, provider: str, api_key: str, limiter: DistributedRateLimiter
-) -> DebridDownloadClient:
-    return orchestration_build_provider_client(provider=provider, api_key=api_key, limiter=limiter)
-
-
-async def _resolve_download_clients(
-    ctx: dict[str, Any],
-    *,
-    settings: Settings,
-    limiter: DistributedRateLimiter,
-    item_id: str | None = None,
-    item_request_id: str | None = None,
-) -> list[tuple[str, DebridDownloadClient]]:
-    plugin_registry = await _resolve_plugin_registry(ctx)
-    return resolve_download_clients(
-        settings=settings,
-        limiter=limiter,
-        plugin_registry=plugin_registry,
-        provider_client_builder=_build_provider_client,
-        item_id=item_id,
-        item_request_id=item_request_id,
-    )
-
-
-async def _resolve_download_client(
-    ctx: dict[str, Any],
-    *,
-    settings: Settings,
-    limiter: DistributedRateLimiter,
-    item_id: str | None = None,
-    item_request_id: str | None = None,
-) -> tuple[str, DebridDownloadClient]:
-    plugin_registry = await _resolve_plugin_registry(ctx)
-    return resolve_download_client(
-        settings=settings, limiter=limiter, plugin_registry=plugin_registry,
-        provider_client_builder=_build_provider_client,
-        item_id=item_id,
-        item_request_id=item_request_id,
-    )
-
-
-def _resolve_downloader_api_key(settings: Settings, *, provider: str) -> str:
-    return resolve_downloader_api_key(settings, provider=provider)
 
 async def _maybe_enqueue_next_stage(
     ctx: dict[str, Any],
@@ -2579,10 +2540,11 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             raise ValueError("selected_stream_missing")
         selected_stream_id = selected_stream.id
 
-        provider_candidates = await _resolve_download_clients(
-            mutable_ctx,
+        provider_candidates = resolve_download_clients(
             settings=settings,
             limiter=limiter,
+            plugin_registry=await _resolve_plugin_registry(mutable_ctx),
+            provider_client_builder=_build_provider_client,
             item_id=item_id,
             item_request_id=item_request_id,
         )
@@ -2765,6 +2727,13 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider or exc.provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="rate_limit",
+                    retry_after_seconds=exc.retry_after_seconds,
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2807,6 +2776,12 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="timeout",
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2831,6 +2806,13 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                     task_name="debrid_item",
                     item_id=item_id,
                     reason=str(exc),
+                    metadata=build_dead_letter_metadata(
+                        provider=provider or "unknown",
+                        item_request_id=item_request_id,
+                        selected_stream_id=selected_stream_id,
+                        failure_kind="rate_limit",
+                        retry_after_seconds=retry_after_seconds,
+                    ),
                 )
                 raise
             raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2856,6 +2838,13 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="provider_error",
+                    status_code=exc.response.status_code,
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2881,6 +2870,12 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="provider_error",
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc

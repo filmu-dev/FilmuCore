@@ -32,6 +32,8 @@ from filmu_py.graphql.types import (
     GQLControlPlaneStatusCount,
     GQLControlPlaneSubscriber,
     GQLControlPlaneSummary,
+    GQLDownloaderExecutionDeadLetter,
+    GQLDownloaderExecutionEvidence,
     GQLDownloaderOrchestration,
     GQLDownloaderProviderCandidate,
     GQLEnterpriseOperationsGovernance,
@@ -50,6 +52,7 @@ from filmu_py.graphql.types import (
     GQLObservabilityConvergence,
     GQLObservabilityConvergenceSummary,
     GQLObservabilityPipelineStage,
+    GQLObservabilityRolloutSummary,
     GQLPersistMediaEntryControlResult,
     GQLPersistPlaybackAttachmentControlResult,
     GQLPlaybackAttachment,
@@ -73,6 +76,7 @@ from filmu_py.graphql.types import (
     GQLStreamCandidate,
     GQLVfsBlockedItem,
     GQLVfsBreadcrumb,
+    GQLVfsCatalogDelta,
     GQLVfsCatalogEntry,
     GQLVfsCatalogGovernance,
     GQLVfsCatalogGovernanceSummary,
@@ -83,11 +87,13 @@ from filmu_py.graphql.types import (
     GQLVfsDirectoryListing,
     GQLVfsFileContext,
     GQLVfsFileDetail,
+    GQLVfsMountDiagnostics,
     GQLVfsOverview,
     GQLVfsRollupBucket,
     GQLVfsSearchResult,
     GQLVfsSnapshot,
     GQLWorkerQueueHistoryPoint,
+    GQLWorkerQueueHistorySummary,
     GQLWorkerQueueStatus,
     ItemActionInput,
     ItemStateChangedEvent,
@@ -100,7 +106,10 @@ from filmu_py.graphql.types import (
     RetryItemResult,
     SettingsUpdateInput,
 )
-from filmu_py.observability_convergence import build_observability_convergence_snapshot
+from filmu_py.observability_convergence import (
+    build_observability_convergence_snapshot,
+    build_observability_rollout_summary,
+)
 from filmu_py.services.media import (
     ArqNotEnabledError,
     CalendarProjectionRecord,
@@ -119,11 +128,13 @@ from filmu_py.services.operator_posture import (
     build_control_plane_replay_backplane_posture,
     build_control_plane_subscribers_posture,
     build_control_plane_summary_posture,
+    build_downloader_execution_evidence_posture,
     build_downloader_orchestration_posture,
     build_plugin_event_status_posture,
     build_plugin_governance_posture,
     build_plugin_integration_readiness_posture,
     build_vfs_catalog_governance_posture,
+    build_vfs_mount_diagnostics_posture,
 )
 from filmu_py.services.playback import (
     AppScopedDirectPlaybackRefreshTriggerResult,
@@ -136,9 +147,11 @@ from filmu_py.services.playback import (
     trigger_hls_restricted_fallback_refresh_from_resources,
 )
 from filmu_py.services.vfs_catalog import (
+    VfsCatalogDelta,
     VfsCatalogEntry,
     VfsCatalogRollup,
     VfsCatalogSnapshot,
+    summarize_vfs_catalog_delta,
     summarize_vfs_catalog_snapshot,
 )
 
@@ -321,6 +334,26 @@ def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLO
             )
             for stage in snapshot.pipeline_stages
         ],
+    )
+
+
+def _build_observability_rollout(info: Info[GraphQLContext, object]) -> GQLObservabilityRolloutSummary:
+    summary = build_observability_rollout_summary(info.context.resources.settings)
+    return GQLObservabilityRolloutSummary(
+        generated_at=summary.generated_at,
+        status=summary.status,
+        pipeline_stage_count=summary.pipeline_stage_count,
+        ready_stage_count=summary.ready_stage_count,
+        production_evidence_count=summary.production_evidence_count,
+        production_evidence_ready=summary.production_evidence_ready,
+        grpc_rust_trace_ready=summary.grpc_rust_trace_ready,
+        otlp_export_ready=summary.otlp_export_ready,
+        search_index_ready=summary.search_index_ready,
+        alert_rollout_ready=summary.alert_rollout_ready,
+        ready_stage_names=list(summary.ready_stage_names),
+        blocked_stage_names=list(summary.blocked_stage_names),
+        required_actions=list(summary.required_actions),
+        remaining_gaps=list(summary.remaining_gaps),
     )
 
 
@@ -577,6 +610,58 @@ def _build_downloader_orchestration(snapshot: object) -> GQLDownloaderOrchestrat
     )
 
 
+def _build_downloader_execution_evidence(snapshot: object) -> GQLDownloaderExecutionEvidence:
+    typed_snapshot: Any = snapshot
+    return GQLDownloaderExecutionEvidence(
+        generated_at=str(typed_snapshot.generated_at),
+        queue_name=str(typed_snapshot.queue_name),
+        status=str(typed_snapshot.status),
+        selection_mode=str(typed_snapshot.selection_mode),
+        ordered_failover_ready=bool(typed_snapshot.ordered_failover_ready),
+        fanout_ready=bool(typed_snapshot.fanout_ready),
+        provider_counts=_build_named_count_buckets(dict(typed_snapshot.provider_counts)),
+        failure_kind_counts=_build_named_count_buckets(
+            dict(typed_snapshot.failure_kind_counts)
+        ),
+        dead_letter_reason_counts=_build_named_count_buckets(
+            dict(typed_snapshot.dead_letter_reason_counts)
+        ),
+        history_summary=GQLWorkerQueueHistorySummary(
+            point_count=int(typed_snapshot.history_summary.point_count),
+            warning_point_count=int(typed_snapshot.history_summary.warning_point_count),
+            critical_point_count=int(typed_snapshot.history_summary.critical_point_count),
+            max_total_jobs=int(typed_snapshot.history_summary.max_total_jobs),
+            max_ready_jobs=int(typed_snapshot.history_summary.max_ready_jobs),
+            max_retry_jobs=int(typed_snapshot.history_summary.max_retry_jobs),
+            max_dead_letter_jobs=int(typed_snapshot.history_summary.max_dead_letter_jobs),
+            latest_alert_level=str(typed_snapshot.history_summary.latest_alert_level),
+            dead_letter_reason_counts=_build_named_count_buckets(
+                dict(typed_snapshot.history_summary.dead_letter_reason_counts)
+            ),
+        ),
+        recent_dead_letters=[
+            GQLDownloaderExecutionDeadLetter(
+                stage=str(row.stage),
+                item_id=str(row.item_id),
+                reason=str(row.reason),
+                reason_code=str(row.reason_code),
+                idempotency_key=str(row.idempotency_key),
+                attempt=int(row.attempt),
+                queued_at=str(row.queued_at),
+                provider=row.provider,
+                failure_kind=row.failure_kind,
+                selected_stream_id=row.selected_stream_id,
+                item_request_id=row.item_request_id,
+                status_code=row.status_code,
+                retry_after_seconds=row.retry_after_seconds,
+            )
+            for row in typed_snapshot.recent_dead_letters
+        ],
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
 def _build_plugin_event_status(row: object) -> GQLPluginEventStatus:
     typed_row: Any = row
     return GQLPluginEventStatus(
@@ -755,6 +840,33 @@ def _build_vfs_catalog_governance(snapshot: object) -> GQLVfsCatalogGovernance:
     )
 
 
+def _build_vfs_mount_diagnostics(snapshot: object) -> GQLVfsMountDiagnostics:
+    typed_snapshot: Any = snapshot
+    return GQLVfsMountDiagnostics(
+        generated_at=str(typed_snapshot.generated_at),
+        status=str(typed_snapshot.status),
+        supplier_attached=bool(typed_snapshot.supplier_attached),
+        server_attached=bool(typed_snapshot.server_attached),
+        current_generation_id=typed_snapshot.current_generation_id,
+        current_published_at=typed_snapshot.current_published_at,
+        history_generation_ids=list(typed_snapshot.history_generation_ids),
+        history_generation_count=int(typed_snapshot.history_generation_count),
+        delta_history_ready=bool(typed_snapshot.delta_history_ready),
+        active_watch_sessions=int(typed_snapshot.active_watch_sessions),
+        snapshots_served=int(typed_snapshot.snapshots_served),
+        deltas_served=int(typed_snapshot.deltas_served),
+        reconnect_delta_served=int(typed_snapshot.reconnect_delta_served),
+        reconnect_snapshot_fallbacks=int(typed_snapshot.reconnect_snapshot_fallbacks),
+        reconnect_failures=int(typed_snapshot.reconnect_failures),
+        request_stream_failures=int(typed_snapshot.request_stream_failures),
+        problem_events=int(typed_snapshot.problem_events),
+        refresh_provider_failures=int(typed_snapshot.refresh_provider_failures),
+        refresh_validation_failures=int(typed_snapshot.refresh_validation_failures),
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
 def _format_optional_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -883,6 +995,35 @@ async def _resolve_vfs_snapshot(
     if not generation_id.isdigit():
         return None
     return await supplier.snapshot_for_generation(int(generation_id))
+
+
+async def _resolve_vfs_delta(
+    info: Info[GraphQLContext, object],
+    *,
+    base_generation_id: str | None,
+) -> VfsCatalogDelta | None:
+    supplier = info.context.resources.vfs_catalog_supplier
+    if supplier is None or not hasattr(supplier, "build_delta_since"):
+        return None
+
+    requested_generation = (base_generation_id or "").strip()
+    if requested_generation:
+        if not requested_generation.isdigit():
+            raise ValueError("base_generation_id must be numeric when provided")
+        return cast(
+            VfsCatalogDelta | None,
+            await cast(Any, supplier).build_delta_since(int(requested_generation)),
+        )
+
+    history_ids: list[str] = []
+    if hasattr(supplier, "history_generation_ids"):
+        history_ids = list(await cast(Any, supplier).history_generation_ids())
+    if len(history_ids) < 2:
+        return None
+    return cast(
+        VfsCatalogDelta | None,
+        await cast(Any, supplier).build_delta_since(int(history_ids[-2])),
+    )
 
 
 def _find_vfs_entry(snapshot: VfsCatalogSnapshot, path: str) -> VfsCatalogEntry | None:
@@ -1867,6 +2008,43 @@ class CoreQueryResolver:
         )
 
     @strawberry.field(
+        description="GraphQL-native VFS catalog delta rollup using retained mounted generations"
+    )
+    async def vfs_catalog_delta(
+        self,
+        info: Info[GraphQLContext, object],
+        base_generation_id: str | None = None,
+    ) -> GQLVfsCatalogDelta | None:
+        delta = await _resolve_vfs_delta(info, base_generation_id=base_generation_id)
+        if delta is None:
+            return None
+        rollup = summarize_vfs_catalog_delta(delta)
+        return GQLVfsCatalogDelta(
+            generation_id=str(delta.generation_id),
+            base_generation_id=delta.base_generation_id,
+            published_at=delta.published_at.isoformat(),
+            upsert_directory_count=rollup.upsert_directory_count,
+            upsert_file_count=rollup.upsert_file_count,
+            removal_directory_count=rollup.removal_directory_count,
+            removal_file_count=rollup.removal_file_count,
+            provider_family_counts=_build_named_count_buckets(
+                dict(rollup.provider_family_counts)
+            ),
+            lease_state_counts=_build_named_count_buckets(dict(rollup.lease_state_counts)),
+        )
+
+    @strawberry.field(
+        description="GraphQL-native VFS mount diagnostics covering retained generations and live gRPC mount counters"
+    )
+    async def vfs_mount_diagnostics(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLVfsMountDiagnostics:
+        return _build_vfs_mount_diagnostics(
+            await build_vfs_mount_diagnostics_posture(info.context.resources)
+        )
+
+    @strawberry.field(
         description="List blocked mounted catalog items from the current or requested snapshot"
     )
     async def vfs_blocked_items(
@@ -1967,6 +2145,15 @@ class CoreQueryResolver:
         return _build_observability_convergence(info)
 
     @strawberry.field(
+        description="Compact observability rollout closure summary for Director/operator screens"
+    )
+    async def observability_rollout_summary(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLObservabilityRolloutSummary:
+        return _build_observability_rollout(info)
+
+    @strawberry.field(
         description="Builtin plugin registration and config-validation posture for GraphQL-first clients"
     )
     async def plugin_integration_readiness(
@@ -2015,6 +2202,44 @@ class CoreQueryResolver:
         return _build_downloader_orchestration(
             build_downloader_orchestration_posture(info.context.resources)
         )
+
+    @strawberry.field(
+        description="Retained downloader execution evidence and recent dead-letter samples for failover/operator inspection"
+    )
+    async def downloader_execution_evidence(
+        self,
+        info: Info[GraphQLContext, object],
+        provider: str | None = None,
+        failure_kind: str | None = None,
+        limit: int = 20,
+    ) -> GQLDownloaderExecutionEvidence:
+        bounded_limit = max(1, min(limit, 100))
+        snapshot = await build_downloader_execution_evidence_posture(
+            info.context.resources,
+            dead_letter_limit=bounded_limit,
+        )
+        filtered_dead_letters = [
+            row
+            for row in snapshot.recent_dead_letters
+            if (provider is None or row.provider == provider)
+            and (failure_kind is None or row.failure_kind == failure_kind)
+        ]
+        filtered_snapshot = SimpleNamespace(
+            generated_at=snapshot.generated_at,
+            queue_name=snapshot.queue_name,
+            status=snapshot.status,
+            selection_mode=snapshot.selection_mode,
+            ordered_failover_ready=snapshot.ordered_failover_ready,
+            fanout_ready=snapshot.fanout_ready,
+            provider_counts=snapshot.provider_counts,
+            failure_kind_counts=snapshot.failure_kind_counts,
+            dead_letter_reason_counts=snapshot.dead_letter_reason_counts,
+            history_summary=snapshot.history_summary,
+            recent_dead_letters=filtered_dead_letters[:bounded_limit],
+            required_actions=snapshot.required_actions,
+            remaining_gaps=snapshot.remaining_gaps,
+        )
+        return _build_downloader_execution_evidence(filtered_snapshot)
 
     @strawberry.field(
         description="Declared publishable plugin events and hook subscriptions"

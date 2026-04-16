@@ -250,6 +250,18 @@ class VfsCatalogRollup:
 
 
 @dataclass(frozen=True, slots=True)
+class VfsCatalogDeltaRollup:
+    """Aggregate posture counts derived from one published VFS catalog delta."""
+
+    upsert_directory_count: int
+    upsert_file_count: int
+    removal_directory_count: int
+    removal_file_count: int
+    provider_family_counts: dict[str, int]
+    lease_state_counts: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
 class VfsCatalogRemoval:
     """One removed catalog entry emitted by a computed delta."""
 
@@ -344,6 +356,45 @@ def summarize_vfs_catalog_snapshot(snapshot: VfsCatalogSnapshot) -> VfsCatalogRo
     )
 
 
+def summarize_vfs_catalog_delta(delta: VfsCatalogDelta) -> VfsCatalogDeltaRollup:
+    """Return aggregate provider/lease posture for one published VFS delta."""
+
+    provider_family_counts: dict[str, int] = {}
+    lease_state_counts: dict[str, int] = {}
+    upsert_directory_count = 0
+    upsert_file_count = 0
+    removal_directory_count = 0
+    removal_file_count = 0
+
+    for entry in delta.upserts:
+        if entry.kind == "directory":
+            upsert_directory_count += 1
+            continue
+        upsert_file_count += 1
+        file_entry = entry.file
+        if file_entry is None:
+            continue
+        provider_family = file_entry.provider_family if file_entry.provider_family else "none"
+        provider_family_counts[provider_family] = provider_family_counts.get(provider_family, 0) + 1
+        lease_state = file_entry.lease_state if file_entry.lease_state else "unknown"
+        lease_state_counts[lease_state] = lease_state_counts.get(lease_state, 0) + 1
+
+    for removal in delta.removals:
+        if removal.kind == "directory":
+            removal_directory_count += 1
+        else:
+            removal_file_count += 1
+
+    return VfsCatalogDeltaRollup(
+        upsert_directory_count=upsert_directory_count,
+        upsert_file_count=upsert_file_count,
+        removal_directory_count=removal_directory_count,
+        removal_file_count=removal_file_count,
+        provider_family_counts=dict(sorted(provider_family_counts.items())),
+        lease_state_counts=dict(sorted(lease_state_counts.items())),
+    )
+
+
 class FilmuVfsCatalogSupplier:
     """Project persisted Python playback state into the Rust-sidecar catalog contract."""
 
@@ -393,6 +444,13 @@ class FilmuVfsCatalogSupplier:
         if previous is None:
             return None
         return self._build_delta_from_snapshots(previous, current)
+
+    async def history_generation_ids(self) -> tuple[str, ...]:
+        """Return cached generation identifiers in ascending order."""
+
+        async with self._state_lock:
+            await self._build_snapshot_locked()
+            return tuple(str(generation_id) for generation_id in self._snapshot_history)
 
     async def _build_snapshot_locked(self) -> VfsCatalogSnapshot:
         """Build or reuse the latest snapshot while holding the supplier state lock."""

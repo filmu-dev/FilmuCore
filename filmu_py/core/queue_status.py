@@ -88,6 +88,36 @@ class QueueStatusSnapshot:
     dead_letter_reason_counts: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class DeadLetterSample:
+    """One persisted dead-letter payload normalized for graph/operator consumers."""
+
+    stage: str
+    task: str
+    item_id: str
+    reason: str
+    reason_code: str
+    idempotency_key: str
+    attempt: int
+    queued_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueHistorySummary:
+    """Aggregate rollup derived from bounded queue-history points."""
+
+    point_count: int
+    warning_point_count: int
+    critical_point_count: int
+    max_total_jobs: int
+    max_ready_jobs: int
+    max_retry_jobs: int
+    max_dead_letter_jobs: int
+    latest_alert_level: AlertLevel
+    dead_letter_reason_counts: dict[str, int] = field(default_factory=dict)
+
+
 class QueueStatusReader:
     """Read one bounded ARQ queue snapshot from Redis primitives."""
 
@@ -207,6 +237,44 @@ class QueueStatusReader:
                 continue
             payloads.append(payload)
         return payloads
+
+    @staticmethod
+    def _dead_letter_sample_from_payload(payload: dict[str, Any]) -> DeadLetterSample | None:
+        stage = payload.get("stage")
+        task = payload.get("task")
+        item_id = payload.get("item_id")
+        reason = payload.get("reason")
+        reason_code = payload.get("reason_code")
+        idempotency_key = payload.get("idempotency_key")
+        queued_at = payload.get("queued_at")
+        metadata = payload.get("metadata", {})
+        if not all(isinstance(value, str) and value.strip() for value in (
+            stage,
+            task,
+            item_id,
+            reason,
+            reason_code,
+            idempotency_key,
+            queued_at,
+        )):
+            return None
+        attempt = QueueStatusReader._coerce_int(payload.get("attempt", 0))
+        normalized_metadata = (
+            cast(dict[str, Any], metadata)
+            if isinstance(metadata, dict)
+            else {}
+        )
+        return DeadLetterSample(
+            stage=stage,
+            task=task,
+            item_id=item_id,
+            reason=reason,
+            reason_code=reason_code,
+            idempotency_key=idempotency_key,
+            attempt=attempt,
+            queued_at=queued_at,
+            metadata=normalized_metadata,
+        )
 
     @staticmethod
     def _payload_queued_age_seconds(
@@ -414,6 +482,51 @@ class QueueStatusReader:
                 )
             )
         return history
+
+    async def history_summary(self, *, limit: int = 20) -> QueueHistorySummary:
+        """Return an aggregate rollup over bounded persisted queue history."""
+
+        points = await self.history(limit=limit)
+        dead_letter_reason_counts: dict[str, int] = {}
+        for point in points:
+            for reason_code, count in point.dead_letter_reason_counts.items():
+                dead_letter_reason_counts[reason_code] = (
+                    dead_letter_reason_counts.get(reason_code, 0) + int(count)
+                )
+
+        return QueueHistorySummary(
+            point_count=len(points),
+            warning_point_count=sum(1 for point in points if point.alert_level == "warning"),
+            critical_point_count=sum(1 for point in points if point.alert_level == "critical"),
+            max_total_jobs=max((point.total_jobs for point in points), default=0),
+            max_ready_jobs=max((point.ready_jobs for point in points), default=0),
+            max_retry_jobs=max((point.retry_jobs for point in points), default=0),
+            max_dead_letter_jobs=max((point.dead_letter_jobs for point in points), default=0),
+            latest_alert_level=(points[0].alert_level if points else "ok"),
+            dead_letter_reason_counts=dict(sorted(dead_letter_reason_counts.items())),
+        )
+
+    async def dead_letter_samples(
+        self,
+        *,
+        limit: int = 20,
+        stage: str | None = None,
+        reason_code: str | None = None,
+    ) -> list[DeadLetterSample]:
+        """Return normalized dead-letter payload samples with optional bounded filters."""
+
+        bounded_limit = max(1, min(limit, 100))
+        payloads = await self._dead_letter_payloads(start=0, stop=max(0, bounded_limit - 1))
+        samples = [
+            sample
+            for payload in payloads
+            if (sample := self._dead_letter_sample_from_payload(payload)) is not None
+        ]
+        if stage is not None:
+            samples = [sample for sample in samples if sample.stage == stage]
+        if reason_code is not None:
+            samples = [sample for sample in samples if sample.reason_code == reason_code]
+        return samples[:bounded_limit]
 
     async def snapshot(self, *, now_seconds: float | None = None) -> QueueStatusSnapshot:
         """Return one live queue snapshot and update exported Prometheus gauges."""
