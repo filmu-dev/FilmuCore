@@ -26,9 +26,9 @@ GraphQL is the long-term client contract for:
 - library and item detail experiences
 - calendar and release projections
 - VFS catalog projections
-- screen-oriented VFS overview and browse projections
+- screen-oriented VFS overview and browse projections, including breadcrumbs and file-focused directory context
 - playback and recovery control-plane actions
-- Director-facing operator posture read models, including control-plane recovery and plugin readiness
+- Director-facing operator posture read models, including control-plane recovery, replay-backplane proof, observability pipeline proof, and plugin readiness
 - downloader orchestration, plugin events, plugin governance, and enterprise operations posture
 - plugin-backed product capabilities
 - future live frontend subscriptions
@@ -51,6 +51,8 @@ When implementing new frontend-facing work:
 - prefer typed GraphQL projections over compatibility payload mirroring
 - avoid adding new frontend-only REST routes
 - when Director needs operator posture or runtime-readiness data, land it on GraphQL first and keep REST as a temporary shim only if an existing client still depends on it
+- when Director needs gate-closure evidence, expose typed proof refs, contract-validation posture, soak posture, and pending-backlog visibility on GraphQL instead of pushing that logic into ad hoc frontend heuristics
+- prefer browse/detail GraphQL projections that can serve both directory and selected-file screens from one query rather than forcing the frontend to stitch multiple compatibility endpoints together
 - prefer sharing one read-model builder across GraphQL and compatibility REST instead of duplicating governance logic in both surfaces
 - keep GraphQL naming intentional rather than inherited from legacy REST aliases
 - preserve tenant and authorization rules when moving logic from REST to GraphQL

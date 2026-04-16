@@ -268,6 +268,8 @@ class PlexUpdaterConfig(CompatibilityModel):
     enabled: bool = False
     token: str = ""
     url: str = "http://localhost:32400"
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class JellyfinUpdaterConfig(CompatibilityModel):
@@ -334,6 +336,8 @@ class OverseerrConfig(CompatibilityModel):
     url: str = ""
     api_key: str = ""
     use_webhook: bool = False
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class PlexWatchlistConfig(CompatibilityModel):
@@ -378,6 +382,8 @@ class ListrrConfig(CompatibilityModel):
     movie_lists: list[str] = Field(default_factory=list)
     show_lists: list[str] = Field(default_factory=list)
     api_key: str = ""
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class TraktOAuth(CompatibilityModel):
@@ -428,6 +434,8 @@ class ScraperBaseConfig(CompatibilityModel):
     timeout: int = 30
     retries: int = 1
     ratelimit: bool = True
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class TorrentioConfig(ScraperBaseConfig):
@@ -665,6 +673,7 @@ class ControlPlaneSettings(CompatibilityModel):
     event_stream_name: str = "filmu:events"
     event_replay_maxlen: int = 10_000
     consumer_group: str = "filmu-api"
+    proof_refs: list[str] = Field(default_factory=list)
     automation: ControlPlaneAutomationSettings = Field(
         default_factory=ControlPlaneAutomationSettings
     )
