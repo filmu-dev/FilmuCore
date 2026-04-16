@@ -16,13 +16,6 @@ import strawberry
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
-from filmu_py.api.routes.default import (
-    _downloader_orchestration_response,
-    _enterprise_operations_governance,
-    _plugin_governance_summary,
-    get_plugin_events,
-    get_plugins,
-)
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleSnapshot
@@ -129,6 +122,14 @@ from filmu_py.services.vfs_catalog import (
     VfsCatalogSnapshot,
     summarize_vfs_catalog_snapshot,
 )
+
+
+def _compat_route_module() -> Any:
+    """Resolve compatibility route helpers lazily to avoid import-time cycles."""
+
+    from filmu_py.api.routes import default as default_routes
+
+    return default_routes
 
 
 def _resolve_service_version() -> str:
@@ -1418,7 +1419,7 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
     ) -> GQLDownloaderOrchestration:
         return _build_downloader_orchestration(
-            _downloader_orchestration_response(info.context.request)
+            _compat_route_module()._downloader_orchestration_response(info.context.request)
         )
 
     @strawberry.field(
@@ -1428,7 +1429,7 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> list[GQLPluginEventStatus]:
-        rows = await get_plugin_events(info.context.request)
+        rows = await _compat_route_module().get_plugin_events(info.context.request)
         return [_build_plugin_event_status(row) for row in rows]
 
     @strawberry.field(
@@ -1438,8 +1439,9 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLPluginGovernance:
-        plugins = await get_plugins(info.context.request)
-        summary = _plugin_governance_summary(
+        compat_routes = _compat_route_module()
+        plugins = await compat_routes.get_plugins(info.context.request)
+        summary = compat_routes._plugin_governance_summary(
             plugins,
             runtime_policy=info.context.resources.settings.plugin_runtime,
         )
@@ -1476,9 +1478,10 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLEnterpriseOperationsGovernance:
-        plugins = await get_plugins(info.context.request)
+        compat_routes = _compat_route_module()
+        plugins = await compat_routes.get_plugins(info.context.request)
         return _build_enterprise_operations_governance(
-            await _enterprise_operations_governance(
+            await compat_routes._enterprise_operations_governance(
                 request=info.context.request,
                 plugins=plugins,
             )
