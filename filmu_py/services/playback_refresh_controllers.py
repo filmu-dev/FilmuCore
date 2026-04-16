@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from time import monotonic
+from types import ModuleType
 from typing import Any, cast
 
 from filmu_py.services.playback import (
@@ -52,6 +54,15 @@ class _QueuedRefreshControllerBase:
             )
 
 
+def _resolve_worker_tasks_module() -> ModuleType:
+    module = sys.modules.get("filmu_py.workers.tasks")
+    if isinstance(module, ModuleType):
+        return module
+    from filmu_py.workers import tasks as worker_tasks
+
+    return worker_tasks
+
+
 class QueuedDirectPlaybackRefreshController(_QueuedRefreshControllerBase):
     """Queue-backed dispatcher for direct-play refresh work."""
 
@@ -69,7 +80,7 @@ class QueuedDirectPlaybackRefreshController(_QueuedRefreshControllerBase):
         at: datetime | None = None,
     ) -> DirectPlaybackRefreshControlPlaneTriggerResult:
         _ = at
-        from filmu_py.workers import tasks as worker_tasks
+        worker_tasks = _resolve_worker_tasks_module()
 
         enqueued = await worker_tasks.enqueue_refresh_direct_playback_link(
             cast(Any, self._arq_redis),
@@ -111,7 +122,7 @@ class QueuedHlsFailedLeaseRefreshController(_QueuedRefreshControllerBase):
         at: datetime | None = None,
     ) -> HlsFailedLeaseRefreshControlPlaneTriggerResult:
         _ = at
-        from filmu_py.workers import tasks as worker_tasks
+        worker_tasks = _resolve_worker_tasks_module()
 
         enqueued = await worker_tasks.enqueue_refresh_selected_hls_failed_lease(
             cast(Any, self._arq_redis),
@@ -162,7 +173,7 @@ class QueuedHlsRestrictedFallbackRefreshController(_QueuedRefreshControllerBase)
         at: datetime | None = None,
     ) -> HlsRestrictedFallbackRefreshControlPlaneTriggerResult:
         _ = at
-        from filmu_py.workers import tasks as worker_tasks
+        worker_tasks = _resolve_worker_tasks_module()
 
         enqueued = await worker_tasks.enqueue_refresh_selected_hls_restricted_fallback(
             cast(Any, self._arq_redis),
