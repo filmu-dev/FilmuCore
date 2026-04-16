@@ -73,6 +73,26 @@ class ObservabilityConvergenceSnapshot:
     pipeline_stages: list[ObservabilityPipelineStageSnapshot]
 
 
+@dataclass(frozen=True)
+class ObservabilityRolloutSummarySnapshot:
+    """Compact rollout/evidence summary for Director operator cards."""
+
+    generated_at: str
+    status: str
+    pipeline_stage_count: int
+    ready_stage_count: int
+    production_evidence_count: int
+    production_evidence_ready: bool
+    grpc_rust_trace_ready: bool
+    otlp_export_ready: bool
+    search_index_ready: bool
+    alert_rollout_ready: bool
+    ready_stage_names: list[str]
+    blocked_stage_names: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
 def structured_log_path(settings: Settings) -> str:
     """Return the normalized structured log path for operator and graph surfaces."""
 
@@ -305,4 +325,39 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
         otlp_endpoint=settings.otel_exporter_otlp_endpoint,
         log_shipper_target=settings.log_shipper.target,
         pipeline_stages=pipeline_stages,
+    )
+
+
+def build_observability_rollout_summary(
+    settings: Settings,
+) -> ObservabilityRolloutSummarySnapshot:
+    """Return one compact summary over the full observability convergence snapshot."""
+
+    snapshot = build_observability_convergence_snapshot(settings)
+    ready_stage_names = [stage.name for stage in snapshot.pipeline_stages if stage.ready]
+    blocked_stage_names = [
+        stage.name for stage in snapshot.pipeline_stages if not stage.ready and stage.status == "blocked"
+    ]
+    production_evidence_refs = [ref for ref in snapshot.proof_refs if str(ref).strip()]
+    return ObservabilityRolloutSummarySnapshot(
+        generated_at=snapshot.generated_at,
+        status=snapshot.status,
+        pipeline_stage_count=len(snapshot.pipeline_stages),
+        ready_stage_count=len(ready_stage_names),
+        production_evidence_count=len(production_evidence_refs),
+        production_evidence_ready=bool(production_evidence_refs),
+        grpc_rust_trace_ready=bool(
+            snapshot.rust_trace_correlation_enabled and snapshot.expected_correlation_fields_ready
+        ),
+        otlp_export_ready=bool(snapshot.otel_enabled and snapshot.otel_endpoint_configured),
+        search_index_ready=bool(
+            snapshot.log_shipper_enabled
+            and snapshot.log_shipper_target_configured
+            and snapshot.search_backend != "none"
+        ),
+        alert_rollout_ready=bool(snapshot.alerting_enabled and production_evidence_refs),
+        ready_stage_names=ready_stage_names,
+        blocked_stage_names=blocked_stage_names,
+        required_actions=list(snapshot.required_actions),
+        remaining_gaps=list(snapshot.remaining_gaps),
     )

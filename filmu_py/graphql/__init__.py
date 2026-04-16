@@ -1,4 +1,8 @@
-"""GraphQL package exports for router/schema wiring."""
+"""GraphQL package exports for router/schema wiring.
+
+Keep schema/router imports lazy so plugin-manifest and worker bootstrap paths can
+import GraphQL registration primitives without pulling the full app graph.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ __all__ = [
 
 
 def build_schema(plugin_registry: GraphQLPluginRegistry) -> strawberry.Schema:
-    """Build the GraphQL schema without importing schema wiring eagerly."""
+    """Build the GraphQL schema lazily to avoid bootstrap-time import cycles."""
 
     from .schema import build_schema as _build_schema
 
@@ -32,7 +36,7 @@ def build_schema(plugin_registry: GraphQLPluginRegistry) -> strawberry.Schema:
 
 
 def create_graphql_router(plugin_registry: GraphQLPluginRegistry) -> GraphQLRouter:
-    """Build the GraphQL router without importing schema wiring eagerly."""
+    """Create the GraphQL router lazily to avoid bootstrap-time import cycles."""
 
     from .schema import create_graphql_router as _create_graphql_router
 

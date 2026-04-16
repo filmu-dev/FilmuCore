@@ -34,7 +34,7 @@ from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
 from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.rtn import RankingProfile
-from filmu_py.services.debrid import DebridDownloadClient, DebridRateLimitError, TorrentInfo
+from filmu_py.services.debrid import DebridRateLimitError, TorrentInfo
 from filmu_py.services.media import (
     MediaItemRecord,
     MediaService,
@@ -55,18 +55,18 @@ from filmu_py.workers import stage_job_ids as _stage_job_ids
 from filmu_py.workers import stage_observability as _stage_observability
 from filmu_py.workers import stage_scope as _stage_scope
 from filmu_py.workers.downloader_orchestration import (
-    build_provider_client as orchestration_build_provider_client,
-)
-from filmu_py.workers.downloader_orchestration import (
+    build_dead_letter_metadata,
     build_rank_no_winner_diagnostics,
     execute_debrid_download,
     rank_failure_cooldown_seconds,
-    resolve_download_client,
     resolve_download_clients,
     resolve_downloader_api_key,
     resolve_enabled_downloader,
     selection_failure_reason,
     should_failover_downloader,
+)
+from filmu_py.workers.downloader_orchestration import (
+    build_provider_client as _build_provider_client,
 )
 from filmu_py.workers.retry import (
     RetryPolicy,
@@ -76,6 +76,16 @@ from filmu_py.workers.retry import (
     timed_stage,
 )
 
+_resolve_enabled_downloader = resolve_enabled_downloader
+_resolve_downloader_api_key = resolve_downloader_api_key
+async def _resolve_download_clients(ctx: dict[str, Any], **kwargs: Any) -> list[tuple[str, object]]:
+    resolved = resolve_download_clients(plugin_registry=await _resolve_plugin_registry(ctx), provider_client_builder=_build_provider_client, **kwargs)
+    return [(provider, client) for provider, client in resolved]
+async def _resolve_download_client(ctx: dict[str, Any], **kwargs: Any) -> tuple[str, object]:
+    candidates = await _resolve_download_clients(ctx, **kwargs)
+    if not candidates:
+        raise ValueError("no_enabled_downloader")
+    return candidates[0]
 logger = logging.getLogger(__name__)
 INDEX_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
@@ -85,21 +95,16 @@ DEBRID_RETRY_POLICY = RetryPolicy(max_attempts=5, base_delay_seconds=3, max_dela
 FINALIZE_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=2, max_delay_seconds=20)
 RECOVERY_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=30, max_delay_seconds=300)
 OUTBOX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=5, max_delay_seconds=60)
-METADATA_REINDEX_RETRY_POLICY = RetryPolicy(
-    max_attempts=3, base_delay_seconds=30, max_delay_seconds=300
-)
+METADATA_REINDEX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=30, max_delay_seconds=300)
 WORKER_CLEANUP_TOTAL = _stage_observability.WORKER_CLEANUP_TOTAL
 WORKER_ENQUEUE_DECISIONS_TOTAL = _stage_observability.WORKER_ENQUEUE_DECISIONS_TOTAL
 WORKER_ENQUEUE_DEFER_SECONDS = _stage_observability.WORKER_ENQUEUE_DEFER_SECONDS
 WORKER_JOB_STATUS_TOTAL = _stage_observability.WORKER_JOB_STATUS_TOTAL
 WORKER_STAGE_IDEMPOTENCY_TOTAL = _stage_observability.WORKER_STAGE_IDEMPOTENCY_TOTAL
-_job_status_name = _stage_observability.job_status_name
 _record_cleanup_action = _stage_observability.record_cleanup_action
-_record_debrid_rate_limited = _stage_observability.record_debrid_rate_limited
 _record_enqueue_decision = _stage_observability.record_enqueue_decision
 _record_enqueue_defer = _stage_observability.record_enqueue_defer
 _record_job_status = _stage_observability.record_job_status
-_record_rank_no_winner = _stage_observability.record_rank_no_winner
 _record_stage_idempotency = _stage_observability.record_stage_idempotency
 debrid_item_job_id = _stage_job_ids.debrid_item_job_id
 finalize_item_job_id = _stage_job_ids.finalize_item_job_id
@@ -117,25 +122,15 @@ _RankBatchRecord = _stage_isolation.RankBatchRecord
 _heavy_stage_executor = _stage_isolation.heavy_stage_executor
 _heavy_stage_timeout_seconds = _stage_isolation.heavy_stage_timeout_seconds
 _rank_stream_batch = _stage_isolation.rank_stream_batch
-_resolve_item_type = _stage_scope.resolve_item_type
-_needs_failed_metadata_repair = _stage_scope.needs_failed_metadata_repair
-_normalize_requested_seasons = _stage_scope.normalize_requested_seasons
-_normalize_requested_episode_scope = _stage_scope.normalize_requested_episode_scope
-_requested_seasons_from_episode_scope = _stage_scope.requested_seasons_from_episode_scope
 _missing_episode_scope_from_pairs = _stage_scope.missing_episode_scope_from_pairs
 _partial_scope_rank_bonus = _stage_scope.partial_scope_rank_bonus
 _partial_scope_rejection_reason = _stage_scope.partial_scope_rejection_reason
 _post_rank_expected_scope_reason = _stage_scope.post_rank_expected_scope_reason
 _build_scraper_search_input = _stage_scope.build_scraper_search_input
 _scrape_candidate_from_plugin_result = _stage_scope.scrape_candidate_from_plugin_result
-
-
 def _redis_from_settings(settings: Settings) -> Redis:
     """Build Redis client for worker-side limiter usage."""
-
     return cast(Redis, Redis.from_url(str(settings.redis_url), decode_responses=False))
-
-
 async def _enqueue_arq_job(
     redis: ArqRedis,
     function: str,
@@ -143,11 +138,8 @@ async def _enqueue_arq_job(
     **kwargs: object,
 ) -> object | None:
     """Preserve ARQ runtime keyword payloads while containing the local Any cast."""
-
     enqueued_job = await cast(Any, redis).enqueue_job(function, *args, **kwargs)
     return cast(object | None, enqueued_job)
-
-
 async def _enforce_tenant_worker_enqueue_quota(
     redis: object,
     *,
@@ -156,7 +148,6 @@ async def _enforce_tenant_worker_enqueue_quota(
     stage_name: str,
 ) -> bool:
     """Enforce tenant-scoped worker enqueue pressure when quota policy enables it."""
-
     if tenant_id is None or not settings.tenant_quotas.enabled or not hasattr(redis, "incr"):
         return True
 
@@ -179,14 +170,13 @@ async def _enforce_tenant_worker_enqueue_quota(
         limit = cast(TenantQuotaLimitSettings, limits).worker_enqueues_per_minute
     if limit is None or limit <= 0:
         return True
-
     minute = int(datetime.now(UTC).timestamp() // 60)
     key = f"quota:tenant:{tenant_id}:worker_enqueue:{minute}"
     current = await cast(Any, redis).incr(key)
     if current == 1 and hasattr(redis, "expire"):
         await cast(Any, redis).expire(key, 120)
     if current > limit:
-        _record_enqueue_decision(stage_name, "tenant_quota_denied")
+        _stage_observability.record_enqueue_decision(stage_name, "tenant_quota_denied")
         logger.warning(
             "tenant worker enqueue quota exceeded",
             extra={
@@ -209,7 +199,6 @@ async def _acquire_worker_rate_limit(
     refill_per_second: float,
 ) -> bool:
     """Acquire distributed budget or trigger ARQ retry with bounded backoff."""
-
     decision = await limiter.acquire(
         bucket_key=bucket,
         capacity=capacity,
@@ -224,13 +213,11 @@ async def _acquire_worker_rate_limit(
 
 def _redis_settings(settings: Settings) -> RedisSettings:
     """Return ARQ Redis settings derived from app configuration."""
-
     return RedisSettings.from_dsn(str(settings.redis_url))
 
 
 def _settings_from_worker_context(ctx: dict[str, Any]) -> Settings:
     """Resolve settings from worker context before falling back to process globals."""
-
     explicit = ctx.get("settings")
     if isinstance(explicit, Settings):
         return explicit
@@ -239,7 +226,6 @@ def _settings_from_worker_context(ctx: dict[str, Any]) -> Settings:
 
 def _resolve_limiter(ctx: dict[str, Any]) -> DistributedRateLimiter:
     """Resolve a shared distributed limiter from worker context."""
-
     limiter = ctx.get("rate_limiter")
     if isinstance(limiter, DistributedRateLimiter):
         return limiter
@@ -257,7 +243,6 @@ def _resolve_limiter(ctx: dict[str, Any]) -> DistributedRateLimiter:
 
 async def _resolve_arq_redis(ctx: dict[str, Any]) -> ArqRedis:
     """Resolve an ARQ Redis client from context or create one lazily."""
-
     redis = ctx.get("arq_redis")
     if isinstance(redis, ArqRedis):
         return redis
@@ -271,7 +256,6 @@ async def _resolve_arq_redis(ctx: dict[str, Any]) -> ArqRedis:
 
 async def _resolve_runtime_settings(ctx: dict[str, Any]) -> Settings:
     """Resolve the latest runtime settings, preferring persisted settings for worker jobs."""
-
     explicit = ctx.get("settings")
     current = explicit if isinstance(explicit, Settings) else get_settings()
     db = ctx.get("db")
@@ -300,7 +284,6 @@ async def _try_transition(
     message: str,
 ) -> None:
     """Apply transition while treating already-applied transitions as idempotent."""
-
     try:
         await media_service.transition_item(item_id=item_id, event=event, message=message)
     except InvalidItemTransition:
@@ -315,14 +298,13 @@ def index_item_followup_job_id(
     missing_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Return a stable follow-up index job id for delayed polling or inventory rechecks."""
-
     suffix_parts: list[str] = ["followup"]
     if discriminator:
         suffix_parts.append(discriminator)
     if missing_seasons:
         normalized = "-".join(str(season) for season in sorted(set(missing_seasons)))
         suffix_parts.append(f"missing:{normalized}")
-    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
+    normalized_episode_scope = _stage_scope.normalize_requested_episode_scope(missing_episodes)
     if normalized_episode_scope:
         normalized = "_".join(
             f"{season}-{'-'.join(str(episode) for episode in episodes)}"
@@ -339,14 +321,13 @@ def scrape_item_followup_job_id(
     missing_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Return a stable follow-up scrape job id for partial/ongoing requeues."""
-
     if not missing_seasons and not missing_episodes:
         return scrape_item_job_id(item_id)
     suffix_parts: list[str] = [scrape_item_job_id(item_id)]
     if missing_seasons:
         normalized = "-".join(str(season) for season in sorted(set(missing_seasons)))
         suffix_parts.append(f"missing:{normalized}")
-    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
+    normalized_episode_scope = _stage_scope.normalize_requested_episode_scope(missing_episodes)
     if normalized_episode_scope:
         normalized = "_".join(
             f"{season}-{'-'.join(str(episode) for episode in episodes)}"
@@ -379,10 +360,8 @@ async def _record_metadata_reindex_run(
     last_error: str | None = None,
 ) -> None:
     """Persist one bounded metadata reindex/reconciliation run record."""
-
     if redis is None:
         return
-
     try:
         await MetadataReindexStatusStore(redis, queue_name=queue_name).record_run(
             processed=processed,
@@ -415,12 +394,11 @@ async def _clear_stale_downstream_job(
 ) -> None:
     if not hasattr(redis, "delete"):
         return None
-
     result_key = f"arq:result:{job_id}"
     try:
         deleted = await cast(Any, redis).delete(result_key)
     except Exception as exc:
-        _record_cleanup_action(stage_name, "stale_result_delete_failed")
+        _stage_observability.record_cleanup_action(stage_name, "stale_result_delete_failed")
         _worker_stage_logger().warning(
             "downstream stage stale result cleanup failed",
             item_id=item_id,
@@ -431,7 +409,7 @@ async def _clear_stale_downstream_job(
         )
     else:
         if deleted:
-            _record_cleanup_action(stage_name, "stale_result_deleted")
+            _stage_observability.record_cleanup_action(stage_name, "stale_result_deleted")
             _worker_stage_logger().warning(
                 "downstream stage stale result cleared",
                 item_id=item_id,
@@ -439,15 +417,13 @@ async def _clear_stale_downstream_job(
                 job_id=job_id,
                 result_key=result_key,
             )
-
     if not isinstance(redis, ArqRedis):
         return
-
     job = Job(job_id, redis=redis)
     try:
         status = await job.status()
     except Exception as exc:
-        _record_cleanup_action(stage_name, "stale_job_status_failed")
+        _stage_observability.record_cleanup_action(stage_name, "stale_job_status_failed")
         _worker_stage_logger().warning(
             "downstream stage stale job inspection failed",
             item_id=item_id,
@@ -456,43 +432,38 @@ async def _clear_stale_downstream_job(
             error=str(exc),
         )
         return
-    _record_job_status(stage_name, status)
-
+    _stage_observability.record_job_status(stage_name, status)
     if status not in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}:
         return
-
     try:
         aborted = await job.abort(timeout=0)
     except Exception as exc:
-        _record_cleanup_action(stage_name, "stale_job_abort_failed")
+        _stage_observability.record_cleanup_action(stage_name, "stale_job_abort_failed")
         _worker_stage_logger().warning(
             "downstream stage stale job abort failed",
             item_id=item_id,
             next_stage=stage_name,
             job_id=job_id,
-            job_status=_job_status_name(status),
+            job_status=_stage_observability.job_status_name(status),
             error=str(exc),
         )
         return
-    _record_cleanup_action(stage_name, "stale_job_aborted")
-
+    _stage_observability.record_cleanup_action(stage_name, "stale_job_aborted")
     _worker_stage_logger().warning(
         "downstream stage stale job cleared",
         item_id=item_id,
         next_stage=stage_name,
         job_id=job_id,
-        job_status=_job_status_name(status),
+        job_status=_stage_observability.job_status_name(status),
         aborted=aborted,
     )
-
-
 def _log_downstream_enqueue_result(
     *, item_id: str, stage_name: str, job_id: str, enqueued: bool
 ) -> None:
     worker_logger = _worker_stage_logger()
     if enqueued:
-        _record_stage_idempotency(stage_name, "scheduled")
-        _record_enqueue_decision(stage_name, "enqueued")
+        _stage_observability.record_stage_idempotency(stage_name, "scheduled")
+        _stage_observability.record_enqueue_decision(stage_name, "enqueued")
         worker_logger.info(
             "downstream stage enqueued",
             item_id=item_id,
@@ -500,8 +471,8 @@ def _log_downstream_enqueue_result(
             job_id=job_id,
         )
     else:
-        _record_stage_idempotency(stage_name, "suppressed")
-        _record_enqueue_decision(stage_name, "suppressed")
+        _stage_observability.record_stage_idempotency(stage_name, "suppressed")
+        _stage_observability.record_enqueue_decision(stage_name, "suppressed")
         worker_logger.warning(
             "downstream stage enqueue suppressed",
             item_id=item_id,
@@ -520,7 +491,6 @@ async def enqueue_parse_scrape_results(
     tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the parse-scrape-results stage with a unique job id for idempotency."""
-
     settings = get_settings()
     if not await _enforce_tenant_worker_enqueue_quota(
         redis,
@@ -535,7 +505,7 @@ async def enqueue_parse_scrape_results(
         stage_name="parse_scrape_results",
         job_id=parse_scrape_results_job_id(item_id),
     )
-    normalized_episode_scope = _normalize_requested_episode_scope(partial_episodes)
+    normalized_episode_scope = _stage_scope.normalize_requested_episode_scope(partial_episodes)
     if partial_seasons is None and normalized_episode_scope is None:
         job = await redis.enqueue_job(
             "parse_scrape_results",
@@ -613,11 +583,11 @@ async def enqueue_index_item(
         "_queue_name": queue_name,
     }
     if defer_by_seconds is not None and defer_by_seconds > 0:
-        _record_enqueue_defer("index_item", float(defer_by_seconds))
+        _stage_observability.record_enqueue_defer("index_item", float(defer_by_seconds))
         kwargs["_defer_by"] = timedelta(seconds=defer_by_seconds)
     if missing_seasons:
         kwargs["missing_seasons"] = missing_seasons
-    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
+    normalized_episode_scope = _stage_scope.normalize_requested_episode_scope(missing_episodes)
     if normalized_episode_scope:
         kwargs["missing_episodes"] = normalized_episode_scope
     job = await _enqueue_arq_job(redis, "index_item", item_id, **kwargs)
@@ -652,9 +622,9 @@ async def enqueue_scrape_item(
         stage_name="scrape_item",
         job_id=resolved_job_id,
     )
-    normalized_episode_scope = _normalize_requested_episode_scope(missing_episodes)
+    normalized_episode_scope = _stage_scope.normalize_requested_episode_scope(missing_episodes)
     if defer_by_seconds is not None and defer_by_seconds > 0:
-        _record_enqueue_defer("scrape_item", float(defer_by_seconds))
+        _stage_observability.record_enqueue_defer("scrape_item", float(defer_by_seconds))
         if missing_seasons or normalized_episode_scope:
             kwargs: dict[str, object] = {}
             if missing_seasons:
@@ -784,7 +754,7 @@ async def enqueue_rank_streams(
         stage_name="rank_streams",
         job_id=rank_streams_job_id(item_id),
     )
-    normalized_episode_scope = _normalize_requested_episode_scope(partial_episodes)
+    normalized_episode_scope = _stage_scope.normalize_requested_episode_scope(partial_episodes)
     if partial_seasons is not None or normalized_episode_scope is not None:
         kwargs: dict[str, object] = {}
         if partial_seasons is not None:
@@ -933,7 +903,7 @@ async def is_process_scraped_item_job_active(redis: ArqRedis, *, item_id: str) -
     """Backward-compatible alias for parse-scrape-results queue activity."""
 
     status = await Job(parse_scrape_results_job_id(item_id), redis=redis).status()
-    _record_job_status("parse_scrape_results", status)
+    _stage_observability.record_job_status("parse_scrape_results", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
@@ -941,7 +911,7 @@ async def is_rank_streams_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     """Return whether the rank-streams stage job is already queued or running."""
 
     status = await Job(rank_streams_job_id(item_id), redis=redis).status()
-    _record_job_status("rank_streams", status)
+    _stage_observability.record_job_status("rank_streams", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
@@ -951,7 +921,7 @@ async def is_index_item_job_active(
     """Return whether one index-item stage job is already queued or running."""
 
     status = await Job(job_id or index_item_job_id(item_id), redis=redis).status()
-    _record_job_status("index_item", status)
+    _stage_observability.record_job_status("index_item", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
@@ -959,7 +929,7 @@ async def is_scrape_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     """Return whether the scrape-item stage job is already queued or running."""
 
     status = await Job(scrape_item_job_id(item_id), redis=redis).status()
-    _record_job_status("scrape_item", status)
+    _stage_observability.record_job_status("scrape_item", status)
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
@@ -1129,60 +1099,6 @@ def _dubbed_anime_only(settings: Settings) -> bool:
     return bool(raw)
 
 
-def _resolve_enabled_downloader(
-    settings: Settings,
-    *,
-    item_id: str | None = None,
-    item_request_id: str | None = None,
-) -> str:
-    return resolve_enabled_downloader(settings, item_id=item_id, item_request_id=item_request_id)
-
-
-def _build_provider_client(
-    *, provider: str, api_key: str, limiter: DistributedRateLimiter
-) -> DebridDownloadClient:
-    return orchestration_build_provider_client(provider=provider, api_key=api_key, limiter=limiter)
-
-
-async def _resolve_download_clients(
-    ctx: dict[str, Any],
-    *,
-    settings: Settings,
-    limiter: DistributedRateLimiter,
-    item_id: str | None = None,
-    item_request_id: str | None = None,
-) -> list[tuple[str, DebridDownloadClient]]:
-    plugin_registry = await _resolve_plugin_registry(ctx)
-    return resolve_download_clients(
-        settings=settings,
-        limiter=limiter,
-        plugin_registry=plugin_registry,
-        provider_client_builder=_build_provider_client,
-        item_id=item_id,
-        item_request_id=item_request_id,
-    )
-
-
-async def _resolve_download_client(
-    ctx: dict[str, Any],
-    *,
-    settings: Settings,
-    limiter: DistributedRateLimiter,
-    item_id: str | None = None,
-    item_request_id: str | None = None,
-) -> tuple[str, DebridDownloadClient]:
-    plugin_registry = await _resolve_plugin_registry(ctx)
-    return resolve_download_client(
-        settings=settings, limiter=limiter, plugin_registry=plugin_registry,
-        provider_client_builder=_build_provider_client,
-        item_id=item_id,
-        item_request_id=item_request_id,
-    )
-
-
-def _resolve_downloader_api_key(settings: Settings, *, provider: str) -> str:
-    return resolve_downloader_api_key(settings, provider=provider)
-
 async def _maybe_enqueue_next_stage(
     ctx: dict[str, Any],
     *,
@@ -1194,7 +1110,7 @@ async def _maybe_enqueue_next_stage(
 ) -> bool:
     arq_redis = ctx.get("arq_redis")
     if arq_redis is None or not hasattr(arq_redis, "enqueue_job"):
-        _record_enqueue_decision(stage_name, "arq_unavailable")
+        _stage_observability.record_enqueue_decision(stage_name, "arq_unavailable")
         logger.warning(
             "downstream stage enqueue skipped",
             extra={
@@ -1236,7 +1152,7 @@ async def _maybe_enqueue_parse_stage(
 ) -> None:
     arq_redis = ctx.get("arq_redis")
     if arq_redis is None or not hasattr(arq_redis, "enqueue_job"):
-        _record_enqueue_decision("parse_scrape_results", "arq_unavailable")
+        _stage_observability.record_enqueue_decision("parse_scrape_results", "arq_unavailable")
         logger.warning(
             "downstream stage enqueue skipped",
             extra={
@@ -1539,10 +1455,10 @@ async def index_item(
             item_id=item_id,
             tenant_id=getattr(item, "tenant_id", None),
         )
-        partial_seasons = _normalize_requested_seasons(missing_seasons)
-        partial_episodes = _normalize_requested_episode_scope(missing_episodes)
+        partial_seasons = _stage_scope.normalize_requested_seasons(missing_seasons)
+        partial_episodes = _stage_scope.normalize_requested_episode_scope(missing_episodes)
         if partial_episodes:
-            partial_episode_seasons = _requested_seasons_from_episode_scope(partial_episodes)
+            partial_episode_seasons = _stage_scope.requested_seasons_from_episode_scope(partial_episodes)
             if partial_episode_seasons:
                 partial_seasons = sorted(
                     set(partial_seasons or []).union(partial_episode_seasons)
@@ -1795,22 +1711,22 @@ async def rank_streams(
         # ``partial_seasons`` from the queued job (parse stage) is authoritative
         # for this ranking pass. Fall back to latest request scope only when no
         # explicit partial scope was provided.
-        partial_requested_seasons: list[int] | None = _normalize_requested_seasons(partial_seasons)
-        partial_requested_episodes = _normalize_requested_episode_scope(partial_episodes)
+        partial_requested_seasons: list[int] | None = _stage_scope.normalize_requested_seasons(partial_seasons)
+        partial_requested_episodes = _stage_scope.normalize_requested_episode_scope(partial_episodes)
         get_latest_item_request = getattr(media_service, "get_latest_item_request", None)
         if callable(get_latest_item_request):
             item_request = await get_latest_item_request(media_item_id=item_id)
             if item_request is not None and item_request.is_partial:
                 if partial_requested_seasons is None:
-                    partial_requested_seasons = _normalize_requested_seasons(
+                    partial_requested_seasons = _stage_scope.normalize_requested_seasons(
                         item_request.requested_seasons
                     )
                 if partial_requested_episodes is None:
-                    partial_requested_episodes = _normalize_requested_episode_scope(
+                    partial_requested_episodes = _stage_scope.normalize_requested_episode_scope(
                         item_request.requested_episodes
                     )
         if partial_requested_episodes:
-            partial_episode_seasons = _requested_seasons_from_episode_scope(
+            partial_episode_seasons = _stage_scope.requested_seasons_from_episode_scope(
                 partial_requested_episodes
             )
             if partial_episode_seasons:
@@ -1962,7 +1878,7 @@ async def rank_streams(
                 rank_threshold=profile.options.remove_ranks_under,
             )
             failure_reason = cast(str, diagnostics["failure_reason"])
-            _record_rank_no_winner(failure_reason=failure_reason)
+            _stage_observability.record_rank_no_winner(failure_reason=failure_reason)
             _worker_stage_logger().warning(
                 "rank_streams.no_winner",
                 item_id=item_id,
@@ -2175,7 +2091,7 @@ async def retry_library(ctx: dict[str, object]) -> int:
                 finalize_status = await Job(
                     finalize_item_job_id(item.id), redis=arq_redis
                 ).status()
-                _record_job_status("finalize_item", finalize_status)
+                _stage_observability.record_job_status("finalize_item", finalize_status)
                 if finalize_status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}:
                     logger.info(
                         "retry_library skipped already-queued item",
@@ -2359,17 +2275,17 @@ async def scrape_item(
         if callable(get_latest_item_request):
             item_request = await get_latest_item_request(media_item_id=item_id)
             if item_request is not None and item_request.is_partial:
-                partial_seasons = _normalize_requested_seasons(item_request.requested_seasons)
-                partial_episodes = _normalize_requested_episode_scope(item_request.requested_episodes)
+                partial_seasons = _stage_scope.normalize_requested_seasons(item_request.requested_seasons)
+                partial_episodes = _stage_scope.normalize_requested_episode_scope(item_request.requested_episodes)
         if missing_seasons:
-            normalized_missing_seasons = _normalize_requested_seasons(missing_seasons)
+            normalized_missing_seasons = _stage_scope.normalize_requested_seasons(missing_seasons)
             partial_seasons = normalized_missing_seasons
             structlog.contextvars.bind_contextvars(missing_seasons=normalized_missing_seasons)
         if missing_episodes:
-            partial_episodes = _normalize_requested_episode_scope(missing_episodes)
+            partial_episodes = _stage_scope.normalize_requested_episode_scope(missing_episodes)
             structlog.contextvars.bind_contextvars(missing_episodes=partial_episodes)
         if partial_episodes:
-            partial_episode_seasons = _requested_seasons_from_episode_scope(partial_episodes)
+            partial_episode_seasons = _stage_scope.requested_seasons_from_episode_scope(partial_episodes)
             if partial_episode_seasons:
                 partial_seasons = sorted(set(partial_seasons or []).union(partial_episode_seasons))
         if partial_seasons is not None:
@@ -2579,10 +2495,11 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             raise ValueError("selected_stream_missing")
         selected_stream_id = selected_stream.id
 
-        provider_candidates = await _resolve_download_clients(
-            mutable_ctx,
+        provider_candidates = resolve_download_clients(
             settings=settings,
             limiter=limiter,
+            plugin_registry=await _resolve_plugin_registry(mutable_ctx),
+            provider_client_builder=_build_provider_client,
             item_id=item_id,
             item_request_id=item_request_id,
         )
@@ -2609,7 +2526,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 )
                 break
             except DebridRateLimitError as exc:
-                _record_debrid_rate_limited(
+                _stage_observability.record_debrid_rate_limited(
                     provider=provider or exc.provider,
                     retry_after_seconds=exc.retry_after_seconds,
                 )
@@ -2652,7 +2569,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429:
                     retry_after_seconds = _retry_after_seconds_from_http_status_error(exc)
-                    _record_debrid_rate_limited(
+                    _stage_observability.record_debrid_rate_limited(
                         provider=provider or "unknown",
                         retry_after_seconds=retry_after_seconds,
                     )
@@ -2747,7 +2664,7 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         )
         return item_id
     except DebridRateLimitError as exc:
-        _record_debrid_rate_limited(
+        _stage_observability.record_debrid_rate_limited(
             provider=provider or exc.provider,
             retry_after_seconds=exc.retry_after_seconds,
         )
@@ -2765,6 +2682,13 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider or exc.provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="rate_limit",
+                    retry_after_seconds=exc.retry_after_seconds,
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2807,13 +2731,19 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="timeout",
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
             retry_after_seconds = _retry_after_seconds_from_http_status_error(exc)
-            _record_debrid_rate_limited(
+            _stage_observability.record_debrid_rate_limited(
                 provider=provider or "unknown",
                 retry_after_seconds=retry_after_seconds,
             )
@@ -2831,6 +2761,13 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                     task_name="debrid_item",
                     item_id=item_id,
                     reason=str(exc),
+                    metadata=build_dead_letter_metadata(
+                        provider=provider or "unknown",
+                        item_request_id=item_request_id,
+                        selected_stream_id=selected_stream_id,
+                        failure_kind="rate_limit",
+                        retry_after_seconds=retry_after_seconds,
+                    ),
                 )
                 raise
             raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2856,6 +2793,13 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="provider_error",
+                    status_code=exc.response.status_code,
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2881,6 +2825,12 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
                 task_name="debrid_item",
                 item_id=item_id,
                 reason=str(exc),
+                metadata=build_dead_letter_metadata(
+                    provider=provider,
+                    item_request_id=item_request_id,
+                    selected_stream_id=selected_stream_id,
+                    failure_kind="provider_error",
+                ),
             )
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
@@ -2933,7 +2883,7 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
         missing_season_numbers: list[int] = []
         missing_episode_scope: dict[str, list[int]] | None = None
 
-        if _resolve_item_type(item) == "show":
+        if _stage_scope.resolve_item_type(item) == "show":
             result = await _evaluate_show_completion(item, media_service._db, settings)
             completion_result = {
                 "all_satisfied": result.all_satisfied,
@@ -3350,7 +3300,7 @@ async def _scrape_with_plugins(
     if not scrapers:
         return [], []
 
-    normalized_episode_scope = _normalize_requested_episode_scope(partial_episodes)
+    normalized_episode_scope = _stage_scope.normalize_requested_episode_scope(partial_episodes)
     search_scope_pairs: list[tuple[int | None, int | None]] = []
     if partial_seasons:
         search_scope_pairs.extend((season, None) for season in sorted(set(partial_seasons)))
@@ -3441,7 +3391,7 @@ async def poll_ongoing_shows(ctx: dict[str, object]) -> dict[str, int]:
     )
     for listed_item in items:
         item = listed_item if listed_item.attributes else await media_service.get_item(listed_item.id)
-        if item is None or _resolve_item_type(item) != "show":
+        if item is None or _stage_scope.resolve_item_type(item) != "show":
             continue
 
         processed_count += 1
@@ -3550,7 +3500,7 @@ async def scheduled_metadata_reindex_reconciliation(ctx: dict[str, object]) -> d
             ]
         )
         failed_repair_candidate_ids = [
-            item.id for item in items if _needs_failed_metadata_repair(item)
+            item.id for item in items if _stage_scope.needs_failed_metadata_repair(item)
         ]
 
         for item in items:

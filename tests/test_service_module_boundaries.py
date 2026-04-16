@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import ast
+import importlib
+import sys
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 from filmu_py.services import (
     media_path_inference,
@@ -116,7 +119,7 @@ def test_playback_refresh_dispatch_module_exports_contract() -> None:
     resources = _Resources()
     assert (
         playback_refresh_dispatch.resolve_refresh_controller(
-            resources,
+            cast(Any, resources),
             prefer_queued=None,
             in_process_attr="playback_refresh_controller",
             queued_attr="queued_direct_playback_refresh_controller",
@@ -125,7 +128,7 @@ def test_playback_refresh_dispatch_module_exports_contract() -> None:
     )
     assert (
         playback_refresh_dispatch.resolve_refresh_controller(
-            resources,
+            cast(Any, resources),
             prefer_queued=False,
             in_process_attr="hls_failed_lease_refresh_controller",
             queued_attr="queued_hls_failed_lease_refresh_controller",
@@ -157,6 +160,43 @@ def test_media_stream_candidates_module_exports_contract() -> None:
 def test_playback_refresh_controllers_module_exports_contract() -> None:
     assert hasattr(playback_refresh_controllers, "QueuedDirectPlaybackRefreshController")
     assert hasattr(playback_refresh_controllers, "InProcessDirectPlaybackRefreshController")
+
+
+def test_plugin_manifest_import_does_not_eagerly_load_graphql_schema() -> None:
+    modules_to_clear = [
+        "filmu_py.graphql",
+        "filmu_py.graphql.schema",
+        "filmu_py.graphql.resolvers",
+        "filmu_py.plugins.manifest",
+    ]
+    for module_name in modules_to_clear:
+        sys.modules.pop(module_name, None)
+
+    manifest_module = importlib.import_module("filmu_py.plugins.manifest")
+
+    assert manifest_module.PluginManifest.__name__ == "PluginManifest"
+    assert "filmu_py.graphql.schema" not in sys.modules
+    assert "filmu_py.graphql.resolvers" not in sys.modules
+
+
+def test_worker_tasks_import_contract() -> None:
+    workers_package = importlib.import_module("filmu_py.workers")
+    original_tasks_module = sys.modules.get("filmu_py.workers.tasks")
+    original_package_tasks = getattr(workers_package, "tasks", None)
+    sys.modules.pop("filmu_py.workers.tasks", None)
+    try:
+        tasks_module = importlib.import_module("filmu_py.workers.tasks")
+        assert hasattr(tasks_module, "run_worker_entrypoint")
+    finally:
+        if original_tasks_module is None:
+            sys.modules.pop("filmu_py.workers.tasks", None)
+        else:
+            sys.modules["filmu_py.workers.tasks"] = original_tasks_module
+        if original_package_tasks is None:
+            if hasattr(workers_package, "tasks"):
+                delattr(workers_package, "tasks")
+        else:
+            cast(Any, workers_package).tasks = original_package_tasks
 
 
 def test_large_file_decomposition_size_budget_contract() -> None:

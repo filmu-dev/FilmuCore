@@ -189,6 +189,26 @@ class GQLObservabilityPipelineStage:
 
 
 @strawberry.type
+class GQLObservabilityRolloutSummary:
+    """Compact GraphQL rollout summary for cross-process observability closure."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    pipeline_stage_count: int = strawberry.field(name="pipelineStageCount")
+    ready_stage_count: int = strawberry.field(name="readyStageCount")
+    production_evidence_count: int = strawberry.field(name="productionEvidenceCount")
+    production_evidence_ready: bool = strawberry.field(name="productionEvidenceReady")
+    grpc_rust_trace_ready: bool = strawberry.field(name="grpcRustTraceReady")
+    otlp_export_ready: bool = strawberry.field(name="otlpExportReady")
+    search_index_ready: bool = strawberry.field(name="searchIndexReady")
+    alert_rollout_ready: bool = strawberry.field(name="alertRolloutReady")
+    ready_stage_names: list[str] = strawberry.field(name="readyStageNames")
+    blocked_stage_names: list[str] = strawberry.field(name="blockedStageNames")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
 class GQLControlPlaneStatusCount:
     """One typed control-plane subscriber-status count bucket."""
 
@@ -430,6 +450,65 @@ class GQLDownloaderOrchestration:
     multi_container_ready: bool = strawberry.field(name="multiContainerReady")
     provider_priority_order: list[str] = strawberry.field(name="providerPriorityOrder")
     providers: list[GQLDownloaderProviderCandidate]
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLWorkerQueueHistorySummary:
+    """Aggregate rollup across bounded worker queue history."""
+
+    point_count: int = strawberry.field(name="pointCount")
+    warning_point_count: int = strawberry.field(name="warningPointCount")
+    critical_point_count: int = strawberry.field(name="criticalPointCount")
+    max_total_jobs: int = strawberry.field(name="maxTotalJobs")
+    max_ready_jobs: int = strawberry.field(name="maxReadyJobs")
+    max_retry_jobs: int = strawberry.field(name="maxRetryJobs")
+    max_dead_letter_jobs: int = strawberry.field(name="maxDeadLetterJobs")
+    latest_alert_level: str = strawberry.field(name="latestAlertLevel")
+    dead_letter_reason_counts: list[GQLNamedCountBucket] = strawberry.field(
+        name="deadLetterReasonCounts"
+    )
+
+
+@strawberry.type
+class GQLDownloaderExecutionDeadLetter:
+    """One recent downloader/debrid dead-letter sample with structured evidence fields."""
+
+    stage: str
+    item_id: str = strawberry.field(name="itemId")
+    reason: str
+    reason_code: str = strawberry.field(name="reasonCode")
+    idempotency_key: str = strawberry.field(name="idempotencyKey")
+    attempt: int
+    queued_at: str = strawberry.field(name="queuedAt")
+    provider: str | None = None
+    failure_kind: str | None = strawberry.field(name="failureKind", default=None)
+    selected_stream_id: str | None = strawberry.field(name="selectedStreamId", default=None)
+    item_request_id: str | None = strawberry.field(name="itemRequestId", default=None)
+    status_code: int | None = strawberry.field(name="statusCode", default=None)
+    retry_after_seconds: int | None = strawberry.field(name="retryAfterSeconds", default=None)
+
+
+@strawberry.type
+class GQLDownloaderExecutionEvidence:
+    """Retained downloader execution and failover evidence for Director/operator screens."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    queue_name: str = strawberry.field(name="queueName")
+    status: str
+    selection_mode: str = strawberry.field(name="selectionMode")
+    ordered_failover_ready: bool = strawberry.field(name="orderedFailoverReady")
+    fanout_ready: bool = strawberry.field(name="fanoutReady")
+    provider_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerCounts")
+    failure_kind_counts: list[GQLNamedCountBucket] = strawberry.field(name="failureKindCounts")
+    dead_letter_reason_counts: list[GQLNamedCountBucket] = strawberry.field(
+        name="deadLetterReasonCounts"
+    )
+    history_summary: GQLWorkerQueueHistorySummary = strawberry.field(name="historySummary")
+    recent_dead_letters: list[GQLDownloaderExecutionDeadLetter] = strawberry.field(
+        name="recentDeadLetters"
+    )
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 
@@ -790,6 +869,50 @@ class GQLVfsCatalogGovernance:
     status: str
     counters: list[GQLNamedCountBucket]
     summary: GQLVfsCatalogGovernanceSummary
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLVfsCatalogDelta:
+    """One typed VFS catalog delta rollup for Director/operator inspection."""
+
+    generation_id: str = strawberry.field(name="generationId")
+    base_generation_id: str | None = strawberry.field(name="baseGenerationId", default=None)
+    published_at: str = strawberry.field(name="publishedAt")
+    upsert_directory_count: int = strawberry.field(name="upsertDirectoryCount")
+    upsert_file_count: int = strawberry.field(name="upsertFileCount")
+    removal_directory_count: int = strawberry.field(name="removalDirectoryCount")
+    removal_file_count: int = strawberry.field(name="removalFileCount")
+    provider_family_counts: list[GQLNamedCountBucket] = strawberry.field(
+        name="providerFamilyCounts"
+    )
+    lease_state_counts: list[GQLNamedCountBucket] = strawberry.field(name="leaseStateCounts")
+
+
+@strawberry.type
+class GQLVfsMountDiagnostics:
+    """Shared mount diagnostics and delta-retention posture for Director/operator screens."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    supplier_attached: bool = strawberry.field(name="supplierAttached")
+    server_attached: bool = strawberry.field(name="serverAttached")
+    current_generation_id: str | None = strawberry.field(name="currentGenerationId", default=None)
+    current_published_at: str | None = strawberry.field(name="currentPublishedAt", default=None)
+    history_generation_ids: list[str] = strawberry.field(name="historyGenerationIds")
+    history_generation_count: int = strawberry.field(name="historyGenerationCount")
+    delta_history_ready: bool = strawberry.field(name="deltaHistoryReady")
+    active_watch_sessions: int = strawberry.field(name="activeWatchSessions")
+    snapshots_served: int = strawberry.field(name="snapshotsServed")
+    deltas_served: int = strawberry.field(name="deltasServed")
+    reconnect_delta_served: int = strawberry.field(name="reconnectDeltaServed")
+    reconnect_snapshot_fallbacks: int = strawberry.field(name="reconnectSnapshotFallbacks")
+    reconnect_failures: int = strawberry.field(name="reconnectFailures")
+    request_stream_failures: int = strawberry.field(name="requestStreamFailures")
+    problem_events: int = strawberry.field(name="problemEvents")
+    refresh_provider_failures: int = strawberry.field(name="refreshProviderFailures")
+    refresh_validation_failures: int = strawberry.field(name="refreshValidationFailures")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 

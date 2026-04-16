@@ -175,6 +175,7 @@ async def route_dead_letter(
     task_name: str,
     item_id: str,
     reason: str,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     """Publish dead-letter metadata to Redis list for operator inspection."""
 
@@ -184,6 +185,14 @@ async def route_dead_letter(
 
     queue_name = str(ctx.get("queue_name", "filmu-py"))
     key = f"arq:dead-letter:{queue_name}"
+
+    normalized_metadata = {
+        key: value
+        for key, value in (metadata or {}).items()
+        if isinstance(key, str)
+        and key.strip()
+        and isinstance(value, (str, int, float, bool))
+    }
 
     payload = json.dumps(
         {
@@ -195,6 +204,7 @@ async def route_dead_letter(
             "idempotency_key": f"{task_name}:{item_id}",
             "attempt": task_try_count(ctx),
             "queued_at": datetime.now(UTC).isoformat(),
+            "metadata": normalized_metadata,
         },
         sort_keys=True,
         separators=(",", ":"),

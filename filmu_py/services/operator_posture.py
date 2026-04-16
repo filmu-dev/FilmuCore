@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
+from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.plugins.builtin.listrr import resolve_listrr_settings
 from filmu_py.plugins.builtin.plex import resolve_plex_settings
 from filmu_py.plugins.builtin.seerr import resolve_seerr_settings
@@ -103,6 +104,59 @@ class DownloaderOrchestrationSnapshot:
     multi_container_ready: bool
     provider_priority_order: list[str]
     providers: list[DownloaderProviderCandidateSnapshot]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class DownloaderExecutionDeadLetterSnapshot:
+    """One downloader/debrid dead-letter sample with normalized metadata."""
+
+    stage: str
+    item_id: str
+    reason: str
+    reason_code: str
+    idempotency_key: str
+    attempt: int
+    queued_at: str
+    provider: str | None
+    failure_kind: str | None
+    selected_stream_id: str | None
+    item_request_id: str | None
+    status_code: int | None
+    retry_after_seconds: int | None
+
+
+@dataclass(slots=True)
+class QueueHistorySummarySnapshot:
+    """Aggregate queue-history rollup for GraphQL-first operator screens."""
+
+    point_count: int
+    warning_point_count: int
+    critical_point_count: int
+    max_total_jobs: int
+    max_ready_jobs: int
+    max_retry_jobs: int
+    max_dead_letter_jobs: int
+    latest_alert_level: str
+    dead_letter_reason_counts: dict[str, int]
+
+
+@dataclass(slots=True)
+class DownloaderExecutionEvidenceSnapshot:
+    """GraphQL-facing downloader execution and failover evidence posture."""
+
+    generated_at: str
+    queue_name: str
+    status: Literal["ready", "partial", "blocked"]
+    selection_mode: str
+    ordered_failover_ready: bool
+    fanout_ready: bool
+    provider_counts: dict[str, int]
+    failure_kind_counts: dict[str, int]
+    dead_letter_reason_counts: dict[str, int]
+    history_summary: QueueHistorySummarySnapshot
+    recent_dead_letters: list[DownloaderExecutionDeadLetterSnapshot]
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -314,6 +368,31 @@ class VfsCatalogGovernanceSnapshot:
     status: Literal["ready", "partial", "blocked"]
     counters: dict[str, int]
     summary: VfsCatalogGovernanceSummarySnapshot
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class VfsMountDiagnosticsSnapshot:
+    generated_at: str
+    status: Literal["ready", "partial", "blocked"]
+    supplier_attached: bool
+    server_attached: bool
+    current_generation_id: str | None
+    current_published_at: str | None
+    history_generation_ids: list[str]
+    history_generation_count: int
+    delta_history_ready: bool
+    active_watch_sessions: int
+    snapshots_served: int
+    deltas_served: int
+    reconnect_delta_served: int
+    reconnect_snapshot_fallbacks: int
+    reconnect_failures: int
+    request_stream_failures: int
+    problem_events: int
+    refresh_provider_failures: int
+    refresh_validation_failures: int
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -567,6 +646,108 @@ def empty_control_plane_summary() -> ControlPlaneSummarySnapshot:
         status_counts={},
         required_actions=["attach_control_plane_service"],
         remaining_gaps=["durable replay/control-plane ownership is not configured"],
+    )
+
+
+async def build_downloader_execution_evidence_posture(
+    resources: AppResources,
+    *,
+    history_limit: int = 20,
+    dead_letter_limit: int = 20,
+) -> DownloaderExecutionEvidenceSnapshot:
+    """Return downloader/debrid execution evidence from queue history and DLQ samples."""
+
+    def _coerce_metadata_int(metadata: Mapping[str, Any], key: str) -> int | None:
+        value = metadata.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    reader = QueueStatusReader(redis, queue_name=queue_name)
+    history_summary = await reader.history_summary(limit=history_limit)
+    dead_letter_samples = await reader.dead_letter_samples(limit=dead_letter_limit, stage="debrid_item")
+
+    provider_counts: dict[str, int] = {}
+    failure_kind_counts: dict[str, int] = {}
+    normalized_dead_letters: list[DownloaderExecutionDeadLetterSnapshot] = []
+    for sample in dead_letter_samples:
+        provider_raw = sample.metadata.get("provider")
+        provider = str(provider_raw).strip() if isinstance(provider_raw, str) else ""
+        if provider:
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+        failure_kind_raw = sample.metadata.get("failure_kind")
+        failure_kind = str(failure_kind_raw).strip() if isinstance(failure_kind_raw, str) else ""
+        if failure_kind:
+            failure_kind_counts[failure_kind] = failure_kind_counts.get(failure_kind, 0) + 1
+        status_code = _coerce_metadata_int(sample.metadata, "status_code")
+        retry_after_seconds = _coerce_metadata_int(sample.metadata, "retry_after_seconds")
+        normalized_dead_letters.append(
+            DownloaderExecutionDeadLetterSnapshot(
+                stage=sample.stage,
+                item_id=sample.item_id,
+                reason=sample.reason,
+                reason_code=sample.reason_code,
+                idempotency_key=sample.idempotency_key,
+                attempt=int(sample.attempt),
+                queued_at=sample.queued_at,
+                provider=provider or None,
+                failure_kind=failure_kind or None,
+                selected_stream_id=(
+                    str(sample.metadata["selected_stream_id"]).strip() or None
+                    if isinstance(sample.metadata.get("selected_stream_id"), str)
+                    else None
+                ),
+                item_request_id=(
+                    str(sample.metadata["item_request_id"]).strip() or None
+                    if isinstance(sample.metadata.get("item_request_id"), str)
+                    else None
+                ),
+                status_code=status_code,
+                retry_after_seconds=retry_after_seconds,
+            )
+        )
+
+    orchestration = build_downloader_orchestration_posture(resources)
+    required_actions = list(orchestration.required_actions)
+    remaining_gaps = list(orchestration.remaining_gaps)
+    if not normalized_dead_letters:
+        required_actions.append("record_downloader_failover_dead_letter_evidence")
+        remaining_gaps.append("no retained downloader dead-letter evidence is available yet")
+
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready"
+        if orchestration.ordered_failover_ready and not remaining_gaps
+        else "partial"
+        if orchestration.configured_provider_count > 0 or normalized_dead_letters
+        else "blocked"
+    )
+
+    return DownloaderExecutionEvidenceSnapshot(
+        generated_at=datetime.now(UTC).isoformat(),
+        queue_name=queue_name,
+        status=status,
+        selection_mode=orchestration.selection_mode,
+        ordered_failover_ready=orchestration.ordered_failover_ready,
+        fanout_ready=orchestration.fanout_ready,
+        provider_counts=dict(sorted(provider_counts.items())),
+        failure_kind_counts=dict(sorted(failure_kind_counts.items())),
+        dead_letter_reason_counts=dict(sorted(history_summary.dead_letter_reason_counts.items())),
+        history_summary=QueueHistorySummarySnapshot(
+            point_count=history_summary.point_count,
+            warning_point_count=history_summary.warning_point_count,
+            critical_point_count=history_summary.critical_point_count,
+            max_total_jobs=history_summary.max_total_jobs,
+            max_ready_jobs=history_summary.max_ready_jobs,
+            max_retry_jobs=history_summary.max_retry_jobs,
+            max_dead_letter_jobs=history_summary.max_dead_letter_jobs,
+            latest_alert_level=history_summary.latest_alert_level,
+            dead_letter_reason_counts=dict(sorted(history_summary.dead_letter_reason_counts.items())),
+        ),
+        recent_dead_letters=normalized_dead_letters,
+        required_actions=list(dict.fromkeys(required_actions)),
+        remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )
 
 
@@ -1663,6 +1844,74 @@ def build_vfs_catalog_governance_posture(resources: AppResources) -> VfsCatalogG
             inline_refresh_succeeded=int(counters.get("vfs_catalog_inline_refresh_succeeded", 0)),
             inline_refresh_failed=int(counters.get("vfs_catalog_inline_refresh_failed", 0)),
         ),
+        required_actions=list(dict.fromkeys(required_actions)),
+        remaining_gaps=list(dict.fromkeys(remaining_gaps)),
+    )
+
+
+async def build_vfs_mount_diagnostics_posture(
+    resources: AppResources,
+) -> VfsMountDiagnosticsSnapshot:
+    """Return shared VFS mount diagnostics for GraphQL-first Director/operator views."""
+
+    supplier = resources.vfs_catalog_supplier
+    governance = build_vfs_catalog_governance_posture(resources)
+    snapshot = None
+    history_generation_ids: list[str] = []
+    required_actions = list(governance.required_actions)
+    remaining_gaps = list(governance.remaining_gaps)
+
+    if supplier is None:
+        required_actions.append("attach_vfs_catalog_supplier")
+        remaining_gaps.append("mounted VFS catalog supplier is not attached")
+    else:
+        try:
+            snapshot = await supplier.build_snapshot()
+        except Exception as exc:
+            required_actions.append("repair_vfs_catalog_supplier_snapshot_build")
+            remaining_gaps.append(f"vfs catalog supplier snapshot build failed: {exc}")
+        else:
+            if hasattr(supplier, "history_generation_ids"):
+                try:
+                    history_generation_ids = list(await supplier.history_generation_ids())
+                except Exception as exc:
+                    required_actions.append("repair_vfs_catalog_supplier_history")
+                    remaining_gaps.append(f"vfs catalog supplier history probe failed: {exc}")
+            if len(history_generation_ids) < 2:
+                required_actions.append("retain_vfs_catalog_delta_history")
+                remaining_gaps.append(
+                    "vfs catalog supplier has not retained enough published generations for delta inspection"
+                )
+
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready"
+        if supplier is not None and resources.vfs_catalog_server is not None and not remaining_gaps
+        else "partial"
+        if supplier is not None or resources.vfs_catalog_server is not None
+        else "blocked"
+    )
+    return VfsMountDiagnosticsSnapshot(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=status,
+        supplier_attached=supplier is not None,
+        server_attached=resources.vfs_catalog_server is not None,
+        current_generation_id=(snapshot.generation_id if snapshot is not None else None),
+        current_published_at=(
+            snapshot.published_at.isoformat() if snapshot is not None else None
+        ),
+        history_generation_ids=history_generation_ids,
+        history_generation_count=len(history_generation_ids),
+        delta_history_ready=len(history_generation_ids) >= 2,
+        active_watch_sessions=governance.summary.active_watch_sessions,
+        snapshots_served=governance.summary.snapshots_served,
+        deltas_served=governance.summary.deltas_served,
+        reconnect_delta_served=governance.summary.reconnect_delta_served,
+        reconnect_snapshot_fallbacks=governance.summary.reconnect_snapshot_fallbacks,
+        reconnect_failures=governance.summary.reconnect_failures,
+        request_stream_failures=governance.summary.request_stream_failures,
+        problem_events=governance.summary.problem_events,
+        refresh_provider_failures=governance.summary.refresh_provider_failures,
+        refresh_validation_failures=governance.summary.refresh_validation_failures,
         required_actions=list(dict.fromkeys(required_actions)),
         remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )

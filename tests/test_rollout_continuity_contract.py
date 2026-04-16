@@ -41,3 +41,17 @@ def test_rollout_contract_manifests_exist_and_define_expected_keys() -> None:
     assert 'require_runtime_capture' in windows_text
     assert 'required_fields' in operator_text
     assert 'minimum_green_streak' in operator_text
+
+
+def test_enterprise_rollout_workflow_uses_github_hosted_pr_gate_and_self_hosted_managed_gate() -> None:
+    workflow = (
+        REPO_ROOT / '.github' / 'workflows' / 'enterprise-rollout-continuity.yml'
+    ).read_text(encoding='utf-8')
+
+    assert "if: github.event_name == 'pull_request'" in workflow
+    assert 'runs-on: ubuntu-latest' in workflow
+    assert '-AllowBootstrap' in workflow
+    assert '-AllowOfflineOperator' in workflow
+    assert "if: github.event_name != 'pull_request'" in workflow
+    assert 'runs-on: [self-hosted, windows, filmu-vfs]' in workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
