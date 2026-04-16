@@ -54,3 +54,4 @@ def test_enterprise_rollout_workflow_uses_github_hosted_pr_gate_and_self_hosted_
     assert '-AllowOfflineOperator' in workflow
     assert "if: github.event_name != 'pull_request'" in workflow
     assert 'runs-on: [self-hosted, windows, filmu-vfs]' in workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
