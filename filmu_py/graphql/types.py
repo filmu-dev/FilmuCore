@@ -209,6 +209,92 @@ class GQLObservabilityRolloutSummary:
 
 
 @strawberry.type
+class GQLGovernanceEvidenceCheck:
+    """One retained rollout-evidence check for Director/operator governance views."""
+
+    key: str
+    label: str
+    status: str
+    recorded: bool
+    ready: bool
+    evidence_refs: list[str] = strawberry.field(name="evidenceRefs")
+    proof_artifacts: list[GQLProofArtifact] = strawberry.field(name="proofArtifacts")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLEnterpriseRolloutEvidence:
+    """Aggregated retained rollout evidence across enterprise governance domains."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    total_check_count: int = strawberry.field(name="totalCheckCount")
+    ready_check_count: int = strawberry.field(name="readyCheckCount")
+    checks: list[GQLGovernanceEvidenceCheck]
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPlaybackGateGovernance:
+    """Typed playback-gate rollout posture for GraphQL-first operator consoles."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    rollout_readiness: str = strawberry.field(name="rolloutReadiness")
+    next_action: str = strawberry.field(name="nextAction")
+    reasons: list[str]
+    environment_class: str = strawberry.field(name="environmentClass")
+    gate_mode: str = strawberry.field(name="gateMode")
+    runner_status: str = strawberry.field(name="runnerStatus")
+    runner_ready: bool = strawberry.field(name="runnerReady")
+    runner_required_failures: int = strawberry.field(name="runnerRequiredFailures")
+    provider_gate_required: bool = strawberry.field(name="providerGateRequired")
+    provider_gate_ran: bool = strawberry.field(name="providerGateRan")
+    provider_parity_ready: bool = strawberry.field(name="providerParityReady")
+    windows_provider_ready: bool = strawberry.field(name="windowsProviderReady")
+    windows_provider_movie_ready: bool = strawberry.field(name="windowsProviderMovieReady")
+    windows_provider_tv_ready: bool = strawberry.field(name="windowsProviderTvReady")
+    windows_provider_coverage: list[str] = strawberry.field(name="windowsProviderCoverage")
+    windows_soak_ready: bool = strawberry.field(name="windowsSoakReady")
+    windows_soak_repeat_count: int = strawberry.field(name="windowsSoakRepeatCount")
+    windows_soak_profile_coverage_complete: bool = strawberry.field(
+        name="windowsSoakProfileCoverageComplete"
+    )
+    windows_soak_profile_coverage: list[str] = strawberry.field(
+        name="windowsSoakProfileCoverage"
+    )
+    policy_validation_status: str = strawberry.field(name="policyValidationStatus")
+    policy_ready: bool = strawberry.field(name="policyReady")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLVfsRuntimeRollout:
+    """Typed VFS runtime rollout/canary posture for GraphQL-first operator consoles."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    rollout_readiness: str = strawberry.field(name="rolloutReadiness")
+    next_action: str = strawberry.field(name="nextAction")
+    canary_decision: str = strawberry.field(name="canaryDecision")
+    merge_gate: str = strawberry.field(name="mergeGate")
+    environment_class: str = strawberry.field(name="environmentClass")
+    snapshot_available: bool = strawberry.field(name="snapshotAvailable")
+    open_handles: int = strawberry.field(name="openHandles")
+    active_reads: int = strawberry.field(name="activeReads")
+    cache_pressure_class: str = strawberry.field(name="cachePressureClass")
+    refresh_pressure_class: str = strawberry.field(name="refreshPressureClass")
+    provider_pressure_incidents: int = strawberry.field(name="providerPressureIncidents")
+    fairness_pressure_incidents: int = strawberry.field(name="fairnessPressureIncidents")
+    reasons: list[str]
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
 class GQLControlPlaneStatusCount:
     """One typed control-plane subscriber-status count bucket."""
 
@@ -412,6 +498,38 @@ class GQLPluginEventStatus:
     publishable_event_count: int = strawberry.field(name="publishableEventCount")
     hook_subscription_count: int = strawberry.field(name="hookSubscriptionCount")
     wiring_status: str = strawberry.field(name="wiringStatus")
+
+
+@strawberry.type
+class GQLPluginRuntimeOverview:
+    """Aggregated plugin runtime health/readiness posture for Director operator screens."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    total_plugins: int = strawberry.field(name="totalPlugins")
+    ready_plugins: int = strawberry.field(name="readyPlugins")
+    load_failed_plugins: int = strawberry.field(name="loadFailedPlugins")
+    wiring_ready_plugins: int = strawberry.field(name="wiringReadyPlugins")
+    contract_validated_plugins: int = strawberry.field(name="contractValidatedPlugins")
+    soak_validated_plugins: int = strawberry.field(name="soakValidatedPlugins")
+    quarantined_plugins: int = strawberry.field(name="quarantinedPlugins")
+    publishable_event_count: int = strawberry.field(name="publishableEventCount")
+    hook_subscription_count: int = strawberry.field(name="hookSubscriptionCount")
+    warning_count: int = strawberry.field(name="warningCount")
+    recommended_actions: list[str] = strawberry.field(name="recommendedActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPluginRuntimeWarning:
+    """One actionable plugin runtime warning row for GraphQL-first consoles."""
+
+    plugin_name: str = strawberry.field(name="pluginName")
+    source: str
+    severity: str
+    status: str
+    message: str
+    capability_kind: str | None = strawberry.field(name="capabilityKind", default=None)
 
 
 @strawberry.type
@@ -915,6 +1033,27 @@ class GQLVfsMountDiagnostics:
     refresh_validation_failures: int = strawberry.field(name="refreshValidationFailures")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLVfsGenerationHistoryPoint:
+    """One retained VFS generation with snapshot and delta rollups for Director screens."""
+
+    generation_id: str = strawberry.field(name="generationId")
+    published_at: str = strawberry.field(name="publishedAt")
+    entry_count: int = strawberry.field(name="entryCount")
+    directory_count: int = strawberry.field(name="directoryCount")
+    file_count: int = strawberry.field(name="fileCount")
+    blocked_item_count: int = strawberry.field(name="blockedItemCount")
+    blocked_reason_counts: list[GQLNamedCountBucket] = strawberry.field(name="blockedReasonCounts")
+    query_strategy_counts: list[GQLNamedCountBucket] = strawberry.field(name="queryStrategyCounts")
+    provider_family_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerFamilyCounts")
+    lease_state_counts: list[GQLNamedCountBucket] = strawberry.field(name="leaseStateCounts")
+    delta_from_previous_available: bool = strawberry.field(name="deltaFromPreviousAvailable")
+    delta_upsert_count: int = strawberry.field(name="deltaUpsertCount")
+    delta_removal_count: int = strawberry.field(name="deltaRemovalCount")
+    delta_upsert_file_count: int = strawberry.field(name="deltaUpsertFileCount")
+    delta_removal_file_count: int = strawberry.field(name="deltaRemovalFileCount")
 
 
 @strawberry.type
