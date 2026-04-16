@@ -86,6 +86,28 @@ def test_to_compatibility_dict_matches_original_shape_key_for_key() -> None:
     assert _collect_key_paths(settings.to_compatibility_dict()) == _collect_key_paths(payload)
 
 
+def test_to_compatibility_dict_strips_runtime_proof_tracking_keys() -> None:
+    """Legacy compatibility serialization must not leak GraphQL/runtime proof tracking keys."""
+
+    settings = Settings.from_compatibility_dict(_expected_compatibility_payload())
+    settings.updaters.plex.contract_proof_refs = ["ops://plex-contract"]
+    settings.updaters.plex.soak_proof_refs = ["ops://plex-soak"]
+    settings.content.overseerr.contract_proof_refs = ["ops://seerr-contract"]
+    settings.content.listrr.soak_proof_refs = ["ops://listrr-soak"]
+    settings.scraping.comet.contract_proof_refs = ["ops://comet-contract"]
+    settings.scraping.comet.soak_proof_refs = ["ops://comet-soak"]
+
+    serialized = settings.to_compatibility_dict()
+    flattened = _collect_key_paths(serialized)
+
+    assert "updaters.plex.contract_proof_refs" not in flattened
+    assert "updaters.plex.soak_proof_refs" not in flattened
+    assert "content.overseerr.contract_proof_refs" not in flattened
+    assert "content.listrr.soak_proof_refs" not in flattened
+    assert "scraping.comet.contract_proof_refs" not in flattened
+    assert "scraping.comet.soak_proof_refs" not in flattened
+
+
 def test_scraper_configs_deserialize_provider_specific_fields() -> None:
     """Per-scraper optional fields should hydrate into the typed internal model."""
 

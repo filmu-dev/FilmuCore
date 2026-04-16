@@ -21,6 +21,11 @@ on:
         required: false
         default: false
         type: boolean
+      rust_components:
+        description: Optional comma-separated Rust components to install for this check
+        required: false
+        default: ""
+        type: string
       fuse:
         description: Install FUSE system packages needed by Rust checks
         required: false
@@ -62,8 +67,14 @@ jobs:
         run: uv sync --frozen --extra dev
 
       - name: Set up Rust
-        if: ${{ inputs.rust }}
+        if: ${{ inputs.rust && inputs.rust_components == '' }}
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Rust with required components
+        if: ${{ inputs.rust && inputs.rust_components != '' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: ${{ inputs.rust_components }}
 
       - name: Run ${{ inputs.name }}
         run: ${{ inputs.command }}

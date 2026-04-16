@@ -22,6 +22,19 @@ EXPECTED_CORRELATION_FIELDS = (
     "provider.file_id",
     "vfs.handle_key",
 )
+GRPC_SERVICE_NAME = "filmu.vfs.catalog.v1.FilmuVfsCatalogService"
+
+
+@dataclass(frozen=True)
+class ObservabilityPipelineStageSnapshot:
+    """One typed observability pipeline stage for GraphQL/operator surfaces."""
+
+    name: str
+    status: str
+    configured: bool
+    ready: bool
+    required_actions: list[str]
+    remaining_gaps: list[str]
 
 
 @dataclass(frozen=True)
@@ -52,6 +65,12 @@ class ObservabilityConvergenceSnapshot:
     shared_cross_process_headers: list[str]
     expected_correlation_fields: list[str]
     expected_correlation_fields_ready: bool
+    missing_expected_correlation_fields: list[str]
+    grpc_bind_address: str
+    grpc_service_name: str
+    otlp_endpoint: str | None
+    log_shipper_target: str | None
+    pipeline_stages: list[ObservabilityPipelineStageSnapshot]
 
 
 def structured_log_path(settings: Settings) -> str:
@@ -87,6 +106,9 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
     observability_policy = settings.observability
     ready = operator_log_pipeline_ready(settings)
     configured_fields = set(observability_policy.required_correlation_fields)
+    missing_expected_correlation_fields = [
+        field for field in EXPECTED_CORRELATION_FIELDS if field not in configured_fields
+    ]
     expected_correlation_fields_ready = all(
         field in configured_fields for field in EXPECTED_CORRELATION_FIELDS
     )
@@ -134,6 +156,124 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
             else "blocked"
         )
     )
+    pipeline_stages = [
+        ObservabilityPipelineStageSnapshot(
+            name="python_structured_logging",
+            status="ready" if settings.logging.enabled else "blocked",
+            configured=settings.logging.enabled,
+            ready=settings.logging.enabled,
+            required_actions=([] if settings.logging.enabled else ["enable_structured_logging"]),
+            remaining_gaps=(
+                []
+                if settings.logging.enabled
+                else ["structured logging is not enabled for the Python API runtime"]
+            ),
+        ),
+        ObservabilityPipelineStageSnapshot(
+            name="grpc_rust_correlation",
+            status=(
+                "ready"
+                if observability_policy.rust_trace_correlation_enabled
+                and expected_correlation_fields_ready
+                else "partial"
+                if bool(observability_policy.required_correlation_fields)
+                else "blocked"
+            ),
+            configured=bool(observability_policy.required_correlation_fields),
+            ready=bool(
+                observability_policy.rust_trace_correlation_enabled
+                and expected_correlation_fields_ready
+            ),
+            required_actions=(
+                []
+                if observability_policy.rust_trace_correlation_enabled
+                and expected_correlation_fields_ready
+                else ["wire_rust_trace_correlation_fields"]
+            ),
+            remaining_gaps=(
+                []
+                if observability_policy.rust_trace_correlation_enabled
+                and expected_correlation_fields_ready
+                else [
+                    "Python request scope and Rust gRPC handlers are not yet proven on one full correlation contract"
+                ]
+            ),
+        ),
+        ObservabilityPipelineStageSnapshot(
+            name="otlp_export",
+            status=(
+                "ready"
+                if settings.otel_enabled and bool(settings.otel_exporter_otlp_endpoint)
+                else "blocked"
+            ),
+            configured=settings.otel_enabled or bool(settings.otel_exporter_otlp_endpoint),
+            ready=settings.otel_enabled and bool(settings.otel_exporter_otlp_endpoint),
+            required_actions=(
+                []
+                if settings.otel_enabled and bool(settings.otel_exporter_otlp_endpoint)
+                else ["configure_otlp_trace_export"]
+            ),
+            remaining_gaps=(
+                []
+                if settings.otel_enabled and bool(settings.otel_exporter_otlp_endpoint)
+                else ["OTLP export is not configured for cross-process traces"]
+            ),
+        ),
+        ObservabilityPipelineStageSnapshot(
+            name="log_shipping_and_search",
+            status=(
+                "ready"
+                if settings.log_shipper.enabled
+                and bool(settings.log_shipper.target)
+                and observability_policy.search_backend != "none"
+                else "partial"
+                if settings.log_shipper.enabled or observability_policy.search_backend != "none"
+                else "blocked"
+            ),
+            configured=bool(settings.log_shipper.enabled or observability_policy.search_backend != "none"),
+            ready=bool(
+                settings.log_shipper.enabled
+                and bool(settings.log_shipper.target)
+                and observability_policy.search_backend != "none"
+            ),
+            required_actions=(
+                []
+                if settings.log_shipper.enabled
+                and bool(settings.log_shipper.target)
+                and observability_policy.search_backend != "none"
+                else ["define_search_index_mapping_and_retention_policy"]
+            ),
+            remaining_gaps=(
+                []
+                if settings.log_shipper.enabled
+                and bool(settings.log_shipper.target)
+                and observability_policy.search_backend != "none"
+                else ["structured logs are not yet shipped into a searchable backend"]
+            ),
+        ),
+        ObservabilityPipelineStageSnapshot(
+            name="alerting_and_rollout_evidence",
+            status=(
+                "ready"
+                if observability_policy.alerting_enabled and bool(observability_policy.proof_refs)
+                else "partial"
+                if observability_policy.alerting_enabled or bool(observability_policy.proof_refs)
+                else "blocked"
+            ),
+            configured=bool(observability_policy.alerting_enabled or observability_policy.proof_refs),
+            ready=bool(observability_policy.alerting_enabled and observability_policy.proof_refs),
+            required_actions=(
+                []
+                if observability_policy.alerting_enabled and bool(observability_policy.proof_refs)
+                else ["enable_alerting_for_log_search_and_trace_pipeline", "record_log_pipeline_rollout_evidence"]
+            ),
+            remaining_gaps=(
+                []
+                if observability_policy.alerting_enabled and bool(observability_policy.proof_refs)
+                else ["alerting or retained rollout evidence is still incomplete for observability convergence"]
+            ),
+        ),
+    ]
     return ObservabilityConvergenceSnapshot(
         generated_at=datetime.now(UTC).isoformat(),
         status=status,
@@ -159,4 +299,10 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
         shared_cross_process_headers=list(REQUIRED_CROSS_PROCESS_HEADERS),
         expected_correlation_fields=list(EXPECTED_CORRELATION_FIELDS),
         expected_correlation_fields_ready=expected_correlation_fields_ready,
+        missing_expected_correlation_fields=missing_expected_correlation_fields,
+        grpc_bind_address=settings.grpc_bind_address,
+        grpc_service_name=GRPC_SERVICE_NAME,
+        otlp_endpoint=settings.otel_exporter_otlp_endpoint,
+        log_shipper_target=settings.log_shipper.target,
+        pipeline_stages=pipeline_stages,
     )

@@ -3216,17 +3216,28 @@ def test_control_plane_automation_route_deduplicates_remaining_gaps() -> None:
 
 def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins() -> None:
     plugin_settings = {
-        "scraping": {"comet": {"enabled": True, "url": "https://comet.example"}},
+        "scraping": {
+            "comet": {
+                "enabled": True,
+                "url": "https://comet.example",
+                "contract_proof_refs": ["ops/plugins/comet-contract.md"],
+                "soak_proof_refs": ["ops/plugins/comet-soak.md"],
+            }
+        },
         "content": {
             "overseerr": {
                 "enabled": True,
                 "url": "https://seerr.example",
                 "api_key": "seerr-key",
+                "contract_proof_refs": ["ops/plugins/seerr-contract.md"],
+                "soak_proof_refs": ["ops/plugins/seerr-soak.md"],
             },
             "listrr": {
                 "enabled": True,
                 "url": "https://listrr.example",
                 "movie_lists": ["movies-a"],
+                "contract_proof_refs": ["ops/plugins/listrr-contract.md"],
+                "soak_proof_refs": ["ops/plugins/listrr-soak.md"],
             },
         },
         "updaters": {
@@ -3234,6 +3245,8 @@ def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins
                 "enabled": True,
                 "url": "https://plex.example",
                 "token": "plex-token",
+                "contract_proof_refs": ["ops/plugins/plex-contract.md"],
+                "soak_proof_refs": ["ops/plugins/plex-soak.md"],
             }
         },
     }

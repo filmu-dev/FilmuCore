@@ -27,7 +27,9 @@ from filmu_py.graphql.types import (
     GQLCalendarEntry,
     GQLCalendarReleaseWindow,
     GQLControlPlaneAutomation,
+    GQLControlPlaneReplayBackplane,
     GQLControlPlaneStatusCount,
+    GQLControlPlaneSubscriber,
     GQLControlPlaneSummary,
     GQLDownloaderOrchestration,
     GQLDownloaderProviderCandidate,
@@ -45,6 +47,7 @@ from filmu_py.graphql.types import (
     GQLMetadataReindexStatus,
     GQLNamedCountBucket,
     GQLObservabilityConvergence,
+    GQLObservabilityPipelineStage,
     GQLPersistMediaEntryControlResult,
     GQLPersistPlaybackAttachmentControlResult,
     GQLPlaybackAttachment,
@@ -65,6 +68,7 @@ from filmu_py.graphql.types import (
     GQLRuntimeLifecycleTransition,
     GQLStreamCandidate,
     GQLVfsBlockedItem,
+    GQLVfsBreadcrumb,
     GQLVfsCatalogEntry,
     GQLVfsCatalogRollup,
     GQLVfsCatalogStats,
@@ -103,6 +107,8 @@ from filmu_py.services.media import (
 )
 from filmu_py.services.operator_posture import (
     build_control_plane_automation_posture,
+    build_control_plane_replay_backplane_posture,
+    build_control_plane_subscribers_posture,
     build_control_plane_summary_posture,
     build_plugin_integration_readiness_posture,
 )
@@ -257,6 +263,22 @@ def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLO
         shared_cross_process_headers=list(snapshot.shared_cross_process_headers),
         expected_correlation_fields=list(snapshot.expected_correlation_fields),
         expected_correlation_fields_ready=snapshot.expected_correlation_fields_ready,
+        missing_expected_correlation_fields=list(snapshot.missing_expected_correlation_fields),
+        grpc_bind_address=snapshot.grpc_bind_address,
+        grpc_service_name=snapshot.grpc_service_name,
+        otlp_endpoint=snapshot.otlp_endpoint,
+        log_shipper_target=snapshot.log_shipper_target,
+        pipeline_stages=[
+            GQLObservabilityPipelineStage(
+                name=stage.name,
+                status=stage.status,
+                configured=stage.configured,
+                ready=stage.ready,
+                required_actions=list(stage.required_actions),
+                remaining_gaps=list(stage.remaining_gaps),
+            )
+            for stage in snapshot.pipeline_stages
+        ],
     )
 
 
@@ -297,9 +319,15 @@ def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegratio
                 enabled=bool(row.enabled),
                 configured=bool(row.configured),
                 ready=bool(row.ready),
+                endpoint=row.endpoint,
+                endpoint_configured=bool(row.endpoint_configured),
                 config_source=row.config_source,
                 required_settings=list(row.required_settings),
                 missing_settings=list(row.missing_settings),
+                contract_proof_refs=list(row.contract_proof_refs),
+                soak_proof_refs=list(row.soak_proof_refs),
+                contract_validated=bool(row.contract_validated),
+                soak_validated=bool(row.soak_validated),
                 required_actions=list(row.required_actions),
                 remaining_gaps=list(row.remaining_gaps),
             )
@@ -336,6 +364,49 @@ def _build_control_plane_automation(snapshot: object) -> GQLControlPlaneAutomati
         claim_passes=int(typed_snapshot.claim_passes),
         pending_count_after=typed_snapshot.pending_count_after,
         summary=_build_control_plane_summary(typed_snapshot.summary),
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_control_plane_subscriber(snapshot: object) -> GQLControlPlaneSubscriber:
+    typed_snapshot: Any = snapshot
+    return GQLControlPlaneSubscriber(
+        stream_name=str(typed_snapshot.stream_name),
+        group_name=str(typed_snapshot.group_name),
+        consumer_name=str(typed_snapshot.consumer_name),
+        node_id=str(typed_snapshot.node_id),
+        tenant_id=typed_snapshot.tenant_id,
+        status=str(typed_snapshot.status),
+        last_read_offset=typed_snapshot.last_read_offset,
+        last_delivered_event_id=typed_snapshot.last_delivered_event_id,
+        last_acked_event_id=typed_snapshot.last_acked_event_id,
+        ack_pending=bool(typed_snapshot.ack_pending),
+        fenced=bool(typed_snapshot.fenced),
+        last_error=typed_snapshot.last_error,
+        claimed_at=str(typed_snapshot.claimed_at),
+        last_heartbeat_at=str(typed_snapshot.last_heartbeat_at),
+        created_at=str(typed_snapshot.created_at),
+        updated_at=str(typed_snapshot.updated_at),
+    )
+
+
+def _build_control_plane_replay_backplane(snapshot: object) -> GQLControlPlaneReplayBackplane:
+    typed_snapshot: Any = snapshot
+    return GQLControlPlaneReplayBackplane(
+        generated_at=str(typed_snapshot.generated_at),
+        status=str(typed_snapshot.status),
+        event_backplane=str(typed_snapshot.event_backplane),
+        stream_name=str(typed_snapshot.stream_name),
+        consumer_group=str(typed_snapshot.consumer_group),
+        replay_maxlen=int(typed_snapshot.replay_maxlen),
+        attached=bool(typed_snapshot.attached),
+        pending_count=int(typed_snapshot.pending_count),
+        oldest_event_id=typed_snapshot.oldest_event_id,
+        latest_event_id=typed_snapshot.latest_event_id,
+        consumer_counts=_build_named_count_buckets(dict(typed_snapshot.consumer_counts)),
+        proof_refs=list(typed_snapshot.proof_refs),
+        proof_ready=bool(typed_snapshot.proof_ready),
         required_actions=list(typed_snapshot.required_actions),
         remaining_gaps=list(typed_snapshot.remaining_gaps),
     )
@@ -641,14 +712,51 @@ def _find_vfs_entry(snapshot: VfsCatalogSnapshot, path: str) -> VfsCatalogEntry 
     return next((entry for entry in snapshot.entries if entry.path == normalized_path), None)
 
 
+def _build_vfs_breadcrumbs(
+    snapshot: VfsCatalogSnapshot,
+    entry: VfsCatalogEntry,
+) -> list[GQLVfsBreadcrumb]:
+    entries_by_id = {candidate.entry_id: candidate for candidate in snapshot.entries}
+    lineage: list[VfsCatalogEntry] = []
+    cursor: VfsCatalogEntry | None = entry
+    while cursor is not None:
+        lineage.append(cursor)
+        cursor = entries_by_id.get(cursor.parent_entry_id or "")
+    lineage.reverse()
+    return [
+        GQLVfsBreadcrumb(
+            entry_id=node.entry_id,
+            path=node.path,
+            name=node.name,
+            kind=node.kind,
+        )
+        for node in lineage
+    ]
+
+
 def _build_vfs_directory_listing(
     snapshot: VfsCatalogSnapshot,
     *,
     path: str,
 ) -> GQLVfsDirectoryListing | None:
-    entry = _find_vfs_entry(snapshot, path)
-    if entry is None or entry.kind != "directory":
+    focused_entry = _find_vfs_entry(snapshot, path)
+    if focused_entry is None:
         return None
+    entry: VfsCatalogEntry | None = focused_entry
+    if focused_entry.kind != "directory":
+        if focused_entry.parent_entry_id is None:
+            return None
+        entry = next(
+            (
+                candidate
+                for candidate in snapshot.entries
+                if candidate.entry_id == focused_entry.parent_entry_id and candidate.kind == "directory"
+            ),
+            None,
+        )
+        if entry is None:
+            return None
+    assert entry is not None
     children = sorted(
         (candidate for candidate in snapshot.entries if candidate.parent_entry_id == entry.entry_id),
         key=lambda candidate: (candidate.kind != "directory", candidate.path),
@@ -661,10 +769,27 @@ def _build_vfs_directory_listing(
     files = [
         _build_vfs_catalog_entry(candidate) for candidate in children if candidate.kind == "file"
     ]
+    parent = (
+        next(
+            (
+                candidate
+                for candidate in snapshot.entries
+                if candidate.entry_id == entry.parent_entry_id
+            ),
+            None,
+        )
+        if entry.parent_entry_id is not None
+        else None
+    )
     return GQLVfsDirectoryListing(
         generation_id=snapshot.generation_id,
         path=entry.path,
         entry=_build_vfs_catalog_entry(entry),
+        focused_entry=_build_vfs_catalog_entry(focused_entry),
+        parent=_build_vfs_catalog_entry(parent) if parent is not None else None,
+        breadcrumbs=_build_vfs_breadcrumbs(snapshot, focused_entry),
+        directory_count=len(directories),
+        file_count=len(files),
         stats=_build_vfs_catalog_stats(snapshot),
         directories=directories,
         files=files,
@@ -1461,6 +1586,22 @@ class CoreQueryResolver:
         )
 
     @strawberry.field(
+        description="Durable replay/control-plane subscriber ledger rows for GraphQL-first operator consoles"
+    )
+    async def control_plane_subscribers(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+    ) -> list[GQLControlPlaneSubscriber]:
+        return [
+            _build_control_plane_subscriber(row)
+            for row in await build_control_plane_subscribers_posture(
+                info.context.resources,
+                active_within_seconds=active_within_seconds,
+            )
+        ]
+
+    @strawberry.field(
         description="Background replay/control-plane recovery automation posture"
     )
     async def control_plane_automation(
@@ -1469,6 +1610,17 @@ class CoreQueryResolver:
     ) -> GQLControlPlaneAutomation:
         return _build_control_plane_automation(
             await build_control_plane_automation_posture(info.context.resources)
+        )
+
+    @strawberry.field(
+        description="Replay-backplane readiness and pending-delivery posture for live Redis consumer-group proof"
+    )
+    async def control_plane_replay_backplane(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLControlPlaneReplayBackplane:
+        return _build_control_plane_replay_backplane(
+            await build_control_plane_replay_backplane_posture(info.context.resources)
         )
 
     @strawberry.field(

@@ -64,6 +64,21 @@ def _compat_dump(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="python", exclude_none=True)
 
 
+def _strip_compatibility_runtime_keys(value: Any) -> Any:
+    """Remove runtime-only proof/evidence keys from the legacy compatibility surface."""
+
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, nested in value.items():
+            if key in {"contract_proof_refs", "soak_proof_refs", "proof_refs"}:
+                continue
+            cleaned[key] = _strip_compatibility_runtime_keys(nested)
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_compatibility_runtime_keys(item) for item in value]
+    return value
+
+
 def _build_default_ranking_settings() -> dict[str, object]:
     """Return the compatibility-default ranking block used when no explicit ranking exists."""
 
@@ -268,6 +283,8 @@ class PlexUpdaterConfig(CompatibilityModel):
     enabled: bool = False
     token: str = ""
     url: str = "http://localhost:32400"
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class JellyfinUpdaterConfig(CompatibilityModel):
@@ -334,6 +351,8 @@ class OverseerrConfig(CompatibilityModel):
     url: str = ""
     api_key: str = ""
     use_webhook: bool = False
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class PlexWatchlistConfig(CompatibilityModel):
@@ -378,6 +397,8 @@ class ListrrConfig(CompatibilityModel):
     movie_lists: list[str] = Field(default_factory=list)
     show_lists: list[str] = Field(default_factory=list)
     api_key: str = ""
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class TraktOAuth(CompatibilityModel):
@@ -428,6 +449,8 @@ class ScraperBaseConfig(CompatibilityModel):
     timeout: int = 30
     retries: int = 1
     ratelimit: bool = True
+    contract_proof_refs: list[str] = Field(default_factory=list)
+    soak_proof_refs: list[str] = Field(default_factory=list)
 
 
 class TorrentioConfig(ScraperBaseConfig):
@@ -665,6 +688,7 @@ class ControlPlaneSettings(CompatibilityModel):
     event_stream_name: str = "filmu:events"
     event_replay_maxlen: int = 10_000
     consumer_group: str = "filmu-api"
+    proof_refs: list[str] = Field(default_factory=list)
     automation: ControlPlaneAutomationSettings = Field(
         default_factory=ControlPlaneAutomationSettings
     )
@@ -1106,7 +1130,7 @@ class Settings(BaseSettings):
     def _compat_content_payload(self) -> dict[str, Any]:
         """Return the legacy-compatible content payload without new-shape noise."""
 
-        payload = _compat_dump(self._content_model())
+        payload = cast(dict[str, Any], _strip_compatibility_runtime_keys(_compat_dump(self._content_model())))
         mdblist = cast(dict[str, Any], payload.get("mdblist", {}))
         if mdblist:
             if "list_ids" in mdblist:
@@ -1123,7 +1147,10 @@ class Settings(BaseSettings):
         return _coerce_model(self.scraping, ScrapingSettings)
 
     def _compat_scraping_payload(self) -> dict[str, Any]:
-        payload = _compat_dump(self._scraping_model())
+        payload = cast(
+            dict[str, Any],
+            _strip_compatibility_runtime_keys(_compat_dump(self._scraping_model())),
+        )
         payload.pop("ongoing_show_poll_interval_hours", None)
         return payload
 
@@ -1164,7 +1191,7 @@ class Settings(BaseSettings):
         if stream.get("refresh_dispatch_mode") == "in_process":
             stream.pop("refresh_dispatch_mode", None)
 
-        return {
+        payload = {
             "version": self.version,
             "api_key": self.api_key.get_secret_value(),
             "api_key_id": self.api_key_id,
@@ -1175,7 +1202,7 @@ class Settings(BaseSettings):
             "retry_interval": self.retry_interval,
             "tracemalloc": self.tracemalloc,
             "filesystem": _compat_dump(self._filesystem_model()),
-            "updaters": _compat_dump(self._updaters_model()),
+            "updaters": _strip_compatibility_runtime_keys(_compat_dump(self._updaters_model())),
             "downloaders": self._compat_downloaders_payload(),
             "content": content,
             "scraping": self._compat_scraping_payload(),
@@ -1187,6 +1214,7 @@ class Settings(BaseSettings):
             "logging": self._compat_logging_payload(),
             "stream": stream,
         }
+        return cast(dict[str, Any], _strip_compatibility_runtime_keys(payload))
 
     @classmethod
     def from_compatibility_dict(cls, data: dict[str, Any]) -> Settings:

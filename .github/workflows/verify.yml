@@ -30,41 +30,49 @@ jobs:
             command: pwsh -NoProfile -File ./scripts/check_publish_hygiene.ps1 && uv run ruff check . && uv run mypy filmu_py
             python: true
             rust: false
+            rust_components: ""
             fuse: false
           - name: Python Tests
             command: bash ./scripts/run_python_tests_ci.sh
             python: true
             rust: false
+            rust_components: ""
             fuse: false
           - name: Rust Format
-            command: cargo fmt --manifest-path ./rust/filmuvfs/Cargo.toml --all --check
+            command: pwsh -NoProfile -File ./scripts/check_rust_format.ps1
             python: false
             rust: true
+            rust_components: rustfmt
             fuse: false
           - name: Rust Check
             command: cargo check --manifest-path ./rust/filmuvfs/Cargo.toml
             python: false
             rust: true
+            rust_components: ""
             fuse: true
           - name: Rust Tests
             command: cargo test --manifest-path ./rust/filmuvfs/Cargo.toml
             python: false
             rust: true
+            rust_components: ""
             fuse: true
           - name: Decomposition Boundary Contracts
             command: uv run pytest -q tests/test_worker_module_boundaries.py tests/test_route_module_boundaries.py tests/test_service_module_boundaries.py
             python: true
             rust: false
+            rust_components: ""
             fuse: false
           - name: Mount HTTP Chunk Parity
             command: pwsh -NoProfile -File ./scripts/check_mount_http_chunk_parity.ps1
             python: true
             rust: true
+            rust_components: ""
             fuse: true
           - name: Release Provenance Perf Chaos Gate
             command: pwsh -NoProfile -File ./scripts/generate_release_provenance_perf_chaos_evidence.ps1 -RunChaosContracts && pwsh -NoProfile -File ./scripts/check_release_provenance_perf_chaos_gate.ps1 -ChaosSummaryPaths ./ci-artifacts/release-gates/chaos-contract-summary.json -MaxReconnectIncidents 0 -MaxProviderPressureIncidents 0 -MaxFatalErrorIncidents 0
             python: true
             rust: true
+            rust_components: ""
             fuse: false
     uses: ./.github/workflows/run-project-check.yml
     with:
@@ -72,5 +80,6 @@ jobs:
       command: ${{ matrix.task.command }}
       python: ${{ matrix.task.python }}
       rust: ${{ matrix.task.rust }}
+      rust_components: ${{ matrix.task.rust_components }}
       fuse: ${{ matrix.task.fuse }}
 

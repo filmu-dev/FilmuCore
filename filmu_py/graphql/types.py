@@ -139,6 +139,28 @@ class GQLObservabilityConvergence:
     expected_correlation_fields_ready: bool = strawberry.field(
         name="expectedCorrelationFieldsReady"
     )
+    missing_expected_correlation_fields: list[str] = strawberry.field(
+        name="missingExpectedCorrelationFields"
+    )
+    grpc_bind_address: str = strawberry.field(name="grpcBindAddress")
+    grpc_service_name: str = strawberry.field(name="grpcServiceName")
+    otlp_endpoint: str | None = strawberry.field(name="otlpEndpoint", default=None)
+    log_shipper_target: str | None = strawberry.field(name="logShipperTarget", default=None)
+    pipeline_stages: list[GQLObservabilityPipelineStage] = strawberry.field(
+        name="pipelineStages"
+    )
+
+
+@strawberry.type
+class GQLObservabilityPipelineStage:
+    """One typed observability pipeline stage in the GraphQL convergence view."""
+
+    name: str
+    status: str
+    configured: bool
+    ready: bool
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 
 
 @strawberry.type
@@ -204,6 +226,49 @@ class GQLControlPlaneAutomation:
 
 
 @strawberry.type
+class GQLControlPlaneSubscriber:
+    """One durable replay/control-plane subscriber row for GraphQL consoles."""
+
+    stream_name: str = strawberry.field(name="streamName")
+    group_name: str = strawberry.field(name="groupName")
+    consumer_name: str = strawberry.field(name="consumerName")
+    node_id: str = strawberry.field(name="nodeId")
+    tenant_id: str | None = strawberry.field(name="tenantId", default=None)
+    status: str
+    last_read_offset: str | None = strawberry.field(name="lastReadOffset", default=None)
+    last_delivered_event_id: str | None = strawberry.field(name="lastDeliveredEventId", default=None)
+    last_acked_event_id: str | None = strawberry.field(name="lastAckedEventId", default=None)
+    ack_pending: bool = strawberry.field(name="ackPending")
+    fenced: bool
+    last_error: str | None = strawberry.field(name="lastError", default=None)
+    claimed_at: str = strawberry.field(name="claimedAt")
+    last_heartbeat_at: str = strawberry.field(name="lastHeartbeatAt")
+    created_at: str = strawberry.field(name="createdAt")
+    updated_at: str = strawberry.field(name="updatedAt")
+
+
+@strawberry.type
+class GQLControlPlaneReplayBackplane:
+    """Replay-backplane readiness and pending-delivery posture for GraphQL."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    event_backplane: str = strawberry.field(name="eventBackplane")
+    stream_name: str = strawberry.field(name="streamName")
+    consumer_group: str = strawberry.field(name="consumerGroup")
+    replay_maxlen: int = strawberry.field(name="replayMaxlen")
+    attached: bool
+    pending_count: int = strawberry.field(name="pendingCount")
+    oldest_event_id: str | None = strawberry.field(name="oldestEventId", default=None)
+    latest_event_id: str | None = strawberry.field(name="latestEventId", default=None)
+    consumer_counts: list[GQLNamedCountBucket] = strawberry.field(name="consumerCounts")
+    proof_refs: list[str] = strawberry.field(name="proofRefs")
+    proof_ready: bool = strawberry.field(name="proofReady")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
 class GQLPluginIntegrationReadinessPlugin:
     """One builtin plugin readiness row for GraphQL-first Director consoles."""
 
@@ -214,9 +279,15 @@ class GQLPluginIntegrationReadinessPlugin:
     enabled: bool
     configured: bool
     ready: bool
+    endpoint: str | None = None
+    endpoint_configured: bool = strawberry.field(name="endpointConfigured")
     config_source: str | None = strawberry.field(name="configSource", default=None)
     required_settings: list[str] = strawberry.field(name="requiredSettings")
     missing_settings: list[str] = strawberry.field(name="missingSettings")
+    contract_proof_refs: list[str] = strawberry.field(name="contractProofRefs")
+    soak_proof_refs: list[str] = strawberry.field(name="soakProofRefs")
+    contract_validated: bool = strawberry.field(name="contractValidated")
+    soak_validated: bool = strawberry.field(name="soakValidated")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 
@@ -469,6 +540,16 @@ class GQLVfsCatalogEntry:
 
 
 @strawberry.type
+class GQLVfsBreadcrumb:
+    """One breadcrumb node for Director browse/detail navigation."""
+
+    entry_id: str = strawberry.field(name="entryId")
+    path: str
+    name: str
+    kind: str
+
+
+@strawberry.type
 class GQLVfsCatalogStats:
     """Aggregate counts for one mounted catalog snapshot."""
 
@@ -529,6 +610,11 @@ class GQLVfsDirectoryListing:
     generation_id: str = strawberry.field(name="generationId")
     path: str
     entry: GQLVfsCatalogEntry
+    focused_entry: GQLVfsCatalogEntry = strawberry.field(name="focusedEntry")
+    parent: GQLVfsCatalogEntry | None = None
+    breadcrumbs: list[GQLVfsBreadcrumb]
+    directory_count: int = strawberry.field(name="directoryCount")
+    file_count: int = strawberry.field(name="fileCount")
     stats: GQLVfsCatalogStats
     directories: list[GQLVfsCatalogEntry]
     files: list[GQLVfsCatalogEntry]

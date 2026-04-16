@@ -331,6 +331,23 @@ class FakeVfsCatalogSupplier:
 
 
 @dataclass
+class FakeReplayBackplane:
+    pending_count: int = 0
+    oldest_event_id: str | None = None
+    latest_event_id: str | None = None
+    consumer_counts: dict[str, int] = field(default_factory=dict)
+
+    async def pending_summary(self, *, group_name: str) -> object:
+        _ = group_name
+        return SimpleNamespace(
+            pending_count=self.pending_count,
+            oldest_event_id=self.oldest_event_id,
+            latest_event_id=self.latest_event_id,
+            consumer_counts=dict(self.consumer_counts),
+        )
+
+
+@dataclass
 class FakePlaybackTriggerController:
     result: object
     triggered_item_ids: list[str] = field(default_factory=list)
@@ -585,10 +602,14 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
                   observabilityConvergence {
                     status
                     structuredLoggingEnabled
+                    grpcBindAddress
+                    grpcServiceName
                     otelEnabled
                     otelEndpointConfigured
+                    otlpEndpoint
                     logShipperEnabled
                     logShipperType
+                    logShipperTarget
                     logShipperTargetConfigured
                     logShipperHealthcheckConfigured
                     searchBackend
@@ -601,8 +622,15 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
                     correlationHeaders
                     sharedCrossProcessHeaders
                     expectedCorrelationFields
+                    missingExpectedCorrelationFields
                     requiredCorrelationFields
                     proofRefs
+                    pipelineStages {
+                      name
+                      status
+                      configured
+                      ready
+                    }
                     requiredActions
                     remainingGaps
                   }
@@ -615,10 +643,14 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
     payload = response.json()["data"]["observabilityConvergence"]
     assert payload["status"] == "ready"
     assert payload["structuredLoggingEnabled"] is True
+    assert payload["grpcBindAddress"] == "127.0.0.1:50051"
+    assert payload["grpcServiceName"] == "filmu.vfs.catalog.v1.FilmuVfsCatalogService"
     assert payload["otelEnabled"] is True
     assert payload["otelEndpointConfigured"] is True
+    assert payload["otlpEndpoint"] == "http://collector.internal:4318"
     assert payload["logShipperEnabled"] is True
     assert payload["logShipperType"] == "vector"
+    assert payload["logShipperTarget"] == "opensearch://logs-filmu"
     assert payload["logShipperTargetConfigured"] is True
     assert payload["logShipperHealthcheckConfigured"] is True
     assert payload["searchBackend"] == "opensearch"
@@ -648,6 +680,7 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
         "provider.file_id",
         "vfs.handle_key",
     ]
+    assert payload["missingExpectedCorrelationFields"] == []
     assert payload["requiredCorrelationFields"] == [
         "request.id",
         "trace.id",
@@ -657,6 +690,38 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
         "catalog.entry_id",
         "provider.file_id",
         "vfs.handle_key",
+    ]
+    assert payload["pipelineStages"] == [
+        {
+            "name": "python_structured_logging",
+            "status": "ready",
+            "configured": True,
+            "ready": True,
+        },
+        {
+            "name": "grpc_rust_correlation",
+            "status": "ready",
+            "configured": True,
+            "ready": True,
+        },
+        {
+            "name": "otlp_export",
+            "status": "ready",
+            "configured": True,
+            "ready": True,
+        },
+        {
+            "name": "log_shipping_and_search",
+            "status": "ready",
+            "configured": True,
+            "ready": True,
+        },
+        {
+            "name": "alerting_and_rollout_evidence",
+            "status": "ready",
+            "configured": True,
+            "ready": True,
+        },
     ]
     assert payload["proofRefs"] == ["ops/wave4/log-pipeline-rollout.md"]
     assert payload["requiredActions"] == []
@@ -669,6 +734,8 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
             "comet": {
                 "enabled": True,
                 "url": "https://comet.example",
+                "contract_proof_refs": ["ops/plugins/comet-contract.md"],
+                "soak_proof_refs": ["ops/plugins/comet-soak.md"],
             }
         },
         "content": {
@@ -676,6 +743,8 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
                 "enabled": True,
                 "url": "https://seerr.example",
                 "api_key": "seerr-token",
+                "contract_proof_refs": ["ops/plugins/seerr-contract.md"],
+                "soak_proof_refs": ["ops/plugins/seerr-soak.md"],
             },
             "listrr": {
                 "enabled": False,
@@ -688,6 +757,8 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
                 "enabled": True,
                 "url": "https://plex.example",
                 "token": "plex-token",
+                "contract_proof_refs": ["ops/plugins/plex-contract.md"],
+                "soak_proof_refs": ["ops/plugins/plex-soak.md"],
             }
         },
     }
@@ -721,9 +792,15 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
                       enabled
                       configured
                       ready
+                      endpoint
+                      endpointConfigured
                       configSource
                       requiredSettings
                       missingSettings
+                      contractProofRefs
+                      soakProofRefs
+                      contractValidated
+                      soakValidated
                       requiredActions
                       remainingGaps
                     }
@@ -740,10 +817,16 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
     assert payload["remainingGaps"] == ["listrr integration is not enabled in runtime settings"]
     by_name = {entry["name"]: entry for entry in payload["plugins"]}
     assert by_name["comet"]["ready"] is True
+    assert by_name["comet"]["endpoint"] == "https://comet.example"
+    assert by_name["comet"]["endpointConfigured"] is True
+    assert by_name["comet"]["contractValidated"] is True
+    assert by_name["comet"]["soakValidated"] is True
     assert by_name["seerr"]["configSource"] == "content.overseerr"
+    assert by_name["seerr"]["contractProofRefs"] == ["ops/plugins/seerr-contract.md"]
     assert by_name["listrr"]["status"] == "partial"
     assert by_name["listrr"]["requiredActions"] == ["enable_listrr_integration"]
     assert by_name["plex"]["ready"] is True
+    assert by_name["plex"]["soakProofRefs"] == ["ops/plugins/plex-soak.md"]
 
 
 def test_graphql_control_plane_posture_returns_typed_summary_and_automation() -> None:
@@ -766,6 +849,27 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
                 required_actions=["recover_stale_control_plane_subscribers"],
                 remaining_gaps=["control-plane backlog needs recovery"],
             )
+
+        async def list_subscribers(self, *, active_within_seconds: int) -> list[object]:
+            _ = active_within_seconds
+            return [
+                SimpleNamespace(
+                    stream_name="filmu:events",
+                    group_name="filmu-api",
+                    consumer_name="worker-a",
+                    node_id="node-a",
+                    tenant_id="tenant-main",
+                    status="stale",
+                    last_read_offset="100-0",
+                    last_delivered_event_id="120-0",
+                    last_acked_event_id="110-0",
+                    last_error="consumer_fenced owner=node-b contender=node-a",
+                    claimed_at=datetime(2026, 4, 16, 9, 58, tzinfo=UTC),
+                    last_heartbeat_at=datetime(2026, 4, 16, 9, 59, tzinfo=UTC),
+                    created_at=datetime(2026, 4, 16, 9, 50, tzinfo=UTC),
+                    updated_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                )
+            ]
 
     class FakeAutomation:
         def snapshot(self) -> object:
@@ -796,10 +900,21 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
 
     client = _build_client(
         FakeMediaService(),
-        settings_overrides={"FILMU_PY_CONTROL_PLANE": {"automation": {"enabled": True}}},
+        settings_overrides={
+            "FILMU_PY_CONTROL_PLANE": {
+                "event_backplane": "redis_stream",
+                "proof_refs": ["ops/control-plane/redis-consumer-group-soak.md"],
+                "automation": {"enabled": True},
+            }
+        },
         control_plane_service=FakeControlPlaneService(),
         control_plane_automation=FakeAutomation(),
-        replay_backplane=object(),
+        replay_backplane=FakeReplayBackplane(
+            pending_count=3,
+            oldest_event_id="100-0",
+            latest_event_id="120-0",
+            consumer_counts={"worker-a": 2, "worker-b": 1},
+        ),
     )
 
     response = client.post(
@@ -814,6 +929,19 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
                     statusCounts { status count }
                     requiredActions
                     remainingGaps
+                  }
+                  controlPlaneSubscribers(activeWithinSeconds: 180) {
+                    streamName
+                    groupName
+                    consumerName
+                    nodeId
+                    tenantId
+                    status
+                    lastReadOffset
+                    lastDeliveredEventId
+                    lastAckedEventId
+                    ackPending
+                    fenced
                   }
                   controlPlaneAutomation {
                     enabled
@@ -839,6 +967,22 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
                     requiredActions
                     remainingGaps
                   }
+                  controlPlaneReplayBackplane {
+                    status
+                    eventBackplane
+                    streamName
+                    consumerGroup
+                    replayMaxlen
+                    attached
+                    pendingCount
+                    oldestEventId
+                    latestEventId
+                    consumerCounts { key count }
+                    proofRefs
+                    proofReady
+                    requiredActions
+                    remainingGaps
+                  }
                 }
             """
         },
@@ -857,6 +1001,21 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
     }
+    assert payload["controlPlaneSubscribers"] == [
+        {
+            "streamName": "filmu:events",
+            "groupName": "filmu-api",
+            "consumerName": "worker-a",
+            "nodeId": "node-a",
+            "tenantId": "tenant-main",
+            "status": "stale",
+            "lastReadOffset": "100-0",
+            "lastDeliveredEventId": "120-0",
+            "lastAckedEventId": "110-0",
+            "ackPending": True,
+            "fenced": True,
+        }
+    ]
     assert payload["controlPlaneAutomation"] == {
         "enabled": True,
         "runnerStatus": "running",
@@ -880,6 +1039,25 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         },
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
+    }
+    assert payload["controlPlaneReplayBackplane"] == {
+        "status": "ready",
+        "eventBackplane": "redis_stream",
+        "streamName": "filmu:events",
+        "consumerGroup": "filmu-api",
+        "replayMaxlen": 10000,
+        "attached": True,
+        "pendingCount": 3,
+        "oldestEventId": "100-0",
+        "latestEventId": "120-0",
+        "consumerCounts": [
+            {"key": "worker-a", "count": 2},
+            {"key": "worker-b", "count": 1},
+        ],
+        "proofRefs": ["ops/control-plane/redis-consumer-group-soak.md"],
+        "proofReady": True,
+        "requiredActions": [],
+        "remainingGaps": [],
     }
 
 
@@ -1599,6 +1777,11 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                     generationId
                     path
                     entry { entryId kind path }
+                    focusedEntry { entryId kind path }
+                    parent { entryId kind path }
+                    breadcrumbs { entryId path name kind }
+                    directoryCount
+                    fileCount
                     stats { directoryCount fileCount blockedItemCount }
                     directories { path name kind }
                     files {
@@ -1634,13 +1817,16 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                     correlation { itemId mediaEntryId providerDownloadId }
                     file { mediaEntryId providerDownloadId restrictedFallback }
                   }
-                  vfsOverview(path: "/Shows/Example Show (2024)/Season 01", generationId: "7") {
+                  vfsOverview(path: "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv", generationId: "7") {
                     snapshot {
                       generationId
                       stats { directoryCount fileCount blockedItemCount }
                     }
                     directory {
                       path
+                      focusedEntry { entryId kind path }
+                      breadcrumbs { path name kind }
+                      fileCount
                       files { path name kind }
                     }
                   }
@@ -1659,6 +1845,34 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
             "kind": "directory",
             "path": "/Shows/Example Show (2024)/Season 01",
         },
+        "focusedEntry": {
+            "entryId": "dir:/Shows/Example Show (2024)/Season 01",
+            "kind": "directory",
+            "path": "/Shows/Example Show (2024)/Season 01",
+        },
+        "parent": {
+            "entryId": "dir:/Shows/Example Show (2024)",
+            "kind": "directory",
+            "path": "/Shows/Example Show (2024)",
+        },
+        "breadcrumbs": [
+            {"entryId": "dir:/", "path": "/", "name": "/", "kind": "directory"},
+            {"entryId": "dir:/Shows", "path": "/Shows", "name": "Shows", "kind": "directory"},
+            {
+                "entryId": "dir:/Shows/Example Show (2024)",
+                "path": "/Shows/Example Show (2024)",
+                "name": "Example Show (2024)",
+                "kind": "directory",
+            },
+            {
+                "entryId": "dir:/Shows/Example Show (2024)/Season 01",
+                "path": "/Shows/Example Show (2024)/Season 01",
+                "name": "Season 01",
+                "kind": "directory",
+            },
+        ],
+        "directoryCount": 0,
+        "fileCount": 1,
         "stats": {
             "directoryCount": 4,
             "fileCount": 1,
@@ -1725,6 +1939,31 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
         },
         "directory": {
             "path": "/Shows/Example Show (2024)/Season 01",
+            "focusedEntry": {
+                "entryId": "file:entry-1",
+                "kind": "file",
+                "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+            },
+            "breadcrumbs": [
+                {"path": "/", "name": "/", "kind": "directory"},
+                {"path": "/Shows", "name": "Shows", "kind": "directory"},
+                {
+                    "path": "/Shows/Example Show (2024)",
+                    "name": "Example Show (2024)",
+                    "kind": "directory",
+                },
+                {
+                    "path": "/Shows/Example Show (2024)/Season 01",
+                    "name": "Season 01",
+                    "kind": "directory",
+                },
+                {
+                    "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                    "name": "Example Show S01E01.mkv",
+                    "kind": "file",
+                },
+            ],
+            "fileCount": 1,
             "files": [
                 {
                     "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
