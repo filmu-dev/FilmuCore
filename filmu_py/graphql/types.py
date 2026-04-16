@@ -237,6 +237,50 @@ class GQLEnterpriseRolloutEvidence:
 
 
 @strawberry.type
+class GQLGovernanceStatusCount:
+    """One rollout-governance status bucket."""
+
+    status: str
+    count: int
+
+
+@strawberry.type
+class GQLGovernanceArtifactInventoryItem:
+    """One retained rollout artifact entry exposed intentionally through GraphQL."""
+
+    check_key: str = strawberry.field(name="checkKey")
+    check_label: str = strawberry.field(name="checkLabel")
+    ref: str
+    category: str
+    label: str
+    recorded: bool
+
+
+@strawberry.type
+class GQLOperatorActionItem:
+    """One flattened actionable operator/governance action row."""
+
+    domain: str
+    subject: str
+    severity: str
+    status: str
+    action: str
+    capability_kind: str | None = strawberry.field(name="capabilityKind", default=None)
+
+
+@strawberry.type
+class GQLOperatorGapItem:
+    """One flattened actionable operator/governance gap row."""
+
+    domain: str
+    subject: str
+    severity: str
+    status: str
+    message: str
+    capability_kind: str | None = strawberry.field(name="capabilityKind", default=None)
+
+
+@strawberry.type
 class GQLPlaybackGateGovernance:
     """Typed playback-gate rollout posture for GraphQL-first operator consoles."""
 
@@ -533,6 +577,51 @@ class GQLPluginRuntimeWarning:
 
 
 @strawberry.type
+class GQLPluginRuntimeRow:
+    """One combined plugin runtime row with wiring and proof posture."""
+
+    name: str
+    status: str
+    ready: bool
+    capability_kinds: list[str] = strawberry.field(name="capabilityKinds")
+    wiring_status: str = strawberry.field(name="wiringStatus")
+    publishable_event_count: int = strawberry.field(name="publishableEventCount")
+    hook_subscription_count: int = strawberry.field(name="hookSubscriptionCount")
+    contract_validated: bool = strawberry.field(name="contractValidated")
+    soak_validated: bool = strawberry.field(name="soakValidated")
+    proof_gap_count: int = strawberry.field(name="proofGapCount")
+    warning_count: int = strawberry.field(name="warningCount")
+    quarantined: bool
+    recommended_actions: list[str] = strawberry.field(name="recommendedActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPluginRuntimeCapabilitySummary:
+    """Capability-grouped plugin runtime rollup."""
+
+    capability_kind: str = strawberry.field(name="capabilityKind")
+    total_plugins: int = strawberry.field(name="totalPlugins")
+    ready_plugins: int = strawberry.field(name="readyPlugins")
+    blocked_plugins: int = strawberry.field(name="blockedPlugins")
+    warning_count: int = strawberry.field(name="warningCount")
+    contract_validated_plugins: int = strawberry.field(name="contractValidatedPlugins")
+    soak_validated_plugins: int = strawberry.field(name="soakValidatedPlugins")
+
+
+@strawberry.type
+class GQLPluginProofCoverageSummary:
+    """Capability-grouped retained plugin proof coverage summary."""
+
+    capability_kind: str = strawberry.field(name="capabilityKind")
+    total_plugins: int = strawberry.field(name="totalPlugins")
+    contract_validated_plugins: int = strawberry.field(name="contractValidatedPlugins")
+    soak_validated_plugins: int = strawberry.field(name="soakValidatedPlugins")
+    missing_contract_plugins: int = strawberry.field(name="missingContractPlugins")
+    missing_soak_plugins: int = strawberry.field(name="missingSoakPlugins")
+
+
+@strawberry.type
 class GQLDownloaderProviderCandidate:
     """One downloader candidate in the orchestration posture graph."""
 
@@ -629,6 +718,42 @@ class GQLDownloaderExecutionEvidence:
     )
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLDownloaderExecutionTrendSummary:
+    """Bounded downloader queue-history trend summary for graph operator views."""
+
+    point_count: int = strawberry.field(name="pointCount")
+    ok_point_count: int = strawberry.field(name="okPointCount")
+    warning_point_count: int = strawberry.field(name="warningPointCount")
+    critical_point_count: int = strawberry.field(name="criticalPointCount")
+    average_ready_jobs: float = strawberry.field(name="averageReadyJobs")
+    average_retry_jobs: float = strawberry.field(name="averageRetryJobs")
+    average_dead_letter_jobs: float = strawberry.field(name="averageDeadLetterJobs")
+    latest_alert_level: str = strawberry.field(name="latestAlertLevel")
+
+
+@strawberry.type
+class GQLDownloaderProviderSummary:
+    """Provider-grouped downloader dead-letter evidence summary."""
+
+    provider: str
+    sample_count: int = strawberry.field(name="sampleCount")
+    failure_kind_counts: list[GQLNamedCountBucket] = strawberry.field(name="failureKindCounts")
+    reason_code_counts: list[GQLNamedCountBucket] = strawberry.field(name="reasonCodeCounts")
+    status_code_counts: list[GQLNamedCountBucket] = strawberry.field(name="statusCodeCounts")
+    retry_after_hint_count: int = strawberry.field(name="retryAfterHintCount")
+
+
+@strawberry.type
+class GQLDownloaderReasonSummary:
+    """Reason-code grouped downloader dead-letter evidence summary."""
+
+    reason_code: str = strawberry.field(name="reasonCode")
+    sample_count: int = strawberry.field(name="sampleCount")
+    provider_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerCounts")
+    failure_kind_counts: list[GQLNamedCountBucket] = strawberry.field(name="failureKindCounts")
 
 
 @strawberry.type
@@ -1054,6 +1179,22 @@ class GQLVfsGenerationHistoryPoint:
     delta_removal_count: int = strawberry.field(name="deltaRemovalCount")
     delta_upsert_file_count: int = strawberry.field(name="deltaUpsertFileCount")
     delta_removal_file_count: int = strawberry.field(name="deltaRemovalFileCount")
+
+
+@strawberry.type
+class GQLVfsGenerationHistorySummary:
+    """Aggregate rollup over retained VFS generation history."""
+
+    generation_count: int = strawberry.field(name="generationCount")
+    newest_generation_id: str | None = strawberry.field(name="newestGenerationId", default=None)
+    oldest_generation_id: str | None = strawberry.field(name="oldestGenerationId", default=None)
+    max_entry_count: int = strawberry.field(name="maxEntryCount")
+    max_file_count: int = strawberry.field(name="maxFileCount")
+    blocked_generation_count: int = strawberry.field(name="blockedGenerationCount")
+    total_delta_upsert_count: int = strawberry.field(name="totalDeltaUpsertCount")
+    total_delta_removal_count: int = strawberry.field(name="totalDeltaRemovalCount")
+    provider_family_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerFamilyCounts")
+    lease_state_counts: list[GQLNamedCountBucket] = strawberry.field(name="leaseStateCounts")
 
 
 @strawberry.type
