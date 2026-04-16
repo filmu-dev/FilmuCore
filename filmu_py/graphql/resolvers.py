@@ -29,6 +29,10 @@ from filmu_py.graphql.types import (
     GQLControlPlaneAutomation,
     GQLControlPlaneStatusCount,
     GQLControlPlaneSummary,
+    GQLDownloaderOrchestration,
+    GQLDownloaderProviderCandidate,
+    GQLEnterpriseOperationsGovernance,
+    GQLEnterpriseOperationsSlice,
     GQLFilmuSettings,
     GQLHealthCheck,
     GQLItemEvent,
@@ -39,11 +43,16 @@ from filmu_py.graphql.types import (
     GQLMediaItemDetail,
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
+    GQLNamedCountBucket,
     GQLObservabilityConvergence,
     GQLPersistMediaEntryControlResult,
     GQLPersistPlaybackAttachmentControlResult,
     GQLPlaybackAttachment,
     GQLPlaybackRefreshTriggerResult,
+    GQLPluginCapabilityStatus,
+    GQLPluginEventStatus,
+    GQLPluginGovernance,
+    GQLPluginGovernanceSummary,
     GQLPluginIntegrationReadiness,
     GQLPluginIntegrationReadinessPlugin,
     GQLQueueAlert,
@@ -63,6 +72,7 @@ from filmu_py.graphql.types import (
     GQLVfsDirectoryDetail,
     GQLVfsDirectoryListing,
     GQLVfsFileDetail,
+    GQLVfsOverview,
     GQLVfsRollupBucket,
     GQLVfsSnapshot,
     GQLWorkerQueueHistoryPoint,
@@ -112,6 +122,14 @@ from filmu_py.services.vfs_catalog import (
     VfsCatalogSnapshot,
     summarize_vfs_catalog_snapshot,
 )
+
+
+def _compat_route_module() -> Any:
+    """Resolve compatibility route helpers lazily to avoid import-time cycles."""
+
+    from filmu_py.api.routes import default as default_routes
+
+    return default_routes
 
 
 def _resolve_service_version() -> str:
@@ -323,6 +341,171 @@ def _build_control_plane_automation(snapshot: object) -> GQLControlPlaneAutomati
     )
 
 
+def _build_named_count_buckets(counts: dict[str, int]) -> list[GQLNamedCountBucket]:
+    return [
+        GQLNamedCountBucket(key=key, count=count)
+        for key, count in sorted(counts.items())
+    ]
+
+
+def _build_downloader_orchestration(snapshot: object) -> GQLDownloaderOrchestration:
+    typed_snapshot: Any = snapshot
+    return GQLDownloaderOrchestration(
+        generated_at=str(typed_snapshot.generated_at),
+        selection_mode=str(typed_snapshot.selection_mode),
+        selected_provider=typed_snapshot.selected_provider,
+        multi_provider_enabled=bool(typed_snapshot.multi_provider_enabled),
+        plugin_downloaders_registered=int(typed_snapshot.plugin_downloaders_registered),
+        worker_plugin_dispatch_ready=bool(typed_snapshot.worker_plugin_dispatch_ready),
+        fanout_ready=bool(typed_snapshot.fanout_ready),
+        multi_container_ready=bool(typed_snapshot.multi_container_ready),
+        providers=[
+            GQLDownloaderProviderCandidate(
+                name=str(row.name),
+                source=str(row.source),
+                enabled=bool(row.enabled),
+                configured=bool(row.configured),
+                selected=bool(row.selected),
+                priority=row.priority,
+                capabilities=list(row.capabilities),
+            )
+            for row in typed_snapshot.providers
+        ],
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_plugin_event_status(row: object) -> GQLPluginEventStatus:
+    typed_row: Any = row
+    return GQLPluginEventStatus(
+        name=str(typed_row.name),
+        publisher=typed_row.publisher,
+        publishable_events=list(typed_row.publishable_events),
+        hook_subscriptions=list(typed_row.hook_subscriptions),
+    )
+
+
+def _build_plugin_capability_status(row: object) -> GQLPluginCapabilityStatus:
+    typed_row: Any = row
+    return GQLPluginCapabilityStatus(
+        name=str(typed_row.name),
+        capabilities=list(typed_row.capabilities),
+        status=str(typed_row.status),
+        ready=bool(typed_row.ready),
+        configured=typed_row.configured,
+        version=typed_row.version,
+        api_version=typed_row.api_version,
+        min_host_version=typed_row.min_host_version,
+        max_host_version=typed_row.max_host_version,
+        publisher=typed_row.publisher,
+        release_channel=typed_row.release_channel,
+        trust_level=typed_row.trust_level,
+        permission_scopes=list(typed_row.permission_scopes),
+        source_sha256=typed_row.source_sha256,
+        signing_key_id=typed_row.signing_key_id,
+        signature_present=bool(typed_row.signature_present),
+        signature_verified=bool(typed_row.signature_verified),
+        signature_verification_reason=typed_row.signature_verification_reason,
+        trust_policy_decision=typed_row.trust_policy_decision,
+        trust_store_source=typed_row.trust_store_source,
+        sandbox_profile=typed_row.sandbox_profile,
+        tenancy_mode=typed_row.tenancy_mode,
+        quarantined=bool(typed_row.quarantined),
+        quarantine_reason=typed_row.quarantine_reason,
+        publisher_policy_decision=typed_row.publisher_policy_decision,
+        publisher_policy_status=typed_row.publisher_policy_status,
+        quarantine_recommended=bool(typed_row.quarantine_recommended),
+        source=typed_row.source,
+        warnings=list(typed_row.warnings),
+        error=typed_row.error,
+    )
+
+
+def _build_plugin_governance_summary(snapshot: object) -> GQLPluginGovernanceSummary:
+    typed_snapshot: Any = snapshot
+    return GQLPluginGovernanceSummary(
+        total_plugins=int(typed_snapshot.total_plugins),
+        loaded_plugins=int(typed_snapshot.loaded_plugins),
+        load_failed_plugins=int(typed_snapshot.load_failed_plugins),
+        ready_plugins=int(typed_snapshot.ready_plugins),
+        unready_plugins=int(typed_snapshot.unready_plugins),
+        healthy_plugins=int(typed_snapshot.healthy_plugins),
+        degraded_plugins=int(typed_snapshot.degraded_plugins),
+        non_builtin_plugins=int(typed_snapshot.non_builtin_plugins),
+        isolated_non_builtin_plugins=int(typed_snapshot.isolated_non_builtin_plugins),
+        quarantined_plugins=int(typed_snapshot.quarantined_plugins),
+        quarantine_recommended_plugins=int(typed_snapshot.quarantine_recommended_plugins),
+        unsigned_external_plugins=int(typed_snapshot.unsigned_external_plugins),
+        unverified_signature_plugins=int(typed_snapshot.unverified_signature_plugins),
+        publisher_policy_rejections=int(typed_snapshot.publisher_policy_rejections),
+        trust_policy_rejections=int(typed_snapshot.trust_policy_rejections),
+        sandbox_profile_counts=_build_named_count_buckets(
+            dict(typed_snapshot.sandbox_profile_counts)
+        ),
+        tenancy_mode_counts=_build_named_count_buckets(dict(typed_snapshot.tenancy_mode_counts)),
+        runtime_policy_mode=str(typed_snapshot.runtime_policy_mode),
+        runtime_isolation_ready=bool(typed_snapshot.runtime_isolation_ready),
+        recommended_actions=list(typed_snapshot.recommended_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_plugin_governance(
+    *,
+    summary: object,
+    plugins: list[object],
+) -> GQLPluginGovernance:
+    return GQLPluginGovernance(
+        summary=_build_plugin_governance_summary(summary),
+        plugins=[_build_plugin_capability_status(row) for row in plugins],
+    )
+
+
+def _build_enterprise_operations_slice(snapshot: object) -> GQLEnterpriseOperationsSlice:
+    typed_snapshot: Any = snapshot
+    return GQLEnterpriseOperationsSlice(
+        name=str(typed_snapshot.name),
+        status=str(typed_snapshot.status),
+        evidence=list(typed_snapshot.evidence),
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_enterprise_operations_governance(
+    snapshot: object,
+) -> GQLEnterpriseOperationsGovernance:
+    typed_snapshot: Any = snapshot
+    return GQLEnterpriseOperationsGovernance(
+        generated_at=str(typed_snapshot.generated_at),
+        playback_gate=_build_enterprise_operations_slice(typed_snapshot.playback_gate),
+        operational_evidence=_build_enterprise_operations_slice(
+            typed_snapshot.operational_evidence
+        ),
+        identity_authz=_build_enterprise_operations_slice(typed_snapshot.identity_authz),
+        tenant_boundary=_build_enterprise_operations_slice(typed_snapshot.tenant_boundary),
+        vfs_data_plane=_build_enterprise_operations_slice(typed_snapshot.vfs_data_plane),
+        distributed_control_plane=_build_enterprise_operations_slice(
+            typed_snapshot.distributed_control_plane
+        ),
+        runtime_lifecycle=_build_enterprise_operations_slice(typed_snapshot.runtime_lifecycle),
+        sre_program=_build_enterprise_operations_slice(typed_snapshot.sre_program),
+        operator_log_pipeline=_build_enterprise_operations_slice(
+            typed_snapshot.operator_log_pipeline
+        ),
+        plugin_runtime_isolation=_build_enterprise_operations_slice(
+            typed_snapshot.plugin_runtime_isolation
+        ),
+        heavy_stage_workload_isolation=_build_enterprise_operations_slice(
+            typed_snapshot.heavy_stage_workload_isolation
+        ),
+        release_metadata_performance=_build_enterprise_operations_slice(
+            typed_snapshot.release_metadata_performance
+        ),
+    )
+
+
 def _format_optional_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -456,6 +639,36 @@ async def _resolve_vfs_snapshot(
 def _find_vfs_entry(snapshot: VfsCatalogSnapshot, path: str) -> VfsCatalogEntry | None:
     normalized_path = _normalize_vfs_path(path)
     return next((entry for entry in snapshot.entries if entry.path == normalized_path), None)
+
+
+def _build_vfs_directory_listing(
+    snapshot: VfsCatalogSnapshot,
+    *,
+    path: str,
+) -> GQLVfsDirectoryListing | None:
+    entry = _find_vfs_entry(snapshot, path)
+    if entry is None or entry.kind != "directory":
+        return None
+    children = sorted(
+        (candidate for candidate in snapshot.entries if candidate.parent_entry_id == entry.entry_id),
+        key=lambda candidate: (candidate.kind != "directory", candidate.path),
+    )
+    directories = [
+        _build_vfs_catalog_entry(candidate)
+        for candidate in children
+        if candidate.kind == "directory"
+    ]
+    files = [
+        _build_vfs_catalog_entry(candidate) for candidate in children if candidate.kind == "file"
+    ]
+    return GQLVfsDirectoryListing(
+        generation_id=snapshot.generation_id,
+        path=entry.path,
+        entry=_build_vfs_catalog_entry(entry),
+        stats=_build_vfs_catalog_stats(snapshot),
+        directories=directories,
+        files=files,
+    )
 
 
 def _build_vfs_snapshot(snapshot: VfsCatalogSnapshot) -> GQLVfsSnapshot:
@@ -1117,28 +1330,26 @@ class CoreQueryResolver:
         snapshot = await _resolve_vfs_snapshot(info, generation_id)
         if snapshot is None:
             return None
-        entry = _find_vfs_entry(snapshot, path)
-        if entry is None or entry.kind != "directory":
+        return _build_vfs_directory_listing(snapshot, path=path)
+
+    @strawberry.field(
+        description="Screen-oriented VFS overview for Director browse and detail surfaces"
+    )
+    async def vfs_overview(
+        self,
+        info: Info[GraphQLContext, object],
+        path: str = "/",
+        generation_id: str | None = None,
+    ) -> GQLVfsOverview | None:
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
             return None
-        children = sorted(
-            (candidate for candidate in snapshot.entries if candidate.parent_entry_id == entry.entry_id),
-            key=lambda candidate: (candidate.kind != "directory", candidate.path),
-        )
-        directories = [
-            _build_vfs_catalog_entry(candidate)
-            for candidate in children
-            if candidate.kind == "directory"
-        ]
-        files = [
-            _build_vfs_catalog_entry(candidate) for candidate in children if candidate.kind == "file"
-        ]
-        return GQLVfsDirectoryListing(
-            generation_id=snapshot.generation_id,
-            path=entry.path,
-            entry=_build_vfs_catalog_entry(entry),
-            stats=_build_vfs_catalog_stats(snapshot),
-            directories=directories,
-            files=files,
+        directory = _build_vfs_directory_listing(snapshot, path=path)
+        if directory is None:
+            return None
+        return GQLVfsOverview(
+            snapshot=_build_vfs_snapshot(snapshot),
+            directory=directory,
         )
 
     @strawberry.field(
@@ -1200,6 +1411,42 @@ class CoreQueryResolver:
             build_plugin_integration_readiness_posture(info.context.resources)
         )
 
+    @strawberry.field(
+        description="Downloader orchestration posture for GraphQL-first operator and Director clients"
+    )
+    async def downloader_orchestration(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLDownloaderOrchestration:
+        return _build_downloader_orchestration(
+            _compat_route_module()._downloader_orchestration_response(info.context.request)
+        )
+
+    @strawberry.field(
+        description="Declared publishable plugin events and hook subscriptions"
+    )
+    async def plugin_events(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLPluginEventStatus]:
+        rows = await _compat_route_module().get_plugin_events(info.context.request)
+        return [_build_plugin_event_status(row) for row in rows]
+
+    @strawberry.field(
+        description="Plugin trust, readiness, and runtime isolation governance posture"
+    )
+    async def plugin_governance(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLPluginGovernance:
+        compat_routes = _compat_route_module()
+        plugins = await compat_routes.get_plugins(info.context.request)
+        summary = compat_routes._plugin_governance_summary(
+            plugins,
+            runtime_policy=info.context.resources.settings.plugin_runtime,
+        )
+        return _build_plugin_governance(summary=summary, plugins=list(plugins))
+
     @strawberry.field(description="Bounded control-plane subscriber health rollup")
     async def control_plane_summary(
         self,
@@ -1223,6 +1470,23 @@ class CoreQueryResolver:
         return _build_control_plane_automation(
             await build_control_plane_automation_posture(info.context.resources)
         )
+
+    @strawberry.field(
+        description="Machine-readable enterprise operations posture across current governance slices"
+    )
+    async def enterprise_operations_governance(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLEnterpriseOperationsGovernance:
+        compat_routes = _compat_route_module()
+        plugins = await compat_routes.get_plugins(info.context.request)
+        return _build_enterprise_operations_governance(
+            await compat_routes._enterprise_operations_governance(
+                request=info.context.request,
+                plugins=plugins,
+            )
+        )
+
     @strawberry.field(description="Current runtime lifecycle graph and bounded transition history")
     async def runtime_lifecycle(
         self,

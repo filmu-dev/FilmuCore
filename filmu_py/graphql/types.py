@@ -233,6 +233,172 @@ class GQLPluginIntegrationReadiness:
 
 
 @strawberry.type
+class GQLNamedCountBucket:
+    """Generic named counter bucket for typed governance rollups."""
+
+    key: str
+    count: int
+
+
+@strawberry.type
+class GQLPluginEventStatus:
+    """Declared publishable plugin events and subscriptions."""
+
+    name: str
+    publisher: str | None = None
+    publishable_events: list[str] = strawberry.field(name="publishableEvents")
+    hook_subscriptions: list[str] = strawberry.field(name="hookSubscriptions")
+
+
+@strawberry.type
+class GQLDownloaderProviderCandidate:
+    """One downloader candidate in the orchestration posture graph."""
+
+    name: str
+    source: str
+    enabled: bool
+    configured: bool
+    selected: bool
+    priority: int | None = None
+    capabilities: list[str]
+
+
+@strawberry.type
+class GQLDownloaderOrchestration:
+    """Downloader orchestration posture exposed to GraphQL-first clients."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    selection_mode: str = strawberry.field(name="selectionMode")
+    selected_provider: str | None = strawberry.field(name="selectedProvider", default=None)
+    multi_provider_enabled: bool = strawberry.field(name="multiProviderEnabled")
+    plugin_downloaders_registered: int = strawberry.field(name="pluginDownloadersRegistered")
+    worker_plugin_dispatch_ready: bool = strawberry.field(name="workerPluginDispatchReady")
+    fanout_ready: bool = strawberry.field(name="fanoutReady")
+    multi_container_ready: bool = strawberry.field(name="multiContainerReady")
+    providers: list[GQLDownloaderProviderCandidate]
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPluginCapabilityStatus:
+    """Loaded plugin runtime row with trust and readiness posture."""
+
+    name: str
+    capabilities: list[str]
+    status: str
+    ready: bool
+    configured: bool | None = None
+    version: str | None = None
+    api_version: str | None = strawberry.field(name="apiVersion", default=None)
+    min_host_version: str | None = strawberry.field(name="minHostVersion", default=None)
+    max_host_version: str | None = strawberry.field(name="maxHostVersion", default=None)
+    publisher: str | None = None
+    release_channel: str | None = strawberry.field(name="releaseChannel", default=None)
+    trust_level: str | None = strawberry.field(name="trustLevel", default=None)
+    permission_scopes: list[str] = strawberry.field(name="permissionScopes")
+    source_sha256: str | None = strawberry.field(name="sourceSha256", default=None)
+    signing_key_id: str | None = strawberry.field(name="signingKeyId", default=None)
+    signature_present: bool = strawberry.field(name="signaturePresent")
+    signature_verified: bool = strawberry.field(name="signatureVerified")
+    signature_verification_reason: str | None = strawberry.field(
+        name="signatureVerificationReason",
+        default=None,
+    )
+    trust_policy_decision: str | None = strawberry.field(name="trustPolicyDecision", default=None)
+    trust_store_source: str | None = strawberry.field(name="trustStoreSource", default=None)
+    sandbox_profile: str | None = strawberry.field(name="sandboxProfile", default=None)
+    tenancy_mode: str | None = strawberry.field(name="tenancyMode", default=None)
+    quarantined: bool
+    quarantine_reason: str | None = strawberry.field(name="quarantineReason", default=None)
+    publisher_policy_decision: str | None = strawberry.field(
+        name="publisherPolicyDecision",
+        default=None,
+    )
+    publisher_policy_status: str | None = strawberry.field(
+        name="publisherPolicyStatus",
+        default=None,
+    )
+    quarantine_recommended: bool = strawberry.field(name="quarantineRecommended")
+    source: str | None = None
+    warnings: list[str]
+    error: str | None = None
+
+
+@strawberry.type
+class GQLPluginGovernanceSummary:
+    """Plugin trust/isolation rollup for operator and Director consoles."""
+
+    total_plugins: int = strawberry.field(name="totalPlugins")
+    loaded_plugins: int = strawberry.field(name="loadedPlugins")
+    load_failed_plugins: int = strawberry.field(name="loadFailedPlugins")
+    ready_plugins: int = strawberry.field(name="readyPlugins")
+    unready_plugins: int = strawberry.field(name="unreadyPlugins")
+    healthy_plugins: int = strawberry.field(name="healthyPlugins")
+    degraded_plugins: int = strawberry.field(name="degradedPlugins")
+    non_builtin_plugins: int = strawberry.field(name="nonBuiltinPlugins")
+    isolated_non_builtin_plugins: int = strawberry.field(name="isolatedNonBuiltinPlugins")
+    quarantined_plugins: int = strawberry.field(name="quarantinedPlugins")
+    quarantine_recommended_plugins: int = strawberry.field(name="quarantineRecommendedPlugins")
+    unsigned_external_plugins: int = strawberry.field(name="unsignedExternalPlugins")
+    unverified_signature_plugins: int = strawberry.field(name="unverifiedSignaturePlugins")
+    publisher_policy_rejections: int = strawberry.field(name="publisherPolicyRejections")
+    trust_policy_rejections: int = strawberry.field(name="trustPolicyRejections")
+    sandbox_profile_counts: list[GQLNamedCountBucket] = strawberry.field(name="sandboxProfileCounts")
+    tenancy_mode_counts: list[GQLNamedCountBucket] = strawberry.field(name="tenancyModeCounts")
+    runtime_policy_mode: str = strawberry.field(name="runtimePolicyMode")
+    runtime_isolation_ready: bool = strawberry.field(name="runtimeIsolationReady")
+    recommended_actions: list[str] = strawberry.field(name="recommendedActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPluginGovernance:
+    """Plugin trust/isolation summary plus plugin runtime rows."""
+
+    summary: GQLPluginGovernanceSummary
+    plugins: list[GQLPluginCapabilityStatus]
+
+
+@strawberry.type
+class GQLEnterpriseOperationsSlice:
+    """One enterprise-operations roadmap slice posture row."""
+
+    name: str
+    status: str
+    evidence: list[str]
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLEnterpriseOperationsGovernance:
+    """Machine-readable enterprise operations posture for Director consoles."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    playback_gate: GQLEnterpriseOperationsSlice = strawberry.field(name="playbackGate")
+    operational_evidence: GQLEnterpriseOperationsSlice = strawberry.field(name="operationalEvidence")
+    identity_authz: GQLEnterpriseOperationsSlice = strawberry.field(name="identityAuthz")
+    tenant_boundary: GQLEnterpriseOperationsSlice = strawberry.field(name="tenantBoundary")
+    vfs_data_plane: GQLEnterpriseOperationsSlice = strawberry.field(name="vfsDataPlane")
+    distributed_control_plane: GQLEnterpriseOperationsSlice = strawberry.field(
+        name="distributedControlPlane"
+    )
+    runtime_lifecycle: GQLEnterpriseOperationsSlice = strawberry.field(name="runtimeLifecycle")
+    sre_program: GQLEnterpriseOperationsSlice = strawberry.field(name="sreProgram")
+    operator_log_pipeline: GQLEnterpriseOperationsSlice = strawberry.field(name="operatorLogPipeline")
+    plugin_runtime_isolation: GQLEnterpriseOperationsSlice = strawberry.field(
+        name="pluginRuntimeIsolation"
+    )
+    heavy_stage_workload_isolation: GQLEnterpriseOperationsSlice = strawberry.field(
+        name="heavyStageWorkloadIsolation"
+    )
+    release_metadata_performance: GQLEnterpriseOperationsSlice = strawberry.field(
+        name="releaseMetadataPerformance"
+    )
+
+
+@strawberry.type
 class GQLVfsCorrelationKeys:
     """Correlation identifiers for one VFS catalog node."""
 
@@ -366,6 +532,14 @@ class GQLVfsDirectoryListing:
     stats: GQLVfsCatalogStats
     directories: list[GQLVfsCatalogEntry]
     files: list[GQLVfsCatalogEntry]
+
+
+@strawberry.type
+class GQLVfsOverview:
+    """Screen-oriented VFS overview with snapshot and one directory listing."""
+
+    snapshot: GQLVfsSnapshot
+    directory: GQLVfsDirectoryListing
 
 
 @strawberry.type
