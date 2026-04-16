@@ -60,6 +60,8 @@ from filmu_py.workers.downloader_orchestration import (
     execute_debrid_download,
     rank_failure_cooldown_seconds,
     resolve_download_clients,
+    resolve_downloader_api_key,
+    resolve_enabled_downloader,
     selection_failure_reason,
     should_failover_downloader,
 )
@@ -74,6 +76,16 @@ from filmu_py.workers.retry import (
     timed_stage,
 )
 
+_resolve_enabled_downloader = resolve_enabled_downloader
+_resolve_downloader_api_key = resolve_downloader_api_key
+async def _resolve_download_clients(ctx: dict[str, Any], **kwargs: Any) -> list[tuple[str, object]]:
+    resolved = resolve_download_clients(plugin_registry=await _resolve_plugin_registry(ctx), provider_client_builder=_build_provider_client, **kwargs)
+    return [(provider, client) for provider, client in resolved]
+async def _resolve_download_client(ctx: dict[str, Any], **kwargs: Any) -> tuple[str, object]:
+    candidates = await _resolve_download_clients(ctx, **kwargs)
+    if not candidates:
+        raise ValueError("no_enabled_downloader")
+    return candidates[0]
 logger = logging.getLogger(__name__)
 INDEX_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_seconds=2, max_delay_seconds=30)
@@ -136,7 +148,6 @@ async def _enforce_tenant_worker_enqueue_quota(
     stage_name: str,
 ) -> bool:
     """Enforce tenant-scoped worker enqueue pressure when quota policy enables it."""
-
     if tenant_id is None or not settings.tenant_quotas.enabled or not hasattr(redis, "incr"):
         return True
 
@@ -159,7 +170,6 @@ async def _enforce_tenant_worker_enqueue_quota(
         limit = cast(TenantQuotaLimitSettings, limits).worker_enqueues_per_minute
     if limit is None or limit <= 0:
         return True
-
     minute = int(datetime.now(UTC).timestamp() // 60)
     key = f"quota:tenant:{tenant_id}:worker_enqueue:{minute}"
     current = await cast(Any, redis).incr(key)
@@ -352,7 +362,6 @@ async def _record_metadata_reindex_run(
     """Persist one bounded metadata reindex/reconciliation run record."""
     if redis is None:
         return
-
     try:
         await MetadataReindexStatusStore(redis, queue_name=queue_name).record_run(
             processed=processed,
@@ -385,7 +394,6 @@ async def _clear_stale_downstream_job(
 ) -> None:
     if not hasattr(redis, "delete"):
         return None
-
     result_key = f"arq:result:{job_id}"
     try:
         deleted = await cast(Any, redis).delete(result_key)
@@ -409,10 +417,8 @@ async def _clear_stale_downstream_job(
                 job_id=job_id,
                 result_key=result_key,
             )
-
     if not isinstance(redis, ArqRedis):
         return
-
     job = Job(job_id, redis=redis)
     try:
         status = await job.status()
@@ -427,10 +433,8 @@ async def _clear_stale_downstream_job(
         )
         return
     _stage_observability.record_job_status(stage_name, status)
-
     if status not in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}:
         return
-
     try:
         aborted = await job.abort(timeout=0)
     except Exception as exc:
@@ -445,7 +449,6 @@ async def _clear_stale_downstream_job(
         )
         return
     _stage_observability.record_cleanup_action(stage_name, "stale_job_aborted")
-
     _worker_stage_logger().warning(
         "downstream stage stale job cleared",
         item_id=item_id,
@@ -454,8 +457,6 @@ async def _clear_stale_downstream_job(
         job_status=_stage_observability.job_status_name(status),
         aborted=aborted,
     )
-
-
 def _log_downstream_enqueue_result(
     *, item_id: str, stage_name: str, job_id: str, enqueued: bool
 ) -> None:
@@ -490,7 +491,6 @@ async def enqueue_parse_scrape_results(
     tenant_id: str | None = None,
 ) -> bool:
     """Enqueue the parse-scrape-results stage with a unique job id for idempotency."""
-
     settings = get_settings()
     if not await _enforce_tenant_worker_enqueue_quota(
         redis,
