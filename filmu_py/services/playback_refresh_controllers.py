@@ -69,9 +69,9 @@ class QueuedDirectPlaybackRefreshController(_QueuedRefreshControllerBase):
         at: datetime | None = None,
     ) -> DirectPlaybackRefreshControlPlaneTriggerResult:
         _ = at
-        from filmu_py.workers.tasks import enqueue_refresh_direct_playback_link
+        from filmu_py.workers import tasks as worker_tasks
 
-        enqueued = await enqueue_refresh_direct_playback_link(
+        enqueued = await worker_tasks.enqueue_refresh_direct_playback_link(
             cast(Any, self._arq_redis),
             item_id=item_identifier,
             queue_name=self._queue_name,
@@ -111,9 +111,9 @@ class QueuedHlsFailedLeaseRefreshController(_QueuedRefreshControllerBase):
         at: datetime | None = None,
     ) -> HlsFailedLeaseRefreshControlPlaneTriggerResult:
         _ = at
-        from filmu_py.workers.tasks import enqueue_refresh_selected_hls_failed_lease
+        from filmu_py.workers import tasks as worker_tasks
 
-        enqueued = await enqueue_refresh_selected_hls_failed_lease(
+        enqueued = await worker_tasks.enqueue_refresh_selected_hls_failed_lease(
             cast(Any, self._arq_redis),
             item_id=item_identifier,
             queue_name=self._queue_name,
@@ -162,9 +162,9 @@ class QueuedHlsRestrictedFallbackRefreshController(_QueuedRefreshControllerBase)
         at: datetime | None = None,
     ) -> HlsRestrictedFallbackRefreshControlPlaneTriggerResult:
         _ = at
-        from filmu_py.workers.tasks import enqueue_refresh_selected_hls_restricted_fallback
+        from filmu_py.workers import tasks as worker_tasks
 
-        enqueued = await enqueue_refresh_selected_hls_restricted_fallback(
+        enqueued = await worker_tasks.enqueue_refresh_selected_hls_restricted_fallback(
             cast(Any, self._arq_redis),
             item_id=item_identifier,
             queue_name=self._queue_name,

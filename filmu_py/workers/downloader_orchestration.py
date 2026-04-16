@@ -152,7 +152,7 @@ def build_dead_letter_metadata(
     selected_stream_id: str | None,
     failure_kind: str,
     status_code: int | None = None,
-    retry_after_seconds: int | None = None,
+    retry_after_seconds: float | int | None = None,
 ) -> dict[str, object]:
     """Build normalized downloader/debrid dead-letter metadata for retained evidence."""
 

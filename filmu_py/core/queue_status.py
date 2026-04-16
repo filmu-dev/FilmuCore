@@ -248,15 +248,22 @@ class QueueStatusReader:
         idempotency_key = payload.get("idempotency_key")
         queued_at = payload.get("queued_at")
         metadata = payload.get("metadata", {})
-        if not all(isinstance(value, str) and value.strip() for value in (
-            stage,
-            task,
-            item_id,
-            reason,
-            reason_code,
-            idempotency_key,
-            queued_at,
-        )):
+        if not (
+            isinstance(stage, str)
+            and stage.strip()
+            and isinstance(task, str)
+            and task.strip()
+            and isinstance(item_id, str)
+            and item_id.strip()
+            and isinstance(reason, str)
+            and reason.strip()
+            and isinstance(reason_code, str)
+            and reason_code.strip()
+            and isinstance(idempotency_key, str)
+            and idempotency_key.strip()
+            and isinstance(queued_at, str)
+            and queued_at.strip()
+        ):
             return None
         attempt = QueueStatusReader._coerce_int(payload.get("attempt", 0))
         normalized_metadata = (

@@ -86,7 +86,15 @@ async def _resolve_download_clients(
     item_id: str | None = None,
     item_request_id: str | None = None,
 ) -> list[tuple[str, object]]:
-    return resolve_download_clients(settings=settings, limiter=limiter, plugin_registry=await _resolve_plugin_registry(ctx), provider_client_builder=_build_provider_client, item_id=item_id, item_request_id=item_request_id)
+    resolved_clients = resolve_download_clients(
+        settings=settings,
+        limiter=limiter,
+        plugin_registry=await _resolve_plugin_registry(ctx),
+        provider_client_builder=_build_provider_client,
+        item_id=item_id,
+        item_request_id=item_request_id,
+    )
+    return [(provider, client) for provider, client in resolved_clients]
 async def _resolve_download_client(
     ctx: dict[str, Any],
     *,
@@ -95,7 +103,13 @@ async def _resolve_download_client(
     item_id: str | None = None,
     item_request_id: str | None = None,
 ) -> tuple[str, object]:
-    candidates = await _resolve_download_clients(ctx, settings=settings, limiter=limiter, item_id=item_id, item_request_id=item_request_id)
+    candidates = await _resolve_download_clients(
+        ctx,
+        settings=settings,
+        limiter=limiter,
+        item_id=item_id,
+        item_request_id=item_request_id,
+    )
     if not candidates:
         raise ValueError("no_enabled_downloader")
     return candidates[0]
