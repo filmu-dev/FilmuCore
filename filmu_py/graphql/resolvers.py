@@ -837,7 +837,6 @@ def _build_downloader_dead_letter(snapshot: object) -> GQLDownloaderExecutionDea
         retry_after_seconds=typed_snapshot.retry_after_seconds,
     )
 
-
 def _build_plugin_event_status(row: object) -> GQLPluginEventStatus:
     typed_row: Any = row
     return GQLPluginEventStatus(
