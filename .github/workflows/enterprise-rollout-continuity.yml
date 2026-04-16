@@ -48,7 +48,45 @@ permissions:
   contents: read
 
 jobs:
-  enterprise-rollout-continuity:
+  enterprise-rollout-continuity-pr:
+    if: github.event_name == 'pull_request'
+    name: Enterprise Rollout Continuity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Run enterprise continuity PR contract gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & pwsh `
+            -NoProfile `
+            -File ./scripts/check_enterprise_rollout_continuity.ps1 `
+            -AllowBootstrap `
+            -AllowOfflineOperator `
+            -WindowsSoakContractPath ./ops/rollout/windows-vfs-soak-program.contract.json `
+            -OperatorRolloutContractPath ./ops/rollout/operator-log-pipeline.contract.json `
+            -MaxEvidenceAgeHours 168 `
+            -MinimumSoakTrendRecords 3 `
+            -MinimumPlaybackTrendRecords 3 `
+            -MinimumOperatorTrendRecords 3
+
+      - name: Upload continuity artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: enterprise-rollout-continuity-${{ github.run_id }}
+          path: |
+            artifacts/operations/**
+            playback-proof-artifacts/playback-stability-trend-summary-*.json
+            playback-proof-artifacts/windows-native-stack/soak-trend-summary-*.json
+          if-no-files-found: warn
+          retention-days: 21
+
+  enterprise-rollout-continuity-managed:
+    if: github.event_name != 'pull_request'
     name: Enterprise Rollout Continuity
     runs-on: [self-hosted, windows, filmu-vfs]
     timeout-minutes: 40

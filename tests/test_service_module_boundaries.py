@@ -196,7 +196,7 @@ def test_worker_tasks_import_contract() -> None:
             if hasattr(workers_package, "tasks"):
                 delattr(workers_package, "tasks")
         else:
-            workers_package.tasks = original_package_tasks
+            cast(Any, workers_package).tasks = original_package_tasks
 
 
 def test_large_file_decomposition_size_budget_contract() -> None:
