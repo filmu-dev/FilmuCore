@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from filmu_py.plugins.builtin.listrr import resolve_listrr_settings
 from filmu_py.plugins.builtin.plex import resolve_plex_settings
 from filmu_py.plugins.builtin.seerr import resolve_seerr_settings
+from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.resources import AppResources
 
 
@@ -60,6 +61,105 @@ class PluginIntegrationReadinessSnapshot:
     plugins: list[PluginIntegrationReadinessPluginSnapshot]
     required_actions: list[str]
     remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class DownloaderProviderCandidateSnapshot:
+    name: str
+    source: str
+    enabled: bool
+    configured: bool
+    selected: bool
+    priority: int | None
+    capabilities: list[str]
+
+
+@dataclass(slots=True)
+class DownloaderOrchestrationSnapshot:
+    generated_at: str
+    selection_mode: str
+    selected_provider: str | None
+    multi_provider_enabled: bool
+    plugin_downloaders_registered: int
+    worker_plugin_dispatch_ready: bool
+    fanout_ready: bool
+    multi_container_ready: bool
+    providers: list[DownloaderProviderCandidateSnapshot]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class PluginEventStatusSnapshot:
+    name: str
+    publisher: str | None
+    publishable_events: list[str]
+    hook_subscriptions: list[str]
+
+
+@dataclass(slots=True)
+class PluginCapabilityStatusSnapshot:
+    name: str
+    capabilities: list[str]
+    status: str
+    ready: bool
+    configured: bool | None
+    version: str | None
+    api_version: str | None
+    min_host_version: str | None
+    max_host_version: str | None
+    publisher: str | None
+    release_channel: str | None
+    trust_level: str | None
+    permission_scopes: list[str]
+    source_sha256: str | None
+    signing_key_id: str | None
+    signature_present: bool
+    signature_verified: bool
+    signature_verification_reason: str | None
+    trust_policy_decision: str | None
+    trust_store_source: str | None
+    sandbox_profile: str | None
+    tenancy_mode: str | None
+    quarantined: bool
+    quarantine_reason: str | None
+    publisher_policy_decision: str | None
+    publisher_policy_status: str | None
+    quarantine_recommended: bool
+    source: str | None
+    warnings: list[str]
+    error: str | None
+
+
+@dataclass(slots=True)
+class PluginGovernanceSummarySnapshot:
+    total_plugins: int
+    loaded_plugins: int
+    load_failed_plugins: int
+    ready_plugins: int
+    unready_plugins: int
+    healthy_plugins: int
+    degraded_plugins: int
+    non_builtin_plugins: int
+    isolated_non_builtin_plugins: int
+    quarantined_plugins: int
+    quarantine_recommended_plugins: int
+    unsigned_external_plugins: int
+    unverified_signature_plugins: int
+    publisher_policy_rejections: int
+    trust_policy_rejections: int
+    sandbox_profile_counts: dict[str, int]
+    tenancy_mode_counts: dict[str, int]
+    runtime_policy_mode: str
+    runtime_isolation_ready: bool
+    recommended_actions: list[str]
+    remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class PluginGovernanceSnapshot:
+    summary: PluginGovernanceSummarySnapshot
+    plugins: list[PluginCapabilityStatusSnapshot]
 
 
 @dataclass(slots=True)
@@ -128,6 +228,186 @@ class ControlPlaneReplayBackplaneSnapshot:
     proof_ready: bool
     required_actions: list[str]
     remaining_gaps: list[str]
+
+
+def _plugin_load_report_maps(app_state: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return plugin-load successes and failures keyed by plugin name when available."""
+
+    report = getattr(app_state, "plugin_load_report", None)
+    loaded: dict[str, Any] = {}
+    failed: dict[str, Any] = {}
+    if report is None:
+        return loaded, failed
+
+    for success in getattr(report, "loaded", []):
+        plugin_name = getattr(success, "plugin_name", None)
+        if isinstance(plugin_name, str) and plugin_name:
+            loaded[plugin_name] = success
+    for failure in getattr(report, "failed", []):
+        plugin_name = getattr(failure, "plugin_name", None)
+        if isinstance(plugin_name, str) and plugin_name:
+            failed[plugin_name] = failure
+    return loaded, failed
+
+
+def _plugin_runtime_health(
+    plugin_name: str,
+    resources: AppResources,
+) -> tuple[bool, bool | None, list[str]]:
+    """Return operator-facing readiness for built-in/runtime-managed plugins."""
+
+    warnings: list[str] = []
+    configured: bool | None = None
+
+    if plugin_name == "stremthru":
+        stremthru = resources.settings.downloaders.stremthru
+        configured_url = str(getattr(stremthru, "base_url", getattr(stremthru, "url", ""))).strip()
+        configured = bool(stremthru.enabled and stremthru.token.strip() and configured_url)
+        if stremthru.enabled and not stremthru.token.strip():
+            warnings.append("enabled but token is missing")
+        if stremthru.enabled and not configured_url:
+            warnings.append("enabled but url is missing")
+        if stremthru.token.strip() and not stremthru.enabled:
+            warnings.append("token is configured but the plugin is disabled")
+        return configured, configured, warnings
+
+    return True, configured, warnings
+
+
+def _plugin_signature_fields(*, manifest: Any, success: Any) -> dict[str, Any]:
+    """Return operator-facing trust-store verification details when available."""
+
+    return {
+        "signature_present": bool(
+            getattr(success, "signature_present", False) or (manifest and manifest.signature)
+        ),
+        "signature_verified": bool(getattr(success, "signature_verified", False)),
+        "signature_verification_reason": getattr(success, "signature_verification_reason", None),
+        "trust_policy_decision": getattr(success, "trust_policy_decision", None),
+        "trust_store_source": getattr(success, "trust_store_source", None),
+    }
+
+
+def _plugin_recommended_actions(
+    plugin: PluginCapabilityStatusSnapshot,
+) -> tuple[str, ...]:
+    """Return stable operator actions for one plugin governance row."""
+
+    actions: set[str] = set()
+    if plugin.status == "load_failed":
+        actions.add("investigate_plugin_load_failure")
+    if plugin.quarantined or plugin.quarantine_recommended:
+        actions.add("review_plugin_quarantine")
+    if plugin.publisher_policy_decision in {"rejected", "untrusted"}:
+        actions.add("review_publisher_policy")
+    if plugin.trust_policy_decision in {"rejected", "untrusted"}:
+        actions.add("review_signature_trust")
+    if (
+        plugin.release_channel != "builtin"
+        and plugin.source != "builtin"
+        and not plugin.signature_present
+    ):
+        actions.add("require_external_plugin_signature")
+    if not plugin.ready:
+        actions.add("resolve_plugin_readiness")
+    return tuple(sorted(actions))
+
+
+def _plugin_governance_summary(
+    plugins: list[PluginCapabilityStatusSnapshot],
+    *,
+    runtime_policy: Any,
+) -> PluginGovernanceSummarySnapshot:
+    """Return a bounded plugin trust/isolation rollup for operators and GraphQL."""
+
+    sandbox_profile_counts: dict[str, int] = {}
+    tenancy_mode_counts: dict[str, int] = {}
+    recommended_actions: set[str] = set()
+    non_builtin_plugins = [
+        plugin
+        for plugin in plugins
+        if plugin.release_channel != "builtin" and plugin.source != "builtin"
+    ]
+    governed_plugins = non_builtin_plugins
+    for plugin in plugins:
+        sandbox_profile = plugin.sandbox_profile or "unspecified"
+        sandbox_profile_counts[sandbox_profile] = sandbox_profile_counts.get(sandbox_profile, 0) + 1
+        tenancy_mode = plugin.tenancy_mode or "unspecified"
+        tenancy_mode_counts[tenancy_mode] = tenancy_mode_counts.get(tenancy_mode, 0) + 1
+        recommended_actions.update(_plugin_recommended_actions(plugin))
+
+    runtime_isolation_ready = (
+        runtime_policy.health_rollup_enabled
+        and runtime_policy.enforcement_mode == "isolated_runtime_required"
+        and runtime_policy.require_strict_signatures
+        and runtime_policy.require_source_digest
+        and bool(runtime_policy.proof_refs)
+        and all(plugin.ready for plugin in governed_plugins)
+        and not any(
+            plugin.quarantined or plugin.quarantine_recommended for plugin in governed_plugins
+        )
+        and not any(plugin.status == "load_failed" for plugin in governed_plugins)
+        and not any(
+            plugin.publisher_policy_decision in {"rejected", "untrusted"}
+            or plugin.trust_policy_decision in {"rejected", "untrusted"}
+            for plugin in governed_plugins
+        )
+        and all(
+            (plugin.sandbox_profile in runtime_policy.allowed_non_builtin_sandbox_profiles)
+            and (plugin.tenancy_mode in runtime_policy.allowed_non_builtin_tenancy_modes)
+            and (not runtime_policy.require_source_digest or bool(plugin.source_sha256))
+            and (not runtime_policy.require_strict_signatures or plugin.signature_verified)
+            for plugin in non_builtin_plugins
+        )
+    )
+
+    return PluginGovernanceSummarySnapshot(
+        total_plugins=len(plugins),
+        loaded_plugins=sum(1 for plugin in plugins if plugin.status == "loaded"),
+        load_failed_plugins=sum(1 for plugin in plugins if plugin.status == "load_failed"),
+        ready_plugins=sum(1 for plugin in plugins if plugin.ready),
+        unready_plugins=sum(1 for plugin in plugins if not plugin.ready),
+        healthy_plugins=sum(1 for plugin in plugins if plugin.ready and not plugin.warnings),
+        degraded_plugins=sum(1 for plugin in plugins if (not plugin.ready) or bool(plugin.warnings)),
+        non_builtin_plugins=len(non_builtin_plugins),
+        isolated_non_builtin_plugins=sum(
+            1 for plugin in non_builtin_plugins if plugin.sandbox_profile == "isolated"
+        ),
+        quarantined_plugins=sum(1 for plugin in plugins if plugin.quarantined),
+        quarantine_recommended_plugins=sum(1 for plugin in plugins if plugin.quarantine_recommended),
+        unsigned_external_plugins=sum(
+            1
+            for plugin in plugins
+            if plugin.release_channel != "builtin"
+            and plugin.source != "builtin"
+            and not plugin.signature_present
+        ),
+        unverified_signature_plugins=sum(
+            1 for plugin in plugins if plugin.signature_present and not plugin.signature_verified
+        ),
+        publisher_policy_rejections=sum(
+            1
+            for plugin in plugins
+            if plugin.publisher_policy_decision in {"rejected", "untrusted"}
+        ),
+        trust_policy_rejections=sum(
+            1 for plugin in plugins if plugin.trust_policy_decision in {"rejected", "untrusted"}
+        ),
+        sandbox_profile_counts=dict(sorted(sandbox_profile_counts.items())),
+        tenancy_mode_counts=dict(sorted(tenancy_mode_counts.items())),
+        runtime_policy_mode=runtime_policy.enforcement_mode,
+        runtime_isolation_ready=runtime_isolation_ready,
+        recommended_actions=sorted(recommended_actions),
+        remaining_gaps=(
+            []
+            if runtime_isolation_ready
+            else [
+                "non-builtin plugin runtime isolation exit gates are not fully satisfied",
+                "operator quarantine/revocation still depends on runtime policy enforcement",
+                "external plugin artifact provenance or signature verification is still incomplete",
+            ]
+        ),
+    )
 
 
 def plugin_settings_payload(resources: AppResources) -> Mapping[str, Any]:
@@ -418,6 +698,373 @@ def build_plugin_integration_readiness_posture(
         plugins=rows,
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
+    )
+
+
+def build_downloader_orchestration_posture(
+    resources: AppResources,
+) -> DownloaderOrchestrationSnapshot:
+    """Return the current downloader orchestration posture and breadth gaps."""
+
+    settings = resources.settings
+    provider_priority = {
+        name: index
+        for index, name in enumerate(settings.orchestration.downloader_provider_priority, start=1)
+    }
+    providers: list[DownloaderProviderCandidateSnapshot] = []
+    builtin_candidates: list[DownloaderProviderCandidateSnapshot] = []
+    provider_entries = (
+        ("realdebrid", settings.downloaders.real_debrid),
+        ("alldebrid", settings.downloaders.all_debrid),
+        ("debridlink", settings.downloaders.debrid_link),
+    )
+    for priority, (name, config) in enumerate(provider_entries, start=1):
+        configured = bool(config.api_key.strip())
+        enabled = bool(config.enabled and configured)
+        candidate = DownloaderProviderCandidateSnapshot(
+            name=name,
+            source="builtin",
+            enabled=enabled,
+            configured=configured,
+            selected=False,
+            priority=provider_priority.get(name, priority),
+            capabilities=["magnet_add", "file_select", "status_poll", "download_links"],
+        )
+        builtin_candidates.append(candidate)
+        providers.append(candidate)
+
+    plugin_registry = resources.plugin_registry
+    plugin_downloaders_registered = 0
+    if plugin_registry is not None:
+        for plugin in plugin_registry.get_downloaders():
+            plugin_downloaders_registered += 1
+            plugin_name = str(getattr(plugin, "plugin_name", type(plugin).__name__))
+            configured = True
+            enabled = True
+            if plugin_name == "stremthru":
+                stremthru = settings.downloaders.stremthru
+                configured = bool(
+                    stremthru.enabled and stremthru.token.strip() and stremthru.url.strip()
+                )
+                enabled = configured
+            providers.append(
+                DownloaderProviderCandidateSnapshot(
+                    name=plugin_name,
+                    source="plugin",
+                    enabled=enabled,
+                    configured=configured,
+                    selected=False,
+                    priority=provider_priority.get(plugin_name),
+                    capabilities=["magnet_add", "status_poll", "download_links"],
+                )
+            )
+
+    enabled_candidates = sorted(
+        [candidate for candidate in providers if candidate.enabled],
+        key=lambda candidate: (
+            candidate.priority if candidate.priority is not None else 10_000,
+            candidate.name,
+        ),
+    )
+    selected_provider = enabled_candidates[0].name if enabled_candidates else None
+    if selected_provider is not None:
+        providers = [
+            DownloaderProviderCandidateSnapshot(
+                name=candidate.name,
+                source=candidate.source,
+                enabled=candidate.enabled,
+                configured=candidate.configured,
+                selected=candidate.name == selected_provider,
+                priority=candidate.priority,
+                capabilities=list(candidate.capabilities),
+            )
+            for candidate in providers
+        ]
+
+    plugin_policy_ready = any(
+        candidate.source == "plugin" and candidate.enabled for candidate in providers
+    )
+    multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
+    worker_plugin_dispatch_ready = plugin_policy_ready
+    fanout_ready = bool(
+        settings.orchestration.downloader_selection_mode == "ordered_failover"
+        and len(enabled_candidates) > 1
+        and (plugin_downloaders_registered == 0 or plugin_policy_ready)
+    )
+    multi_container_ready = True
+    ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
+
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if selected_provider is None:
+        required_actions.append("configure_at_least_one_builtin_downloader_provider")
+        remaining_gaps.append(
+            "debrid worker execution has no configured builtin downloader provider"
+        )
+    if multi_provider_enabled:
+        if ordered_failover_ready and not fanout_ready:
+            required_actions.append("promote_ordered_failover_into_policy_driven_fanout")
+            remaining_gaps.append(
+                "multiple builtin downloaders now support ordered failover, but not policy-driven fan-out"
+            )
+        elif not ordered_failover_ready:
+            required_actions.append(
+                "replace_fixed_priority_builtin_selection_with_policy_driven_fanout"
+            )
+            remaining_gaps.append(
+                "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
+            )
+    if plugin_downloaders_registered > 0 and not worker_plugin_dispatch_ready:
+        required_actions.append("wire_registered_downloader_plugins_into_debrid_worker")
+        remaining_gaps.append(
+            "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
+        )
+
+    return DownloaderOrchestrationSnapshot(
+        generated_at=datetime.now(UTC).isoformat(),
+        selection_mode=(
+            "ordered_failover_policy_fanout"
+            if ordered_failover_ready and worker_plugin_dispatch_ready and fanout_ready
+            else "ordered_failover_with_plugin_policy"
+            if ordered_failover_ready and worker_plugin_dispatch_ready
+            else "ordered_failover"
+            if ordered_failover_ready
+            else "fixed_priority_builtin_then_plugin_policy"
+            if worker_plugin_dispatch_ready
+            else "fixed_priority_builtin_only"
+        ),
+        selected_provider=selected_provider,
+        multi_provider_enabled=multi_provider_enabled,
+        plugin_downloaders_registered=plugin_downloaders_registered,
+        worker_plugin_dispatch_ready=worker_plugin_dispatch_ready,
+        fanout_ready=fanout_ready,
+        multi_container_ready=multi_container_ready,
+        providers=providers,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
+    )
+
+
+def build_plugin_event_status_posture(
+    resources: AppResources,
+) -> list[PluginEventStatusSnapshot]:
+    """Return declared publishable events and hook subscriptions per plugin."""
+
+    plugin_registry = resources.plugin_registry
+    if plugin_registry is None:
+        return []
+
+    publishable_by_plugin = plugin_registry.publishable_events_by_plugin()
+    subscriptions_by_plugin = plugin_registry.hook_subscriptions_by_plugin()
+    rows: list[PluginEventStatusSnapshot] = []
+    for plugin_name in sorted(plugin_registry.all_plugin_names()):
+        manifest = plugin_registry.manifest(plugin_name)
+        rows.append(
+            PluginEventStatusSnapshot(
+                name=plugin_name,
+                publisher=manifest.publisher if manifest is not None else None,
+                publishable_events=list(publishable_by_plugin.get(plugin_name, ())),
+                hook_subscriptions=list(subscriptions_by_plugin.get(plugin_name, ())),
+            )
+        )
+    return rows
+
+
+async def build_plugin_governance_posture(
+    resources: AppResources,
+    *,
+    app_state: Any,
+) -> PluginGovernanceSnapshot:
+    """Return plugin trust, quarantine, and isolation posture for GraphQL/REST."""
+
+    plugin_registry: PluginRegistry | None = resources.plugin_registry
+    loaded_report, failed_report = _plugin_load_report_maps(app_state)
+    override_service = resources.plugin_governance_service
+    overrides = await override_service.list_overrides() if override_service is not None else {}
+
+    if plugin_registry is None:
+        failed_plugins = [
+            PluginCapabilityStatusSnapshot(
+                name=plugin_name,
+                capabilities=[],
+                status="load_failed",
+                ready=False,
+                configured=None,
+                version=None,
+                api_version=None,
+                min_host_version=None,
+                max_host_version=None,
+                publisher=None,
+                release_channel=None,
+                trust_level=None,
+                permission_scopes=[],
+                source_sha256=None,
+                signing_key_id=None,
+                signature_present=False,
+                signature_verified=False,
+                signature_verification_reason=None,
+                trust_policy_decision=None,
+                trust_store_source=None,
+                sandbox_profile=None,
+                tenancy_mode=None,
+                quarantined=False,
+                quarantine_reason=None,
+                publisher_policy_decision=None,
+                publisher_policy_status=None,
+                quarantine_recommended=False,
+                source=getattr(failure, "source", None),
+                warnings=[],
+                error=getattr(failure, "reason", None),
+            )
+            for plugin_name, failure in sorted(failed_report.items())
+        ]
+        return PluginGovernanceSnapshot(
+            summary=_plugin_governance_summary(
+                failed_plugins,
+                runtime_policy=resources.settings.plugin_runtime,
+            ),
+            plugins=failed_plugins,
+        )
+
+    plugins: list[PluginCapabilityStatusSnapshot] = []
+    registrations_by_plugin = plugin_registry.by_plugin()
+    all_plugin_names = plugin_registry.all_plugin_names() | set(failed_report)
+    for plugin_name in sorted(all_plugin_names):
+        manifest = plugin_registry.manifest(plugin_name)
+        registrations = registrations_by_plugin.get(plugin_name, [])
+        success = loaded_report.get(plugin_name)
+        failure = failed_report.get(plugin_name)
+        ready, configured, warnings = _plugin_runtime_health(plugin_name, resources)
+        signature_fields = _plugin_signature_fields(manifest=manifest, success=success)
+        override = overrides.get(plugin_name)
+        if success is not None:
+            warnings.extend(list(getattr(success, "skipped", ())))
+        if failure is not None and not registrations:
+            plugins.append(
+                PluginCapabilityStatusSnapshot(
+                    name=plugin_name,
+                    capabilities=[],
+                    status="load_failed",
+                    ready=False,
+                    configured=None,
+                    version=manifest.version if manifest is not None else None,
+                    api_version=manifest.api_version if manifest is not None else None,
+                    min_host_version=manifest.min_host_version if manifest is not None else None,
+                    max_host_version=manifest.max_host_version if manifest is not None else None,
+                    publisher=manifest.publisher if manifest is not None else None,
+                    release_channel=manifest.release_channel if manifest is not None else None,
+                    trust_level=manifest.trust_level if manifest is not None else None,
+                    permission_scopes=(
+                        sorted(manifest.effective_permission_scopes())
+                        if manifest is not None
+                        else []
+                    ),
+                    source_sha256=manifest.source_sha256 if manifest is not None else None,
+                    signing_key_id=manifest.signing_key_id if manifest is not None else None,
+                    sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
+                    tenancy_mode=manifest.tenancy_mode if manifest is not None else None,
+                    quarantined=(
+                        (override.state == "quarantined")
+                        if override is not None
+                        else (manifest.quarantined if manifest is not None else False)
+                    ),
+                    quarantine_reason=(
+                        override.reason
+                        if override is not None and override.state == "quarantined"
+                        else (manifest.quarantine_reason if manifest is not None else None)
+                    ),
+                    publisher_policy_decision=(
+                        getattr(success, "publisher_policy_decision", None)
+                        if success is not None
+                        else None
+                    ),
+                    publisher_policy_status=(
+                        getattr(success, "publisher_policy_status", None)
+                        if success is not None
+                        else None
+                    ),
+                    quarantine_recommended=(
+                        bool(getattr(success, "quarantine_recommended", False))
+                        if success is not None
+                        else False
+                    ),
+                    source=getattr(failure, "source", None),
+                    warnings=warnings,
+                    error=getattr(failure, "reason", None),
+                    signature_present=bool(signature_fields["signature_present"]),
+                    signature_verified=bool(signature_fields["signature_verified"]),
+                    signature_verification_reason=signature_fields["signature_verification_reason"],
+                    trust_policy_decision=signature_fields["trust_policy_decision"],
+                    trust_store_source=signature_fields["trust_store_source"],
+                )
+            )
+            continue
+
+        is_revoked = override is not None and override.state == "revoked"
+        is_quarantined = override is not None and override.state == "quarantined"
+        if is_revoked:
+            warnings.append("operator override revoked this plugin")
+        elif is_quarantined:
+            warnings.append("operator override quarantined this plugin")
+        plugins.append(
+            PluginCapabilityStatusSnapshot(
+                name=plugin_name,
+                capabilities=sorted({registration.kind.value for registration in registrations}),
+                status="loaded",
+                ready=ready and not is_revoked and not is_quarantined,
+                configured=configured,
+                version=manifest.version if manifest is not None else None,
+                api_version=manifest.api_version if manifest is not None else None,
+                min_host_version=manifest.min_host_version if manifest is not None else None,
+                max_host_version=manifest.max_host_version if manifest is not None else None,
+                publisher=manifest.publisher if manifest is not None else None,
+                release_channel=manifest.release_channel if manifest is not None else None,
+                trust_level=manifest.trust_level if manifest is not None else None,
+                permission_scopes=(
+                    sorted(manifest.effective_permission_scopes())
+                    if manifest is not None
+                    else []
+                ),
+                source_sha256=manifest.source_sha256 if manifest is not None else None,
+                signing_key_id=manifest.signing_key_id if manifest is not None else None,
+                signature_present=bool(signature_fields["signature_present"]),
+                signature_verified=bool(signature_fields["signature_verified"]),
+                signature_verification_reason=signature_fields["signature_verification_reason"],
+                trust_policy_decision=signature_fields["trust_policy_decision"],
+                trust_store_source=signature_fields["trust_store_source"],
+                sandbox_profile=manifest.sandbox_profile if manifest is not None else None,
+                tenancy_mode=manifest.tenancy_mode if manifest is not None else None,
+                quarantined=(
+                    is_quarantined
+                    if override is not None
+                    else (manifest.quarantined if manifest is not None else False)
+                ),
+                quarantine_reason=(
+                    override.reason
+                    if is_quarantined and override is not None
+                    else (manifest.quarantine_reason if manifest is not None else None)
+                ),
+                publisher_policy_decision=getattr(success, "publisher_policy_decision", None),
+                publisher_policy_status=getattr(success, "publisher_policy_status", None),
+                quarantine_recommended=bool(
+                    getattr(success, "quarantine_recommended", False)
+                ),
+                source=(
+                    manifest.distribution
+                    if manifest is not None
+                    else getattr(success, "source", None)
+                ),
+                warnings=warnings,
+                error=None,
+            )
+        )
+
+    return PluginGovernanceSnapshot(
+        summary=_plugin_governance_summary(
+            plugins,
+            runtime_policy=resources.settings.plugin_runtime,
+        ),
+        plugins=plugins,
     )
 
 

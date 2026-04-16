@@ -293,11 +293,24 @@ class GQLPluginIntegrationReadinessPlugin:
 
 
 @strawberry.type
+class GQLPluginIntegrationReadinessSummary:
+    """Rollup counters for Director plugin readiness consoles."""
+
+    total_plugins: int = strawberry.field(name="totalPlugins")
+    enabled_plugins: int = strawberry.field(name="enabledPlugins")
+    configured_plugins: int = strawberry.field(name="configuredPlugins")
+    contract_validated_plugins: int = strawberry.field(name="contractValidatedPlugins")
+    soak_validated_plugins: int = strawberry.field(name="soakValidatedPlugins")
+    ready_plugins: int = strawberry.field(name="readyPlugins")
+
+
+@strawberry.type
 class GQLPluginIntegrationReadiness:
     """Builtin plugin registration and config-validation posture for GraphQL."""
 
     generated_at: str = strawberry.field(name="generatedAt")
     status: str
+    summary: GQLPluginIntegrationReadinessSummary
     plugins: list[GQLPluginIntegrationReadinessPlugin]
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
@@ -609,15 +622,33 @@ class GQLVfsDirectoryListing:
 
     generation_id: str = strawberry.field(name="generationId")
     path: str
+    search_query: str | None = strawberry.field(name="searchQuery", default=None)
     entry: GQLVfsCatalogEntry
     focused_entry: GQLVfsCatalogEntry = strawberry.field(name="focusedEntry")
     parent: GQLVfsCatalogEntry | None = None
     breadcrumbs: list[GQLVfsBreadcrumb]
     directory_count: int = strawberry.field(name="directoryCount")
     file_count: int = strawberry.field(name="fileCount")
+    total_directory_count: int = strawberry.field(name="totalDirectoryCount")
+    total_file_count: int = strawberry.field(name="totalFileCount")
+    sibling_index: int = strawberry.field(name="siblingIndex")
+    sibling_count: int = strawberry.field(name="siblingCount")
+    previous_entry: GQLVfsCatalogEntry | None = strawberry.field(name="previousEntry", default=None)
+    next_entry: GQLVfsCatalogEntry | None = strawberry.field(name="nextEntry", default=None)
     stats: GQLVfsCatalogStats
     directories: list[GQLVfsCatalogEntry]
     files: list[GQLVfsCatalogEntry]
+
+
+@strawberry.type
+class GQLVfsSearchResult:
+    """GraphQL-native VFS search result for Director browse surfaces."""
+
+    generation_id: str = strawberry.field(name="generationId")
+    query: str
+    path_prefix: str = strawberry.field(name="pathPrefix")
+    total_matches: int = strawberry.field(name="totalMatches")
+    entries: list[GQLVfsCatalogEntry]
 
 
 @strawberry.type
