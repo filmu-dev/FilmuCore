@@ -348,6 +348,14 @@ class FakeReplayBackplane:
 
 
 @dataclass
+class FakeVfsCatalogServer:
+    counters: dict[str, int] = field(default_factory=dict)
+
+    def build_governance_snapshot(self) -> dict[str, int]:
+        return dict(self.counters)
+
+
+@dataclass
 class FakePlaybackTriggerController:
     result: object
     triggered_item_ids: list[str] = field(default_factory=list)
@@ -456,6 +464,7 @@ def _build_client(
     *,
     settings_overrides: dict[str, Any] | None = None,
     vfs_catalog_supplier: FakeVfsCatalogSupplier | None = None,
+    vfs_catalog_server: object | None = None,
     redis: DummyRedis | None = None,
     runtime_lifecycle: RuntimeLifecycleState | None = None,
     plugin_registry: object | None = None,
@@ -486,6 +495,7 @@ def _build_client(
         control_plane_service=control_plane_service,  # type: ignore[arg-type]
         control_plane_automation=control_plane_automation,
         vfs_catalog_supplier=vfs_catalog_supplier,  # type: ignore[arg-type]
+        vfs_catalog_server=vfs_catalog_server,  # type: ignore[arg-type]
         playback_service=playback_service,  # type: ignore[arg-type]
         replay_backplane=replay_backplane,
         queued_direct_playback_refresh_controller=queued_direct_playback_refresh_controller,
@@ -1183,6 +1193,8 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
                     streamName
                     consumerGroup
                     replayMaxlen
+                    claimLimit
+                    maxClaimPasses
                     attached
                     pendingCount
                     oldestEventId
@@ -1193,6 +1205,7 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
                     proofRefs
                     proofArtifacts { ref category label recorded }
                     proofReady
+                    pendingRecoveryReady
                     requiredActions
                     remainingGaps
                   }
@@ -1259,6 +1272,8 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "streamName": "filmu:events",
         "consumerGroup": "filmu-api",
         "replayMaxlen": 10000,
+        "claimLimit": 100,
+        "maxClaimPasses": 3,
         "attached": True,
         "pendingCount": 3,
         "oldestEventId": "100-0",
@@ -1279,6 +1294,7 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
             }
         ],
         "proofReady": True,
+        "pendingRecoveryReady": True,
         "requiredActions": [],
         "remainingGaps": [],
     }
@@ -1387,6 +1403,7 @@ def test_graphql_control_plane_recovery_requires_healthy_automation_backplane() 
                     proofRefs
                     proofArtifacts { ref category label recorded }
                     proofReady
+                    pendingRecoveryReady
                     requiredActions
                   }
                   controlPlaneRecoveryReadiness(activeWithinSeconds: 180) {
@@ -1409,6 +1426,7 @@ def test_graphql_control_plane_recovery_requires_healthy_automation_backplane() 
         "proofRefs": [],
         "proofArtifacts": [],
         "proofReady": False,
+        "pendingRecoveryReady": True,
         "requiredActions": ["record_control_plane_redis_consumer_group_evidence"],
     }
     assert payload["controlPlaneRecoveryReadiness"] == {
@@ -1491,11 +1509,18 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
                   downloaderOrchestration {
                     selectionMode
                     selectedProvider
+                    selectedProviderSource
+                    enabledProviderCount
+                    configuredProviderCount
+                    builtinEnabledProviderCount
+                    pluginEnabledProviderCount
                     multiProviderEnabled
                     pluginDownloadersRegistered
                     workerPluginDispatchReady
+                    orderedFailoverReady
                     fanoutReady
                     multiContainerReady
+                    providerPriorityOrder
                     requiredActions
                     remainingGaps
                     providers {
@@ -1512,12 +1537,25 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
                     publisher
                     publishableEvents
                     hookSubscriptions
+                    publishableEventCount
+                    hookSubscriptionCount
+                    wiringStatus
+                  }
+                  filteredPluginEvents: pluginEvents(wiringStatus: "subscriber_only") {
+                    name
+                    wiringStatus
                   }
                   pluginGovernance {
                     summary {
                       totalPlugins
                       nonBuiltinPlugins
                       unsignedExternalPlugins
+                      scraperPlugins
+                      eventHookPlugins
+                      overrideCount
+                      approvedOverrides
+                      quarantinedOverrides
+                      revokedOverrides
                       runtimePolicyMode
                       runtimeIsolationReady
                       recommendedActions
@@ -1535,6 +1573,7 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
                       sandboxProfile
                       tenancyMode
                       signaturePresent
+                      overrideState
                       warnings
                     }
                   }
@@ -1548,11 +1587,18 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
     assert payload["downloaderOrchestration"] == {
         "selectionMode": "ordered_failover",
         "selectedProvider": "realdebrid",
+        "selectedProviderSource": "builtin",
+        "enabledProviderCount": 2,
+        "configuredProviderCount": 2,
+        "builtinEnabledProviderCount": 2,
+        "pluginEnabledProviderCount": 0,
         "multiProviderEnabled": True,
         "pluginDownloadersRegistered": 0,
         "workerPluginDispatchReady": False,
+        "orderedFailoverReady": True,
         "fanoutReady": True,
         "multiContainerReady": True,
+        "providerPriorityOrder": ["realdebrid", "alldebrid", "debridlink", "stremthru"],
         "requiredActions": [],
         "remainingGaps": [],
         "providers": [
@@ -1588,19 +1634,37 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
             "publisher": "community",
             "publishableEvents": ["external.scan.completed"],
             "hookSubscriptions": [],
+            "publishableEventCount": 1,
+            "hookSubscriptionCount": 0,
+            "wiringStatus": "publisher_only",
         },
         {
             "name": "hook-plugin",
             "publisher": None,
             "publishableEvents": [],
             "hookSubscriptions": ["item.completed", "item.state.changed"],
+            "publishableEventCount": 0,
+            "hookSubscriptionCount": 2,
+            "wiringStatus": "subscriber_only",
         },
+    ]
+    assert payload["filteredPluginEvents"] == [
+        {
+            "name": "hook-plugin",
+            "wiringStatus": "subscriber_only",
+        }
     ]
     governance = payload["pluginGovernance"]
     assert governance["summary"] == {
         "totalPlugins": 2,
         "nonBuiltinPlugins": 2,
         "unsignedExternalPlugins": 2,
+        "scraperPlugins": 1,
+        "eventHookPlugins": 1,
+        "overrideCount": 0,
+        "approvedOverrides": 0,
+        "quarantinedOverrides": 0,
+        "revokedOverrides": 0,
         "runtimePolicyMode": "report_only",
         "runtimeIsolationReady": False,
         "recommendedActions": ["require_external_plugin_signature"],
@@ -1622,6 +1686,7 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
         "sandboxProfile": "restricted",
         "tenancyMode": "tenant",
         "signaturePresent": False,
+        "overrideState": None,
         "warnings": [],
     }
     assert governance["plugins"][1] == {
@@ -1634,6 +1699,7 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
         "sandboxProfile": "restricted",
         "tenancyMode": "shared",
         "signaturePresent": False,
+        "overrideState": None,
         "warnings": [],
     }
 
@@ -2127,6 +2193,27 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
             snapshot=snapshot,
             snapshots_by_generation={7: snapshot},
         ),
+        vfs_catalog_server=FakeVfsCatalogServer(
+            counters={
+                "vfs_catalog_watch_sessions_active": 1,
+                "vfs_catalog_reconnect_requested": 2,
+                "vfs_catalog_reconnect_delta_served": 1,
+                "vfs_catalog_reconnect_snapshot_fallback": 0,
+                "vfs_catalog_reconnect_failures": 0,
+                "vfs_catalog_snapshots_served": 3,
+                "vfs_catalog_deltas_served": 4,
+                "vfs_catalog_heartbeats_served": 5,
+                "vfs_catalog_problem_events": 0,
+                "vfs_catalog_request_stream_failures": 0,
+                "vfs_catalog_refresh_attempts": 6,
+                "vfs_catalog_refresh_succeeded": 5,
+                "vfs_catalog_refresh_provider_failures": 1,
+                "vfs_catalog_refresh_validation_failed": 0,
+                "vfs_catalog_inline_refresh_requests": 2,
+                "vfs_catalog_inline_refresh_succeeded": 2,
+                "vfs_catalog_inline_refresh_failed": 0,
+            }
+        ),
     )
 
     response = client.post(
@@ -2206,7 +2293,41 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                     query
                     pathPrefix
                     totalMatches
+                    exactMatchCount
+                    directoryMatches
+                    fileMatches
+                    mediaTypeCounts { key count }
+                    providerFamilyCounts { key count }
+                    leaseStateCounts { key count }
                     entries { entryId path kind }
+                  }
+                  filteredVfsSearch: vfsSearch(
+                    query: "Example Show",
+                    pathPrefix: "/Shows",
+                    generationId: "7",
+                    kind: "file",
+                    mediaType: "episode",
+                    providerFamily: "debrid",
+                    limit: 5
+                  ) {
+                    totalMatches
+                    entries { entryId path kind }
+                  }
+                  vfsCatalogGovernance {
+                    status
+                    counters { key count }
+                    summary {
+                      activeWatchSessions
+                      reconnectRequests
+                      reconnectDeltaServed
+                      snapshotsServed
+                      deltasServed
+                      refreshAttempts
+                      refreshSucceeded
+                      refreshProviderFailures
+                    }
+                    requiredActions
+                    remainingGaps
                   }
                   vfsFileContext(path: "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv", generationId: "7", search: "S01E01") {
                     generationId
@@ -2381,6 +2502,12 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
         "query": "Example Show",
         "pathPrefix": "/Shows",
         "totalMatches": 1,
+        "exactMatchCount": 0,
+        "directoryMatches": 0,
+        "fileMatches": 1,
+        "mediaTypeCounts": [{"key": "episode", "count": 1}],
+        "providerFamilyCounts": [{"key": "debrid", "count": 1}],
+        "leaseStateCounts": [{"key": "ready", "count": 1}],
         "entries": [
             {
                 "entryId": "file:entry-1",
@@ -2388,6 +2515,50 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                 "kind": "file",
             },
         ],
+    }
+    assert payload["filteredVfsSearch"] == {
+        "totalMatches": 1,
+        "entries": [
+            {
+                "entryId": "file:entry-1",
+                "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                "kind": "file",
+            }
+        ],
+    }
+    assert payload["vfsCatalogGovernance"] == {
+        "status": "partial",
+        "counters": [
+            {"key": "vfs_catalog_deltas_served", "count": 4},
+            {"key": "vfs_catalog_heartbeats_served", "count": 5},
+            {"key": "vfs_catalog_inline_refresh_failed", "count": 0},
+            {"key": "vfs_catalog_inline_refresh_requests", "count": 2},
+            {"key": "vfs_catalog_inline_refresh_succeeded", "count": 2},
+            {"key": "vfs_catalog_problem_events", "count": 0},
+            {"key": "vfs_catalog_reconnect_delta_served", "count": 1},
+            {"key": "vfs_catalog_reconnect_failures", "count": 0},
+            {"key": "vfs_catalog_reconnect_requested", "count": 2},
+            {"key": "vfs_catalog_reconnect_snapshot_fallback", "count": 0},
+            {"key": "vfs_catalog_refresh_attempts", "count": 6},
+            {"key": "vfs_catalog_refresh_provider_failures", "count": 1},
+            {"key": "vfs_catalog_refresh_succeeded", "count": 5},
+            {"key": "vfs_catalog_refresh_validation_failed", "count": 0},
+            {"key": "vfs_catalog_request_stream_failures", "count": 0},
+            {"key": "vfs_catalog_snapshots_served", "count": 3},
+            {"key": "vfs_catalog_watch_sessions_active", "count": 1},
+        ],
+        "summary": {
+            "activeWatchSessions": 1,
+            "reconnectRequests": 2,
+            "reconnectDeltaServed": 1,
+            "snapshotsServed": 3,
+            "deltasServed": 4,
+            "refreshAttempts": 6,
+            "refreshSucceeded": 5,
+            "refreshProviderFailures": 1,
+        },
+        "requiredActions": ["reduce_vfs_catalog_refresh_provider_failures"],
+        "remainingGaps": ["vfs catalog refresh provider failures were observed in the current runtime"],
     }
     assert payload["vfsFileContext"] == {
         "generationId": "7",

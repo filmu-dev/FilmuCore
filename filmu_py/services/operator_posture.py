@@ -90,11 +90,18 @@ class DownloaderOrchestrationSnapshot:
     generated_at: str
     selection_mode: str
     selected_provider: str | None
+    selected_provider_source: str | None
+    enabled_provider_count: int
+    configured_provider_count: int
+    builtin_enabled_provider_count: int
+    plugin_enabled_provider_count: int
     multi_provider_enabled: bool
     plugin_downloaders_registered: int
     worker_plugin_dispatch_ready: bool
+    ordered_failover_ready: bool
     fanout_ready: bool
     multi_container_ready: bool
+    provider_priority_order: list[str]
     providers: list[DownloaderProviderCandidateSnapshot]
     required_actions: list[str]
     remaining_gaps: list[str]
@@ -106,6 +113,9 @@ class PluginEventStatusSnapshot:
     publisher: str | None
     publishable_events: list[str]
     hook_subscriptions: list[str]
+    publishable_event_count: int
+    hook_subscription_count: int
+    wiring_status: str
 
 
 @dataclass(slots=True)
@@ -137,6 +147,9 @@ class PluginCapabilityStatusSnapshot:
     publisher_policy_decision: str | None
     publisher_policy_status: str | None
     quarantine_recommended: bool
+    override_state: str | None
+    override_reason: str | None
+    override_updated_at: str | None
     source: str | None
     warnings: list[str]
     error: str | None
@@ -159,6 +172,14 @@ class PluginGovernanceSummarySnapshot:
     unverified_signature_plugins: int
     publisher_policy_rejections: int
     trust_policy_rejections: int
+    scraper_plugins: int
+    downloader_plugins: int
+    content_service_plugins: int
+    event_hook_plugins: int
+    override_count: int
+    approved_overrides: int
+    quarantined_overrides: int
+    revoked_overrides: int
     sandbox_profile_counts: dict[str, int]
     tenancy_mode_counts: dict[str, int]
     runtime_policy_mode: str
@@ -230,6 +251,8 @@ class ControlPlaneReplayBackplaneSnapshot:
     stream_name: str
     consumer_group: str
     replay_maxlen: int
+    claim_limit: int
+    max_claim_passes: int
     attached: bool
     pending_count: int
     oldest_event_id: str | None
@@ -240,6 +263,7 @@ class ControlPlaneReplayBackplaneSnapshot:
     proof_refs: list[str]
     proof_artifacts: list[ProofArtifactSnapshot]
     proof_ready: bool
+    pending_recovery_ready: bool
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -259,6 +283,37 @@ class ControlPlaneRecoveryReadinessSnapshot:
     proof_refs: list[str]
     proof_artifacts: list[ProofArtifactSnapshot]
     proof_ready: bool
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class VfsCatalogGovernanceSummarySnapshot:
+    active_watch_sessions: int
+    reconnect_requests: int
+    reconnect_delta_served: int
+    reconnect_snapshot_fallbacks: int
+    reconnect_failures: int
+    snapshots_served: int
+    deltas_served: int
+    heartbeats_served: int
+    problem_events: int
+    request_stream_failures: int
+    refresh_attempts: int
+    refresh_succeeded: int
+    refresh_provider_failures: int
+    refresh_validation_failures: int
+    inline_refresh_requests: int
+    inline_refresh_succeeded: int
+    inline_refresh_failed: int
+
+
+@dataclass(slots=True)
+class VfsCatalogGovernanceSnapshot:
+    generated_at: str
+    status: Literal["ready", "partial", "blocked"]
+    counters: dict[str, int]
+    summary: VfsCatalogGovernanceSummarySnapshot
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -374,6 +429,17 @@ def _plugin_governance_summary(
     sandbox_profile_counts: dict[str, int] = {}
     tenancy_mode_counts: dict[str, int] = {}
     recommended_actions: set[str] = set()
+    capability_counts = {
+        "scraper": 0,
+        "downloader": 0,
+        "content_service": 0,
+        "event_hook": 0,
+    }
+    override_counts = {
+        "approved": 0,
+        "quarantined": 0,
+        "revoked": 0,
+    }
     non_builtin_plugins = [
         plugin
         for plugin in plugins
@@ -386,6 +452,11 @@ def _plugin_governance_summary(
         tenancy_mode = plugin.tenancy_mode or "unspecified"
         tenancy_mode_counts[tenancy_mode] = tenancy_mode_counts.get(tenancy_mode, 0) + 1
         recommended_actions.update(_plugin_recommended_actions(plugin))
+        for capability in plugin.capabilities:
+            if capability in capability_counts:
+                capability_counts[capability] += 1
+        if plugin.override_state in override_counts:
+            override_counts[plugin.override_state] += 1
 
     runtime_isolation_ready = (
         runtime_policy.health_rollup_enabled
@@ -444,6 +515,14 @@ def _plugin_governance_summary(
         trust_policy_rejections=sum(
             1 for plugin in plugins if plugin.trust_policy_decision in {"rejected", "untrusted"}
         ),
+        scraper_plugins=capability_counts["scraper"],
+        downloader_plugins=capability_counts["downloader"],
+        content_service_plugins=capability_counts["content_service"],
+        event_hook_plugins=capability_counts["event_hook"],
+        override_count=sum(override_counts.values()),
+        approved_overrides=override_counts["approved"],
+        quarantined_overrides=override_counts["quarantined"],
+        revoked_overrides=override_counts["revoked"],
         sandbox_profile_counts=dict(sorted(sandbox_profile_counts.items())),
         tenancy_mode_counts=dict(sorted(tenancy_mode_counts.items())),
         runtime_policy_mode=runtime_policy.enforcement_mode,
@@ -833,6 +912,7 @@ def build_downloader_orchestration_posture(
         ),
     )
     selected_provider = enabled_candidates[0].name if enabled_candidates else None
+    selected_provider_source = enabled_candidates[0].source if enabled_candidates else None
     if selected_provider is not None:
         providers = [
             DownloaderProviderCandidateSnapshot(
@@ -850,15 +930,27 @@ def build_downloader_orchestration_posture(
     plugin_policy_ready = any(
         candidate.source == "plugin" and candidate.enabled for candidate in providers
     )
+    enabled_provider_count = sum(1 for candidate in providers if candidate.enabled)
+    configured_provider_count = sum(1 for candidate in providers if candidate.configured)
+    builtin_enabled_provider_count = sum(
+        1 for candidate in providers if candidate.source == "builtin" and candidate.enabled
+    )
+    plugin_enabled_provider_count = sum(
+        1 for candidate in providers if candidate.source == "plugin" and candidate.enabled
+    )
     multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
     worker_plugin_dispatch_ready = plugin_policy_ready
+    ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
     fanout_ready = bool(
-        settings.orchestration.downloader_selection_mode == "ordered_failover"
+        ordered_failover_ready
         and len(enabled_candidates) > 1
         and (plugin_downloaders_registered == 0 or plugin_policy_ready)
     )
     multi_container_ready = True
-    ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
+    provider_priority_order = [
+        name
+        for name, _priority in sorted(provider_priority.items(), key=lambda item: (item[1], item[0]))
+    ]
 
     required_actions: list[str] = []
     remaining_gaps: list[str] = []
@@ -900,11 +992,18 @@ def build_downloader_orchestration_posture(
             else "fixed_priority_builtin_only"
         ),
         selected_provider=selected_provider,
+        selected_provider_source=selected_provider_source,
+        enabled_provider_count=enabled_provider_count,
+        configured_provider_count=configured_provider_count,
+        builtin_enabled_provider_count=builtin_enabled_provider_count,
+        plugin_enabled_provider_count=plugin_enabled_provider_count,
         multi_provider_enabled=multi_provider_enabled,
         plugin_downloaders_registered=plugin_downloaders_registered,
         worker_plugin_dispatch_ready=worker_plugin_dispatch_ready,
+        ordered_failover_ready=ordered_failover_ready,
         fanout_ready=fanout_ready,
         multi_container_ready=multi_container_ready,
+        provider_priority_order=provider_priority_order,
         providers=providers,
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
@@ -925,12 +1024,26 @@ def build_plugin_event_status_posture(
     rows: list[PluginEventStatusSnapshot] = []
     for plugin_name in sorted(plugin_registry.all_plugin_names()):
         manifest = plugin_registry.manifest(plugin_name)
+        publishable_events = list(publishable_by_plugin.get(plugin_name, ()))
+        hook_subscriptions = list(subscriptions_by_plugin.get(plugin_name, ()))
+        wiring_status = (
+            "bidirectional"
+            if publishable_events and hook_subscriptions
+            else "publisher_only"
+            if publishable_events
+            else "subscriber_only"
+            if hook_subscriptions
+            else "idle"
+        )
         rows.append(
             PluginEventStatusSnapshot(
                 name=plugin_name,
                 publisher=manifest.publisher if manifest is not None else None,
-                publishable_events=list(publishable_by_plugin.get(plugin_name, ())),
-                hook_subscriptions=list(subscriptions_by_plugin.get(plugin_name, ())),
+                publishable_events=publishable_events,
+                hook_subscriptions=hook_subscriptions,
+                publishable_event_count=len(publishable_events),
+                hook_subscription_count=len(hook_subscriptions),
+                wiring_status=wiring_status,
             )
         )
     return rows
@@ -978,6 +1091,9 @@ async def build_plugin_governance_posture(
                 publisher_policy_decision=None,
                 publisher_policy_status=None,
                 quarantine_recommended=False,
+                override_state=None,
+                override_reason=None,
+                override_updated_at=None,
                 source=getattr(failure, "source", None),
                 warnings=[],
                 error=getattr(failure, "reason", None),
@@ -1054,6 +1170,11 @@ async def build_plugin_governance_posture(
                         if success is not None
                         else False
                     ),
+                    override_state=override.state if override is not None else None,
+                    override_reason=override.reason if override is not None else None,
+                    override_updated_at=(
+                        override.updated_at.isoformat() if override is not None else None
+                    ),
                     source=getattr(failure, "source", None),
                     warnings=warnings,
                     error=getattr(failure, "reason", None),
@@ -1114,6 +1235,11 @@ async def build_plugin_governance_posture(
                 publisher_policy_status=getattr(success, "publisher_policy_status", None),
                 quarantine_recommended=bool(
                     getattr(success, "quarantine_recommended", False)
+                ),
+                override_state=override.state if override is not None else None,
+                override_reason=override.reason if override is not None else None,
+                override_updated_at=(
+                    override.updated_at.isoformat() if override is not None else None
                 ),
                 source=(
                     manifest.distribution
@@ -1361,6 +1487,8 @@ async def build_control_plane_replay_backplane_posture(
         stream_name=settings.event_stream_name,
         consumer_group=settings.consumer_group,
         replay_maxlen=settings.event_replay_maxlen,
+        claim_limit=settings.automation.claim_limit,
+        max_claim_passes=settings.automation.max_claim_passes,
         attached=attached,
         pending_count=pending_count,
         oldest_event_id=oldest_event_id,
@@ -1371,6 +1499,12 @@ async def build_control_plane_replay_backplane_posture(
         proof_refs=proof_refs,
         proof_artifacts=proof_artifacts,
         proof_ready=bool(proof_artifacts),
+        pending_recovery_ready=bool(
+            settings.event_backplane == "redis_stream"
+            and attached
+            and settings.automation.claim_limit > 0
+            and settings.automation.max_claim_passes > 0
+        ),
         required_actions=list(dict.fromkeys(required_actions)),
         remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )
@@ -1441,4 +1575,94 @@ async def build_control_plane_recovery_readiness_posture(
         proof_ready=replay.proof_ready,
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
+    )
+
+
+def build_vfs_catalog_governance_posture(resources: AppResources) -> VfsCatalogGovernanceSnapshot:
+    """Return graph-friendly governance counters for the live VFS gRPC catalog server."""
+
+    counter_keys = (
+        "vfs_catalog_watch_sessions_active",
+        "vfs_catalog_reconnect_requested",
+        "vfs_catalog_reconnect_delta_served",
+        "vfs_catalog_reconnect_snapshot_fallback",
+        "vfs_catalog_reconnect_failures",
+        "vfs_catalog_snapshots_served",
+        "vfs_catalog_deltas_served",
+        "vfs_catalog_heartbeats_served",
+        "vfs_catalog_problem_events",
+        "vfs_catalog_request_stream_failures",
+        "vfs_catalog_refresh_attempts",
+        "vfs_catalog_refresh_succeeded",
+        "vfs_catalog_refresh_provider_failures",
+        "vfs_catalog_refresh_validation_failed",
+        "vfs_catalog_inline_refresh_requests",
+        "vfs_catalog_inline_refresh_succeeded",
+        "vfs_catalog_inline_refresh_failed",
+    )
+    server = resources.vfs_catalog_server
+    counters = (
+        server.build_governance_snapshot()
+        if server is not None and hasattr(server, "build_governance_snapshot")
+        else dict.fromkeys(counter_keys, 0)
+    )
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
+    if server is None:
+        required_actions.append("attach_vfs_catalog_grpc_server")
+        remaining_gaps.append("live FilmuVFS gRPC governance counters are not attached")
+    if counters.get("vfs_catalog_reconnect_failures", 0) > 0:
+        required_actions.append("investigate_vfs_catalog_reconnect_failures")
+        remaining_gaps.append("vfs catalog reconnect failures were observed in the current runtime")
+    if counters.get("vfs_catalog_problem_events", 0) > 0:
+        required_actions.append("investigate_vfs_catalog_problem_events")
+        remaining_gaps.append("vfs catalog problem events were emitted by the current runtime")
+    if counters.get("vfs_catalog_request_stream_failures", 0) > 0:
+        required_actions.append("repair_vfs_catalog_request_stream_failures")
+        remaining_gaps.append("vfs catalog request-stream failures were observed in the current runtime")
+    if counters.get("vfs_catalog_refresh_provider_failures", 0) > 0:
+        required_actions.append("reduce_vfs_catalog_refresh_provider_failures")
+        remaining_gaps.append("vfs catalog refresh provider failures were observed in the current runtime")
+    if counters.get("vfs_catalog_refresh_validation_failed", 0) > 0:
+        required_actions.append("repair_vfs_catalog_refresh_validation_failures")
+        remaining_gaps.append("vfs catalog refresh validation failures were observed in the current runtime")
+
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready"
+        if server is not None and not remaining_gaps
+        else "partial"
+        if server is not None
+        else "blocked"
+    )
+    return VfsCatalogGovernanceSnapshot(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=status,
+        counters=dict(sorted(counters.items())),
+        summary=VfsCatalogGovernanceSummarySnapshot(
+            active_watch_sessions=int(counters.get("vfs_catalog_watch_sessions_active", 0)),
+            reconnect_requests=int(counters.get("vfs_catalog_reconnect_requested", 0)),
+            reconnect_delta_served=int(counters.get("vfs_catalog_reconnect_delta_served", 0)),
+            reconnect_snapshot_fallbacks=int(
+                counters.get("vfs_catalog_reconnect_snapshot_fallback", 0)
+            ),
+            reconnect_failures=int(counters.get("vfs_catalog_reconnect_failures", 0)),
+            snapshots_served=int(counters.get("vfs_catalog_snapshots_served", 0)),
+            deltas_served=int(counters.get("vfs_catalog_deltas_served", 0)),
+            heartbeats_served=int(counters.get("vfs_catalog_heartbeats_served", 0)),
+            problem_events=int(counters.get("vfs_catalog_problem_events", 0)),
+            request_stream_failures=int(counters.get("vfs_catalog_request_stream_failures", 0)),
+            refresh_attempts=int(counters.get("vfs_catalog_refresh_attempts", 0)),
+            refresh_succeeded=int(counters.get("vfs_catalog_refresh_succeeded", 0)),
+            refresh_provider_failures=int(
+                counters.get("vfs_catalog_refresh_provider_failures", 0)
+            ),
+            refresh_validation_failures=int(
+                counters.get("vfs_catalog_refresh_validation_failed", 0)
+            ),
+            inline_refresh_requests=int(counters.get("vfs_catalog_inline_refresh_requests", 0)),
+            inline_refresh_succeeded=int(counters.get("vfs_catalog_inline_refresh_succeeded", 0)),
+            inline_refresh_failed=int(counters.get("vfs_catalog_inline_refresh_failed", 0)),
+        ),
+        required_actions=list(dict.fromkeys(required_actions)),
+        remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )

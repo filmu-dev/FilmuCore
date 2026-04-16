@@ -282,6 +282,8 @@ class GQLControlPlaneReplayBackplane:
     stream_name: str = strawberry.field(name="streamName")
     consumer_group: str = strawberry.field(name="consumerGroup")
     replay_maxlen: int = strawberry.field(name="replayMaxlen")
+    claim_limit: int = strawberry.field(name="claimLimit")
+    max_claim_passes: int = strawberry.field(name="maxClaimPasses")
     attached: bool
     pending_count: int = strawberry.field(name="pendingCount")
     oldest_event_id: str | None = strawberry.field(name="oldestEventId", default=None)
@@ -292,6 +294,7 @@ class GQLControlPlaneReplayBackplane:
     proof_refs: list[str] = strawberry.field(name="proofRefs")
     proof_artifacts: list[GQLProofArtifact] = strawberry.field(name="proofArtifacts")
     proof_ready: bool = strawberry.field(name="proofReady")
+    pending_recovery_ready: bool = strawberry.field(name="pendingRecoveryReady")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 
@@ -386,6 +389,9 @@ class GQLPluginEventStatus:
     publisher: str | None = None
     publishable_events: list[str] = strawberry.field(name="publishableEvents")
     hook_subscriptions: list[str] = strawberry.field(name="hookSubscriptions")
+    publishable_event_count: int = strawberry.field(name="publishableEventCount")
+    hook_subscription_count: int = strawberry.field(name="hookSubscriptionCount")
+    wiring_status: str = strawberry.field(name="wiringStatus")
 
 
 @strawberry.type
@@ -408,11 +414,21 @@ class GQLDownloaderOrchestration:
     generated_at: str = strawberry.field(name="generatedAt")
     selection_mode: str = strawberry.field(name="selectionMode")
     selected_provider: str | None = strawberry.field(name="selectedProvider", default=None)
+    selected_provider_source: str | None = strawberry.field(
+        name="selectedProviderSource",
+        default=None,
+    )
+    enabled_provider_count: int = strawberry.field(name="enabledProviderCount")
+    configured_provider_count: int = strawberry.field(name="configuredProviderCount")
+    builtin_enabled_provider_count: int = strawberry.field(name="builtinEnabledProviderCount")
+    plugin_enabled_provider_count: int = strawberry.field(name="pluginEnabledProviderCount")
     multi_provider_enabled: bool = strawberry.field(name="multiProviderEnabled")
     plugin_downloaders_registered: int = strawberry.field(name="pluginDownloadersRegistered")
     worker_plugin_dispatch_ready: bool = strawberry.field(name="workerPluginDispatchReady")
+    ordered_failover_ready: bool = strawberry.field(name="orderedFailoverReady")
     fanout_ready: bool = strawberry.field(name="fanoutReady")
     multi_container_ready: bool = strawberry.field(name="multiContainerReady")
+    provider_priority_order: list[str] = strawberry.field(name="providerPriorityOrder")
     providers: list[GQLDownloaderProviderCandidate]
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
@@ -458,6 +474,9 @@ class GQLPluginCapabilityStatus:
         default=None,
     )
     quarantine_recommended: bool = strawberry.field(name="quarantineRecommended")
+    override_state: str | None = strawberry.field(name="overrideState", default=None)
+    override_reason: str | None = strawberry.field(name="overrideReason", default=None)
+    override_updated_at: str | None = strawberry.field(name="overrideUpdatedAt", default=None)
     source: str | None = None
     warnings: list[str]
     error: str | None = None
@@ -482,6 +501,14 @@ class GQLPluginGovernanceSummary:
     unverified_signature_plugins: int = strawberry.field(name="unverifiedSignaturePlugins")
     publisher_policy_rejections: int = strawberry.field(name="publisherPolicyRejections")
     trust_policy_rejections: int = strawberry.field(name="trustPolicyRejections")
+    scraper_plugins: int = strawberry.field(name="scraperPlugins")
+    downloader_plugins: int = strawberry.field(name="downloaderPlugins")
+    content_service_plugins: int = strawberry.field(name="contentServicePlugins")
+    event_hook_plugins: int = strawberry.field(name="eventHookPlugins")
+    override_count: int = strawberry.field(name="overrideCount")
+    approved_overrides: int = strawberry.field(name="approvedOverrides")
+    quarantined_overrides: int = strawberry.field(name="quarantinedOverrides")
+    revoked_overrides: int = strawberry.field(name="revokedOverrides")
     sandbox_profile_counts: list[GQLNamedCountBucket] = strawberry.field(name="sandboxProfileCounts")
     tenancy_mode_counts: list[GQLNamedCountBucket] = strawberry.field(name="tenancyModeCounts")
     runtime_policy_mode: str = strawberry.field(name="runtimePolicyMode")
@@ -702,6 +729,12 @@ class GQLVfsSearchResult:
     query: str
     path_prefix: str = strawberry.field(name="pathPrefix")
     total_matches: int = strawberry.field(name="totalMatches")
+    exact_match_count: int = strawberry.field(name="exactMatchCount")
+    directory_matches: int = strawberry.field(name="directoryMatches")
+    file_matches: int = strawberry.field(name="fileMatches")
+    media_type_counts: list[GQLNamedCountBucket] = strawberry.field(name="mediaTypeCounts")
+    provider_family_counts: list[GQLNamedCountBucket] = strawberry.field(name="providerFamilyCounts")
+    lease_state_counts: list[GQLNamedCountBucket] = strawberry.field(name="leaseStateCounts")
     entries: list[GQLVfsCatalogEntry]
 
 
@@ -724,6 +757,41 @@ class GQLVfsOverview:
 
     snapshot: GQLVfsSnapshot
     directory: GQLVfsDirectoryListing
+
+
+@strawberry.type
+class GQLVfsCatalogGovernanceSummary:
+    """Rollup of live VFS gRPC governance counters for Director operator screens."""
+
+    active_watch_sessions: int = strawberry.field(name="activeWatchSessions")
+    reconnect_requests: int = strawberry.field(name="reconnectRequests")
+    reconnect_delta_served: int = strawberry.field(name="reconnectDeltaServed")
+    reconnect_snapshot_fallbacks: int = strawberry.field(name="reconnectSnapshotFallbacks")
+    reconnect_failures: int = strawberry.field(name="reconnectFailures")
+    snapshots_served: int = strawberry.field(name="snapshotsServed")
+    deltas_served: int = strawberry.field(name="deltasServed")
+    heartbeats_served: int = strawberry.field(name="heartbeatsServed")
+    problem_events: int = strawberry.field(name="problemEvents")
+    request_stream_failures: int = strawberry.field(name="requestStreamFailures")
+    refresh_attempts: int = strawberry.field(name="refreshAttempts")
+    refresh_succeeded: int = strawberry.field(name="refreshSucceeded")
+    refresh_provider_failures: int = strawberry.field(name="refreshProviderFailures")
+    refresh_validation_failures: int = strawberry.field(name="refreshValidationFailures")
+    inline_refresh_requests: int = strawberry.field(name="inlineRefreshRequests")
+    inline_refresh_succeeded: int = strawberry.field(name="inlineRefreshSucceeded")
+    inline_refresh_failed: int = strawberry.field(name="inlineRefreshFailed")
+
+
+@strawberry.type
+class GQLVfsCatalogGovernance:
+    """GraphQL-native live FilmuVFS gRPC governance snapshot."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    counters: list[GQLNamedCountBucket]
+    summary: GQLVfsCatalogGovernanceSummary
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 
 
 @strawberry.type
