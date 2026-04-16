@@ -1486,6 +1486,7 @@ class CoreQueryResolver:
                 plugins=plugins,
             )
         )
+
     @strawberry.field(description="Current runtime lifecycle graph and bounded transition history")
     async def runtime_lifecycle(
         self,
