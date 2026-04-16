@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -4061,3 +4062,503 @@ def test_graphql_persist_playback_attachment_control_state_rejects_empty_mutatio
         "success": False,
         "error": "no_changes_requested",
     }
+
+
+def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_governance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._playback_gate_governance_snapshot",
+        lambda: {
+            "playback_gate_environment_class": "canary",
+            "playback_gate_gate_mode": "enforced",
+            "playback_gate_runner_status": "ready",
+            "playback_gate_runner_ready": 1,
+            "playback_gate_runner_required_failures": 0,
+            "playback_gate_provider_gate_required": 1,
+            "playback_gate_provider_gate_ran": 1,
+            "playback_gate_provider_parity_ready": 1,
+            "playback_gate_windows_provider_ready": 1,
+            "playback_gate_windows_provider_movie_ready": 1,
+            "playback_gate_windows_provider_tv_ready": 1,
+            "playback_gate_windows_provider_coverage": ["movie", "tv"],
+            "playback_gate_windows_soak_ready": 1,
+            "playback_gate_windows_soak_repeat_count": 4,
+            "playback_gate_windows_soak_profile_coverage_complete": 1,
+            "playback_gate_windows_soak_profile_coverage": [
+                "continuous",
+                "seek",
+                "concurrent",
+                "full",
+            ],
+            "playback_gate_policy_validation_status": "ready",
+            "playback_gate_policy_ready": 1,
+            "playback_gate_rollout_readiness": "ready",
+            "playback_gate_rollout_reasons": ["enterprise_playback_gate_green"],
+            "playback_gate_rollout_next_action": "keep_required_checks_enforced",
+        },
+    )
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._vfs_runtime_governance_snapshot",
+        lambda playback_gate_governance=None: {
+            "vfs_runtime_snapshot_available": 1,
+            "vfs_runtime_open_handles": 8,
+            "vfs_runtime_active_reads": 3,
+            "vfs_runtime_cache_pressure_class": "healthy",
+            "vfs_runtime_refresh_pressure_class": "healthy",
+            "vfs_runtime_provider_pressure_incidents": 0,
+            "vfs_runtime_fairness_pressure_incidents": 0,
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_canary_decision": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_merge_gate": "ready",
+            "vfs_runtime_rollout_environment_class": "canary",
+            "vfs_runtime_rollout_reasons": ["no_blocking_runtime_signals"],
+        },
+    )
+
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "enabled": True,
+                "rollout_stage": "enforced",
+                "rollout_evidence_refs": ["ops/identity/oidc-rollout.md"],
+            },
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "proof_refs": ["ops/plugins/runtime-rollout.md"],
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "proof_refs": ["ops/observability/rollout.md"],
+            },
+            "FILMU_PY_CONTROL_PLANE": {
+                "event_backplane": "redis_stream",
+                "proof_refs": ["ops/control-plane/replay-soak.md"],
+            },
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  enterpriseRolloutEvidence {
+                    status
+                    totalCheckCount
+                    readyCheckCount
+                    requiredActions
+                    remainingGaps
+                    checks {
+                      key
+                      status
+                      recorded
+                      ready
+                      evidenceRefs
+                    }
+                  }
+                  playbackGateGovernance {
+                    status
+                    rolloutReadiness
+                    environmentClass
+                    runnerStatus
+                    providerGateRequired
+                    providerGateRan
+                    windowsSoakReady
+                    policyValidationStatus
+                    requiredActions
+                    remainingGaps
+                  }
+                  vfsRuntimeRollout {
+                    status
+                    rolloutReadiness
+                    canaryDecision
+                    mergeGate
+                    environmentClass
+                    snapshotAvailable
+                    openHandles
+                    activeReads
+                    reasons
+                    requiredActions
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["enterpriseRolloutEvidence"]["status"] == "ready"
+    assert payload["enterpriseRolloutEvidence"]["totalCheckCount"] == 7
+    assert payload["enterpriseRolloutEvidence"]["readyCheckCount"] == 7
+    checks = {row["key"]: row for row in payload["enterpriseRolloutEvidence"]["checks"]}
+    assert checks["observability_rollout"]["evidenceRefs"] == ["ops/observability/rollout.md"]
+    assert checks["control_plane_replay"]["ready"] is True
+    assert payload["playbackGateGovernance"] == {
+        "status": "ready",
+        "rolloutReadiness": "ready",
+        "environmentClass": "canary",
+        "runnerStatus": "ready",
+        "providerGateRequired": True,
+        "providerGateRan": True,
+        "windowsSoakReady": True,
+        "policyValidationStatus": "ready",
+        "requiredActions": ["keep_required_checks_enforced"],
+        "remainingGaps": [],
+    }
+    assert payload["vfsRuntimeRollout"] == {
+        "status": "ready",
+        "rolloutReadiness": "ready",
+        "canaryDecision": "promote_to_next_environment_class",
+        "mergeGate": "ready",
+        "environmentClass": "canary",
+        "snapshotAvailable": True,
+        "openHandles": 8,
+        "activeReads": 3,
+        "reasons": ["no_blocking_runtime_signals"],
+        "requiredActions": ["promote_to_next_environment_class"],
+        "remainingGaps": ["vfs rollout reason: no_blocking_runtime_signals"],
+    }
+
+
+def test_graphql_plugin_runtime_overview_and_warnings_use_shared_posture() -> None:
+    plugin_settings = {
+        "scraping": {
+            "comet": {
+                "enabled": True,
+                "url": "https://comet.example",
+                "contract_proof_refs": ["ops/plugins/comet-contract.md"],
+                "soak_proof_refs": ["ops/plugins/comet-soak.md"],
+            }
+        },
+        "content": {
+            "listrr": {
+                "enabled": True,
+                "url": "https://listrr.example",
+                "list_ids": [],
+            }
+        },
+    }
+    registry = PluginRegistry()
+    harness = TestPluginContext(settings=plugin_settings)
+    register_builtin_plugins(registry, context_provider=harness.provider())
+    client = _build_client(
+        FakeMediaService(),
+        plugin_registry=registry,
+        plugin_settings_payload=plugin_settings,
+        settings_overrides={
+            "FILMU_PY_SCRAPING": plugin_settings["scraping"],
+            "FILMU_PY_CONTENT": plugin_settings["content"],
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  pluginRuntimeOverview {
+                    status
+                    totalPlugins
+                    readyPlugins
+                    wiringReadyPlugins
+                    contractValidatedPlugins
+                    soakValidatedPlugins
+                    warningCount
+                    recommendedActions
+                    remainingGaps
+                  }
+                  pluginRuntimeWarnings {
+                    pluginName
+                    source
+                    severity
+                    status
+                    message
+                    capabilityKind
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["pluginRuntimeOverview"]["status"] == "partial"
+    assert payload["pluginRuntimeOverview"]["totalPlugins"] >= 2
+    assert payload["pluginRuntimeOverview"]["contractValidatedPlugins"] >= 1
+    assert payload["pluginRuntimeOverview"]["soakValidatedPlugins"] >= 1
+    assert payload["pluginRuntimeOverview"]["warningCount"] >= 1
+    warnings = payload["pluginRuntimeWarnings"]
+    assert any(
+        row["pluginName"] == "listrr"
+        and row["source"] == "integration"
+        and row["capabilityKind"] == "content_service"
+        for row in warnings
+    )
+
+
+def test_graphql_downloader_execution_history_and_dead_letters_return_filtered_results() -> None:
+    redis = FakeOperatorRedis(
+        lists={
+            "arq:queue-status-history:filmu-py": [
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-16T11:10:00Z",
+                        "total_jobs": 6,
+                        "ready_jobs": 2,
+                        "deferred_jobs": 1,
+                        "in_progress_jobs": 1,
+                        "retry_jobs": 2,
+                        "dead_letter_jobs": 2,
+                        "alert_level": "critical",
+                        "dead_letter_reason_counts": {
+                            "provider_timeout": 1,
+                            "provider_rate_limit": 1,
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-16T11:05:00Z",
+                        "total_jobs": 3,
+                        "ready_jobs": 1,
+                        "deferred_jobs": 0,
+                        "in_progress_jobs": 1,
+                        "retry_jobs": 0,
+                        "dead_letter_jobs": 0,
+                        "alert_level": "ok",
+                        "dead_letter_reason_counts": {},
+                    }
+                ),
+            ],
+            "arq:dead-letter:filmu-py": [
+                json.dumps(
+                    {
+                        "stage": "debrid_item",
+                        "task": "debrid_item",
+                        "item_id": "item-2",
+                        "reason": "provider timeout",
+                        "reason_code": "provider_timeout",
+                        "idempotency_key": "item-2:timeout",
+                        "attempt": 2,
+                        "queued_at": "2026-04-16T11:12:00Z",
+                        "metadata": {
+                            "provider": "alldebrid",
+                            "failure_kind": "timeout",
+                            "selected_stream_id": "stream-2",
+                            "item_request_id": "request-2",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "stage": "debrid_item",
+                        "task": "debrid_item",
+                        "item_id": "item-1",
+                        "reason": "provider rate limited",
+                        "reason_code": "provider_rate_limit",
+                        "idempotency_key": "item-1:ratelimit",
+                        "attempt": 1,
+                        "queued_at": "2026-04-16T11:15:00Z",
+                        "metadata": {
+                            "provider": "realdebrid",
+                            "failure_kind": "rate_limit",
+                            "selected_stream_id": "stream-1",
+                            "item_request_id": "request-1",
+                            "status_code": 429,
+                            "retry_after_seconds": 30,
+                        },
+                    }
+                ),
+            ],
+        }
+    )
+    client = _build_client(FakeMediaService(), redis=redis)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  downloaderExecutionHistory(alertLevel: "critical", reasonCode: "provider_rate_limit") {
+                    observedAt
+                    alertLevel
+                    deadLetterJobs
+                    deadLetterReasonCounts
+                  }
+                  downloaderExecutionDeadLetters(provider: "realdebrid", failureKind: "rate_limit") {
+                    itemId
+                    reasonCode
+                    provider
+                    failureKind
+                    statusCode
+                    retryAfterSeconds
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["downloaderExecutionHistory"] == [
+        {
+            "observedAt": "2026-04-16T11:10:00Z",
+            "alertLevel": "critical",
+            "deadLetterJobs": 2,
+            "deadLetterReasonCounts": {
+                "provider_timeout": 1,
+                "provider_rate_limit": 1,
+            },
+        }
+    ]
+    assert payload["downloaderExecutionDeadLetters"] == [
+        {
+            "itemId": "item-1",
+            "reasonCode": "provider_rate_limit",
+            "provider": "realdebrid",
+            "failureKind": "rate_limit",
+            "statusCode": 429,
+            "retryAfterSeconds": 30,
+        }
+    ]
+
+
+def test_graphql_vfs_generation_history_returns_rollups_and_delta_counts() -> None:
+    snapshot_11 = VfsCatalogSnapshot(
+        generation_id="11",
+        published_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+        entries=(
+            VfsCatalogEntry(
+                entry_id="dir:/",
+                parent_entry_id=None,
+                path="/",
+                name="/",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/"),
+            ),
+            VfsCatalogEntry(
+                entry_id="file:entry-1",
+                parent_entry_id="dir:/",
+                path="/Example.mkv",
+                name="Example.mkv",
+                kind="file",
+                file=VfsCatalogFileEntry(
+                    item_id="item-1",
+                    item_title="Example",
+                    item_external_ref="tmdb:1",
+                    media_entry_id="entry-1",
+                    source_attachment_id="attachment-1",
+                    media_type="movie",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/1",
+                    lease_state="ready",
+                    query_strategy="persisted_media_entries",
+                    provider_family="debrid",
+                    locator_source="unrestricted_url",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=1, file_count=1, blocked_item_count=0),
+    )
+    snapshot_12 = VfsCatalogSnapshot(
+        generation_id="12",
+        published_at=datetime(2026, 4, 16, 10, 5, tzinfo=UTC),
+        entries=(
+            snapshot_11.entries[0],
+            snapshot_11.entries[1],
+            VfsCatalogEntry(
+                entry_id="file:entry-2",
+                parent_entry_id="dir:/",
+                path="/Example-2.mkv",
+                name="Example-2.mkv",
+                kind="file",
+                file=VfsCatalogFileEntry(
+                    item_id="item-2",
+                    item_title="Example Two",
+                    item_external_ref="tmdb:2",
+                    media_entry_id="entry-2",
+                    source_attachment_id="attachment-2",
+                    media_type="movie",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/2",
+                    lease_state="refreshing",
+                    query_strategy="playback_snapshot",
+                    provider_family="debrid",
+                    locator_source="locator",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=1, file_count=2, blocked_item_count=0),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(
+            snapshot=snapshot_12,
+            snapshots_by_generation={11: snapshot_11, 12: snapshot_12},
+        ),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsGenerationHistory(limit: 5) {
+                    generationId
+                    publishedAt
+                    entryCount
+                    fileCount
+                    queryStrategyCounts { key count }
+                    leaseStateCounts { key count }
+                    deltaFromPreviousAvailable
+                    deltaUpsertCount
+                    deltaRemovalCount
+                    deltaUpsertFileCount
+                    deltaRemovalFileCount
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["vfsGenerationHistory"] == [
+        {
+            "generationId": "12",
+            "publishedAt": "2026-04-16T10:05:00+00:00",
+            "entryCount": 3,
+            "fileCount": 2,
+            "queryStrategyCounts": [
+                {"key": "persisted_media_entries", "count": 1},
+                {"key": "playback_snapshot", "count": 1},
+            ],
+            "leaseStateCounts": [
+                {"key": "ready", "count": 1},
+                {"key": "refreshing", "count": 1},
+            ],
+            "deltaFromPreviousAvailable": True,
+            "deltaUpsertCount": 1,
+            "deltaRemovalCount": 0,
+            "deltaUpsertFileCount": 1,
+            "deltaRemovalFileCount": 0,
+        },
+        {
+            "generationId": "11",
+            "publishedAt": "2026-04-16T10:00:00+00:00",
+            "entryCount": 2,
+            "fileCount": 1,
+            "queryStrategyCounts": [
+                {"key": "persisted_media_entries", "count": 1},
+            ],
+            "leaseStateCounts": [
+                {"key": "ready", "count": 1},
+            ],
+            "deltaFromPreviousAvailable": False,
+            "deltaUpsertCount": 0,
+            "deltaRemovalCount": 0,
+            "deltaUpsertFileCount": 0,
+            "deltaRemovalFileCount": 0,
+        },
+    ]

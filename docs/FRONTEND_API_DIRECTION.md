@@ -35,7 +35,9 @@ GraphQL is the long-term client contract for:
 - playback and recovery control-plane actions
 - Director-facing operator posture read models, including control-plane recovery, replay-backplane proof, observability pipeline proof, plugin readiness, and retained evidence artifacts
 - compact observability rollout summaries, downloader execution evidence, dead-letter inspection, and queue-history rollups for Director/operator screens
+- retained rollout evidence checks, typed playback-gate governance, typed VFS runtime rollout posture, and bounded downloader history/dead-letter feeds for Director/operator screens
 - downloader orchestration, plugin events, plugin governance, enterprise operations posture, and live VFS gRPC governance counters
+- plugin runtime overview/warning feeds and retained VFS generation history for browse/operator adoption
 - VFS retained-generation delta rollups and mount diagnostics backed by the shared supplier/governance builders
 - plugin-backed product capabilities
 - future live frontend subscriptions
@@ -65,6 +67,9 @@ When implementing new frontend-facing work:
 - prefer filtered graph queries for operator consoles instead of shipping large unfiltered posture payloads and making the frontend post-process them
 - prefer GraphQL-native facet and counter rollups for browse/search/operator screens instead of asking the frontend to derive those summaries client-side
 - prefer GraphQL-native retained evidence summaries over frontend heuristics when the screen is about rollout/gate closure, downloader failover proof, or mount diagnostics
+- prefer dedicated GraphQL governance checks and rollout posture queries over frontends scraping generic enterprise summary slices for merge-readiness decisions
+- prefer dedicated GraphQL downloader history/dead-letter feeds over reusing generic worker queue queries in Director failover/operator screens
+- prefer retained VFS generation-history graph queries over frontend-local diffing when browse or operator views need snapshot-to-snapshot movement
 - prefer sharing one read-model builder across GraphQL and compatibility REST instead of duplicating governance logic in both surfaces
 - when retiring REST-backed logic, move the source builder into services first and let GraphQL consume that builder directly; do not create new route-only shaping logic
 - keep GraphQL bootstrap/import paths lazy so worker and plugin startup does not pull in the full schema unless the app actually needs it
