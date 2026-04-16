@@ -257,7 +257,9 @@ def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLO
             recorded=True,
         )
         for ref in snapshot.proof_refs
+        if str(ref).strip()
     ]
+    proof_refs = [artifact.ref for artifact in proof_artifacts]
     return GQLObservabilityConvergence(
         generated_at=snapshot.generated_at,
         status=snapshot.status,
@@ -274,7 +276,7 @@ def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLO
         alerting_enabled=snapshot.alerting_enabled,
         rust_trace_correlation_enabled=snapshot.rust_trace_correlation_enabled,
         correlation_contract_complete=snapshot.correlation_contract_complete,
-        proof_refs=list(snapshot.proof_refs),
+        proof_refs=proof_refs,
         required_correlation_fields=list(snapshot.required_correlation_fields),
         required_actions=list(snapshot.required_actions),
         remaining_gaps=list(snapshot.remaining_gaps),
@@ -286,16 +288,18 @@ def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLO
         summary=GQLObservabilityConvergenceSummary(
             pipeline_stage_count=len(snapshot.pipeline_stages),
             ready_stage_count=ready_stage_count,
-            production_evidence_ready=bool(snapshot.proof_refs),
+            production_evidence_ready=bool(proof_artifacts),
             grpc_rust_trace_ready=bool(
                 snapshot.rust_trace_correlation_enabled
                 and snapshot.expected_correlation_fields_ready
             ),
             otlp_export_ready=bool(snapshot.otel_enabled and snapshot.otel_endpoint_configured),
             search_index_ready=bool(
-                snapshot.log_shipper_target_configured and snapshot.search_backend != "none"
+                snapshot.log_shipper_enabled
+                and snapshot.log_shipper_target_configured
+                and snapshot.search_backend != "none"
             ),
-            alert_rollout_ready=bool(snapshot.alerting_enabled and snapshot.proof_refs),
+            alert_rollout_ready=bool(snapshot.alerting_enabled and proof_artifacts),
         ),
         missing_expected_correlation_fields=list(snapshot.missing_expected_correlation_fields),
         grpc_bind_address=snapshot.grpc_bind_address,

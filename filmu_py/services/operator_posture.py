@@ -571,8 +571,10 @@ def _plugin_integration_row(
         category="plugin_soak",
         label=f"{name} soak proof",
     )
-    contract_validated = bool(contract_proof_refs)
-    soak_validated = bool(soak_proof_refs)
+    sanitized_contract_proof_refs = [proof.ref for proof in contract_proofs]
+    sanitized_soak_proof_refs = [proof.ref for proof in soak_proofs]
+    contract_validated = bool(contract_proofs)
+    soak_validated = bool(soak_proofs)
     ready = registered and configured and contract_validated and soak_validated
     status: Literal["ready", "partial", "blocked"] = (
         "ready" if ready else "partial" if enabled or registered else "blocked"
@@ -611,8 +613,8 @@ def _plugin_integration_row(
         config_source=config_source,
         required_settings=list(required_settings),
         missing_settings=missing_settings,
-        contract_proof_refs=list(contract_proof_refs),
-        soak_proof_refs=list(soak_proof_refs),
+        contract_proof_refs=sanitized_contract_proof_refs,
+        soak_proof_refs=sanitized_soak_proof_refs,
         contract_proofs=contract_proofs,
         soak_proofs=soak_proofs,
         contract_validated=contract_validated,
@@ -1307,12 +1309,12 @@ async def build_control_plane_replay_backplane_posture(
 
     settings = resources.settings.control_plane
     backplane = resources.replay_backplane
-    proof_refs = list(settings.proof_refs)
     proof_artifacts = _build_proof_artifacts(
-        proof_refs,
+        list(settings.proof_refs),
         category="control_plane_rollout",
         label="control-plane replay backplane proof",
     )
+    proof_refs = [artifact.ref for artifact in proof_artifacts]
     required_actions: list[str] = []
     remaining_gaps: list[str] = []
     pending_count = 0
@@ -1340,11 +1342,11 @@ async def build_control_plane_replay_backplane_posture(
             oldest_event_id = summary.oldest_event_id
             latest_event_id = summary.latest_event_id
             consumer_counts = dict(summary.consumer_counts)
-    if not proof_refs:
+    if not proof_artifacts:
         required_actions.append("record_control_plane_redis_consumer_group_evidence")
         remaining_gaps.append("redis consumer-group rollout has no retained production evidence")
 
-    ready = settings.event_backplane == "redis_stream" and attached and bool(proof_refs)
+    ready = settings.event_backplane == "redis_stream" and attached and bool(proof_artifacts)
     status: Literal["ready", "partial", "blocked"] = (
         "ready"
         if ready and not remaining_gaps
@@ -1368,7 +1370,7 @@ async def build_control_plane_replay_backplane_posture(
         has_pending_backlog=pending_count > 0,
         proof_refs=proof_refs,
         proof_artifacts=proof_artifacts,
-        proof_ready=bool(proof_refs),
+        proof_ready=bool(proof_artifacts),
         required_actions=list(dict.fromkeys(required_actions)),
         remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )
@@ -1407,6 +1409,8 @@ async def build_control_plane_recovery_readiness_posture(
         if (
             automation.enabled
             and automation.runner_status == "running"
+            and automation.service_attached
+            and automation.backplane_attached
             and replay.attached
             and replay.proof_ready
             and summary.stale_subscribers == 0

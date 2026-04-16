@@ -760,6 +760,70 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
     assert payload["remainingGaps"] == []
 
 
+def test_graphql_observability_convergence_sanitizes_blank_proofs_and_requires_live_log_shipping() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": False,
+                "type": "vector",
+                "target": "opensearch://logs-filmu",
+                "healthcheck_url": "https://ops.example.test/vector/health",
+                "field_mapping_version": "filmu-ecs-v1",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "required_correlation_fields": [
+                    "request.id",
+                    "trace.id",
+                ],
+                "proof_refs": ["   ", "ops/wave4/log-pipeline-rollout.md"],
+            },
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  observabilityConvergence {
+                    proofRefs
+                    proofArtifacts { ref category label recorded }
+                    summary {
+                      productionEvidenceReady
+                      searchIndexReady
+                      alertRolloutReady
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["observabilityConvergence"]
+    assert payload["proofRefs"] == ["ops/wave4/log-pipeline-rollout.md"]
+    assert payload["proofArtifacts"] == [
+        {
+            "ref": "ops/wave4/log-pipeline-rollout.md",
+            "category": "observability_rollout",
+            "label": "observability rollout proof",
+            "recorded": True,
+        }
+    ]
+    assert payload["summary"] == {
+        "productionEvidenceReady": True,
+        "searchIndexReady": False,
+        "alertRolloutReady": True,
+    }
+
+
 def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
     plugin_settings = {
         "scraping": {
@@ -890,6 +954,73 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
     assert "listrr" not in by_name
     assert by_name["plex"]["ready"] is True
     assert by_name["plex"]["soakProofRefs"] == ["ops/plugins/plex-soak.md"]
+
+
+def test_graphql_plugin_integration_readiness_sanitizes_blank_proof_refs() -> None:
+    plugin_settings = {
+        "scraping": {
+            "comet": {
+                "enabled": True,
+                "url": "https://comet.example",
+                "contract_proof_refs": ["   "],
+                "soak_proof_refs": ["ops/plugins/comet-soak.md"],
+            }
+        }
+    }
+    registry = PluginRegistry()
+    harness = TestPluginContext(settings=plugin_settings)
+    register_builtin_plugins(registry, context_provider=harness.provider())
+    client = _build_client(
+        FakeMediaService(),
+        plugin_registry=registry,
+        plugin_settings_payload=plugin_settings,
+        settings_overrides={
+            "FILMU_PY_SCRAPING": plugin_settings["scraping"],
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  pluginIntegrationReadiness(includeDisabled: false) {
+                    summary {
+                      totalPlugins
+                      contractValidatedPlugins
+                      missingContractProofPlugins
+                    }
+                    plugins {
+                      name
+                      contractProofRefs
+                      contractProofs { ref category label recorded }
+                      contractValidated
+                      soakValidated
+                      proofGapCount
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["pluginIntegrationReadiness"]
+    assert payload["summary"] == {
+        "totalPlugins": 1,
+        "contractValidatedPlugins": 0,
+        "missingContractProofPlugins": 1,
+    }
+    assert payload["plugins"] == [
+        {
+            "name": "comet",
+            "contractProofRefs": [],
+            "contractProofs": [],
+            "contractValidated": False,
+            "soakValidated": True,
+            "proofGapCount": 1,
+        }
+    ]
 
 
 def test_graphql_control_plane_posture_returns_typed_summary_and_automation() -> None:
@@ -1173,6 +1304,121 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "proofReady": True,
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
+    }
+
+
+def test_graphql_control_plane_recovery_requires_healthy_automation_backplane() -> None:
+    class HealthyControlPlaneService:
+        async def summarize_subscribers(self, *, active_within_seconds: int) -> object:
+            _ = active_within_seconds
+            return SimpleNamespace(
+                total_subscribers=1,
+                active_subscribers=1,
+                stale_subscribers=0,
+                error_subscribers=0,
+                fenced_subscribers=0,
+                ack_pending_subscribers=0,
+                stream_count=1,
+                group_count=1,
+                node_count=1,
+                tenant_count=1,
+                oldest_heartbeat_age_seconds=5.0,
+                status_counts={"active": 1},
+                required_actions=[],
+                remaining_gaps=[],
+            )
+
+        async def list_subscribers(self, *, active_within_seconds: int) -> list[object]:
+            _ = active_within_seconds
+            return []
+
+    class BackplaneDetachedAutomation:
+        def snapshot(self) -> object:
+            return SimpleNamespace(
+                enabled=True,
+                runner_status="running",
+                interval_seconds=30,
+                active_within_seconds=180,
+                pending_min_idle_ms=60000,
+                claim_limit=25,
+                max_claim_passes=2,
+                consumer_group="filmu-api",
+                consumer_name="automation",
+                service_attached=True,
+                backplane_attached=False,
+                last_run_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                last_success_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                last_failure_at=None,
+                consecutive_failures=0,
+                last_error=None,
+                remediation_updated_subscribers=0,
+                rewound_subscribers=0,
+                claimed_pending_events=0,
+                claim_passes=0,
+                pending_count_after=0,
+                summary=None,
+            )
+
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_CONTROL_PLANE": {
+                "event_backplane": "redis_stream",
+                "proof_refs": ["   "],
+                "automation": {"enabled": True},
+            }
+        },
+        control_plane_service=HealthyControlPlaneService(),
+        control_plane_automation=BackplaneDetachedAutomation(),
+        replay_backplane=FakeReplayBackplane(
+            pending_count=0,
+            oldest_event_id=None,
+            latest_event_id=None,
+            consumer_counts={"worker-a": 1},
+        ),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  controlPlaneReplayBackplane {
+                    proofRefs
+                    proofArtifacts { ref category label recorded }
+                    proofReady
+                    requiredActions
+                  }
+                  controlPlaneRecoveryReadiness(activeWithinSeconds: 180) {
+                    status
+                    automationHealthy
+                    proofRefs
+                    proofArtifacts { ref category label recorded }
+                    proofReady
+                    requiredActions
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["controlPlaneReplayBackplane"] == {
+        "proofRefs": [],
+        "proofArtifacts": [],
+        "proofReady": False,
+        "requiredActions": ["record_control_plane_redis_consumer_group_evidence"],
+    }
+    assert payload["controlPlaneRecoveryReadiness"] == {
+        "status": "partial",
+        "automationHealthy": False,
+        "proofRefs": [],
+        "proofArtifacts": [],
+        "proofReady": False,
+        "requiredActions": ["record_control_plane_redis_consumer_group_evidence"],
+        "remainingGaps": ["redis consumer-group rollout has no retained production evidence"],
     }
 
 
