@@ -7,9 +7,13 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 
 from filmu_py.api.routes import runtime_governance
+from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.resources import AppResources
 from filmu_py.services.operator_posture import (
+    PluginCapabilityStatusSnapshot,
+    PluginIntegrationReadinessPluginSnapshot,
     ProofArtifactSnapshot,
+    _plugin_recommended_actions,
     build_plugin_event_status_posture,
     build_plugin_governance_posture,
     build_plugin_integration_readiness_posture,
@@ -136,6 +140,129 @@ class VfsGenerationHistoryPointSnapshot:
     delta_removal_count: int
     delta_upsert_file_count: int
     delta_removal_file_count: int
+
+
+@dataclass(slots=True)
+class GovernanceStatusCountSnapshot:
+    status: str
+    count: int
+
+
+@dataclass(slots=True)
+class GovernanceArtifactInventorySnapshot:
+    check_key: str
+    check_label: str
+    ref: str
+    category: str
+    label: str
+    recorded: bool
+
+
+@dataclass(slots=True)
+class OperatorActionItemSnapshot:
+    domain: str
+    subject: str
+    severity: Literal["warning", "critical"]
+    status: str
+    action: str
+    capability_kind: str | None = None
+
+
+@dataclass(slots=True)
+class OperatorGapItemSnapshot:
+    domain: str
+    subject: str
+    severity: Literal["warning", "critical"]
+    status: str
+    message: str
+    capability_kind: str | None = None
+
+
+@dataclass(slots=True)
+class DownloaderExecutionTrendSummarySnapshot:
+    point_count: int
+    ok_point_count: int
+    warning_point_count: int
+    critical_point_count: int
+    average_ready_jobs: float
+    average_retry_jobs: float
+    average_dead_letter_jobs: float
+    latest_alert_level: str
+
+
+@dataclass(slots=True)
+class DownloaderProviderSummarySnapshot:
+    provider: str
+    sample_count: int
+    failure_kind_counts: dict[str, int]
+    reason_code_counts: dict[str, int]
+    status_code_counts: dict[str, int]
+    retry_after_hint_count: int
+
+
+@dataclass(slots=True)
+class DownloaderReasonSummarySnapshot:
+    reason_code: str
+    sample_count: int
+    provider_counts: dict[str, int]
+    failure_kind_counts: dict[str, int]
+
+
+@dataclass(slots=True)
+class PluginRuntimeRowSnapshot:
+    name: str
+    status: str
+    ready: bool
+    capability_kinds: list[str]
+    wiring_status: str
+    publishable_event_count: int
+    hook_subscription_count: int
+    contract_validated: bool
+    soak_validated: bool
+    proof_gap_count: int
+    warning_count: int
+    quarantined: bool
+    recommended_actions: list[str]
+    remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class PluginRuntimeCapabilitySummarySnapshot:
+    capability_kind: str
+    total_plugins: int
+    ready_plugins: int
+    blocked_plugins: int
+    warning_count: int
+    contract_validated_plugins: int
+    soak_validated_plugins: int
+
+
+@dataclass(slots=True)
+class PluginProofCoverageSummarySnapshot:
+    capability_kind: str
+    total_plugins: int
+    contract_validated_plugins: int
+    soak_validated_plugins: int
+    missing_contract_plugins: int
+    missing_soak_plugins: int
+
+
+@dataclass(slots=True)
+class VfsGenerationHistorySummarySnapshot:
+    generation_count: int
+    newest_generation_id: str | None
+    oldest_generation_id: str | None
+    max_entry_count: int
+    max_file_count: int
+    blocked_generation_count: int
+    total_delta_upsert_count: int
+    total_delta_removal_count: int
+    provider_family_counts: dict[str, int]
+    lease_state_counts: dict[str, int]
+
+
+def _queue_name(resources: AppResources) -> str:
+    return resources.arq_queue_name or resources.settings.arq_queue_name
 
 
 def _as_int(value: object) -> int:
@@ -694,3 +821,469 @@ async def build_vfs_generation_history_posture(
         )
         previous_snapshot = snapshot
     return list(reversed(results))
+
+
+def build_enterprise_rollout_status_counts(
+    resources: AppResources,
+) -> list[GovernanceStatusCountSnapshot]:
+    """Return status buckets for retained rollout evidence checks."""
+
+    evidence = build_enterprise_rollout_evidence_posture(resources)
+    counts: dict[str, int] = {}
+    for check in evidence.checks:
+        counts[check.status] = counts.get(check.status, 0) + 1
+    return [
+        GovernanceStatusCountSnapshot(status=status, count=count)
+        for status, count in sorted(counts.items())
+    ]
+
+
+def build_enterprise_rollout_artifact_inventory(
+    resources: AppResources,
+) -> list[GovernanceArtifactInventorySnapshot]:
+    """Return the retained rollout-evidence artifact inventory for GraphQL."""
+
+    evidence = build_enterprise_rollout_evidence_posture(resources)
+    rows: list[GovernanceArtifactInventorySnapshot] = []
+    for check in evidence.checks:
+        for artifact in check.proof_artifacts:
+            rows.append(
+                GovernanceArtifactInventorySnapshot(
+                    check_key=check.key,
+                    check_label=check.label,
+                    ref=artifact.ref,
+                    category=artifact.category,
+                    label=artifact.label,
+                    recorded=bool(artifact.recorded),
+                )
+            )
+    return rows
+
+
+def build_enterprise_rollout_action_items(
+    resources: AppResources,
+) -> list[OperatorActionItemSnapshot]:
+    """Return one flattened governance-action feed for Director/operator screens."""
+
+    evidence = build_enterprise_rollout_evidence_posture(resources)
+    playback_gate = build_playback_gate_governance_posture()
+    vfs_runtime = build_vfs_runtime_rollout_posture(resources)
+    actions: list[OperatorActionItemSnapshot] = []
+    for check in evidence.checks:
+        severity: Literal["warning", "critical"] = (
+            "critical" if check.status == "blocked" else "warning"
+        )
+        for action in check.required_actions:
+            actions.append(
+                OperatorActionItemSnapshot(
+                    domain="enterprise_rollout",
+                    subject=check.key,
+                    severity=severity,
+                    status=check.status,
+                    action=action,
+                )
+            )
+    for action in playback_gate.required_actions:
+        actions.append(
+            OperatorActionItemSnapshot(
+                domain="playback_gate",
+                subject="playback_gate_governance",
+                severity="critical" if playback_gate.status == "blocked" else "warning",
+                status=playback_gate.status,
+                action=action,
+            )
+        )
+    for action in vfs_runtime.required_actions:
+        actions.append(
+            OperatorActionItemSnapshot(
+                domain="vfs_runtime_rollout",
+                subject="vfs_runtime_rollout",
+                severity="critical" if vfs_runtime.status == "blocked" else "warning",
+                status=vfs_runtime.status,
+                action=action,
+            )
+        )
+    deduped: dict[tuple[str, str, str], OperatorActionItemSnapshot] = {}
+    for row in actions:
+        deduped[(row.domain, row.subject, row.action)] = row
+    return list(deduped.values())
+
+
+def build_enterprise_rollout_gap_items(
+    resources: AppResources,
+) -> list[OperatorGapItemSnapshot]:
+    """Return flattened retained rollout gaps for GraphQL-first consoles."""
+
+    evidence = build_enterprise_rollout_evidence_posture(resources)
+    playback_gate = build_playback_gate_governance_posture()
+    vfs_runtime = build_vfs_runtime_rollout_posture(resources)
+    gaps: list[OperatorGapItemSnapshot] = []
+    for check in evidence.checks:
+        severity: Literal["warning", "critical"] = (
+            "critical" if check.status == "blocked" else "warning"
+        )
+        for message in check.remaining_gaps:
+            gaps.append(
+                OperatorGapItemSnapshot(
+                    domain="enterprise_rollout",
+                    subject=check.key,
+                    severity=severity,
+                    status=check.status,
+                    message=message,
+                )
+            )
+    for message in playback_gate.remaining_gaps:
+        gaps.append(
+            OperatorGapItemSnapshot(
+                domain="playback_gate",
+                subject="playback_gate_governance",
+                severity="critical" if playback_gate.status == "blocked" else "warning",
+                status=playback_gate.status,
+                message=message,
+            )
+        )
+    for message in vfs_runtime.remaining_gaps:
+        gaps.append(
+            OperatorGapItemSnapshot(
+                domain="vfs_runtime_rollout",
+                subject="vfs_runtime_rollout",
+                severity="critical" if vfs_runtime.status == "blocked" else "warning",
+                status=vfs_runtime.status,
+                message=message,
+            )
+        )
+    deduped: dict[tuple[str, str, str], OperatorGapItemSnapshot] = {}
+    for row in gaps:
+        deduped[(row.domain, row.subject, row.message)] = row
+    return list(deduped.values())
+
+
+async def build_downloader_execution_trend_summary(
+    resources: AppResources,
+    *,
+    limit: int = 20,
+) -> DownloaderExecutionTrendSummarySnapshot:
+    """Return bounded queue-history trend rollups for downloader execution."""
+
+    reader = QueueStatusReader(
+        resources.arq_redis or resources.redis,
+        queue_name=_queue_name(resources),
+    )
+    points = await reader.history(limit=max(1, min(limit, 100)))
+    point_count = len(points)
+    average_ready_jobs = (
+        sum(point.ready_jobs for point in points) / point_count if point_count else 0.0
+    )
+    average_retry_jobs = (
+        sum(point.retry_jobs for point in points) / point_count if point_count else 0.0
+    )
+    average_dead_letter_jobs = (
+        sum(point.dead_letter_jobs for point in points) / point_count if point_count else 0.0
+    )
+    return DownloaderExecutionTrendSummarySnapshot(
+        point_count=point_count,
+        ok_point_count=sum(1 for point in points if point.alert_level == "ok"),
+        warning_point_count=sum(1 for point in points if point.alert_level == "warning"),
+        critical_point_count=sum(1 for point in points if point.alert_level == "critical"),
+        average_ready_jobs=average_ready_jobs,
+        average_retry_jobs=average_retry_jobs,
+        average_dead_letter_jobs=average_dead_letter_jobs,
+        latest_alert_level=(points[0].alert_level if points else "ok"),
+    )
+
+
+async def build_downloader_provider_summaries(
+    resources: AppResources,
+    *,
+    limit: int = 50,
+) -> list[DownloaderProviderSummarySnapshot]:
+    """Return provider-grouped dead-letter/failover evidence for GraphQL."""
+
+    reader = QueueStatusReader(
+        resources.arq_redis or resources.redis,
+        queue_name=_queue_name(resources),
+    )
+    samples = await reader.dead_letter_samples(limit=max(1, min(limit, 100)), stage="debrid_item")
+    grouped: dict[str, DownloaderProviderSummarySnapshot] = {}
+    for sample in samples:
+        metadata = sample.metadata
+        provider = (
+            str(metadata.get("provider")).strip()
+            if isinstance(metadata.get("provider"), str) and str(metadata.get("provider")).strip()
+            else "unknown"
+        )
+        failure_kind = (
+            str(metadata.get("failure_kind")).strip()
+            if isinstance(metadata.get("failure_kind"), str) and str(metadata.get("failure_kind")).strip()
+            else "unknown"
+        )
+        status_code = metadata.get("status_code")
+        status_code_key = (
+            str(int(status_code))
+            if isinstance(status_code, int) and not isinstance(status_code, bool)
+            else "unknown"
+        )
+        row = grouped.get(provider)
+        if row is None:
+            row = DownloaderProviderSummarySnapshot(
+                provider=provider,
+                sample_count=0,
+                failure_kind_counts={},
+                reason_code_counts={},
+                status_code_counts={},
+                retry_after_hint_count=0,
+            )
+            grouped[provider] = row
+        row.sample_count += 1
+        row.failure_kind_counts[failure_kind] = row.failure_kind_counts.get(failure_kind, 0) + 1
+        row.reason_code_counts[sample.reason_code] = row.reason_code_counts.get(sample.reason_code, 0) + 1
+        row.status_code_counts[status_code_key] = row.status_code_counts.get(status_code_key, 0) + 1
+        if isinstance(metadata.get("retry_after_seconds"), int) and not isinstance(
+            metadata.get("retry_after_seconds"), bool
+        ):
+            row.retry_after_hint_count += 1
+    return [grouped[key] for key in sorted(grouped)]
+
+
+async def build_downloader_reason_summaries(
+    resources: AppResources,
+    *,
+    limit: int = 50,
+) -> list[DownloaderReasonSummarySnapshot]:
+    """Return reason-code grouped downloader dead-letter evidence."""
+
+    reader = QueueStatusReader(
+        resources.arq_redis or resources.redis,
+        queue_name=_queue_name(resources),
+    )
+    samples = await reader.dead_letter_samples(limit=max(1, min(limit, 100)), stage="debrid_item")
+    grouped: dict[str, DownloaderReasonSummarySnapshot] = {}
+    for sample in samples:
+        metadata = sample.metadata
+        provider = (
+            str(metadata.get("provider")).strip()
+            if isinstance(metadata.get("provider"), str) and str(metadata.get("provider")).strip()
+            else "unknown"
+        )
+        failure_kind = (
+            str(metadata.get("failure_kind")).strip()
+            if isinstance(metadata.get("failure_kind"), str) and str(metadata.get("failure_kind")).strip()
+            else "unknown"
+        )
+        row = grouped.get(sample.reason_code)
+        if row is None:
+            row = DownloaderReasonSummarySnapshot(
+                reason_code=sample.reason_code,
+                sample_count=0,
+                provider_counts={},
+                failure_kind_counts={},
+            )
+            grouped[sample.reason_code] = row
+        row.sample_count += 1
+        row.provider_counts[provider] = row.provider_counts.get(provider, 0) + 1
+        row.failure_kind_counts[failure_kind] = row.failure_kind_counts.get(failure_kind, 0) + 1
+    return [grouped[key] for key in sorted(grouped)]
+
+
+def _integration_by_name(
+    rows: list[PluginIntegrationReadinessPluginSnapshot],
+) -> dict[str, PluginIntegrationReadinessPluginSnapshot]:
+    return {row.name: row for row in rows}
+
+
+def _event_by_name(rows: list[object]) -> dict[str, object]:
+    return {str(getattr(row, "name", "")): row for row in rows}
+
+
+def _row_capability_kinds(plugin: PluginCapabilityStatusSnapshot) -> list[str]:
+    return [str(capability) for capability in plugin.capabilities]
+
+
+async def build_plugin_runtime_rows(
+    resources: AppResources,
+    *,
+    app_state: object,
+) -> list[PluginRuntimeRowSnapshot]:
+    """Return per-plugin runtime rows combining governance, events, and proof posture."""
+
+    integration = build_plugin_integration_readiness_posture(resources)
+    event_rows = build_plugin_event_status_posture(resources)
+    governance = await build_plugin_governance_posture(resources, app_state=app_state)
+    integration_by_name = _integration_by_name(list(integration.plugins))
+    event_by_name = _event_by_name(list(event_rows))
+    rows: list[PluginRuntimeRowSnapshot] = []
+    for plugin in governance.plugins:
+        event_row = event_by_name.get(plugin.name)
+        integration_row = integration_by_name.get(plugin.name)
+        capability_kinds = _row_capability_kinds(plugin)
+        status = "blocked" if plugin.status == "load_failed" else ("partial" if not plugin.ready else "ready")
+        if integration_row is not None and integration_row.status == "blocked":
+            status = "blocked"
+        elif integration_row is not None and integration_row.status == "partial" and status == "ready":
+            status = "partial"
+        row_remaining_gaps = list(plugin.warnings)
+        recommended_actions = set(_plugin_recommended_actions(plugin))
+        contract_validated = bool(integration_row.contract_validated) if integration_row is not None else False
+        soak_validated = bool(integration_row.soak_validated) if integration_row is not None else False
+        proof_gap_count = int(integration_row.proof_gap_count) if integration_row is not None else 0
+        if integration_row is not None:
+            row_remaining_gaps.extend(integration_row.remaining_gaps)
+            recommended_actions.update(integration_row.required_actions)
+        rows.append(
+            PluginRuntimeRowSnapshot(
+                name=plugin.name,
+                status=status,
+                ready=bool(plugin.ready and (integration_row.ready if integration_row is not None else True)),
+                capability_kinds=capability_kinds,
+                wiring_status=(
+                    str(getattr(event_row, "wiring_status", "not_wired"))
+                    if event_row is not None
+                    else "not_wired"
+                ),
+                publishable_event_count=int(getattr(event_row, "publishable_event_count", 0)),
+                hook_subscription_count=int(getattr(event_row, "hook_subscription_count", 0)),
+                contract_validated=contract_validated,
+                soak_validated=soak_validated,
+                proof_gap_count=proof_gap_count,
+                warning_count=len(row_remaining_gaps),
+                quarantined=bool(plugin.quarantined),
+                recommended_actions=sorted(recommended_actions),
+                remaining_gaps=list(dict.fromkeys(row_remaining_gaps)),
+            )
+        )
+    return rows
+
+
+def build_plugin_runtime_capability_summaries(
+    rows: list[PluginRuntimeRowSnapshot],
+) -> list[PluginRuntimeCapabilitySummarySnapshot]:
+    """Return capability-grouped plugin runtime rollups."""
+
+    grouped: dict[str, PluginRuntimeCapabilitySummarySnapshot] = {}
+    for row in rows:
+        for capability_kind in row.capability_kinds or ["unknown"]:
+            summary = grouped.get(capability_kind)
+            if summary is None:
+                summary = PluginRuntimeCapabilitySummarySnapshot(
+                    capability_kind=capability_kind,
+                    total_plugins=0,
+                    ready_plugins=0,
+                    blocked_plugins=0,
+                    warning_count=0,
+                    contract_validated_plugins=0,
+                    soak_validated_plugins=0,
+                )
+                grouped[capability_kind] = summary
+            summary.total_plugins += 1
+            if row.ready:
+                summary.ready_plugins += 1
+            if row.status == "blocked":
+                summary.blocked_plugins += 1
+            summary.warning_count += row.warning_count
+            if row.contract_validated:
+                summary.contract_validated_plugins += 1
+            if row.soak_validated:
+                summary.soak_validated_plugins += 1
+    return [grouped[key] for key in sorted(grouped)]
+
+
+def build_plugin_proof_coverage_summaries(
+    rows: list[PluginRuntimeRowSnapshot],
+) -> list[PluginProofCoverageSummarySnapshot]:
+    """Return capability-grouped retained proof coverage summaries."""
+
+    grouped: dict[str, PluginProofCoverageSummarySnapshot] = {}
+    for row in rows:
+        for capability_kind in row.capability_kinds or ["unknown"]:
+            summary = grouped.get(capability_kind)
+            if summary is None:
+                summary = PluginProofCoverageSummarySnapshot(
+                    capability_kind=capability_kind,
+                    total_plugins=0,
+                    contract_validated_plugins=0,
+                    soak_validated_plugins=0,
+                    missing_contract_plugins=0,
+                    missing_soak_plugins=0,
+                )
+                grouped[capability_kind] = summary
+            summary.total_plugins += 1
+            if row.contract_validated:
+                summary.contract_validated_plugins += 1
+            else:
+                summary.missing_contract_plugins += 1
+            if row.soak_validated:
+                summary.soak_validated_plugins += 1
+            else:
+                summary.missing_soak_plugins += 1
+    return [grouped[key] for key in sorted(grouped)]
+
+
+def build_plugin_runtime_action_items(
+    rows: list[PluginRuntimeRowSnapshot],
+) -> list[OperatorActionItemSnapshot]:
+    """Return flattened plugin runtime action items for GraphQL consoles."""
+
+    actions: dict[tuple[str, str, str], OperatorActionItemSnapshot] = {}
+    for row in rows:
+        severity: Literal["warning", "critical"] = "critical" if row.status == "blocked" else "warning"
+        primary_capability = row.capability_kinds[0] if row.capability_kinds else None
+        for action in row.recommended_actions:
+            actions[("plugin_runtime", row.name, action)] = OperatorActionItemSnapshot(
+                domain="plugin_runtime",
+                subject=row.name,
+                severity=severity,
+                status=row.status,
+                action=action,
+                capability_kind=primary_capability,
+            )
+    return list(actions.values())
+
+
+def build_plugin_runtime_gap_items(
+    rows: list[PluginRuntimeRowSnapshot],
+) -> list[OperatorGapItemSnapshot]:
+    """Return flattened plugin runtime gaps for GraphQL consoles."""
+
+    gaps: dict[tuple[str, str, str], OperatorGapItemSnapshot] = {}
+    for row in rows:
+        severity: Literal["warning", "critical"] = "critical" if row.status == "blocked" else "warning"
+        primary_capability = row.capability_kinds[0] if row.capability_kinds else None
+        for message in row.remaining_gaps:
+            gaps[("plugin_runtime", row.name, message)] = OperatorGapItemSnapshot(
+                domain="plugin_runtime",
+                subject=row.name,
+                severity=severity,
+                status=row.status,
+                message=message,
+                capability_kind=primary_capability,
+            )
+    return list(gaps.values())
+
+
+async def build_vfs_generation_history_summary(
+    resources: AppResources,
+    *,
+    limit: int = 20,
+) -> VfsGenerationHistorySummarySnapshot:
+    """Return aggregate rollups over retained VFS generation history."""
+
+    rows = await build_vfs_generation_history_posture(resources, limit=limit)
+    provider_family_counts: dict[str, int] = {}
+    lease_state_counts: dict[str, int] = {}
+    for row in rows:
+        for key, count in row.provider_family_counts.items():
+            provider_family_counts[key] = provider_family_counts.get(key, 0) + int(count)
+        for key, count in row.lease_state_counts.items():
+            lease_state_counts[key] = lease_state_counts.get(key, 0) + int(count)
+    return VfsGenerationHistorySummarySnapshot(
+        generation_count=len(rows),
+        newest_generation_id=(rows[0].generation_id if rows else None),
+        oldest_generation_id=(rows[-1].generation_id if rows else None),
+        max_entry_count=max((row.entry_count for row in rows), default=0),
+        max_file_count=max((row.file_count for row in rows), default=0),
+        blocked_generation_count=sum(1 for row in rows if row.blocked_item_count > 0),
+        total_delta_upsert_count=sum(row.delta_upsert_count for row in rows),
+        total_delta_removal_count=sum(row.delta_removal_count for row in rows),
+        provider_family_counts=dict(sorted(provider_family_counts.items())),
+        lease_state_counts=dict(sorted(lease_state_counts.items())),
+    )
