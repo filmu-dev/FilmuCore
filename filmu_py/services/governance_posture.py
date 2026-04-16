@@ -965,7 +965,10 @@ async def build_downloader_execution_trend_summary(
 ) -> DownloaderExecutionTrendSummarySnapshot:
     """Return bounded queue-history trend rollups for downloader execution."""
 
-    reader = QueueStatusReader(resources.redis, queue_name=_queue_name(resources))
+    reader = QueueStatusReader(
+        resources.arq_redis or resources.redis,
+        queue_name=_queue_name(resources),
+    )
     points = await reader.history(limit=max(1, min(limit, 100)))
     point_count = len(points)
     average_ready_jobs = (
@@ -996,7 +999,10 @@ async def build_downloader_provider_summaries(
 ) -> list[DownloaderProviderSummarySnapshot]:
     """Return provider-grouped dead-letter/failover evidence for GraphQL."""
 
-    reader = QueueStatusReader(resources.redis, queue_name=_queue_name(resources))
+    reader = QueueStatusReader(
+        resources.arq_redis or resources.redis,
+        queue_name=_queue_name(resources),
+    )
     samples = await reader.dead_letter_samples(limit=max(1, min(limit, 100)), stage="debrid_item")
     grouped: dict[str, DownloaderProviderSummarySnapshot] = {}
     for sample in samples:
@@ -1046,7 +1052,10 @@ async def build_downloader_reason_summaries(
 ) -> list[DownloaderReasonSummarySnapshot]:
     """Return reason-code grouped downloader dead-letter evidence."""
 
-    reader = QueueStatusReader(resources.redis, queue_name=_queue_name(resources))
+    reader = QueueStatusReader(
+        resources.arq_redis or resources.redis,
+        queue_name=_queue_name(resources),
+    )
     samples = await reader.dead_letter_samples(limit=max(1, min(limit, 100)), stage="debrid_item")
     grouped: dict[str, DownloaderReasonSummarySnapshot] = {}
     for sample in samples:
