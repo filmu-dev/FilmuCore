@@ -34,7 +34,7 @@ GraphQL is the long-term client contract for:
 - file-focused VFS context, including directory ownership plus previous/next file navigation
 - playback and recovery control-plane actions
 - Director-facing operator posture read models, including control-plane recovery, replay-backplane proof, observability pipeline proof, plugin readiness, and retained evidence artifacts
-- downloader orchestration, plugin events, plugin governance, and enterprise operations posture
+- downloader orchestration, plugin events, plugin governance, enterprise operations posture, and live VFS gRPC governance counters
 - plugin-backed product capabilities
 - future live frontend subscriptions
 
@@ -61,6 +61,7 @@ When implementing new frontend-facing work:
 - prefer graph-native search and sibling-navigation queries for browse/detail screens instead of frontends reconstructing local navigation state
 - prefer typed proof/evidence artifacts on GraphQL instead of raw string arrays once a posture surface is part of Director runtime governance
 - prefer filtered graph queries for operator consoles instead of shipping large unfiltered posture payloads and making the frontend post-process them
+- prefer GraphQL-native facet and counter rollups for browse/search/operator screens instead of asking the frontend to derive those summaries client-side
 - prefer sharing one read-model builder across GraphQL and compatibility REST instead of duplicating governance logic in both surfaces
 - when retiring REST-backed logic, move the source builder into services first and let GraphQL consume that builder directly; do not create new route-only shaping logic
 - keep GraphQL naming intentional rather than inherited from legacy REST aliases

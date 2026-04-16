@@ -74,6 +74,8 @@ from filmu_py.graphql.types import (
     GQLVfsBlockedItem,
     GQLVfsBreadcrumb,
     GQLVfsCatalogEntry,
+    GQLVfsCatalogGovernance,
+    GQLVfsCatalogGovernanceSummary,
     GQLVfsCatalogRollup,
     GQLVfsCatalogStats,
     GQLVfsCorrelationKeys,
@@ -121,6 +123,7 @@ from filmu_py.services.operator_posture import (
     build_plugin_event_status_posture,
     build_plugin_governance_posture,
     build_plugin_integration_readiness_posture,
+    build_vfs_catalog_governance_posture,
 )
 from filmu_py.services.playback import (
     AppScopedDirectPlaybackRefreshTriggerResult,
@@ -475,6 +478,8 @@ def _build_control_plane_replay_backplane(snapshot: object) -> GQLControlPlaneRe
         stream_name=str(typed_snapshot.stream_name),
         consumer_group=str(typed_snapshot.consumer_group),
         replay_maxlen=int(typed_snapshot.replay_maxlen),
+        claim_limit=int(typed_snapshot.claim_limit),
+        max_claim_passes=int(typed_snapshot.max_claim_passes),
         attached=bool(typed_snapshot.attached),
         pending_count=int(typed_snapshot.pending_count),
         oldest_event_id=typed_snapshot.oldest_event_id,
@@ -493,6 +498,7 @@ def _build_control_plane_replay_backplane(snapshot: object) -> GQLControlPlaneRe
             for proof in typed_snapshot.proof_artifacts
         ],
         proof_ready=bool(typed_snapshot.proof_ready),
+        pending_recovery_ready=bool(typed_snapshot.pending_recovery_ready),
         required_actions=list(typed_snapshot.required_actions),
         remaining_gaps=list(typed_snapshot.remaining_gaps),
     )
@@ -542,11 +548,18 @@ def _build_downloader_orchestration(snapshot: object) -> GQLDownloaderOrchestrat
         generated_at=str(typed_snapshot.generated_at),
         selection_mode=str(typed_snapshot.selection_mode),
         selected_provider=typed_snapshot.selected_provider,
+        selected_provider_source=typed_snapshot.selected_provider_source,
+        enabled_provider_count=int(typed_snapshot.enabled_provider_count),
+        configured_provider_count=int(typed_snapshot.configured_provider_count),
+        builtin_enabled_provider_count=int(typed_snapshot.builtin_enabled_provider_count),
+        plugin_enabled_provider_count=int(typed_snapshot.plugin_enabled_provider_count),
         multi_provider_enabled=bool(typed_snapshot.multi_provider_enabled),
         plugin_downloaders_registered=int(typed_snapshot.plugin_downloaders_registered),
         worker_plugin_dispatch_ready=bool(typed_snapshot.worker_plugin_dispatch_ready),
+        ordered_failover_ready=bool(typed_snapshot.ordered_failover_ready),
         fanout_ready=bool(typed_snapshot.fanout_ready),
         multi_container_ready=bool(typed_snapshot.multi_container_ready),
+        provider_priority_order=list(typed_snapshot.provider_priority_order),
         providers=[
             GQLDownloaderProviderCandidate(
                 name=str(row.name),
@@ -571,6 +584,9 @@ def _build_plugin_event_status(row: object) -> GQLPluginEventStatus:
         publisher=typed_row.publisher,
         publishable_events=list(typed_row.publishable_events),
         hook_subscriptions=list(typed_row.hook_subscriptions),
+        publishable_event_count=int(typed_row.publishable_event_count),
+        hook_subscription_count=int(typed_row.hook_subscription_count),
+        wiring_status=str(typed_row.wiring_status),
     )
 
 
@@ -604,6 +620,9 @@ def _build_plugin_capability_status(row: object) -> GQLPluginCapabilityStatus:
         publisher_policy_decision=typed_row.publisher_policy_decision,
         publisher_policy_status=typed_row.publisher_policy_status,
         quarantine_recommended=bool(typed_row.quarantine_recommended),
+        override_state=typed_row.override_state,
+        override_reason=typed_row.override_reason,
+        override_updated_at=typed_row.override_updated_at,
         source=typed_row.source,
         warnings=list(typed_row.warnings),
         error=typed_row.error,
@@ -628,6 +647,14 @@ def _build_plugin_governance_summary(snapshot: object) -> GQLPluginGovernanceSum
         unverified_signature_plugins=int(typed_snapshot.unverified_signature_plugins),
         publisher_policy_rejections=int(typed_snapshot.publisher_policy_rejections),
         trust_policy_rejections=int(typed_snapshot.trust_policy_rejections),
+        scraper_plugins=int(typed_snapshot.scraper_plugins),
+        downloader_plugins=int(typed_snapshot.downloader_plugins),
+        content_service_plugins=int(typed_snapshot.content_service_plugins),
+        event_hook_plugins=int(typed_snapshot.event_hook_plugins),
+        override_count=int(typed_snapshot.override_count),
+        approved_overrides=int(typed_snapshot.approved_overrides),
+        quarantined_overrides=int(typed_snapshot.quarantined_overrides),
+        revoked_overrides=int(typed_snapshot.revoked_overrides),
         sandbox_profile_counts=_build_named_count_buckets(
             dict(typed_snapshot.sandbox_profile_counts)
         ),
@@ -691,6 +718,40 @@ def _build_enterprise_operations_governance(
         release_metadata_performance=_build_enterprise_operations_slice(
             typed_snapshot.release_metadata_performance
         ),
+    )
+
+
+def _build_vfs_catalog_governance(snapshot: object) -> GQLVfsCatalogGovernance:
+    typed_snapshot: Any = snapshot
+    return GQLVfsCatalogGovernance(
+        generated_at=str(typed_snapshot.generated_at),
+        status=str(typed_snapshot.status),
+        counters=_build_named_count_buckets(dict(typed_snapshot.counters)),
+        summary=GQLVfsCatalogGovernanceSummary(
+            active_watch_sessions=int(typed_snapshot.summary.active_watch_sessions),
+            reconnect_requests=int(typed_snapshot.summary.reconnect_requests),
+            reconnect_delta_served=int(typed_snapshot.summary.reconnect_delta_served),
+            reconnect_snapshot_fallbacks=int(
+                typed_snapshot.summary.reconnect_snapshot_fallbacks
+            ),
+            reconnect_failures=int(typed_snapshot.summary.reconnect_failures),
+            snapshots_served=int(typed_snapshot.summary.snapshots_served),
+            deltas_served=int(typed_snapshot.summary.deltas_served),
+            heartbeats_served=int(typed_snapshot.summary.heartbeats_served),
+            problem_events=int(typed_snapshot.summary.problem_events),
+            request_stream_failures=int(typed_snapshot.summary.request_stream_failures),
+            refresh_attempts=int(typed_snapshot.summary.refresh_attempts),
+            refresh_succeeded=int(typed_snapshot.summary.refresh_succeeded),
+            refresh_provider_failures=int(typed_snapshot.summary.refresh_provider_failures),
+            refresh_validation_failures=int(
+                typed_snapshot.summary.refresh_validation_failures
+            ),
+            inline_refresh_requests=int(typed_snapshot.summary.inline_refresh_requests),
+            inline_refresh_succeeded=int(typed_snapshot.summary.inline_refresh_succeeded),
+            inline_refresh_failed=int(typed_snapshot.summary.inline_refresh_failed),
+        ),
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
     )
 
 
@@ -967,6 +1028,8 @@ def _build_vfs_search_result(
     path_prefix: str,
     limit: int,
     kind: str = "any",
+    media_type: str | None = None,
+    provider_family: str | None = None,
 ) -> GQLVfsSearchResult:
     normalized_prefix = _normalize_vfs_path(path_prefix)
     search_query = query.strip().casefold()
@@ -976,13 +1039,53 @@ def _build_vfs_search_result(
         if entry.path.startswith(normalized_prefix)
         and search_query
         and (kind == "any" or entry.kind == kind)
+        and (
+            media_type is None
+            or (entry.file is not None and str(entry.file.media_type).casefold() == media_type.casefold())
+        )
+        and (
+            provider_family is None
+            or (
+                entry.file is not None
+                and str(entry.file.provider_family).casefold() == provider_family.casefold()
+            )
+        )
         and (search_query in entry.name.casefold() or search_query in entry.path.casefold())
     ]
+    exact_match_count = sum(
+        1
+        for entry in matches
+        if search_query == entry.name.casefold() or search_query == entry.path.casefold()
+    )
+    directory_matches = sum(1 for entry in matches if entry.kind == "directory")
+    file_matches = sum(1 for entry in matches if entry.kind == "file")
+    media_type_counts: dict[str, int] = {}
+    provider_family_counts: dict[str, int] = {}
+    lease_state_counts: dict[str, int] = {}
+    for entry in matches:
+        if entry.file is None:
+            continue
+        media_type_key = str(entry.file.media_type) if entry.file.media_type else "unknown"
+        provider_family_key = (
+            str(entry.file.provider_family) if entry.file.provider_family else "unknown"
+        )
+        lease_state_key = str(entry.file.lease_state) if entry.file.lease_state else "unknown"
+        media_type_counts[media_type_key] = media_type_counts.get(media_type_key, 0) + 1
+        provider_family_counts[provider_family_key] = (
+            provider_family_counts.get(provider_family_key, 0) + 1
+        )
+        lease_state_counts[lease_state_key] = lease_state_counts.get(lease_state_key, 0) + 1
     return GQLVfsSearchResult(
         generation_id=snapshot.generation_id,
         query=query,
         path_prefix=normalized_prefix,
         total_matches=len(matches),
+        exact_match_count=exact_match_count,
+        directory_matches=directory_matches,
+        file_matches=file_matches,
+        media_type_counts=_build_named_count_buckets(media_type_counts),
+        provider_family_counts=_build_named_count_buckets(provider_family_counts),
+        lease_state_counts=_build_named_count_buckets(lease_state_counts),
         entries=[_build_vfs_catalog_entry(entry) for entry in matches[:limit]],
     )
 
@@ -1753,6 +1856,17 @@ class CoreQueryResolver:
         return _build_vfs_catalog_rollup(summarize_vfs_catalog_snapshot(snapshot))
 
     @strawberry.field(
+        description="Live FilmuVFS gRPC governance counters and refresh health for Director operator screens"
+    )
+    async def vfs_catalog_governance(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLVfsCatalogGovernance:
+        return _build_vfs_catalog_governance(
+            build_vfs_catalog_governance_posture(info.context.resources)
+        )
+
+    @strawberry.field(
         description="List blocked mounted catalog items from the current or requested snapshot"
     )
     async def vfs_blocked_items(
@@ -1789,6 +1903,8 @@ class CoreQueryResolver:
         path_prefix: str = "/",
         generation_id: str | None = None,
         kind: str = "any",
+        media_type: str | None = None,
+        provider_family: str | None = None,
         limit: int = 50,
     ) -> GQLVfsSearchResult | None:
         bounded_limit = max(1, min(limit, 500))
@@ -1805,6 +1921,8 @@ class CoreQueryResolver:
                 path_prefix=path_prefix,
                 limit=bounded_limit,
                 kind=normalized_kind,
+                media_type=media_type,
+                provider_family=provider_family,
             )
         return _build_vfs_search_result(
             snapshot,
@@ -1812,6 +1930,8 @@ class CoreQueryResolver:
             path_prefix=path_prefix,
             limit=bounded_limit,
             kind=normalized_kind,
+            media_type=media_type,
+            provider_family=provider_family,
         )
 
     @strawberry.field(
@@ -1902,8 +2022,14 @@ class CoreQueryResolver:
     async def plugin_events(
         self,
         info: Info[GraphQLContext, object],
+        publisher: str | None = None,
+        wiring_status: str | None = None,
     ) -> list[GQLPluginEventStatus]:
         rows = build_plugin_event_status_posture(info.context.resources)
+        if publisher is not None:
+            rows = [row for row in rows if row.publisher == publisher]
+        if wiring_status is not None:
+            rows = [row for row in rows if row.wiring_status == wiring_status]
         return [_build_plugin_event_status(row) for row in rows]
 
     @strawberry.field(
