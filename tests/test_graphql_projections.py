@@ -782,6 +782,14 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
                 query {
                   pluginIntegrationReadiness {
                     status
+                    summary {
+                      totalPlugins
+                      enabledPlugins
+                      configuredPlugins
+                      contractValidatedPlugins
+                      soakValidatedPlugins
+                      readyPlugins
+                    }
                     requiredActions
                     remainingGaps
                     plugins {
@@ -813,6 +821,14 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
     assert response.status_code == 200
     payload = response.json()["data"]["pluginIntegrationReadiness"]
     assert payload["status"] == "partial"
+    assert payload["summary"] == {
+        "totalPlugins": 4,
+        "enabledPlugins": 3,
+        "configuredPlugins": 3,
+        "contractValidatedPlugins": 3,
+        "soakValidatedPlugins": 3,
+        "readyPlugins": 3,
+    }
     assert payload["requiredActions"] == ["enable_listrr_integration"]
     assert payload["remainingGaps"] == ["listrr integration is not enabled in runtime settings"]
     by_name = {entry["name"]: entry for entry in payload["plugins"]}
@@ -1776,12 +1792,19 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                   vfsDirectory(path: "/Shows/Example Show (2024)/Season 01", generationId: "7") {
                     generationId
                     path
+                    searchQuery
                     entry { entryId kind path }
                     focusedEntry { entryId kind path }
                     parent { entryId kind path }
                     breadcrumbs { entryId path name kind }
                     directoryCount
                     fileCount
+                    totalDirectoryCount
+                    totalFileCount
+                    siblingIndex
+                    siblingCount
+                    previousEntry { entryId kind path }
+                    nextEntry { entryId kind path }
                     stats { directoryCount fileCount blockedItemCount }
                     directories { path name kind }
                     files {
@@ -1817,18 +1840,28 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                     correlation { itemId mediaEntryId providerDownloadId }
                     file { mediaEntryId providerDownloadId restrictedFallback }
                   }
-                  vfsOverview(path: "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv", generationId: "7") {
+                  vfsOverview(path: "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv", generationId: "7", search: "S01E01") {
                     snapshot {
                       generationId
                       stats { directoryCount fileCount blockedItemCount }
                     }
                     directory {
                       path
+                      searchQuery
                       focusedEntry { entryId kind path }
+                      siblingIndex
+                      siblingCount
                       breadcrumbs { path name kind }
                       fileCount
                       files { path name kind }
                     }
+                  }
+                  vfsSearch(query: "Example Show", pathPrefix: "/Shows", generationId: "7", limit: 5) {
+                    generationId
+                    query
+                    pathPrefix
+                    totalMatches
+                    entries { entryId path kind }
                   }
                 }
             """
@@ -1840,6 +1873,7 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
     assert payload["vfsDirectory"] == {
         "generationId": "7",
         "path": "/Shows/Example Show (2024)/Season 01",
+        "searchQuery": None,
         "entry": {
             "entryId": "dir:/Shows/Example Show (2024)/Season 01",
             "kind": "directory",
@@ -1873,6 +1907,12 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
         ],
         "directoryCount": 0,
         "fileCount": 1,
+        "totalDirectoryCount": 0,
+        "totalFileCount": 1,
+        "siblingIndex": 0,
+        "siblingCount": 1,
+        "previousEntry": None,
+        "nextEntry": None,
         "stats": {
             "directoryCount": 4,
             "fileCount": 1,
@@ -1939,11 +1979,14 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
         },
         "directory": {
             "path": "/Shows/Example Show (2024)/Season 01",
+            "searchQuery": "S01E01",
             "focusedEntry": {
                 "entryId": "file:entry-1",
                 "kind": "file",
                 "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
             },
+            "siblingIndex": 0,
+            "siblingCount": 1,
             "breadcrumbs": [
                 {"path": "/", "name": "/", "kind": "directory"},
                 {"path": "/Shows", "name": "Shows", "kind": "directory"},
@@ -1972,6 +2015,29 @@ def test_graphql_vfs_directory_and_entry_queries_use_catalog_snapshot() -> None:
                 }
             ],
         },
+    }
+    assert payload["vfsSearch"] == {
+        "generationId": "7",
+        "query": "Example Show",
+        "pathPrefix": "/Shows",
+        "totalMatches": 3,
+        "entries": [
+            {
+                "entryId": "dir:/Shows/Example Show (2024)",
+                "path": "/Shows/Example Show (2024)",
+                "kind": "directory",
+            },
+            {
+                "entryId": "dir:/Shows/Example Show (2024)/Season 01",
+                "path": "/Shows/Example Show (2024)/Season 01",
+                "kind": "directory",
+            },
+            {
+                "entryId": "file:entry-1",
+                "path": "/Shows/Example Show (2024)/Season 01/Example Show S01E01.mkv",
+                "kind": "file",
+            },
+        ],
     }
 
 
@@ -2019,6 +2085,12 @@ def test_graphql_vfs_snapshot_and_blocked_items_queries_use_catalog_snapshot() -
                     title
                     reason
                   }
+                  filtered: vfsBlockedItems(generationId: "12", reason: "missing_media_entry", limit: 1) {
+                    itemId
+                    externalRef
+                    title
+                    reason
+                  }
                 }
             """
         },
@@ -2044,6 +2116,14 @@ def test_graphql_vfs_snapshot_and_blocked_items_queries_use_catalog_snapshot() -
         ],
     }
     assert payload["vfsBlockedItems"] == [
+        {
+            "itemId": "item-blocked",
+            "externalRef": "tmdb:42",
+            "title": "Blocked Example",
+            "reason": "missing_media_entry",
+        }
+    ]
+    assert payload["filtered"] == [
         {
             "itemId": "item-blocked",
             "externalRef": "tmdb:42",

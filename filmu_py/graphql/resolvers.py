@@ -58,6 +58,7 @@ from filmu_py.graphql.types import (
     GQLPluginGovernanceSummary,
     GQLPluginIntegrationReadiness,
     GQLPluginIntegrationReadinessPlugin,
+    GQLPluginIntegrationReadinessSummary,
     GQLQueueAlert,
     GQLRecoveryMechanism,
     GQLRecoveryPlan,
@@ -78,6 +79,7 @@ from filmu_py.graphql.types import (
     GQLVfsFileDetail,
     GQLVfsOverview,
     GQLVfsRollupBucket,
+    GQLVfsSearchResult,
     GQLVfsSnapshot,
     GQLWorkerQueueHistoryPoint,
     GQLWorkerQueueStatus,
@@ -110,6 +112,9 @@ from filmu_py.services.operator_posture import (
     build_control_plane_replay_backplane_posture,
     build_control_plane_subscribers_posture,
     build_control_plane_summary_posture,
+    build_downloader_orchestration_posture,
+    build_plugin_event_status_posture,
+    build_plugin_governance_posture,
     build_plugin_integration_readiness_posture,
 )
 from filmu_py.services.playback import (
@@ -307,9 +312,20 @@ def _build_control_plane_summary(snapshot: object) -> GQLControlPlaneSummary:
 
 def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegrationReadiness:
     typed_snapshot: Any = snapshot
+    plugins = list(typed_snapshot.plugins)
     return GQLPluginIntegrationReadiness(
         generated_at=str(typed_snapshot.generated_at),
         status=str(typed_snapshot.status),
+        summary=GQLPluginIntegrationReadinessSummary(
+            total_plugins=len(plugins),
+            enabled_plugins=sum(1 for row in plugins if bool(row.enabled)),
+            configured_plugins=sum(1 for row in plugins if bool(row.configured)),
+            contract_validated_plugins=sum(
+                1 for row in plugins if bool(row.contract_validated)
+            ),
+            soak_validated_plugins=sum(1 for row in plugins if bool(row.soak_validated)),
+            ready_plugins=sum(1 for row in plugins if bool(row.ready)),
+        ),
         plugins=[
             GQLPluginIntegrationReadinessPlugin(
                 name=str(row.name),
@@ -331,7 +347,7 @@ def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegratio
                 required_actions=list(row.required_actions),
                 remaining_gaps=list(row.remaining_gaps),
             )
-            for row in typed_snapshot.plugins
+            for row in plugins
         ],
         required_actions=list(typed_snapshot.required_actions),
         remaining_gaps=list(typed_snapshot.remaining_gaps),
@@ -738,6 +754,9 @@ def _build_vfs_directory_listing(
     snapshot: VfsCatalogSnapshot,
     *,
     path: str,
+    search: str | None = None,
+    directories_limit: int = 200,
+    files_limit: int = 200,
 ) -> GQLVfsDirectoryListing | None:
     focused_entry = _find_vfs_entry(snapshot, path)
     if focused_entry is None:
@@ -761,14 +780,38 @@ def _build_vfs_directory_listing(
         (candidate for candidate in snapshot.entries if candidate.parent_entry_id == entry.entry_id),
         key=lambda candidate: (candidate.kind != "directory", candidate.path),
     )
+    search_query = (search or "").strip().casefold()
+    matched_children = [
+        candidate
+        for candidate in children
+        if not search_query
+        or search_query in candidate.name.casefold()
+        or search_query in candidate.path.casefold()
+    ]
     directories = [
         _build_vfs_catalog_entry(candidate)
-        for candidate in children
+        for candidate in matched_children[: max(0, directories_limit + files_limit)]
         if candidate.kind == "directory"
-    ]
+    ][: max(0, directories_limit)]
     files = [
-        _build_vfs_catalog_entry(candidate) for candidate in children if candidate.kind == "file"
-    ]
+        _build_vfs_catalog_entry(candidate)
+        for candidate in matched_children
+        if candidate.kind == "file"
+    ][: max(0, files_limit)]
+    siblings = sorted(
+        (
+            candidate
+            for candidate in snapshot.entries
+            if candidate.parent_entry_id == focused_entry.parent_entry_id
+        ),
+        key=lambda candidate: (candidate.kind != "directory", candidate.path),
+    )
+    sibling_index = next(
+        (index for index, candidate in enumerate(siblings) if candidate.entry_id == focused_entry.entry_id),
+        0,
+    )
+    previous_entry = siblings[sibling_index - 1] if sibling_index > 0 else None
+    next_entry = siblings[sibling_index + 1] if sibling_index + 1 < len(siblings) else None
     parent = (
         next(
             (
@@ -784,12 +827,21 @@ def _build_vfs_directory_listing(
     return GQLVfsDirectoryListing(
         generation_id=snapshot.generation_id,
         path=entry.path,
+        search_query=(search or None) if search_query else None,
         entry=_build_vfs_catalog_entry(entry),
         focused_entry=_build_vfs_catalog_entry(focused_entry),
         parent=_build_vfs_catalog_entry(parent) if parent is not None else None,
         breadcrumbs=_build_vfs_breadcrumbs(snapshot, focused_entry),
         directory_count=len(directories),
         file_count=len(files),
+        total_directory_count=sum(1 for candidate in children if candidate.kind == "directory"),
+        total_file_count=sum(1 for candidate in children if candidate.kind == "file"),
+        sibling_index=sibling_index,
+        sibling_count=len(siblings),
+        previous_entry=(
+            _build_vfs_catalog_entry(previous_entry) if previous_entry is not None else None
+        ),
+        next_entry=_build_vfs_catalog_entry(next_entry) if next_entry is not None else None,
         stats=_build_vfs_catalog_stats(snapshot),
         directories=directories,
         files=files,
@@ -804,6 +856,31 @@ def _build_vfs_snapshot(snapshot: VfsCatalogSnapshot) -> GQLVfsSnapshot:
         stats=_build_vfs_catalog_stats(snapshot),
         rollup=_build_vfs_catalog_rollup(rollup),
         blocked_items=[_build_vfs_blocked_item(item) for item in snapshot.blocked_items],
+    )
+
+
+def _build_vfs_search_result(
+    snapshot: VfsCatalogSnapshot,
+    *,
+    query: str,
+    path_prefix: str,
+    limit: int,
+) -> GQLVfsSearchResult:
+    normalized_prefix = _normalize_vfs_path(path_prefix)
+    search_query = query.strip().casefold()
+    matches = [
+        entry
+        for entry in snapshot.entries
+        if entry.path.startswith(normalized_prefix)
+        and search_query
+        and (search_query in entry.name.casefold() or search_query in entry.path.casefold())
+    ]
+    return GQLVfsSearchResult(
+        generation_id=snapshot.generation_id,
+        query=query,
+        path_prefix=normalized_prefix,
+        total_matches=len(matches),
+        entries=[_build_vfs_catalog_entry(entry) for entry in matches[:limit]],
     )
 
 
@@ -1451,11 +1528,20 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         path: str = "/",
         generation_id: str | None = None,
+        search: str | None = None,
+        directories_limit: int = 200,
+        files_limit: int = 200,
     ) -> GQLVfsDirectoryListing | None:
         snapshot = await _resolve_vfs_snapshot(info, generation_id)
         if snapshot is None:
             return None
-        return _build_vfs_directory_listing(snapshot, path=path)
+        return _build_vfs_directory_listing(
+            snapshot,
+            path=path,
+            search=search,
+            directories_limit=max(0, min(directories_limit, 500)),
+            files_limit=max(0, min(files_limit, 500)),
+        )
 
     @strawberry.field(
         description="Screen-oriented VFS overview for Director browse and detail surfaces"
@@ -1465,11 +1551,20 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         path: str = "/",
         generation_id: str | None = None,
+        search: str | None = None,
+        directories_limit: int = 200,
+        files_limit: int = 200,
     ) -> GQLVfsOverview | None:
         snapshot = await _resolve_vfs_snapshot(info, generation_id)
         if snapshot is None:
             return None
-        directory = _build_vfs_directory_listing(snapshot, path=path)
+        directory = _build_vfs_directory_listing(
+            snapshot,
+            path=path,
+            search=search,
+            directories_limit=max(0, min(directories_limit, 500)),
+            files_limit=max(0, min(files_limit, 500)),
+        )
         if directory is None:
             return None
         return GQLVfsOverview(
@@ -1510,11 +1605,48 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
         generation_id: str | None = None,
+        reason: str | None = None,
+        limit: int = 100,
     ) -> list[GQLVfsBlockedItem]:
         snapshot = await _resolve_vfs_snapshot(info, generation_id)
         if snapshot is None:
             return []
-        return [_build_vfs_blocked_item(item) for item in snapshot.blocked_items]
+        reason_filter = (reason or "").strip()
+        matches = [
+            item
+            for item in snapshot.blocked_items
+            if not reason_filter or str(getattr(item, "reason", "")) == reason_filter
+        ]
+        return [_build_vfs_blocked_item(item) for item in matches[: max(1, min(limit, 500))]]
+
+    @strawberry.field(
+        description="GraphQL-native VFS search scoped to one path prefix for Director browse surfaces"
+    )
+    async def vfs_search(
+        self,
+        info: Info[GraphQLContext, object],
+        query: str,
+        path_prefix: str = "/",
+        generation_id: str | None = None,
+        limit: int = 50,
+    ) -> GQLVfsSearchResult | None:
+        bounded_limit = max(1, min(limit, 500))
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
+            return None
+        if not query.strip():
+            return _build_vfs_search_result(
+                snapshot,
+                query=query,
+                path_prefix=path_prefix,
+                limit=bounded_limit,
+            )
+        return _build_vfs_search_result(
+            snapshot,
+            query=query,
+            path_prefix=path_prefix,
+            limit=bounded_limit,
+        )
 
     @strawberry.field(
         description="Typed cross-process observability convergence posture for GraphQL-first clients"
@@ -1544,7 +1676,7 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
     ) -> GQLDownloaderOrchestration:
         return _build_downloader_orchestration(
-            _compat_route_module()._downloader_orchestration_response(info.context.request)
+            build_downloader_orchestration_posture(info.context.resources)
         )
 
     @strawberry.field(
@@ -1554,7 +1686,7 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> list[GQLPluginEventStatus]:
-        rows = await _compat_route_module().get_plugin_events(info.context.request)
+        rows = build_plugin_event_status_posture(info.context.resources)
         return [_build_plugin_event_status(row) for row in rows]
 
     @strawberry.field(
@@ -1564,13 +1696,11 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLPluginGovernance:
-        compat_routes = _compat_route_module()
-        plugins = await compat_routes.get_plugins(info.context.request)
-        summary = compat_routes._plugin_governance_summary(
-            plugins,
-            runtime_policy=info.context.resources.settings.plugin_runtime,
+        snapshot = await build_plugin_governance_posture(
+            info.context.resources,
+            app_state=info.context.request.app.state,
         )
-        return _build_plugin_governance(summary=summary, plugins=list(plugins))
+        return _build_plugin_governance(summary=snapshot.summary, plugins=list(snapshot.plugins))
 
     @strawberry.field(description="Bounded control-plane subscriber health rollup")
     async def control_plane_summary(
