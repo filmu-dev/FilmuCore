@@ -84,6 +84,16 @@ FINALIZE_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=2, max_de
 RECOVERY_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=30, max_delay_seconds=300)
 OUTBOX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=5, max_delay_seconds=60)
 METADATA_REINDEX_RETRY_POLICY = RetryPolicy(max_attempts=3, base_delay_seconds=30, max_delay_seconds=300)
+WORKER_CLEANUP_TOTAL = _stage_observability.WORKER_CLEANUP_TOTAL
+WORKER_ENQUEUE_DECISIONS_TOTAL = _stage_observability.WORKER_ENQUEUE_DECISIONS_TOTAL
+WORKER_ENQUEUE_DEFER_SECONDS = _stage_observability.WORKER_ENQUEUE_DEFER_SECONDS
+WORKER_JOB_STATUS_TOTAL = _stage_observability.WORKER_JOB_STATUS_TOTAL
+WORKER_STAGE_IDEMPOTENCY_TOTAL = _stage_observability.WORKER_STAGE_IDEMPOTENCY_TOTAL
+_record_cleanup_action = _stage_observability.record_cleanup_action
+_record_enqueue_decision = _stage_observability.record_enqueue_decision
+_record_enqueue_defer = _stage_observability.record_enqueue_defer
+_record_job_status = _stage_observability.record_job_status
+_record_stage_idempotency = _stage_observability.record_stage_idempotency
 debrid_item_job_id = _stage_job_ids.debrid_item_job_id
 finalize_item_job_id = _stage_job_ids.finalize_item_job_id
 index_item_job_id = _stage_job_ids.index_item_job_id
@@ -179,7 +189,6 @@ async def _acquire_worker_rate_limit(
     refill_per_second: float,
 ) -> bool:
     """Acquire distributed budget or trigger ARQ retry with bounded backoff."""
-
     decision = await limiter.acquire(
         bucket_key=bucket,
         capacity=capacity,
@@ -194,13 +203,11 @@ async def _acquire_worker_rate_limit(
 
 def _redis_settings(settings: Settings) -> RedisSettings:
     """Return ARQ Redis settings derived from app configuration."""
-
     return RedisSettings.from_dsn(str(settings.redis_url))
 
 
 def _settings_from_worker_context(ctx: dict[str, Any]) -> Settings:
     """Resolve settings from worker context before falling back to process globals."""
-
     explicit = ctx.get("settings")
     if isinstance(explicit, Settings):
         return explicit
@@ -209,7 +216,6 @@ def _settings_from_worker_context(ctx: dict[str, Any]) -> Settings:
 
 def _resolve_limiter(ctx: dict[str, Any]) -> DistributedRateLimiter:
     """Resolve a shared distributed limiter from worker context."""
-
     limiter = ctx.get("rate_limiter")
     if isinstance(limiter, DistributedRateLimiter):
         return limiter
@@ -227,7 +233,6 @@ def _resolve_limiter(ctx: dict[str, Any]) -> DistributedRateLimiter:
 
 async def _resolve_arq_redis(ctx: dict[str, Any]) -> ArqRedis:
     """Resolve an ARQ Redis client from context or create one lazily."""
-
     redis = ctx.get("arq_redis")
     if isinstance(redis, ArqRedis):
         return redis
@@ -241,7 +246,6 @@ async def _resolve_arq_redis(ctx: dict[str, Any]) -> ArqRedis:
 
 async def _resolve_runtime_settings(ctx: dict[str, Any]) -> Settings:
     """Resolve the latest runtime settings, preferring persisted settings for worker jobs."""
-
     explicit = ctx.get("settings")
     current = explicit if isinstance(explicit, Settings) else get_settings()
     db = ctx.get("db")
@@ -270,7 +274,6 @@ async def _try_transition(
     message: str,
 ) -> None:
     """Apply transition while treating already-applied transitions as idempotent."""
-
     try:
         await media_service.transition_item(item_id=item_id, event=event, message=message)
     except InvalidItemTransition:
@@ -285,7 +288,6 @@ def index_item_followup_job_id(
     missing_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Return a stable follow-up index job id for delayed polling or inventory rechecks."""
-
     suffix_parts: list[str] = ["followup"]
     if discriminator:
         suffix_parts.append(discriminator)
@@ -309,7 +311,6 @@ def scrape_item_followup_job_id(
     missing_episodes: dict[str, list[int]] | None = None,
 ) -> str:
     """Return a stable follow-up scrape job id for partial/ongoing requeues."""
-
     if not missing_seasons and not missing_episodes:
         return scrape_item_job_id(item_id)
     suffix_parts: list[str] = [scrape_item_job_id(item_id)]
@@ -349,7 +350,6 @@ async def _record_metadata_reindex_run(
     last_error: str | None = None,
 ) -> None:
     """Persist one bounded metadata reindex/reconciliation run record."""
-
     if redis is None:
         return
 
