@@ -180,9 +180,23 @@ def test_plugin_manifest_import_does_not_eagerly_load_graphql_schema() -> None:
 
 
 def test_worker_tasks_import_contract() -> None:
+    workers_package = importlib.import_module("filmu_py.workers")
+    original_tasks_module = sys.modules.get("filmu_py.workers.tasks")
+    original_package_tasks = getattr(workers_package, "tasks", None)
     sys.modules.pop("filmu_py.workers.tasks", None)
-    tasks_module = importlib.import_module("filmu_py.workers.tasks")
-    assert hasattr(tasks_module, "run_worker_entrypoint")
+    try:
+        tasks_module = importlib.import_module("filmu_py.workers.tasks")
+        assert hasattr(tasks_module, "run_worker_entrypoint")
+    finally:
+        if original_tasks_module is None:
+            sys.modules.pop("filmu_py.workers.tasks", None)
+        else:
+            sys.modules["filmu_py.workers.tasks"] = original_tasks_module
+        if original_package_tasks is None:
+            if hasattr(workers_package, "tasks"):
+                delattr(workers_package, "tasks")
+        else:
+            workers_package.tasks = original_package_tasks
 
 
 def test_large_file_decomposition_size_budget_contract() -> None:
