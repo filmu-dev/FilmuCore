@@ -64,6 +64,21 @@ def _compat_dump(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="python", exclude_none=True)
 
 
+def _strip_compatibility_runtime_keys(value: Any) -> Any:
+    """Remove runtime-only proof/evidence keys from the legacy compatibility surface."""
+
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, nested in value.items():
+            if key in {"contract_proof_refs", "soak_proof_refs", "proof_refs"}:
+                continue
+            cleaned[key] = _strip_compatibility_runtime_keys(nested)
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_compatibility_runtime_keys(item) for item in value]
+    return value
+
+
 def _build_default_ranking_settings() -> dict[str, object]:
     """Return the compatibility-default ranking block used when no explicit ranking exists."""
 
@@ -1115,7 +1130,7 @@ class Settings(BaseSettings):
     def _compat_content_payload(self) -> dict[str, Any]:
         """Return the legacy-compatible content payload without new-shape noise."""
 
-        payload = _compat_dump(self._content_model())
+        payload = cast(dict[str, Any], _strip_compatibility_runtime_keys(_compat_dump(self._content_model())))
         mdblist = cast(dict[str, Any], payload.get("mdblist", {}))
         if mdblist:
             if "list_ids" in mdblist:
@@ -1132,7 +1147,10 @@ class Settings(BaseSettings):
         return _coerce_model(self.scraping, ScrapingSettings)
 
     def _compat_scraping_payload(self) -> dict[str, Any]:
-        payload = _compat_dump(self._scraping_model())
+        payload = cast(
+            dict[str, Any],
+            _strip_compatibility_runtime_keys(_compat_dump(self._scraping_model())),
+        )
         payload.pop("ongoing_show_poll_interval_hours", None)
         return payload
 
@@ -1173,7 +1191,7 @@ class Settings(BaseSettings):
         if stream.get("refresh_dispatch_mode") == "in_process":
             stream.pop("refresh_dispatch_mode", None)
 
-        return {
+        payload = {
             "version": self.version,
             "api_key": self.api_key.get_secret_value(),
             "api_key_id": self.api_key_id,
@@ -1184,7 +1202,7 @@ class Settings(BaseSettings):
             "retry_interval": self.retry_interval,
             "tracemalloc": self.tracemalloc,
             "filesystem": _compat_dump(self._filesystem_model()),
-            "updaters": _compat_dump(self._updaters_model()),
+            "updaters": _strip_compatibility_runtime_keys(_compat_dump(self._updaters_model())),
             "downloaders": self._compat_downloaders_payload(),
             "content": content,
             "scraping": self._compat_scraping_payload(),
@@ -1196,6 +1214,7 @@ class Settings(BaseSettings):
             "logging": self._compat_logging_payload(),
             "stream": stream,
         }
+        return cast(dict[str, Any], _strip_compatibility_runtime_keys(payload))
 
     @classmethod
     def from_compatibility_dict(cls, data: dict[str, Any]) -> Settings:
