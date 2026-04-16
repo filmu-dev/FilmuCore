@@ -39,7 +39,7 @@ jobs:
             rust_components: ""
             fuse: false
           - name: Rust Format
-            command: cargo fmt --manifest-path ./rust/filmuvfs/Cargo.toml --all --check
+            command: pwsh -NoProfile -File ./scripts/check_rust_format.ps1
             python: false
             rust: true
             rust_components: rustfmt
