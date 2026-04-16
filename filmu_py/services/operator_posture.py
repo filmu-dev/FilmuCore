@@ -15,6 +15,14 @@ from filmu_py.resources import AppResources
 
 
 @dataclass(slots=True)
+class ProofArtifactSnapshot:
+    ref: str
+    category: str
+    label: str
+    recorded: bool
+
+
+@dataclass(slots=True)
 class ControlPlaneSummarySnapshot:
     total_subscribers: int
     active_subscribers: int
@@ -48,8 +56,11 @@ class PluginIntegrationReadinessPluginSnapshot:
     missing_settings: list[str]
     contract_proof_refs: list[str]
     soak_proof_refs: list[str]
+    contract_proofs: list[ProofArtifactSnapshot]
+    soak_proofs: list[ProofArtifactSnapshot]
     contract_validated: bool
     soak_validated: bool
+    proof_gap_count: int
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -224,10 +235,50 @@ class ControlPlaneReplayBackplaneSnapshot:
     oldest_event_id: str | None
     latest_event_id: str | None
     consumer_counts: dict[str, int]
+    consumer_count: int
+    has_pending_backlog: bool
     proof_refs: list[str]
+    proof_artifacts: list[ProofArtifactSnapshot]
     proof_ready: bool
     required_actions: list[str]
     remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class ControlPlaneRecoveryReadinessSnapshot:
+    generated_at: str
+    status: Literal["ready", "partial", "blocked"]
+    active_within_seconds: int
+    stale_subscribers: int
+    ack_pending_subscribers: int
+    pending_count: int
+    consumer_count: int
+    automation_enabled: bool
+    automation_healthy: bool
+    replay_attached: bool
+    proof_refs: list[str]
+    proof_artifacts: list[ProofArtifactSnapshot]
+    proof_ready: bool
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+def _build_proof_artifacts(
+    refs: list[str],
+    *,
+    category: str,
+    label: str,
+) -> list[ProofArtifactSnapshot]:
+    return [
+        ProofArtifactSnapshot(
+            ref=ref,
+            category=category,
+            label=label,
+            recorded=bool(str(ref).strip()),
+        )
+        for ref in refs
+        if str(ref).strip()
+    ]
 
 
 def _plugin_load_report_maps(app_state: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -510,6 +561,16 @@ def _plugin_integration_row(
     endpoint_text = str(endpoint or "").strip()
     endpoint_configured = bool(endpoint_text)
     configured = enabled and not missing_settings
+    contract_proofs = _build_proof_artifacts(
+        list(contract_proof_refs),
+        category="plugin_contract",
+        label=f"{name} contract proof",
+    )
+    soak_proofs = _build_proof_artifacts(
+        list(soak_proof_refs),
+        category="plugin_soak",
+        label=f"{name} soak proof",
+    )
     contract_validated = bool(contract_proof_refs)
     soak_validated = bool(soak_proof_refs)
     ready = registered and configured and contract_validated and soak_validated
@@ -552,8 +613,11 @@ def _plugin_integration_row(
         missing_settings=missing_settings,
         contract_proof_refs=list(contract_proof_refs),
         soak_proof_refs=list(soak_proof_refs),
+        contract_proofs=contract_proofs,
+        soak_proofs=soak_proofs,
         contract_validated=contract_validated,
         soak_validated=soak_validated,
+        proof_gap_count=int(not contract_validated) + int(not soak_validated),
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
     )
@@ -1244,6 +1308,11 @@ async def build_control_plane_replay_backplane_posture(
     settings = resources.settings.control_plane
     backplane = resources.replay_backplane
     proof_refs = list(settings.proof_refs)
+    proof_artifacts = _build_proof_artifacts(
+        proof_refs,
+        category="control_plane_rollout",
+        label="control-plane replay backplane proof",
+    )
     required_actions: list[str] = []
     remaining_gaps: list[str] = []
     pending_count = 0
@@ -1295,8 +1364,77 @@ async def build_control_plane_replay_backplane_posture(
         oldest_event_id=oldest_event_id,
         latest_event_id=latest_event_id,
         consumer_counts=dict(sorted(consumer_counts.items())),
+        consumer_count=len(consumer_counts),
+        has_pending_backlog=pending_count > 0,
         proof_refs=proof_refs,
+        proof_artifacts=proof_artifacts,
         proof_ready=bool(proof_refs),
         required_actions=list(dict.fromkeys(required_actions)),
         remaining_gaps=list(dict.fromkeys(remaining_gaps)),
+    )
+
+
+async def build_control_plane_recovery_readiness_posture(
+    resources: AppResources,
+    *,
+    active_within_seconds: int = 120,
+) -> ControlPlaneRecoveryReadinessSnapshot:
+    """Return one graph-friendly recovery readiness rollup for Director consoles."""
+
+    summary = await build_control_plane_summary_posture(
+        resources,
+        active_within_seconds=active_within_seconds,
+    )
+    automation = await build_control_plane_automation_posture(resources)
+    replay = await build_control_plane_replay_backplane_posture(resources)
+    required_actions = list(
+        dict.fromkeys(
+            list(summary.required_actions)
+            + list(automation.required_actions)
+            + list(replay.required_actions)
+        )
+    )
+    remaining_gaps = list(
+        dict.fromkeys(
+            list(summary.remaining_gaps)
+            + list(automation.remaining_gaps)
+            + list(replay.remaining_gaps)
+        )
+    )
+    proof_refs = list(replay.proof_refs)
+    status: Literal["ready", "partial", "blocked"] = (
+        "ready"
+        if (
+            automation.enabled
+            and automation.runner_status == "running"
+            and replay.attached
+            and replay.proof_ready
+            and summary.stale_subscribers == 0
+            and summary.ack_pending_subscribers == 0
+        )
+        else "partial"
+        if (
+            automation.enabled
+            or replay.attached
+            or summary.total_subscribers > 0
+            or replay.pending_count > 0
+        )
+        else "blocked"
+    )
+    return ControlPlaneRecoveryReadinessSnapshot(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=status,
+        active_within_seconds=active_within_seconds,
+        stale_subscribers=summary.stale_subscribers,
+        ack_pending_subscribers=summary.ack_pending_subscribers,
+        pending_count=replay.pending_count,
+        consumer_count=replay.consumer_count,
+        automation_enabled=automation.enabled,
+        automation_healthy=automation.runner_status == "running" and automation.backplane_attached,
+        replay_attached=replay.attached,
+        proof_refs=proof_refs,
+        proof_artifacts=list(replay.proof_artifacts),
+        proof_ready=replay.proof_ready,
+        required_actions=required_actions,
+        remaining_gaps=remaining_gaps,
     )

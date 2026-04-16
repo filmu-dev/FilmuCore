@@ -108,6 +108,29 @@ class GQLCalendarEntry:
 
 
 @strawberry.type
+class GQLProofArtifact:
+    """Typed retained evidence reference exposed to Director consoles."""
+
+    ref: str
+    category: str
+    label: str
+    recorded: bool
+
+
+@strawberry.type
+class GQLObservabilityConvergenceSummary:
+    """Rollup counters for cross-process observability readiness."""
+
+    pipeline_stage_count: int = strawberry.field(name="pipelineStageCount")
+    ready_stage_count: int = strawberry.field(name="readyStageCount")
+    production_evidence_ready: bool = strawberry.field(name="productionEvidenceReady")
+    grpc_rust_trace_ready: bool = strawberry.field(name="grpcRustTraceReady")
+    otlp_export_ready: bool = strawberry.field(name="otlpExportReady")
+    search_index_ready: bool = strawberry.field(name="searchIndexReady")
+    alert_rollout_ready: bool = strawberry.field(name="alertRolloutReady")
+
+
+@strawberry.type
 class GQLObservabilityConvergence:
     """Typed GraphQL view over cross-process log/search/trace convergence."""
 
@@ -139,6 +162,7 @@ class GQLObservabilityConvergence:
     expected_correlation_fields_ready: bool = strawberry.field(
         name="expectedCorrelationFieldsReady"
     )
+    summary: GQLObservabilityConvergenceSummary
     missing_expected_correlation_fields: list[str] = strawberry.field(
         name="missingExpectedCorrelationFields"
     )
@@ -146,6 +170,7 @@ class GQLObservabilityConvergence:
     grpc_service_name: str = strawberry.field(name="grpcServiceName")
     otlp_endpoint: str | None = strawberry.field(name="otlpEndpoint", default=None)
     log_shipper_target: str | None = strawberry.field(name="logShipperTarget", default=None)
+    proof_artifacts: list[GQLProofArtifact] = strawberry.field(name="proofArtifacts")
     pipeline_stages: list[GQLObservabilityPipelineStage] = strawberry.field(
         name="pipelineStages"
     )
@@ -262,7 +287,31 @@ class GQLControlPlaneReplayBackplane:
     oldest_event_id: str | None = strawberry.field(name="oldestEventId", default=None)
     latest_event_id: str | None = strawberry.field(name="latestEventId", default=None)
     consumer_counts: list[GQLNamedCountBucket] = strawberry.field(name="consumerCounts")
+    consumer_count: int = strawberry.field(name="consumerCount")
+    has_pending_backlog: bool = strawberry.field(name="hasPendingBacklog")
     proof_refs: list[str] = strawberry.field(name="proofRefs")
+    proof_artifacts: list[GQLProofArtifact] = strawberry.field(name="proofArtifacts")
+    proof_ready: bool = strawberry.field(name="proofReady")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLControlPlaneRecoveryReadiness:
+    """One GraphQL-first recovery readiness rollup for control-plane evidence and automation."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    active_within_seconds: int = strawberry.field(name="activeWithinSeconds")
+    stale_subscribers: int = strawberry.field(name="staleSubscribers")
+    ack_pending_subscribers: int = strawberry.field(name="ackPendingSubscribers")
+    pending_count: int = strawberry.field(name="pendingCount")
+    consumer_count: int = strawberry.field(name="consumerCount")
+    automation_enabled: bool = strawberry.field(name="automationEnabled")
+    automation_healthy: bool = strawberry.field(name="automationHealthy")
+    replay_attached: bool = strawberry.field(name="replayAttached")
+    proof_refs: list[str] = strawberry.field(name="proofRefs")
+    proof_artifacts: list[GQLProofArtifact] = strawberry.field(name="proofArtifacts")
     proof_ready: bool = strawberry.field(name="proofReady")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
@@ -286,8 +335,11 @@ class GQLPluginIntegrationReadinessPlugin:
     missing_settings: list[str] = strawberry.field(name="missingSettings")
     contract_proof_refs: list[str] = strawberry.field(name="contractProofRefs")
     soak_proof_refs: list[str] = strawberry.field(name="soakProofRefs")
+    contract_proofs: list[GQLProofArtifact] = strawberry.field(name="contractProofs")
+    soak_proofs: list[GQLProofArtifact] = strawberry.field(name="soakProofs")
     contract_validated: bool = strawberry.field(name="contractValidated")
     soak_validated: bool = strawberry.field(name="soakValidated")
+    proof_gap_count: int = strawberry.field(name="proofGapCount")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 
@@ -302,6 +354,8 @@ class GQLPluginIntegrationReadinessSummary:
     contract_validated_plugins: int = strawberry.field(name="contractValidatedPlugins")
     soak_validated_plugins: int = strawberry.field(name="soakValidatedPlugins")
     ready_plugins: int = strawberry.field(name="readyPlugins")
+    missing_contract_proof_plugins: int = strawberry.field(name="missingContractProofPlugins")
+    missing_soak_proof_plugins: int = strawberry.field(name="missingSoakProofPlugins")
 
 
 @strawberry.type
@@ -649,6 +703,19 @@ class GQLVfsSearchResult:
     path_prefix: str = strawberry.field(name="pathPrefix")
     total_matches: int = strawberry.field(name="totalMatches")
     entries: list[GQLVfsCatalogEntry]
+
+
+@strawberry.type
+class GQLVfsFileContext:
+    """File-focused VFS context for Director detail screens."""
+
+    generation_id: str = strawberry.field(name="generationId")
+    file: GQLVfsCatalogEntry
+    directory: GQLVfsDirectoryListing
+    sibling_file_index: int = strawberry.field(name="siblingFileIndex")
+    sibling_file_count: int = strawberry.field(name="siblingFileCount")
+    previous_file: GQLVfsCatalogEntry | None = strawberry.field(name="previousFile", default=None)
+    next_file: GQLVfsCatalogEntry | None = strawberry.field(name="nextFile", default=None)
 
 
 @strawberry.type

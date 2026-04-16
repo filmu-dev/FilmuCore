@@ -27,6 +27,7 @@ from filmu_py.graphql.types import (
     GQLCalendarEntry,
     GQLCalendarReleaseWindow,
     GQLControlPlaneAutomation,
+    GQLControlPlaneRecoveryReadiness,
     GQLControlPlaneReplayBackplane,
     GQLControlPlaneStatusCount,
     GQLControlPlaneSubscriber,
@@ -47,6 +48,7 @@ from filmu_py.graphql.types import (
     GQLMetadataReindexStatus,
     GQLNamedCountBucket,
     GQLObservabilityConvergence,
+    GQLObservabilityConvergenceSummary,
     GQLObservabilityPipelineStage,
     GQLPersistMediaEntryControlResult,
     GQLPersistPlaybackAttachmentControlResult,
@@ -59,6 +61,7 @@ from filmu_py.graphql.types import (
     GQLPluginIntegrationReadiness,
     GQLPluginIntegrationReadinessPlugin,
     GQLPluginIntegrationReadinessSummary,
+    GQLProofArtifact,
     GQLQueueAlert,
     GQLRecoveryMechanism,
     GQLRecoveryPlan,
@@ -76,6 +79,7 @@ from filmu_py.graphql.types import (
     GQLVfsCorrelationKeys,
     GQLVfsDirectoryDetail,
     GQLVfsDirectoryListing,
+    GQLVfsFileContext,
     GQLVfsFileDetail,
     GQLVfsOverview,
     GQLVfsRollupBucket,
@@ -109,6 +113,7 @@ from filmu_py.services.media import (
 )
 from filmu_py.services.operator_posture import (
     build_control_plane_automation_posture,
+    build_control_plane_recovery_readiness_posture,
     build_control_plane_replay_backplane_posture,
     build_control_plane_subscribers_posture,
     build_control_plane_summary_posture,
@@ -243,6 +248,16 @@ def _build_calendar_entry(record: CalendarProjectionRecord) -> GQLCalendarEntry:
 
 def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLObservabilityConvergence:
     snapshot = build_observability_convergence_snapshot(info.context.resources.settings)
+    ready_stage_count = sum(1 for stage in snapshot.pipeline_stages if stage.ready)
+    proof_artifacts = [
+        GQLProofArtifact(
+            ref=ref,
+            category="observability_rollout",
+            label="observability rollout proof",
+            recorded=True,
+        )
+        for ref in snapshot.proof_refs
+    ]
     return GQLObservabilityConvergence(
         generated_at=snapshot.generated_at,
         status=snapshot.status,
@@ -268,11 +283,26 @@ def _build_observability_convergence(info: Info[GraphQLContext, object]) -> GQLO
         shared_cross_process_headers=list(snapshot.shared_cross_process_headers),
         expected_correlation_fields=list(snapshot.expected_correlation_fields),
         expected_correlation_fields_ready=snapshot.expected_correlation_fields_ready,
+        summary=GQLObservabilityConvergenceSummary(
+            pipeline_stage_count=len(snapshot.pipeline_stages),
+            ready_stage_count=ready_stage_count,
+            production_evidence_ready=bool(snapshot.proof_refs),
+            grpc_rust_trace_ready=bool(
+                snapshot.rust_trace_correlation_enabled
+                and snapshot.expected_correlation_fields_ready
+            ),
+            otlp_export_ready=bool(snapshot.otel_enabled and snapshot.otel_endpoint_configured),
+            search_index_ready=bool(
+                snapshot.log_shipper_target_configured and snapshot.search_backend != "none"
+            ),
+            alert_rollout_ready=bool(snapshot.alerting_enabled and snapshot.proof_refs),
+        ),
         missing_expected_correlation_fields=list(snapshot.missing_expected_correlation_fields),
         grpc_bind_address=snapshot.grpc_bind_address,
         grpc_service_name=snapshot.grpc_service_name,
         otlp_endpoint=snapshot.otlp_endpoint,
         log_shipper_target=snapshot.log_shipper_target,
+        proof_artifacts=proof_artifacts,
         pipeline_stages=[
             GQLObservabilityPipelineStage(
                 name=stage.name,
@@ -325,6 +355,12 @@ def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegratio
             ),
             soak_validated_plugins=sum(1 for row in plugins if bool(row.soak_validated)),
             ready_plugins=sum(1 for row in plugins if bool(row.ready)),
+            missing_contract_proof_plugins=sum(
+                1 for row in plugins if not bool(row.contract_validated)
+            ),
+            missing_soak_proof_plugins=sum(
+                1 for row in plugins if not bool(row.soak_validated)
+            ),
         ),
         plugins=[
             GQLPluginIntegrationReadinessPlugin(
@@ -342,8 +378,27 @@ def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegratio
                 missing_settings=list(row.missing_settings),
                 contract_proof_refs=list(row.contract_proof_refs),
                 soak_proof_refs=list(row.soak_proof_refs),
+                contract_proofs=[
+                    GQLProofArtifact(
+                        ref=proof.ref,
+                        category=proof.category,
+                        label=proof.label,
+                        recorded=bool(proof.recorded),
+                    )
+                    for proof in row.contract_proofs
+                ],
+                soak_proofs=[
+                    GQLProofArtifact(
+                        ref=proof.ref,
+                        category=proof.category,
+                        label=proof.label,
+                        recorded=bool(proof.recorded),
+                    )
+                    for proof in row.soak_proofs
+                ],
                 contract_validated=bool(row.contract_validated),
                 soak_validated=bool(row.soak_validated),
+                proof_gap_count=int(row.proof_gap_count),
                 required_actions=list(row.required_actions),
                 remaining_gaps=list(row.remaining_gaps),
             )
@@ -421,7 +476,49 @@ def _build_control_plane_replay_backplane(snapshot: object) -> GQLControlPlaneRe
         oldest_event_id=typed_snapshot.oldest_event_id,
         latest_event_id=typed_snapshot.latest_event_id,
         consumer_counts=_build_named_count_buckets(dict(typed_snapshot.consumer_counts)),
+        consumer_count=int(typed_snapshot.consumer_count),
+        has_pending_backlog=bool(typed_snapshot.has_pending_backlog),
         proof_refs=list(typed_snapshot.proof_refs),
+        proof_artifacts=[
+            GQLProofArtifact(
+                ref=proof.ref,
+                category=proof.category,
+                label=proof.label,
+                recorded=bool(proof.recorded),
+            )
+            for proof in typed_snapshot.proof_artifacts
+        ],
+        proof_ready=bool(typed_snapshot.proof_ready),
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_control_plane_recovery_readiness(
+    snapshot: object,
+) -> GQLControlPlaneRecoveryReadiness:
+    typed_snapshot: Any = snapshot
+    return GQLControlPlaneRecoveryReadiness(
+        generated_at=str(typed_snapshot.generated_at),
+        status=str(typed_snapshot.status),
+        active_within_seconds=int(typed_snapshot.active_within_seconds),
+        stale_subscribers=int(typed_snapshot.stale_subscribers),
+        ack_pending_subscribers=int(typed_snapshot.ack_pending_subscribers),
+        pending_count=int(typed_snapshot.pending_count),
+        consumer_count=int(typed_snapshot.consumer_count),
+        automation_enabled=bool(typed_snapshot.automation_enabled),
+        automation_healthy=bool(typed_snapshot.automation_healthy),
+        replay_attached=bool(typed_snapshot.replay_attached),
+        proof_refs=list(typed_snapshot.proof_refs),
+        proof_artifacts=[
+            GQLProofArtifact(
+                ref=proof.ref,
+                category=proof.category,
+                label=proof.label,
+                recorded=bool(proof.recorded),
+            )
+            for proof in typed_snapshot.proof_artifacts
+        ],
         proof_ready=bool(typed_snapshot.proof_ready),
         required_actions=list(typed_snapshot.required_actions),
         remaining_gaps=list(typed_snapshot.remaining_gaps),
@@ -865,6 +962,7 @@ def _build_vfs_search_result(
     query: str,
     path_prefix: str,
     limit: int,
+    kind: str = "any",
 ) -> GQLVfsSearchResult:
     normalized_prefix = _normalize_vfs_path(path_prefix)
     search_query = query.strip().casefold()
@@ -873,6 +971,7 @@ def _build_vfs_search_result(
         for entry in snapshot.entries
         if entry.path.startswith(normalized_prefix)
         and search_query
+        and (kind == "any" or entry.kind == kind)
         and (search_query in entry.name.casefold() or search_query in entry.path.casefold())
     ]
     return GQLVfsSearchResult(
@@ -881,6 +980,57 @@ def _build_vfs_search_result(
         path_prefix=normalized_prefix,
         total_matches=len(matches),
         entries=[_build_vfs_catalog_entry(entry) for entry in matches[:limit]],
+    )
+
+
+def _build_vfs_file_context(
+    snapshot: VfsCatalogSnapshot,
+    *,
+    path: str,
+    search: str | None = None,
+    directories_limit: int = 200,
+    files_limit: int = 200,
+) -> GQLVfsFileContext | None:
+    focused_entry = _find_vfs_entry(snapshot, path)
+    if focused_entry is None or focused_entry.kind != "file":
+        return None
+    directory = _build_vfs_directory_listing(
+        snapshot,
+        path=path,
+        search=search,
+        directories_limit=directories_limit,
+        files_limit=files_limit,
+    )
+    if directory is None:
+        return None
+    sibling_files = sorted(
+        (
+            candidate
+            for candidate in snapshot.entries
+            if candidate.parent_entry_id == focused_entry.parent_entry_id and candidate.kind == "file"
+        ),
+        key=lambda candidate: candidate.path,
+    )
+    sibling_index = next(
+        (index for index, candidate in enumerate(sibling_files) if candidate.entry_id == focused_entry.entry_id),
+        0,
+    )
+    previous_file = sibling_files[sibling_index - 1] if sibling_index > 0 else None
+    next_file = (
+        sibling_files[sibling_index + 1]
+        if sibling_index + 1 < len(sibling_files)
+        else None
+    )
+    return GQLVfsFileContext(
+        generation_id=snapshot.generation_id,
+        file=_build_vfs_catalog_entry(focused_entry),
+        directory=directory,
+        sibling_file_index=sibling_index,
+        sibling_file_count=len(sibling_files),
+        previous_file=(
+            _build_vfs_catalog_entry(previous_file) if previous_file is not None else None
+        ),
+        next_file=_build_vfs_catalog_entry(next_file) if next_file is not None else None,
     )
 
 
@@ -1606,16 +1756,22 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         generation_id: str | None = None,
         reason: str | None = None,
+        external_ref: str | None = None,
+        title_query: str | None = None,
         limit: int = 100,
     ) -> list[GQLVfsBlockedItem]:
         snapshot = await _resolve_vfs_snapshot(info, generation_id)
         if snapshot is None:
             return []
         reason_filter = (reason or "").strip()
+        external_ref_filter = (external_ref or "").strip()
+        title_filter = (title_query or "").strip().casefold()
         matches = [
             item
             for item in snapshot.blocked_items
             if not reason_filter or str(getattr(item, "reason", "")) == reason_filter
+            if not external_ref_filter or str(getattr(item, "external_ref", "")) == external_ref_filter
+            if not title_filter or title_filter in str(getattr(item, "title", "")).casefold()
         ]
         return [_build_vfs_blocked_item(item) for item in matches[: max(1, min(limit, 500))]]
 
@@ -1628,9 +1784,13 @@ class CoreQueryResolver:
         query: str,
         path_prefix: str = "/",
         generation_id: str | None = None,
+        kind: str = "any",
         limit: int = 50,
     ) -> GQLVfsSearchResult | None:
         bounded_limit = max(1, min(limit, 500))
+        normalized_kind = kind.strip().lower() or "any"
+        if normalized_kind not in {"any", "directory", "file"}:
+            raise ValueError("kind must be one of: any, directory, file")
         snapshot = await _resolve_vfs_snapshot(info, generation_id)
         if snapshot is None:
             return None
@@ -1640,12 +1800,37 @@ class CoreQueryResolver:
                 query=query,
                 path_prefix=path_prefix,
                 limit=bounded_limit,
+                kind=normalized_kind,
             )
         return _build_vfs_search_result(
             snapshot,
             query=query,
             path_prefix=path_prefix,
             limit=bounded_limit,
+            kind=normalized_kind,
+        )
+
+    @strawberry.field(
+        description="File-focused VFS context for Director detail screens"
+    )
+    async def vfs_file_context(
+        self,
+        info: Info[GraphQLContext, object],
+        path: str,
+        generation_id: str | None = None,
+        search: str | None = None,
+        directories_limit: int = 200,
+        files_limit: int = 200,
+    ) -> GQLVfsFileContext | None:
+        snapshot = await _resolve_vfs_snapshot(info, generation_id)
+        if snapshot is None:
+            return None
+        return _build_vfs_file_context(
+            snapshot,
+            path=path,
+            search=search,
+            directories_limit=max(0, min(directories_limit, 500)),
+            files_limit=max(0, min(files_limit, 500)),
         )
 
     @strawberry.field(
@@ -1663,10 +1848,38 @@ class CoreQueryResolver:
     async def plugin_integration_readiness(
         self,
         info: Info[GraphQLContext, object],
+        status: str | None = None,
+        capability_kind: str | None = None,
+        include_disabled: bool = True,
     ) -> GQLPluginIntegrationReadiness:
-        return _build_plugin_integration_readiness(
-            build_plugin_integration_readiness_posture(info.context.resources)
+        snapshot = build_plugin_integration_readiness_posture(info.context.resources)
+        filtered_plugins = [
+            plugin
+            for plugin in snapshot.plugins
+            if (status is None or plugin.status == status)
+            and (capability_kind is None or plugin.capability_kind == capability_kind)
+            and (include_disabled or plugin.enabled)
+        ]
+        filtered_snapshot = SimpleNamespace(
+            generated_at=snapshot.generated_at,
+            status=(
+                "ready"
+                if filtered_plugins and all(plugin.ready for plugin in filtered_plugins)
+                else "partial"
+                if filtered_plugins
+                else "blocked"
+            ),
+            plugins=filtered_plugins,
+            required_actions=sorted(
+                {action for plugin in filtered_plugins for action in plugin.required_actions}
+            ),
+            remaining_gaps=list(
+                dict.fromkeys(
+                    gap for plugin in filtered_plugins for gap in plugin.remaining_gaps
+                )
+            ),
         )
+        return _build_plugin_integration_readiness(filtered_snapshot)
 
     @strawberry.field(
         description="Downloader orchestration posture for GraphQL-first operator and Director clients"
@@ -1722,14 +1935,49 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
         active_within_seconds: int = 120,
+        status: str | None = None,
+        tenant_id: str | None = None,
+        consumer_group: str | None = None,
+        consumer_name: str | None = None,
+        node_id: str | None = None,
+        ack_pending: bool | None = None,
+        fenced: bool | None = None,
+        limit: int = 100,
     ) -> list[GQLControlPlaneSubscriber]:
-        return [
+        rows = [
             _build_control_plane_subscriber(row)
             for row in await build_control_plane_subscribers_posture(
                 info.context.resources,
                 active_within_seconds=active_within_seconds,
             )
         ]
+        filtered = [
+            row
+            for row in rows
+            if (status is None or row.status == status)
+            and (tenant_id is None or row.tenant_id == tenant_id)
+            and (consumer_group is None or row.group_name == consumer_group)
+            and (consumer_name is None or row.consumer_name == consumer_name)
+            and (node_id is None or row.node_id == node_id)
+            and (ack_pending is None or row.ack_pending == ack_pending)
+            and (fenced is None or row.fenced == fenced)
+        ]
+        return filtered[: max(1, min(limit, 500))]
+
+    @strawberry.field(
+        description="GraphQL-first recovery readiness rollup for control-plane evidence and automation"
+    )
+    async def control_plane_recovery_readiness(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+    ) -> GQLControlPlaneRecoveryReadiness:
+        return _build_control_plane_recovery_readiness(
+            await build_control_plane_recovery_readiness_posture(
+                info.context.resources,
+                active_within_seconds=active_within_seconds,
+            )
+        )
 
     @strawberry.field(
         description="Background replay/control-plane recovery automation posture"
