@@ -1971,6 +1971,85 @@ def test_graphql_downloader_execution_evidence_returns_dead_letter_and_history_p
     }
 
 
+def test_graphql_downloader_execution_evidence_ignores_boolean_dead_letter_status_fields() -> None:
+    redis = FakeOperatorRedis(
+        lists={
+            "arq:queue-status-history:filmu-py": [
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-16T11:10:00Z",
+                        "total_jobs": 1,
+                        "ready_jobs": 0,
+                        "deferred_jobs": 0,
+                        "in_progress_jobs": 0,
+                        "retry_jobs": 1,
+                        "dead_letter_jobs": 1,
+                        "alert_level": "warning",
+                        "dead_letter_reason_counts": {"provider_rate_limit": 1},
+                    }
+                )
+            ],
+            "arq:dead-letter:filmu-py": [
+                json.dumps(
+                    {
+                        "stage": "debrid_item",
+                        "task": "debrid_item",
+                        "item_id": "item-bool",
+                        "reason": "provider rate limited",
+                        "reason_code": "provider_rate_limit",
+                        "idempotency_key": "item-bool:ratelimit",
+                        "attempt": 1,
+                        "queued_at": "2026-04-16T11:15:00Z",
+                        "metadata": {
+                            "provider": "realdebrid",
+                            "failure_kind": "rate_limit",
+                            "selected_stream_id": "stream-bool",
+                            "item_request_id": "request-bool",
+                            "status_code": True,
+                            "retry_after_seconds": False,
+                        },
+                    }
+                )
+            ],
+        }
+    )
+    client = _build_client(
+        FakeMediaService(),
+        redis=redis,
+        settings_overrides={
+            "FILMU_PY_DOWNLOADERS": {
+                "real_debrid": {"enabled": True, "api_key": "rd-token"},
+            }
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  downloaderExecutionEvidence(limit: 5) {
+                    recentDeadLetters {
+                      itemId
+                      statusCode
+                      retryAfterSeconds
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["downloaderExecutionEvidence"]["recentDeadLetters"] == [
+        {
+            "itemId": "item-bool",
+            "statusCode": None,
+            "retryAfterSeconds": None,
+        }
+    ]
+
+
 def test_graphql_enterprise_operations_governance_returns_typed_slice_posture() -> None:
     client = _build_client(
         FakeMediaService(),

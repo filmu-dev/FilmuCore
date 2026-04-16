@@ -657,6 +657,12 @@ async def build_downloader_execution_evidence_posture(
 ) -> DownloaderExecutionEvidenceSnapshot:
     """Return downloader/debrid execution evidence from queue history and DLQ samples."""
 
+    def _coerce_metadata_int(metadata: Mapping[str, Any], key: str) -> int | None:
+        value = metadata.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
     queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
     redis = resources.arq_redis or resources.redis
     reader = QueueStatusReader(redis, queue_name=queue_name)
@@ -675,16 +681,8 @@ async def build_downloader_execution_evidence_posture(
         failure_kind = str(failure_kind_raw).strip() if isinstance(failure_kind_raw, str) else ""
         if failure_kind:
             failure_kind_counts[failure_kind] = failure_kind_counts.get(failure_kind, 0) + 1
-        status_code = (
-            int(sample.metadata["status_code"])
-            if isinstance(sample.metadata.get("status_code"), (int, bool))
-            else None
-        )
-        retry_after_seconds = (
-            int(sample.metadata["retry_after_seconds"])
-            if isinstance(sample.metadata.get("retry_after_seconds"), (int, bool))
-            else None
-        )
+        status_code = _coerce_metadata_int(sample.metadata, "status_code")
+        retry_after_seconds = _coerce_metadata_int(sample.metadata, "retry_after_seconds")
         normalized_dead_letters.append(
             DownloaderExecutionDeadLetterSnapshot(
                 stage=sample.stage,

@@ -6,7 +6,7 @@ import GraphQL registration primitives without pulling the full app graph.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .plugin_registry import (
     GraphQLPluginRegistry,
@@ -41,13 +41,3 @@ def create_graphql_router(plugin_registry: GraphQLPluginRegistry) -> GraphQLRout
     from .schema import create_graphql_router as _create_graphql_router
 
     return _create_graphql_router(plugin_registry)
-
-
-def __getattr__(name: str) -> Any:
-    """Expose lazy schema helpers for attribute-based imports."""
-
-    if name == "build_schema":
-        return build_schema
-    if name == "create_graphql_router":
-        return create_graphql_router
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
