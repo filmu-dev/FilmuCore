@@ -251,7 +251,18 @@ def apply_vfs_rollout_control_updates(
             ),
         )
     next_state["history"] = history[:_MAX_HISTORY_ENTRIES]
-    return _strip_none_values(next_state)
+    cleaned_next_state = _strip_none_values(next_state)
+    preserved_state: dict[str, object] = (
+        dict(raw_state)
+        if raw_state is not None
+        else {}
+    )
+    for key in next_state:
+        if key in cleaned_next_state:
+            preserved_state[key] = cleaned_next_state[key]
+        else:
+            preserved_state.pop(key, None)
+    return preserved_state
 
 
 def serialize_vfs_rollout_control_state(state: VfsRolloutControlState) -> dict[str, object]:

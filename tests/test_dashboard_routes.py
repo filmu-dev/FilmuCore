@@ -3132,6 +3132,17 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
     artifacts_root = tmp_path / "playback-proof-artifacts"
     windows_artifacts_root = artifacts_root / "windows-native-stack"
     windows_artifacts_root.mkdir(parents=True)
+    state_path = windows_artifacts_root / "filmuvfs-windows-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "last_mount_health": "green",
+                "preserved_state": {"last_good_generation": 41},
+                "notes": "previous note",
+            }
+        ),
+        encoding="utf-8",
+    )
     captured_at = datetime.now(UTC).replace(microsecond=0)
     captured_at_text = captured_at.isoformat().replace("+00:00", "Z")
     expires_at_text = (captured_at + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
@@ -3269,6 +3280,10 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
             },
         }
     ]
+    persisted_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted_state["last_mount_health"] == "green"
+    assert persisted_state["preserved_state"] == {"last_good_generation": 41}
+    assert persisted_state["notes"] == "holding canary for manual review"
 
     governance_response = client.get("/api/v1/operations/governance", headers=_headers())
 

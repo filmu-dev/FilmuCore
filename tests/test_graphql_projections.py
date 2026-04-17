@@ -159,6 +159,12 @@ class FakeOperatorRedis(DummyRedis):
         ]
 
 
+class FailingAuthorizationAuditService:
+    async def record_decision(self, **payload: Any) -> None:
+        _ = payload
+        raise RuntimeError("audit store unavailable")
+
+
 class DummyDatabaseRuntime:
     async def dispose(self) -> None:
         return None
@@ -6119,6 +6125,76 @@ def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_h
                 "summary": "promotion pause enabled; environment updated; notes updated (windows-native:managed)"
             }
         ],
+    }
+
+
+def test_graphql_authorization_audit_failures_do_not_break_allowed_rollout_mutation(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    (artifacts_root / "windows-native-stack").mkdir(parents=True)
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: {"playback_gate_environment_class": "windows-native:managed"},
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "vfs_runtime_governance_snapshot",
+        lambda playback_gate_governance=None, **kwargs: {
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_canary_decision": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_merge_gate": "ready",
+            "vfs_runtime_rollout_environment_class": "windows-native:managed",
+            "vfs_runtime_rollout_reasons": ["no_blocking_runtime_signals"],
+        },
+    )
+
+    client = _build_client(FakeMediaService())
+    cast(Any, client.app.state.resources).authorization_audit_service = (
+        FailingAuthorizationAuditService()
+    )
+
+    response = client.post(
+        "/graphql",
+        headers={
+            "x-api-key": "a" * 32,
+            "x-actor-id": "operator-1",
+            "x-tenant-id": "tenant-main",
+            "x-actor-roles": "platform:admin",
+            "x-actor-scopes": "backend:admin",
+        },
+        json={
+            "query": """
+                mutation Persist($input: PersistVfsRolloutControlInput!) {
+                  persistVfsRolloutControl(input: $input) {
+                    environmentClass
+                    promotionPaused
+                    promotionPauseReason
+                    updatedBy
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "environmentClass": "windows-native:managed",
+                    "promotionPaused": True,
+                    "promotionPauseReason": "repeat soak after audit outage",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "errors" not in body
+    assert body["data"]["persistVfsRolloutControl"] == {
+        "environmentClass": "windows-native:managed",
+        "promotionPaused": True,
+        "promotionPauseReason": "repeat soak after audit outage",
+        "updatedBy": "tenant-main:operator-1",
     }
 
 
