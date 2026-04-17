@@ -10052,7 +10052,25 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
         encoding="utf-8",
     )
     (artifacts_root / "media-server-gate-20260412-010102.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T01:01:02Z", "all_green": True}),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_kind": "media_server_provider_parity",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 24,
+                "status": "passed",
+                "ready": True,
+                "all_green": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     (artifacts_root / "windows-media-server-gate-20260412-010103.json").write_text(
