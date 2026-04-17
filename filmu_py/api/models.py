@@ -539,6 +539,12 @@ class PlaybackGateEvidenceResponse(BaseModel):
     policy_required_actions: list[str] = []
     provider_gate_required: bool
     provider_gate_ran: bool
+    provider_parity_ready: bool
+    provider_gate_recorded_at: str | None = None
+    provider_gate_expires_at: str | None = None
+    provider_gate_stale: bool = False
+    provider_gate_failure_reasons: list[str] = []
+    provider_gate_required_actions: list[str] = []
     windows_provider_ready: bool
     windows_provider_recorded_at: str | None = None
     windows_provider_expires_at: str | None = None
@@ -1258,6 +1264,11 @@ class ServingGovernanceResponse(BaseModel):
     playback_gate_provider_gate_ran: int
     playback_gate_stability_ready: int
     playback_gate_provider_parity_ready: int
+    playback_gate_provider_gate_recorded_at: str = ""
+    playback_gate_provider_gate_expires_at: str = ""
+    playback_gate_provider_gate_stale: int = 0
+    playback_gate_provider_gate_failure_reasons: list[str] = []
+    playback_gate_provider_gate_required_actions: list[str] = []
     playback_gate_windows_provider_ready: int
     playback_gate_windows_provider_movie_ready: int
     playback_gate_windows_provider_tv_ready: int

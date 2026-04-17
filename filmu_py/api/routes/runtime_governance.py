@@ -17,6 +17,21 @@ _STREAM_REFRESH_LATENCY_SLO_MS = 250
 _REQUIRED_WINDOWS_PROVIDER_MEDIA_TYPES = ("movie", "tv")
 _REQUIRED_WINDOWS_PROVIDER_NAMES = ("emby", "plex")
 _REQUIRED_WINDOWS_SOAK_PROFILES = ("continuous", "seek", "concurrent", "full")
+_PROVIDER_GATE_BLOCKING_REASONS = (
+    "provider_gate_docker_plex_mount_path_drift",
+    "provider_gate_wsl_host_mount_missing",
+    "provider_gate_wsl_host_binary_missing",
+    "provider_gate_wsl_host_binary_stale",
+    "provider_gate_wsl_host_binary_freshness_unknown",
+    "provider_gate_entry_id_refresh_identity_missing",
+    "provider_gate_foreground_fetch_signal_missing",
+    "provider_gate_playback_start_not_confirmed",
+    "provider_gate_stale_refresh_not_confirmed",
+    "provider_gate_playback_proof_failed",
+    "provider_gate_summary_missing",
+    "provider_gate_stale",
+)
+
 
 def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | list[str]]:
     """Return the default Rust runtime governance payload for /stream/status."""
@@ -754,6 +769,46 @@ def _windows_soak_profile_gate_snapshot(
     }
 
 
+def _provider_gate_snapshot(
+    provider_summary: dict[str, object] | None,
+) -> dict[str, int | str | list[str]]:
+    """Return bounded Linux/WSL provider-gate posture and classified failures."""
+
+    if provider_summary is None:
+        return {
+            "playback_gate_provider_parity_ready": 0,
+            "playback_gate_provider_gate_recorded_at": "",
+            "playback_gate_provider_gate_expires_at": "",
+            "playback_gate_provider_gate_stale": 0,
+            "playback_gate_provider_gate_failure_reasons": [],
+            "playback_gate_provider_gate_required_actions": [],
+        }
+
+    freshness = _artifact_freshness_snapshot(provider_summary, default_window_hours=24)
+    ready = bool(provider_summary.get("ready"))
+    if "ready" not in provider_summary:
+        ready = bool(provider_summary.get("all_green"))
+    stale = _as_int(freshness.get("stale"))
+    failure_reasons = _as_str_list(provider_summary.get("failure_reasons"))
+    required_actions = _as_str_list(provider_summary.get("required_actions"))
+    if stale > 0 and "provider_gate_stale" not in failure_reasons:
+        failure_reasons.append("provider_gate_stale")
+    if stale > 0 and "refresh_media_server_provider_gate" not in required_actions:
+        required_actions.append("refresh_media_server_provider_gate")
+    elif not ready and "rerun_media_server_provider_gate" not in required_actions:
+        required_actions.append("rerun_media_server_provider_gate")
+    if not ready and not failure_reasons:
+        failure_reasons.append("provider_gate_not_green")
+    return {
+        "playback_gate_provider_parity_ready": int(ready and stale == 0),
+        "playback_gate_provider_gate_recorded_at": _as_str(freshness.get("recorded_at")),
+        "playback_gate_provider_gate_expires_at": _as_str(freshness.get("expires_at")),
+        "playback_gate_provider_gate_stale": stale,
+        "playback_gate_provider_gate_failure_reasons": list(dict.fromkeys(failure_reasons))[:10],
+        "playback_gate_provider_gate_required_actions": list(dict.fromkeys(required_actions))[:10],
+    }
+
+
 def _load_playback_artifact_at_relative_path(relative_path: str) -> dict[str, object] | None:
     """Load one playback-proof artifact by relative path across candidate roots."""
 
@@ -785,6 +840,11 @@ def _empty_playback_gate_governance_snapshot() -> dict[str, int | str | list[str
         "playback_gate_provider_gate_ran": 0,
         "playback_gate_stability_ready": 0,
         "playback_gate_provider_parity_ready": 0,
+        "playback_gate_provider_gate_recorded_at": "",
+        "playback_gate_provider_gate_expires_at": "",
+        "playback_gate_provider_gate_stale": 0,
+        "playback_gate_provider_gate_failure_reasons": [],
+        "playback_gate_provider_gate_required_actions": [],
         "playback_gate_windows_provider_ready": 0,
         "playback_gate_windows_provider_movie_ready": 0,
         "playback_gate_windows_provider_tv_ready": 0,
@@ -896,8 +956,7 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
         )
 
     provider_summary_available = provider_summary is not None
-    if provider_summary is not None and bool(provider_summary.get("all_green")):
-        governance["playback_gate_provider_parity_ready"] = 1
+    governance.update(_provider_gate_snapshot(provider_summary))
 
     windows_provider_summary_available = windows_provider_summary is not None
     governance.update(_windows_provider_media_gate_snapshot())
@@ -949,8 +1008,18 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
     elif provider_gate_ran:
         if not provider_summary_available:
             rollout_reasons.append("provider_gate_artifact_missing")
+        elif _as_int(governance["playback_gate_provider_gate_stale"]) > 0:
+            rollout_reasons.append("provider_gate_stale")
         elif _as_int(governance["playback_gate_provider_parity_ready"]) == 0:
-            rollout_reasons.append("provider_gate_not_green")
+            provider_failure_reasons = _as_str_list(
+                governance.get("playback_gate_provider_gate_failure_reasons")
+            )
+            if provider_failure_reasons:
+                for reason in provider_failure_reasons:
+                    if reason not in rollout_reasons:
+                        rollout_reasons.append(reason)
+            else:
+                rollout_reasons.append("provider_gate_not_green")
 
     if not windows_provider_summary_available:
         rollout_reasons.append("windows_provider_gate_artifact_missing")
@@ -985,6 +1054,7 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
     blocked_reasons = {
         "playback_gate_failed_or_incomplete",
         "provider_gate_not_green",
+        "provider_gate_stale",
         "runner_readiness_artifact_missing",
         "runner_readiness_stale",
         "runner_readiness_not_ready",
@@ -1000,6 +1070,7 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
         "github_main_policy_not_ready",
         "github_main_policy_unverified",
     }
+    blocked_reasons.update(_PROVIDER_GATE_BLOCKING_REASONS)
     warning_reasons = {
         "missing_playback_gate_artifacts",
         "playback_gate_dry_run_mode",

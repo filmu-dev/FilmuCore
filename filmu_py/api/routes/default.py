@@ -398,6 +398,12 @@ def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
     runner_required_actions = list(cast(list[str], governance["playback_gate_runner_required_actions"]))
     policy_failure_reasons = list(cast(list[str], governance["playback_gate_policy_failure_reasons"]))
     policy_required_actions = list(cast(list[str], governance["playback_gate_policy_required_actions"]))
+    provider_gate_failure_reasons = list(
+        cast(list[str], governance["playback_gate_provider_gate_failure_reasons"])
+    )
+    provider_gate_required_actions = list(
+        cast(list[str], governance["playback_gate_provider_gate_required_actions"])
+    )
     windows_provider_failure_reasons = list(
         cast(list[str], governance["playback_gate_windows_provider_failure_reasons"])
     )
@@ -442,6 +448,29 @@ def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
     if policy_failure_reasons:
         remaining_gaps.append(
             "GitHub protected-branch policy failures: " + ", ".join(policy_failure_reasons)
+        )
+    provider_gate_required = bool(cast(int, governance["playback_gate_provider_gate_required"]))
+    provider_gate_ran = bool(cast(int, governance["playback_gate_provider_gate_ran"]))
+    if provider_gate_required and not provider_gate_ran:
+        required_actions.append("run_media_server_provider_gate")
+        remaining_gaps.append(
+            "Linux/WSL provider parity proof is required for this playback gate run but has not been captured yet"
+        )
+    elif provider_gate_ran and cast(int, governance["playback_gate_provider_gate_stale"]) > 0:
+        required_actions.append("refresh_media_server_provider_gate")
+        required_actions.extend(provider_gate_required_actions)
+        remaining_gaps.append(
+            "Linux/WSL provider parity evidence is stale and must be recaptured on the current runner topology"
+        )
+    elif provider_gate_ran and cast(int, governance["playback_gate_provider_parity_ready"]) == 0:
+        required_actions.append("rerun_media_server_provider_gate")
+        required_actions.extend(provider_gate_required_actions)
+        remaining_gaps.append(
+            "Linux/WSL provider parity proof is not yet green across the required provider paths"
+        )
+    if provider_gate_failure_reasons:
+        remaining_gaps.append(
+            "Linux/WSL provider parity failures: " + ", ".join(provider_gate_failure_reasons)
         )
     if cast(int, governance["playback_gate_windows_provider_stale"]) > 0:
         required_actions.append("refresh_native_windows_provider_proof_matrix")
@@ -506,8 +535,18 @@ def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
         policy_stale=bool(cast(int, governance["playback_gate_policy_validation_stale"])),
         policy_failure_reasons=policy_failure_reasons,
         policy_required_actions=policy_required_actions,
-        provider_gate_required=bool(cast(int, governance["playback_gate_provider_gate_required"])),
-        provider_gate_ran=bool(cast(int, governance["playback_gate_provider_gate_ran"])),
+        provider_gate_required=provider_gate_required,
+        provider_gate_ran=provider_gate_ran,
+        provider_parity_ready=bool(cast(int, governance["playback_gate_provider_parity_ready"])),
+        provider_gate_recorded_at=cast(
+            str, governance["playback_gate_provider_gate_recorded_at"]
+        )
+        or None,
+        provider_gate_expires_at=cast(str, governance["playback_gate_provider_gate_expires_at"])
+        or None,
+        provider_gate_stale=bool(cast(int, governance["playback_gate_provider_gate_stale"])),
+        provider_gate_failure_reasons=provider_gate_failure_reasons,
+        provider_gate_required_actions=provider_gate_required_actions,
         windows_provider_ready=bool(cast(int, governance["playback_gate_windows_provider_ready"])),
         windows_provider_recorded_at=cast(
             str, governance["playback_gate_windows_provider_recorded_at"]

@@ -28,6 +28,19 @@ def test_playback_gate_runner_contract_manifest_exists_and_defines_required_chec
     assert "provider_gate_required_checks" in text
 
 
+def test_media_server_provider_gate_contract_manifest_exists_and_defines_freshness() -> None:
+    contract = REPO_ROOT / "ops" / "rollout" / "media-server-provider-parity.contract.json"
+
+    assert contract.is_file()
+
+    text = contract.read_text(encoding="utf-8")
+    assert "schema_version" in text
+    assert "artifact_kind" in text
+    assert "freshness_window_hours" in text
+    assert "docker_wsl_evidence_checks" in text
+    assert "required_fields" in text
+
+
 def test_windows_soak_and_native_media_contract_manifests_define_freshness() -> None:
     soak_contract = REPO_ROOT / "ops" / "rollout" / "windows-vfs-soak-program.contract.json"
     media_contract = REPO_ROOT / "ops" / "rollout" / "windows-native-media-proof.contract.json"
@@ -78,6 +91,23 @@ def test_playback_gate_runner_script_emits_contract_fields_and_github_hosted_che
     assert "policy_admin_token" in script
     assert "failure_reasons" in script
     assert "required_actions" in script
+
+
+def test_media_server_provider_gate_script_emits_contract_and_taxonomy_fields() -> None:
+    script = (REPO_ROOT / "scripts" / "run_media_server_proof_gate.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ContractPath" in script
+    assert "schema_version" in script
+    assert "artifact_kind" in script
+    assert "captured_at" in script
+    assert "expires_at" in script
+    assert "failure_reasons" in script
+    assert "required_actions" in script
+    assert "provider_gate_docker_plex_mount_path_drift" in script
+    assert "provider_gate_wsl_host_binary_stale" in script
+    assert "provider_gate_entry_id_refresh_identity_missing" in script
 
 
 def test_windows_soak_program_and_trend_scripts_emit_normalized_artifact_fields() -> None:

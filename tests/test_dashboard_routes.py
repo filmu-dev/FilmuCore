@@ -2968,6 +2968,68 @@ def test_playback_gate_evidence_route_surfaces_stale_runner_and_policy_contracts
     assert "refresh_github_main_policy_validation" in body["required_actions"]
 
 
+def test_playback_gate_evidence_route_surfaces_provider_gate_taxonomy(
+    monkeypatch: Any,
+) -> None:
+    playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
+    playback_gate_governance.update(
+        {
+            "playback_gate_runner_status": "ready",
+            "playback_gate_runner_ready": 1,
+            "playback_gate_policy_validation_status": "ready",
+            "playback_gate_policy_ready": 1,
+            "playback_gate_provider_gate_required": 1,
+            "playback_gate_provider_gate_ran": 1,
+            "playback_gate_provider_parity_ready": 0,
+            "playback_gate_provider_gate_recorded_at": "2026-04-12T02:01:04Z",
+            "playback_gate_provider_gate_expires_at": "2026-04-13T02:01:04Z",
+            "playback_gate_provider_gate_stale": 0,
+            "playback_gate_provider_gate_failure_reasons": [
+                "provider_gate_docker_plex_mount_path_drift",
+                "provider_gate_wsl_host_binary_stale",
+            ],
+            "playback_gate_provider_gate_required_actions": [
+                "realign_docker_plex_mount_path",
+                "rebuild_wsl_host_mount_binary",
+            ],
+            "playback_gate_windows_provider_ready": 1,
+            "playback_gate_windows_soak_ready": 1,
+            "playback_gate_rollout_readiness": "blocked",
+            "playback_gate_rollout_reasons": [
+                "provider_gate_docker_plex_mount_path_drift",
+                "provider_gate_wsl_host_binary_stale",
+            ],
+            "playback_gate_rollout_next_action": "resolve_failed_playback_gate_proofs",
+        }
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: dict(playback_gate_governance),
+    )
+    client = _build_client()
+
+    response = client.get("/api/v1/operations/playback-gate/evidence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider_gate_required"] is True
+    assert body["provider_gate_ran"] is True
+    assert body["provider_parity_ready"] is False
+    assert body["provider_gate_stale"] is False
+    assert body["provider_gate_failure_reasons"] == [
+        "provider_gate_docker_plex_mount_path_drift",
+        "provider_gate_wsl_host_binary_stale",
+    ]
+    assert body["provider_gate_required_actions"] == [
+        "realign_docker_plex_mount_path",
+        "rebuild_wsl_host_mount_binary",
+    ]
+    assert "rerun_media_server_provider_gate" in body["required_actions"]
+    assert "realign_docker_plex_mount_path" in body["required_actions"]
+    assert "rebuild_wsl_host_mount_binary" in body["required_actions"]
+
+
 def test_playback_gate_evidence_route_surfaces_stale_windows_soak_and_media_proofs(
     monkeypatch: Any,
 ) -> None:
