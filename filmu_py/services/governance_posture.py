@@ -402,15 +402,17 @@ def _artifact_snapshot(
     ]
 
 
-def _vfs_runtime_governance_snapshots() -> tuple[Mapping[str, object], Mapping[str, object]]:
-    playback_gate = cast(
-        Mapping[str, object], runtime_governance._playback_gate_governance_snapshot()
+def _vfs_runtime_governance_snapshots() -> tuple[
+    dict[str, int | str | list[str]],
+    dict[str, int | str | float | list[str]],
+]:
+    playback_gate: dict[str, int | str | list[str]] = (
+        runtime_governance._playback_gate_governance_snapshot()
     )
-    snapshot = cast(
-        Mapping[str, object],
+    snapshot: dict[str, int | str | float | list[str]] = (
         runtime_governance._vfs_runtime_governance_snapshot(
             playback_gate_governance=playback_gate,
-        ),
+        )
     )
     return playback_gate, snapshot
 
