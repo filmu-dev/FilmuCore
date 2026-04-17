@@ -9649,6 +9649,24 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "active_reads": 2,
                     "peak_active_reads": 5,
                     "chunk_cache_weighted_bytes": 8192,
+                    "active_handle_age_percentiles_ms": {
+                        "p50_ms": 12.5,
+                        "p95_ms": 98.0,
+                        "p99_ms": 133.0,
+                        "max_ms": 133.0,
+                    },
+                    "handle_depth_rollups": [
+                        {
+                            "tenant_id": "global",
+                            "session_id": "mount-session-1",
+                            "open_handles": 3,
+                            "invalidated_handles": 1,
+                            "average_depth": 4.0,
+                            "max_depth": 5,
+                            "average_age_ms": 41.5,
+                            "max_age_ms": 133.0,
+                        }
+                    ],
                 },
                 "handle_startup": {
                     "total": 7,
@@ -9667,6 +9685,13 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
                     "cancelled": 2,
                     "average_duration_ms": 12.6,
                     "max_duration_ms": 48.4,
+                    "duration_buckets": [
+                        {"label": "le_5_ms", "count": 2},
+                        {"label": "le_25_ms", "count": 4},
+                        {"label": "le_100_ms", "count": 3},
+                        {"label": "le_250_ms", "count": 1},
+                        {"label": "gt_250_ms", "count": 0},
+                    ],
                 },
                 "upstream_fetch": {
                     "operations": 5,
@@ -9759,145 +9784,176 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
         encoding="utf-8",
     )
     monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+    python_view_path = tmp_path / "python-view.mkv"
+    python_view_path.write_bytes(b"0" * 64)
+    session = byte_streaming.open_mount_session(resource=str(python_view_path))
+    handle = byte_streaming.open_local_file_handle(session=session, path=python_view_path)
+    handle.created_at = datetime.now(UTC) - timedelta(milliseconds=1500)
+    byte_streaming.read_from_handle(handle=handle, chunk_size=4096)
     client, _ = _build_client()
+    try:
+        response = client.get("/api/v1/stream/status", headers=_headers())
 
-    response = client.get("/api/v1/stream/status", headers=_headers())
-
-    assert response.status_code == 200
-    governance = response.json()["governance"]
-    assert governance["vfs_runtime_snapshot_available"] == 1
-    assert governance["vfs_runtime_open_handles"] == 4
-    assert governance["vfs_runtime_peak_open_handles"] == 9
-    assert governance["vfs_runtime_active_reads"] == 2
-    assert governance["vfs_runtime_peak_active_reads"] == 5
-    assert governance["vfs_runtime_chunk_cache_weighted_bytes"] == 8192
-    assert governance["vfs_runtime_chunk_cache_backend"] == "hybrid"
-    assert governance["vfs_runtime_chunk_cache_memory_bytes"] == 4096
-    assert governance["vfs_runtime_chunk_cache_memory_max_bytes"] == 16384
-    assert governance["vfs_runtime_chunk_cache_memory_hits"] == 6
-    assert governance["vfs_runtime_chunk_cache_memory_misses"] == 4
-    assert governance["vfs_runtime_chunk_cache_disk_bytes"] == 12288
-    assert governance["vfs_runtime_chunk_cache_disk_max_bytes"] == 65536
-    assert governance["vfs_runtime_chunk_cache_disk_hits"] == 3
-    assert governance["vfs_runtime_chunk_cache_disk_misses"] == 1
-    assert governance["vfs_runtime_chunk_cache_disk_writes"] == 2
-    assert governance["vfs_runtime_chunk_cache_disk_write_errors"] == 1
-    assert governance["vfs_runtime_chunk_cache_disk_evictions"] == 4
-    assert governance["vfs_runtime_handle_startup_total"] == 7
-    assert governance["vfs_runtime_handle_startup_ok"] == 3
-    assert governance["vfs_runtime_handle_startup_error"] == 1
-    assert governance["vfs_runtime_handle_startup_estale"] == 1
-    assert governance["vfs_runtime_handle_startup_cancelled"] == 2
-    assert governance["vfs_runtime_handle_startup_average_duration_ms"] == 105
-    assert governance["vfs_runtime_handle_startup_max_duration_ms"] == 412
-    assert governance["vfs_runtime_mounted_reads_total"] == 10
-    assert governance["vfs_runtime_mounted_reads_ok"] == 6
-    assert governance["vfs_runtime_mounted_reads_error"] == 1
-    assert governance["vfs_runtime_mounted_reads_estale"] == 1
-    assert governance["vfs_runtime_mounted_reads_cancelled"] == 2
-    assert governance["vfs_runtime_mounted_reads_average_duration_ms"] == 13
-    assert governance["vfs_runtime_mounted_reads_max_duration_ms"] == 48
-    assert governance["vfs_runtime_upstream_fetch_operations"] == 5
-    assert governance["vfs_runtime_upstream_fetch_bytes_total"] == 65536
-    assert governance["vfs_runtime_upstream_fetch_average_duration_ms"] == 23
-    assert governance["vfs_runtime_upstream_fetch_max_duration_ms"] == 72
-    assert governance["vfs_runtime_upstream_fail_invalid_url"] == 1
-    assert governance["vfs_runtime_upstream_fail_build_request"] == 0
-    assert governance["vfs_runtime_upstream_fail_network"] == 2
-    assert governance["vfs_runtime_upstream_fail_stale_status"] == 3
-    assert governance["vfs_runtime_upstream_fail_unexpected_status"] == 4
-    assert governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"] == 2
-    assert governance["vfs_runtime_upstream_fail_unexpected_status_server_error"] == 1
-    assert governance["vfs_runtime_upstream_fail_read_body"] == 5
-    assert governance["vfs_runtime_upstream_retryable_network"] == 6
-    assert governance["vfs_runtime_upstream_retryable_read_body"] == 7
-    assert governance["vfs_runtime_upstream_retryable_status_too_many_requests"] == 8
-    assert governance["vfs_runtime_upstream_retryable_status_server_error"] == 9
-    assert governance["vfs_runtime_backend_fallback_attempts"] == 10
-    assert governance["vfs_runtime_backend_fallback_success"] == 7
-    assert governance["vfs_runtime_backend_fallback_failure"] == 3
-    assert governance["vfs_runtime_backend_fallback_attempts_direct_read_failure"] == 4
-    assert governance["vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable"] == 3
-    assert (
-        governance["vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure"] == 3
-    )
-    assert governance["vfs_runtime_backend_fallback_success_direct_read_failure"] == 2
-    assert governance["vfs_runtime_backend_fallback_success_inline_refresh_unavailable"] == 3
-    assert (
-        governance["vfs_runtime_backend_fallback_success_post_inline_refresh_failure"] == 2
-    )
-    assert governance["vfs_runtime_backend_fallback_failure_direct_read_failure"] == 2
-    assert governance["vfs_runtime_backend_fallback_failure_inline_refresh_unavailable"] == 0
-    assert (
-        governance["vfs_runtime_backend_fallback_failure_post_inline_refresh_failure"] == 1
-    )
-    assert governance["vfs_runtime_chunk_cache_hits"] == 9
-    assert governance["vfs_runtime_chunk_cache_misses"] == 3
-    assert governance["vfs_runtime_chunk_cache_inserts"] == 2
-    assert governance["vfs_runtime_chunk_cache_prefetch_hits"] == 1
-    assert governance["vfs_runtime_prefetch_concurrency_limit"] == 4
-    assert governance["vfs_runtime_prefetch_available_permits"] == 1
-    assert governance["vfs_runtime_prefetch_active_permits"] == 3
-    assert governance["vfs_runtime_prefetch_active_background_tasks"] == 2
-    assert governance["vfs_runtime_prefetch_peak_active_background_tasks"] == 4
-    assert governance["vfs_runtime_prefetch_background_spawned"] == 7
-    assert governance["vfs_runtime_prefetch_background_backpressure"] == 2
-    assert governance["vfs_runtime_prefetch_fairness_denied"] == 1
-    assert governance["vfs_runtime_prefetch_global_backpressure_denied"] == 1
-    assert governance["vfs_runtime_prefetch_background_error"] == 1
-    assert governance["vfs_runtime_chunk_coalescing_in_flight_chunks"] == 1
-    assert governance["vfs_runtime_chunk_coalescing_peak_in_flight_chunks"] == 3
-    assert governance["vfs_runtime_chunk_coalescing_waits_total"] == 6
-    assert governance["vfs_runtime_chunk_coalescing_waits_hit"] == 5
-    assert governance["vfs_runtime_chunk_coalescing_waits_miss"] == 1
-    assert governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] == 14.25
-    assert governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] == 89.5
-    assert governance["vfs_runtime_inline_refresh_success"] == 3
-    assert governance["vfs_runtime_inline_refresh_no_url"] == 1
-    assert governance["vfs_runtime_inline_refresh_error"] == 2
-    assert governance["vfs_runtime_inline_refresh_timeout"] == 1
-    assert governance["vfs_runtime_windows_callbacks_cancelled"] == 3
-    assert governance["vfs_runtime_windows_callbacks_error"] == 4
-    assert governance["vfs_runtime_windows_callbacks_estale"] == 2
-    assert governance["vfs_runtime_cache_hit_ratio"] == 0.75
-    assert governance["vfs_runtime_fallback_success_ratio"] == 0.7
-    assert governance["vfs_runtime_prefetch_pressure_ratio"] == 0.75
-    assert governance["vfs_runtime_provider_pressure_incidents"] == 22
-    assert governance["vfs_runtime_fairness_pressure_incidents"] == 2
-    assert governance["vfs_runtime_cache_pressure_class"] == "critical"
-    assert governance["vfs_runtime_cache_pressure_reasons"] == [
-        "disk_write_errors",
-        "disk_evictions_observed",
-    ]
-    assert governance["vfs_runtime_chunk_coalescing_pressure_class"] == "warning"
-    assert governance["vfs_runtime_chunk_coalescing_pressure_reasons"] == [
-        "coalescing_wait_misses",
-        "coalescing_wait_latency_high",
-        "coalescing_wait_spike",
-    ]
-    assert governance["vfs_runtime_upstream_wait_class"] == "critical"
-    assert governance["vfs_runtime_upstream_wait_reasons"] == [
-        "provider_pressure_incidents",
-        "retryable_network_wait",
-        "retryable_read_body_wait",
-    ]
-    assert governance["vfs_runtime_refresh_pressure_class"] == "critical"
-    assert governance["vfs_runtime_refresh_pressure_reasons"] == [
-        "backend_fallback_failures",
-        "inline_refresh_errors",
-        "inline_refresh_timeouts",
-        "backend_fallback_activity",
-    ]
-    assert governance["vfs_runtime_rollout_readiness"] == "blocked"
-    assert governance["vfs_runtime_rollout_reasons"] == [
-        "backend_fallback_failures",
-        "mounted_read_errors",
-        "prefetch_background_errors",
-        "disk_cache_write_errors",
-    ]
-    assert governance["vfs_runtime_rollout_next_action"] == "resolve_blocking_runtime_failures"
-    assert governance["vfs_runtime_rollout_canary_decision"] == "rollback_current_environment"
-    assert governance["vfs_runtime_rollout_merge_gate"] == "blocked"
+        assert response.status_code == 200
+        governance = response.json()["governance"]
+        assert governance["vfs_runtime_snapshot_available"] == 1
+        assert governance["vfs_runtime_open_handles"] == 4
+        assert governance["vfs_runtime_peak_open_handles"] == 9
+        assert governance["vfs_runtime_active_reads"] == 2
+        assert governance["vfs_runtime_peak_active_reads"] == 5
+        assert governance["vfs_runtime_chunk_cache_weighted_bytes"] == 8192
+        assert governance["vfs_runtime_chunk_cache_backend"] == "hybrid"
+        assert governance["vfs_runtime_chunk_cache_memory_bytes"] == 4096
+        assert governance["vfs_runtime_chunk_cache_memory_max_bytes"] == 16384
+        assert governance["vfs_runtime_chunk_cache_memory_hits"] == 6
+        assert governance["vfs_runtime_chunk_cache_memory_misses"] == 4
+        assert governance["vfs_runtime_chunk_cache_disk_bytes"] == 12288
+        assert governance["vfs_runtime_chunk_cache_disk_max_bytes"] == 65536
+        assert governance["vfs_runtime_chunk_cache_disk_hits"] == 3
+        assert governance["vfs_runtime_chunk_cache_disk_misses"] == 1
+        assert governance["vfs_runtime_chunk_cache_disk_writes"] == 2
+        assert governance["vfs_runtime_chunk_cache_disk_write_errors"] == 1
+        assert governance["vfs_runtime_chunk_cache_disk_evictions"] == 4
+        assert governance["vfs_runtime_handle_startup_total"] == 7
+        assert governance["vfs_runtime_handle_startup_ok"] == 3
+        assert governance["vfs_runtime_handle_startup_error"] == 1
+        assert governance["vfs_runtime_handle_startup_estale"] == 1
+        assert governance["vfs_runtime_handle_startup_cancelled"] == 2
+        assert governance["vfs_runtime_handle_startup_average_duration_ms"] == 105
+        assert governance["vfs_runtime_handle_startup_max_duration_ms"] == 412
+        assert governance["vfs_runtime_mounted_reads_total"] == 10
+        assert governance["vfs_runtime_mounted_reads_ok"] == 6
+        assert governance["vfs_runtime_mounted_reads_error"] == 1
+        assert governance["vfs_runtime_mounted_reads_estale"] == 1
+        assert governance["vfs_runtime_mounted_reads_cancelled"] == 2
+        assert governance["vfs_runtime_mounted_reads_average_duration_ms"] == 13
+        assert governance["vfs_runtime_mounted_reads_max_duration_ms"] == 48
+        assert governance["vfs_runtime_mounted_reads_bucket_le_5ms"] == 2
+        assert governance["vfs_runtime_mounted_reads_bucket_le_25ms"] == 4
+        assert governance["vfs_runtime_mounted_reads_bucket_le_100ms"] == 3
+        assert governance["vfs_runtime_mounted_reads_bucket_le_250ms"] == 1
+        assert governance["vfs_runtime_mounted_reads_bucket_gt_250ms"] == 0
+        assert governance["vfs_runtime_upstream_fetch_operations"] == 5
+        assert governance["vfs_runtime_upstream_fetch_bytes_total"] == 65536
+        assert governance["vfs_runtime_upstream_fetch_average_duration_ms"] == 23
+        assert governance["vfs_runtime_upstream_fetch_max_duration_ms"] == 72
+        assert governance["vfs_runtime_upstream_fail_invalid_url"] == 1
+        assert governance["vfs_runtime_upstream_fail_build_request"] == 0
+        assert governance["vfs_runtime_upstream_fail_network"] == 2
+        assert governance["vfs_runtime_upstream_fail_stale_status"] == 3
+        assert governance["vfs_runtime_upstream_fail_unexpected_status"] == 4
+        assert governance["vfs_runtime_upstream_fail_unexpected_status_too_many_requests"] == 2
+        assert governance["vfs_runtime_upstream_fail_unexpected_status_server_error"] == 1
+        assert governance["vfs_runtime_upstream_fail_read_body"] == 5
+        assert governance["vfs_runtime_upstream_retryable_network"] == 6
+        assert governance["vfs_runtime_upstream_retryable_read_body"] == 7
+        assert governance["vfs_runtime_upstream_retryable_status_too_many_requests"] == 8
+        assert governance["vfs_runtime_upstream_retryable_status_server_error"] == 9
+        assert governance["vfs_runtime_backend_fallback_attempts"] == 10
+        assert governance["vfs_runtime_backend_fallback_success"] == 7
+        assert governance["vfs_runtime_backend_fallback_failure"] == 3
+        assert governance["vfs_runtime_backend_fallback_attempts_direct_read_failure"] == 4
+        assert governance["vfs_runtime_backend_fallback_attempts_inline_refresh_unavailable"] == 3
+        assert (
+            governance["vfs_runtime_backend_fallback_attempts_post_inline_refresh_failure"] == 3
+        )
+        assert governance["vfs_runtime_backend_fallback_success_direct_read_failure"] == 2
+        assert governance["vfs_runtime_backend_fallback_success_inline_refresh_unavailable"] == 3
+        assert (
+            governance["vfs_runtime_backend_fallback_success_post_inline_refresh_failure"] == 2
+        )
+        assert governance["vfs_runtime_backend_fallback_failure_direct_read_failure"] == 2
+        assert governance["vfs_runtime_backend_fallback_failure_inline_refresh_unavailable"] == 0
+        assert (
+            governance["vfs_runtime_backend_fallback_failure_post_inline_refresh_failure"] == 1
+        )
+        assert governance["vfs_runtime_chunk_cache_hits"] == 9
+        assert governance["vfs_runtime_chunk_cache_misses"] == 3
+        assert governance["vfs_runtime_chunk_cache_inserts"] == 2
+        assert governance["vfs_runtime_chunk_cache_prefetch_hits"] == 1
+        assert governance["vfs_runtime_prefetch_concurrency_limit"] == 4
+        assert governance["vfs_runtime_prefetch_available_permits"] == 1
+        assert governance["vfs_runtime_prefetch_active_permits"] == 3
+        assert governance["vfs_runtime_prefetch_active_background_tasks"] == 2
+        assert governance["vfs_runtime_prefetch_peak_active_background_tasks"] == 4
+        assert governance["vfs_runtime_prefetch_background_spawned"] == 7
+        assert governance["vfs_runtime_prefetch_background_backpressure"] == 2
+        assert governance["vfs_runtime_prefetch_fairness_denied"] == 1
+        assert governance["vfs_runtime_prefetch_global_backpressure_denied"] == 1
+        assert governance["vfs_runtime_prefetch_background_error"] == 1
+        assert governance["vfs_runtime_chunk_coalescing_in_flight_chunks"] == 1
+        assert governance["vfs_runtime_chunk_coalescing_peak_in_flight_chunks"] == 3
+        assert governance["vfs_runtime_chunk_coalescing_waits_total"] == 6
+        assert governance["vfs_runtime_chunk_coalescing_waits_hit"] == 5
+        assert governance["vfs_runtime_chunk_coalescing_waits_miss"] == 1
+        assert governance["vfs_runtime_chunk_coalescing_wait_average_duration_ms"] == 14.25
+        assert governance["vfs_runtime_chunk_coalescing_wait_max_duration_ms"] == 89.5
+        assert governance["vfs_runtime_inline_refresh_success"] == 3
+        assert governance["vfs_runtime_inline_refresh_no_url"] == 1
+        assert governance["vfs_runtime_inline_refresh_error"] == 2
+        assert governance["vfs_runtime_inline_refresh_timeout"] == 1
+        assert governance["vfs_runtime_windows_callbacks_cancelled"] == 3
+        assert governance["vfs_runtime_windows_callbacks_error"] == 4
+        assert governance["vfs_runtime_windows_callbacks_estale"] == 2
+        assert governance["vfs_runtime_cache_hit_ratio"] == 0.75
+        assert governance["vfs_runtime_fallback_success_ratio"] == 0.7
+        assert governance["vfs_runtime_prefetch_pressure_ratio"] == 0.75
+        assert governance["vfs_runtime_provider_pressure_incidents"] == 22
+        assert governance["vfs_runtime_fairness_pressure_incidents"] == 2
+        assert governance["vfs_runtime_cache_pressure_class"] == "critical"
+        assert governance["vfs_runtime_cache_pressure_reasons"] == [
+            "disk_write_errors",
+            "disk_evictions_observed",
+        ]
+        assert governance["vfs_runtime_chunk_coalescing_pressure_class"] == "warning"
+        assert governance["vfs_runtime_chunk_coalescing_pressure_reasons"] == [
+            "coalescing_wait_misses",
+            "coalescing_wait_latency_high",
+            "coalescing_wait_spike",
+        ]
+        assert governance["vfs_runtime_upstream_wait_class"] == "critical"
+        assert governance["vfs_runtime_upstream_wait_reasons"] == [
+            "provider_pressure_incidents",
+            "retryable_network_wait",
+            "retryable_read_body_wait",
+        ]
+        assert governance["vfs_runtime_refresh_pressure_class"] == "critical"
+        assert governance["vfs_runtime_refresh_pressure_reasons"] == [
+            "backend_fallback_failures",
+            "inline_refresh_errors",
+            "inline_refresh_timeouts",
+            "backend_fallback_activity",
+        ]
+        assert governance["vfs_runtime_rollout_readiness"] == "blocked"
+        assert governance["vfs_runtime_rollout_reasons"] == [
+            "backend_fallback_failures",
+            "mounted_read_errors",
+            "prefetch_background_errors",
+            "disk_cache_write_errors",
+        ]
+        assert governance["vfs_runtime_rollout_next_action"] == "resolve_blocking_runtime_failures"
+        assert governance["vfs_runtime_rollout_canary_decision"] == "rollback_current_environment"
+        assert governance["vfs_runtime_rollout_merge_gate"] == "blocked"
+        assert governance["vfs_runtime_rust_handle_age_p50_ms"] == 12.5
+        assert governance["vfs_runtime_rust_handle_age_p95_ms"] == 98.0
+        assert governance["vfs_runtime_rust_handle_age_p99_ms"] == 133.0
+        assert governance["vfs_runtime_rust_handle_age_max_ms"] == 133.0
+        assert governance["vfs_runtime_python_handle_age_p50_ms"] >= 1000.0
+        assert governance["vfs_runtime_python_handle_age_p95_ms"] >= 1000.0
+        assert governance["vfs_runtime_python_handle_age_p99_ms"] >= 1000.0
+        assert governance["vfs_runtime_python_handle_age_max_ms"] >= 1000.0
+        assert governance["vfs_runtime_rust_bytes_per_mounted_read"] == 6553.6
+        assert governance["vfs_runtime_python_bytes_per_read"] == 4096.0
+        assert governance["vfs_runtime_rust_handle_depth_rollups"] == [
+            "global|mount-session-1|open=3|invalidated=1|avg_depth=4.00|max_depth=5|avg_age_ms=41.5|max_age_ms=133.0"
+        ]
+        assert len(governance["vfs_runtime_python_session_rollups"]) == 1
+        assert governance["vfs_runtime_python_session_rollups"][0].startswith(
+            "future-vfs|"
+        )
+    finally:
+        byte_streaming.release_handle(handle)
+        byte_streaming.release_serving_session(session)
 
 
 def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(

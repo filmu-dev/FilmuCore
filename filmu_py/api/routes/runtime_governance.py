@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+from filmu_py.core import byte_streaming
 from filmu_py.services.vfs_rollout_control import (
     apply_vfs_rollout_control_updates,
     build_vfs_rollout_control_state,
@@ -157,6 +158,23 @@ def _empty_vfs_runtime_governance_snapshot() -> dict[str, int | float | str | li
         "vfs_runtime_active_handle_tenant_count": 0,
         "vfs_runtime_active_handle_tenants": [],
         "vfs_runtime_active_handle_summaries": [],
+        "vfs_runtime_rust_handle_age_p50_ms": 0.0,
+        "vfs_runtime_rust_handle_age_p95_ms": 0.0,
+        "vfs_runtime_rust_handle_age_p99_ms": 0.0,
+        "vfs_runtime_rust_handle_age_max_ms": 0.0,
+        "vfs_runtime_python_handle_age_p50_ms": 0.0,
+        "vfs_runtime_python_handle_age_p95_ms": 0.0,
+        "vfs_runtime_python_handle_age_p99_ms": 0.0,
+        "vfs_runtime_python_handle_age_max_ms": 0.0,
+        "vfs_runtime_mounted_reads_bucket_le_5ms": 0,
+        "vfs_runtime_mounted_reads_bucket_le_25ms": 0,
+        "vfs_runtime_mounted_reads_bucket_le_100ms": 0,
+        "vfs_runtime_mounted_reads_bucket_le_250ms": 0,
+        "vfs_runtime_mounted_reads_bucket_gt_250ms": 0,
+        "vfs_runtime_rust_bytes_per_mounted_read": 0.0,
+        "vfs_runtime_python_bytes_per_read": 0.0,
+        "vfs_runtime_rust_handle_depth_rollups": [],
+        "vfs_runtime_python_session_rollups": [],
     }
 
 
@@ -226,6 +244,18 @@ def _as_str_list(value: object) -> list[str]:
     return normalized[:10]
 
 
+def _as_mapping_list(value: object) -> list[dict[str, object]]:
+    """Normalize list-like runtime snapshot mappings into typed rows."""
+
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, dict):
+            normalized.append(cast(dict[str, object], item))
+    return normalized
+
+
 def _parse_utc_timestamp(value: object) -> datetime | None:
     """Parse one artifact timestamp into a timezone-aware UTC datetime."""
 
@@ -293,6 +323,16 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4)
 
 
+def _percentile_value(values: list[float], percentile: float) -> float:
+    """Return one percentile from a pre-sorted numeric list."""
+
+    if not values:
+        return 0.0
+    last_index = len(values) - 1
+    rank = min(last_index, round(last_index * percentile))
+    return values[rank]
+
+
 def _pressure_class(
     *, critical: bool, warning: bool
 ) -> Literal["healthy", "warning", "critical"]:
@@ -314,6 +354,15 @@ def _nested_mapping_value(payload: object, *keys: str) -> object | None:
             return None
         current = current.get(key)
     return current
+
+
+def _duration_bucket_count(payload: object, *, label: str) -> int:
+    """Return one mounted-read duration bucket count from the Rust snapshot."""
+
+    for row in _as_mapping_list(_nested_mapping_value(payload, "mounted_reads", "duration_buckets")):
+        if _as_str(row.get("label")) == label:
+            return _as_int(row.get("count"))
+    return 0
 
 
 def _normalize_active_handle_summary(summary: str) -> tuple[str, str]:
@@ -365,6 +414,73 @@ def _tenant_safe_runtime_handle_summaries(
             hidden += 1
 
     return visible[:10], len(visible), hidden, sorted(visible_tenants)
+
+
+def _python_runtime_rollups() -> tuple[list[float], float, list[str]]:
+    """Return Python-side handle ages, bytes-per-read, and bounded session rollups."""
+
+    now = datetime.now(UTC)
+    active_handles = byte_streaming.get_active_handle_snapshot()
+    active_sessions = {
+        session.session_id: session for session in byte_streaming.get_active_session_snapshot()
+    }
+    ages_ms = sorted(
+        max(0.0, (now - handle.created_at).total_seconds() * 1000.0)
+        for handle in active_handles
+    )
+    total_bytes = sum(max(0, handle.bytes_served) for handle in active_handles)
+    total_reads = sum(max(0, handle.read_operations) for handle in active_handles)
+
+    session_rollups: dict[str, dict[str, object]] = {}
+    for handle in active_handles:
+        session = active_sessions.get(handle.session_id)
+        resource = session.resource if session is not None else ""
+        age_ms = max(0.0, (now - handle.created_at).total_seconds() * 1000.0)
+        rollup = session_rollups.setdefault(
+            handle.session_id,
+            {
+                "owner": handle.owner,
+                "resource": resource,
+                "handle_count": 0,
+                "read_operations": 0,
+                "bytes_served": 0,
+                "ages_ms": [],
+            },
+        )
+        rollup["handle_count"] = _as_int(rollup["handle_count"]) + 1
+        rollup["read_operations"] = _as_int(rollup["read_operations"]) + max(
+            0, handle.read_operations
+        )
+        rollup["bytes_served"] = _as_int(rollup["bytes_served"]) + max(0, handle.bytes_served)
+        cast(list[float], rollup["ages_ms"]).append(age_ms)
+
+    summaries: list[str] = []
+    ordered_rollups = sorted(
+        session_rollups.items(),
+        key=lambda item: (
+            -_as_int(item[1].get("read_operations")),
+            -_as_int(item[1].get("bytes_served")),
+            str(item[0]),
+        ),
+    )
+    for session_id, rollup in ordered_rollups[:10]:
+        rollup_ages = sorted(cast(list[float], rollup["ages_ms"]))
+        read_operations = _as_int(rollup["read_operations"])
+        bytes_served = _as_int(rollup["bytes_served"])
+        summaries.append(
+            (
+                f"{_as_str(rollup.get('owner'), default='unknown')}"
+                f"|{session_id}"
+                f"|handles={_as_int(rollup['handle_count'])}"
+                f"|reads={read_operations}"
+                f"|bytes={bytes_served}"
+                f"|p95_age_ms={_percentile_value(rollup_ages, 0.95):.1f}"
+                f"|bytes_per_read={_safe_ratio(bytes_served, read_operations):.1f}"
+                f"|resource={_as_str(rollup.get('resource'), default='')}"
+            )
+        )
+
+    return ages_ms, _safe_ratio(total_bytes, total_reads), summaries
 
 
 def _runtime_pressure_requires_queued_dispatch(
@@ -1641,6 +1757,58 @@ def _vfs_runtime_governance_snapshot(
     governance["vfs_runtime_active_handles_hidden"] = hidden_handles
     governance["vfs_runtime_active_handle_tenant_count"] = len(visible_tenants)
     governance["vfs_runtime_active_handle_tenants"] = visible_tenants
+    governance["vfs_runtime_rust_handle_age_p50_ms"] = _as_float(
+        _nested_mapping_value(payload, "runtime", "active_handle_age_percentiles_ms", "p50_ms")
+    )
+    governance["vfs_runtime_rust_handle_age_p95_ms"] = _as_float(
+        _nested_mapping_value(payload, "runtime", "active_handle_age_percentiles_ms", "p95_ms")
+    )
+    governance["vfs_runtime_rust_handle_age_p99_ms"] = _as_float(
+        _nested_mapping_value(payload, "runtime", "active_handle_age_percentiles_ms", "p99_ms")
+    )
+    governance["vfs_runtime_rust_handle_age_max_ms"] = _as_float(
+        _nested_mapping_value(payload, "runtime", "active_handle_age_percentiles_ms", "max_ms")
+    )
+    governance["vfs_runtime_mounted_reads_bucket_le_5ms"] = _duration_bucket_count(
+        payload, label="le_5_ms"
+    )
+    governance["vfs_runtime_mounted_reads_bucket_le_25ms"] = _duration_bucket_count(
+        payload, label="le_25_ms"
+    )
+    governance["vfs_runtime_mounted_reads_bucket_le_100ms"] = _duration_bucket_count(
+        payload, label="le_100_ms"
+    )
+    governance["vfs_runtime_mounted_reads_bucket_le_250ms"] = _duration_bucket_count(
+        payload, label="le_250_ms"
+    )
+    governance["vfs_runtime_mounted_reads_bucket_gt_250ms"] = _duration_bucket_count(
+        payload, label="gt_250_ms"
+    )
+    rust_rollup_rows = _as_mapping_list(_nested_mapping_value(payload, "runtime", "handle_depth_rollups"))
+    governance["vfs_runtime_rust_handle_depth_rollups"] = [
+        (
+            f"{_as_str(row.get('tenant_id'), default='unknown')}"
+            f"|{_as_str(row.get('session_id'), default='')}"
+            f"|open={_as_int(row.get('open_handles'))}"
+            f"|invalidated={_as_int(row.get('invalidated_handles'))}"
+            f"|avg_depth={_as_float(row.get('average_depth')):.2f}"
+            f"|max_depth={_as_int(row.get('max_depth'))}"
+            f"|avg_age_ms={_as_float(row.get('average_age_ms')):.1f}"
+            f"|max_age_ms={_as_float(row.get('max_age_ms')):.1f}"
+        )
+        for row in rust_rollup_rows[:10]
+    ]
+    governance["vfs_runtime_rust_bytes_per_mounted_read"] = _safe_ratio(
+        _as_int(governance["vfs_runtime_upstream_fetch_bytes_total"]),
+        _as_int(governance["vfs_runtime_mounted_reads_total"]),
+    )
+    python_ages_ms, python_bytes_per_read, python_session_rollups = _python_runtime_rollups()
+    governance["vfs_runtime_python_handle_age_p50_ms"] = _percentile_value(python_ages_ms, 0.50)
+    governance["vfs_runtime_python_handle_age_p95_ms"] = _percentile_value(python_ages_ms, 0.95)
+    governance["vfs_runtime_python_handle_age_p99_ms"] = _percentile_value(python_ages_ms, 0.99)
+    governance["vfs_runtime_python_handle_age_max_ms"] = python_ages_ms[-1] if python_ages_ms else 0.0
+    governance["vfs_runtime_python_bytes_per_read"] = python_bytes_per_read
+    governance["vfs_runtime_python_session_rollups"] = python_session_rollups
     return _apply_vfs_rollout_policy(
         governance,
         playback_gate_governance=playback_gate_governance,

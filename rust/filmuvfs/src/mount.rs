@@ -23,6 +23,7 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 #[cfg(not(target_os = "windows"))]
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use prost::Message;
+use serde::Serialize;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Notify;
@@ -217,6 +218,58 @@ struct MountHandleState {
     opened_at: Instant,
     startup_recorded: bool,
     cancel_token: CancellationToken,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MountHandleAgePercentiles {
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MountHandleDepthRollup {
+    pub tenant_id: String,
+    pub session_id: String,
+    pub open_handles: u64,
+    pub invalidated_handles: u64,
+    pub average_depth: f64,
+    pub max_depth: u64,
+    pub average_age_ms: f64,
+    pub max_age_ms: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MountHandleTelemetrySnapshot {
+    pub age_percentiles_ms: MountHandleAgePercentiles,
+    pub depth_rollups: Vec<MountHandleDepthRollup>,
+}
+
+#[derive(Debug, Default)]
+struct MountHandleDepthAccumulator {
+    open_handles: u64,
+    invalidated_handles: u64,
+    total_depth: u64,
+    max_depth: u64,
+    total_age_ms: f64,
+    max_age_ms: f64,
+}
+
+fn path_depth(path: &str) -> u64 {
+    if path.starts_with("invalidated:") {
+        return 0;
+    }
+    path.split('/').filter(|segment| !segment.is_empty()).count() as u64
+}
+
+fn percentile_value(sorted_values: &[f64], percentile: f64) -> f64 {
+    if sorted_values.is_empty() {
+        return 0.0;
+    }
+    let last_index = sorted_values.len() - 1;
+    let rank = ((last_index as f64) * percentile).ceil() as usize;
+    sorted_values[rank.min(last_index)]
 }
 
 #[derive(Debug)]
@@ -794,6 +847,90 @@ impl MountRuntime {
         summaries.sort();
         summaries.truncate(limit);
         summaries
+    }
+
+    pub fn active_handle_telemetry(&self, limit: usize) -> MountHandleTelemetrySnapshot {
+        let mut ages_ms: Vec<f64> = Vec::new();
+        let mut rollups: HashMap<(String, String), MountHandleDepthAccumulator> = HashMap::new();
+
+        for entry in self.handles.iter() {
+            let state = entry.value();
+            let age_ms = state.opened_at.elapsed().as_secs_f64() * 1000.0;
+            ages_ms.push(age_ms);
+
+            let (path, tenant_id) = self
+                .entry_for_inode(state.inode)
+                .map(|catalog_entry| {
+                    let tenant_id = catalog_entry
+                        .correlation
+                        .as_ref()
+                        .and_then(|correlation| correlation.tenant_id.clone())
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    (catalog_entry.path.clone(), tenant_id)
+                })
+                .unwrap_or_else(|| {
+                    (
+                        format!("invalidated:inode:{}", state.inode),
+                        "unknown".to_owned(),
+                    )
+                });
+
+            let depth = path_depth(&path);
+            let key = (tenant_id.clone(), self.session_id.as_str().to_owned());
+            let accumulator = rollups.entry(key).or_default();
+            accumulator.open_handles += 1;
+            if state.invalidated {
+                accumulator.invalidated_handles += 1;
+            }
+            accumulator.total_depth += depth;
+            accumulator.max_depth = accumulator.max_depth.max(depth);
+            accumulator.total_age_ms += age_ms;
+            accumulator.max_age_ms = accumulator.max_age_ms.max(age_ms);
+        }
+
+        ages_ms.sort_by(|left, right| left.total_cmp(right));
+        let age_percentiles_ms = MountHandleAgePercentiles {
+            p50_ms: percentile_value(&ages_ms, 0.50),
+            p95_ms: percentile_value(&ages_ms, 0.95),
+            p99_ms: percentile_value(&ages_ms, 0.99),
+            max_ms: ages_ms.last().copied().unwrap_or(0.0),
+        };
+
+        let mut depth_rollups = rollups
+            .into_iter()
+            .map(|((tenant_id, session_id), accumulator)| MountHandleDepthRollup {
+                tenant_id,
+                session_id,
+                open_handles: accumulator.open_handles,
+                invalidated_handles: accumulator.invalidated_handles,
+                average_depth: if accumulator.open_handles == 0 {
+                    0.0
+                } else {
+                    accumulator.total_depth as f64 / accumulator.open_handles as f64
+                },
+                max_depth: accumulator.max_depth,
+                average_age_ms: if accumulator.open_handles == 0 {
+                    0.0
+                } else {
+                    accumulator.total_age_ms / accumulator.open_handles as f64
+                },
+                max_age_ms: accumulator.max_age_ms,
+            })
+            .collect::<Vec<_>>();
+        depth_rollups.sort_by(|left, right| {
+            right
+                .open_handles
+                .cmp(&left.open_handles)
+                .then_with(|| right.max_age_ms.total_cmp(&left.max_age_ms))
+                .then_with(|| left.tenant_id.cmp(&right.tenant_id))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        depth_rollups.truncate(limit);
+
+        MountHandleTelemetrySnapshot {
+            age_percentiles_ms,
+            depth_rollups,
+        }
     }
 
     fn record_handle_startup_result(&self, handle_id: u64, result: &'static str) {
@@ -3133,8 +3270,10 @@ fn format_backend_stream_url(base_url: &str, item_id: &str, api_key: &str) -> St
 mod tests {
     use super::{
         build_chunk_read_request, format_backend_stream_url, parse_media_semantic_path,
-        InlineRefreshFlight, MountReadRequest,
+        InlineRefreshFlight, MountHandleState, MountReadRequest, MountRuntime,
     };
+    use crate::catalog::state::CatalogStateStore;
+    use std::{sync::Arc, time::Instant};
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
 
@@ -3185,6 +3324,52 @@ mod tests {
             Some("movie-file")
         );
         assert_eq!(request.semantic_path.tmdb_id.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn active_handle_telemetry_reports_percentiles_and_rollups() {
+        let runtime = MountRuntime::new(
+            Arc::new(CatalogStateStore::new()),
+            "session-runtime".to_owned(),
+        );
+        runtime.handles.insert(
+            1,
+            MountHandleState {
+                inode: 7,
+                handle_key: "session-runtime:1".to_owned(),
+                invalidated: false,
+                opened_at: Instant::now() - std::time::Duration::from_millis(12),
+                startup_recorded: false,
+                cancel_token: CancellationToken::new(),
+            },
+        );
+        runtime.handles.insert(
+            2,
+            MountHandleState {
+                inode: 8,
+                handle_key: "session-runtime:2".to_owned(),
+                invalidated: true,
+                opened_at: Instant::now() - std::time::Duration::from_millis(220),
+                startup_recorded: false,
+                cancel_token: CancellationToken::new(),
+            },
+        );
+
+        let telemetry = runtime.active_handle_telemetry(10);
+
+        assert_eq!(telemetry.depth_rollups.len(), 1);
+        let rollup = &telemetry.depth_rollups[0];
+        assert_eq!(rollup.tenant_id, "unknown");
+        assert_eq!(rollup.session_id, "session-runtime");
+        assert_eq!(rollup.open_handles, 2);
+        assert_eq!(rollup.invalidated_handles, 1);
+        assert_eq!(rollup.max_depth, 0);
+        assert!(rollup.average_age_ms >= 12.0);
+        assert!(rollup.max_age_ms >= 220.0);
+        assert!(telemetry.age_percentiles_ms.p50_ms >= 12.0);
+        assert!(telemetry.age_percentiles_ms.p95_ms >= telemetry.age_percentiles_ms.p50_ms);
+        assert!(telemetry.age_percentiles_ms.p99_ms >= telemetry.age_percentiles_ms.p95_ms);
+        assert!(telemetry.age_percentiles_ms.max_ms >= telemetry.age_percentiles_ms.p99_ms);
     }
 
     #[test]

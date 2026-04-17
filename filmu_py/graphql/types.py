@@ -354,6 +354,84 @@ class GQLVfsRuntimeRollout:
 
 
 @strawberry.type
+class GQLVfsRuntimePercentiles:
+    """One bounded percentile set for runtime handle ages."""
+
+    p50_ms: float = strawberry.field(name="p50Ms")
+    p95_ms: float = strawberry.field(name="p95Ms")
+    p99_ms: float = strawberry.field(name="p99Ms")
+    max_ms: float = strawberry.field(name="maxMs")
+
+
+@strawberry.type
+class GQLVfsRuntimeRustHandleRollup:
+    """One Rust-mounted handle-depth rollup grouped by tenant and session."""
+
+    tenant_id: str = strawberry.field(name="tenantId")
+    session_id: str = strawberry.field(name="sessionId")
+    open_handles: int = strawberry.field(name="openHandles")
+    invalidated_handles: int = strawberry.field(name="invalidatedHandles")
+    average_depth: float = strawberry.field(name="averageDepth")
+    max_depth: int = strawberry.field(name="maxDepth")
+    average_age_ms: float = strawberry.field(name="averageAgeMs")
+    max_age_ms: float = strawberry.field(name="maxAgeMs")
+
+
+@strawberry.type
+class GQLVfsRuntimePythonSessionRollup:
+    """One Python serving-session rollup with depth and age summaries."""
+
+    owner: str
+    session_id: str = strawberry.field(name="sessionId")
+    resource: str
+    open_handles: int = strawberry.field(name="openHandles")
+    read_operations: int = strawberry.field(name="readOperations")
+    bytes_served: int = strawberry.field(name="bytesServed")
+    average_age_ms: float = strawberry.field(name="averageAgeMs")
+    p95_age_ms: float = strawberry.field(name="p95AgeMs")
+    average_depth: float = strawberry.field(name="averageDepth")
+    max_depth: int = strawberry.field(name="maxDepth")
+    bytes_per_read: float = strawberry.field(name="bytesPerRead")
+
+
+@strawberry.type
+class GQLVfsRuntimeReadAmplification:
+    """One view-specific bytes-per-read summary."""
+
+    view: str
+    total_operations: int = strawberry.field(name="totalOperations")
+    total_bytes: int = strawberry.field(name="totalBytes")
+    bytes_per_read: float = strawberry.field(name="bytesPerRead")
+
+
+@strawberry.type
+class GQLVfsRuntimeTelemetry:
+    """Detailed VFS runtime telemetry across Rust-mounted and Python-serving views."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    status: str
+    rust_snapshot_available: bool = strawberry.field(name="rustSnapshotAvailable")
+    python_active_session_count: int = strawberry.field(name="pythonActiveSessionCount")
+    python_active_handle_count: int = strawberry.field(name="pythonActiveHandleCount")
+    rust_handle_age_ms: GQLVfsRuntimePercentiles = strawberry.field(name="rustHandleAgeMs")
+    python_handle_age_ms: GQLVfsRuntimePercentiles = strawberry.field(name="pythonHandleAgeMs")
+    mounted_read_duration_buckets: list[GQLNamedCountBucket] = strawberry.field(
+        name="mountedReadDurationBuckets"
+    )
+    rust_handle_depth_rollups: list[GQLVfsRuntimeRustHandleRollup] = strawberry.field(
+        name="rustHandleDepthRollups"
+    )
+    python_session_rollups: list[GQLVfsRuntimePythonSessionRollup] = strawberry.field(
+        name="pythonSessionRollups"
+    )
+    read_amplification: list[GQLVfsRuntimeReadAmplification] = strawberry.field(
+        name="readAmplification"
+    )
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
 class GQLVfsRolloutLedgerEntry:
     """One retained operator history row for VFS rollout control."""
 

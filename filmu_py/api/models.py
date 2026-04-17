@@ -1281,6 +1281,23 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_active_handles_hidden: int = 0
     vfs_runtime_active_handle_tenant_count: int = 0
     vfs_runtime_active_handle_tenants: list[str] = []
+    vfs_runtime_rust_handle_age_p50_ms: float = 0.0
+    vfs_runtime_rust_handle_age_p95_ms: float = 0.0
+    vfs_runtime_rust_handle_age_p99_ms: float = 0.0
+    vfs_runtime_rust_handle_age_max_ms: float = 0.0
+    vfs_runtime_python_handle_age_p50_ms: float = 0.0
+    vfs_runtime_python_handle_age_p95_ms: float = 0.0
+    vfs_runtime_python_handle_age_p99_ms: float = 0.0
+    vfs_runtime_python_handle_age_max_ms: float = 0.0
+    vfs_runtime_mounted_reads_bucket_le_5ms: int = 0
+    vfs_runtime_mounted_reads_bucket_le_25ms: int = 0
+    vfs_runtime_mounted_reads_bucket_le_100ms: int = 0
+    vfs_runtime_mounted_reads_bucket_le_250ms: int = 0
+    vfs_runtime_mounted_reads_bucket_gt_250ms: int = 0
+    vfs_runtime_rust_bytes_per_mounted_read: float = 0.0
+    vfs_runtime_python_bytes_per_read: float = 0.0
+    vfs_runtime_rust_handle_depth_rollups: list[str] = []
+    vfs_runtime_python_session_rollups: list[str] = []
     playback_gate_snapshot_available: int
     playback_gate_artifact_generated_at: str
     playback_gate_environment_class: str

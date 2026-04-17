@@ -6,6 +6,7 @@ import fnmatch
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -17,6 +18,7 @@ from pydantic import AnyUrl, SecretStr
 
 from filmu_py.api.routes import default as default_routes
 from filmu_py.config import Settings
+from filmu_py.core import byte_streaming
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
@@ -4505,6 +4507,184 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
         "requiredActions": ["promote_to_next_environment_class"],
         "remainingGaps": ["vfs rollout reason: no_blocking_runtime_signals"],
     }
+
+
+def test_graphql_vfs_runtime_telemetry_returns_cross_view_rollups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 3,
+                    "active_reads": 1,
+                    "active_handle_age_percentiles_ms": {
+                        "p50_ms": 15.0,
+                        "p95_ms": 80.0,
+                        "p99_ms": 120.0,
+                        "max_ms": 120.0,
+                    },
+                    "handle_depth_rollups": [
+                        {
+                            "tenant_id": "global",
+                            "session_id": "mount-session-1",
+                            "open_handles": 3,
+                            "invalidated_handles": 1,
+                            "average_depth": 3.5,
+                            "max_depth": 5,
+                            "average_age_ms": 48.0,
+                            "max_age_ms": 120.0,
+                        }
+                    ],
+                },
+                "mounted_reads": {
+                    "total": 4,
+                    "duration_buckets": [
+                        {"label": "le_5_ms", "count": 1},
+                        {"label": "le_25_ms", "count": 2},
+                        {"label": "le_100_ms", "count": 1},
+                        {"label": "le_250_ms", "count": 0},
+                        {"label": "gt_250_ms", "count": 0},
+                    ],
+                },
+                "upstream_fetch": {
+                    "operations": 4,
+                    "bytes_total": 8192,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+
+    python_view_path = tmp_path / "python-runtime-view.mkv"
+    python_view_path.write_bytes(b"1" * 64)
+    session = byte_streaming.open_mount_session(resource=str(python_view_path))
+    handle = byte_streaming.open_local_file_handle(session=session, path=python_view_path)
+    handle.created_at = datetime.now(UTC) - timedelta(milliseconds=2200)
+    byte_streaming.read_from_handle(handle=handle, chunk_size=2048)
+
+    client = _build_client(FakeMediaService())
+    try:
+        response = client.post(
+            "/graphql",
+            json={
+                "query": """
+                    query {
+                      vfsRuntimeTelemetry {
+                        status
+                        rustSnapshotAvailable
+                        pythonActiveSessionCount
+                        pythonActiveHandleCount
+                        rustHandleAgeMs { p50Ms p95Ms p99Ms maxMs }
+                        pythonHandleAgeMs { p50Ms p95Ms p99Ms maxMs }
+                        mountedReadDurationBuckets { key count }
+                        rustHandleDepthRollups {
+                          tenantId
+                          sessionId
+                          openHandles
+                          invalidatedHandles
+                          averageDepth
+                          maxDepth
+                          averageAgeMs
+                          maxAgeMs
+                        }
+                        pythonSessionRollups {
+                          owner
+                          sessionId
+                          resource
+                          openHandles
+                          readOperations
+                          bytesServed
+                          averageAgeMs
+                          p95AgeMs
+                          averageDepth
+                          maxDepth
+                          bytesPerRead
+                        }
+                        readAmplification {
+                          view
+                          totalOperations
+                          totalBytes
+                          bytesPerRead
+                        }
+                        requiredActions
+                        remainingGaps
+                      }
+                    }
+                """
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()["data"]["vfsRuntimeTelemetry"]
+        assert payload["status"] == "ready"
+        assert payload["rustSnapshotAvailable"] is True
+        assert payload["pythonActiveSessionCount"] == 1
+        assert payload["pythonActiveHandleCount"] == 1
+        assert payload["rustHandleAgeMs"] == {
+            "p50Ms": 15.0,
+            "p95Ms": 80.0,
+            "p99Ms": 120.0,
+            "maxMs": 120.0,
+        }
+        assert payload["pythonHandleAgeMs"]["p50Ms"] >= 1000.0
+        assert payload["pythonHandleAgeMs"]["maxMs"] >= payload["pythonHandleAgeMs"]["p50Ms"]
+        assert payload["mountedReadDurationBuckets"] == [
+            {"key": "gt_250_ms", "count": 0},
+            {"key": "le_100_ms", "count": 1},
+            {"key": "le_250_ms", "count": 0},
+            {"key": "le_25_ms", "count": 2},
+            {"key": "le_5_ms", "count": 1},
+        ]
+        assert payload["rustHandleDepthRollups"] == [
+            {
+                "tenantId": "global",
+                "sessionId": "mount-session-1",
+                "openHandles": 3,
+                "invalidatedHandles": 1,
+                "averageDepth": 3.5,
+                "maxDepth": 5,
+                "averageAgeMs": 48.0,
+                "maxAgeMs": 120.0,
+            }
+        ]
+        assert len(payload["pythonSessionRollups"]) == 1
+        python_rollup = payload["pythonSessionRollups"][0]
+        assert python_rollup["owner"] == "future-vfs"
+        assert python_rollup["sessionId"] == session.session_id
+        assert python_rollup["resource"] == str(python_view_path)
+        assert python_rollup["openHandles"] == 1
+        assert python_rollup["readOperations"] == 1
+        assert python_rollup["bytesServed"] == 2048
+        assert python_rollup["averageAgeMs"] >= 1000.0
+        assert python_rollup["p95AgeMs"] >= python_rollup["averageAgeMs"]
+        expected_depth = len(
+            [segment for segment in str(python_view_path).replace("\\", "/").split("/") if segment]
+        )
+        assert python_rollup["averageDepth"] == float(expected_depth)
+        assert python_rollup["maxDepth"] == expected_depth
+        assert python_rollup["bytesPerRead"] == 2048.0
+        assert payload["readAmplification"] == [
+            {
+                "view": "rust_mount",
+                "totalOperations": 4,
+                "totalBytes": 8192,
+                "bytesPerRead": 2048.0,
+            },
+            {
+                "view": "python_serving",
+                "totalOperations": 1,
+                "totalBytes": 2048,
+                "bytesPerRead": 2048.0,
+            },
+        ]
+        assert payload["requiredActions"] == ["promote_to_next_environment_class"]
+        assert payload["remainingGaps"] == ["vfs rollout reason: no_blocking_runtime_signals"]
+    finally:
+        byte_streaming.release_handle(handle)
+        byte_streaming.release_serving_session(session)
 
 
 def test_graphql_plugin_runtime_overview_and_warnings_use_shared_posture() -> None:

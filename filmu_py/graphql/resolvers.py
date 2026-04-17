@@ -118,7 +118,12 @@ from filmu_py.graphql.types import (
     GQLVfsRollupBucket,
     GQLVfsRolloutControl,
     GQLVfsRolloutLedgerEntry,
+    GQLVfsRuntimePercentiles,
+    GQLVfsRuntimePythonSessionRollup,
+    GQLVfsRuntimeReadAmplification,
     GQLVfsRuntimeRollout,
+    GQLVfsRuntimeRustHandleRollup,
+    GQLVfsRuntimeTelemetry,
     GQLVfsSearchResult,
     GQLVfsSnapshot,
     GQLWorkerQueueHistoryPoint,
@@ -158,6 +163,7 @@ from filmu_py.services.governance_posture import (
     build_plugin_runtime_rows,
     build_vfs_generation_history_posture,
     build_vfs_generation_history_summary,
+    build_vfs_runtime_telemetry_posture,
     build_vfs_runtime_rollout_posture,
 )
 from filmu_py.services.graphql_support_posture import (
@@ -839,6 +845,93 @@ def _build_vfs_runtime_rollout(snapshot: object) -> GQLVfsRuntimeRollout:
         provider_pressure_incidents=int(typed_snapshot.provider_pressure_incidents),
         fairness_pressure_incidents=int(typed_snapshot.fairness_pressure_incidents),
         reasons=list(typed_snapshot.reasons),
+        required_actions=list(typed_snapshot.required_actions),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_vfs_runtime_percentiles(snapshot: object) -> GQLVfsRuntimePercentiles:
+    typed_snapshot: Any = snapshot
+    return GQLVfsRuntimePercentiles(
+        p50_ms=float(typed_snapshot.p50_ms),
+        p95_ms=float(typed_snapshot.p95_ms),
+        p99_ms=float(typed_snapshot.p99_ms),
+        max_ms=float(typed_snapshot.max_ms),
+    )
+
+
+def _build_vfs_runtime_rust_handle_rollup(snapshot: object) -> GQLVfsRuntimeRustHandleRollup:
+    typed_snapshot: Any = snapshot
+    return GQLVfsRuntimeRustHandleRollup(
+        tenant_id=str(typed_snapshot.tenant_id),
+        session_id=str(typed_snapshot.session_id),
+        open_handles=int(typed_snapshot.open_handles),
+        invalidated_handles=int(typed_snapshot.invalidated_handles),
+        average_depth=float(typed_snapshot.average_depth),
+        max_depth=int(typed_snapshot.max_depth),
+        average_age_ms=float(typed_snapshot.average_age_ms),
+        max_age_ms=float(typed_snapshot.max_age_ms),
+    )
+
+
+def _build_vfs_runtime_python_session_rollup(
+    snapshot: object,
+) -> GQLVfsRuntimePythonSessionRollup:
+    typed_snapshot: Any = snapshot
+    return GQLVfsRuntimePythonSessionRollup(
+        owner=str(typed_snapshot.owner),
+        session_id=str(typed_snapshot.session_id),
+        resource=str(typed_snapshot.resource),
+        open_handles=int(typed_snapshot.open_handles),
+        read_operations=int(typed_snapshot.read_operations),
+        bytes_served=int(typed_snapshot.bytes_served),
+        average_age_ms=float(typed_snapshot.average_age_ms),
+        p95_age_ms=float(typed_snapshot.p95_age_ms),
+        average_depth=float(typed_snapshot.average_depth),
+        max_depth=int(typed_snapshot.max_depth),
+        bytes_per_read=float(typed_snapshot.bytes_per_read),
+    )
+
+
+def _build_vfs_runtime_read_amplification(
+    snapshot: object,
+) -> GQLVfsRuntimeReadAmplification:
+    typed_snapshot: Any = snapshot
+    return GQLVfsRuntimeReadAmplification(
+        view=str(typed_snapshot.view),
+        total_operations=int(typed_snapshot.total_operations),
+        total_bytes=int(typed_snapshot.total_bytes),
+        bytes_per_read=float(typed_snapshot.bytes_per_read),
+    )
+
+
+def _build_vfs_runtime_telemetry(snapshot: object) -> GQLVfsRuntimeTelemetry:
+    typed_snapshot: Any = snapshot
+    bucket_rows = [
+        GQLNamedCountBucket(key=key, count=int(count))
+        for key, count in sorted(dict(typed_snapshot.mounted_read_duration_buckets).items())
+    ]
+    return GQLVfsRuntimeTelemetry(
+        generated_at=str(typed_snapshot.generated_at),
+        status=str(typed_snapshot.status),
+        rust_snapshot_available=bool(typed_snapshot.rust_snapshot_available),
+        python_active_session_count=int(typed_snapshot.python_active_session_count),
+        python_active_handle_count=int(typed_snapshot.python_active_handle_count),
+        rust_handle_age_ms=_build_vfs_runtime_percentiles(typed_snapshot.rust_handle_age_ms),
+        python_handle_age_ms=_build_vfs_runtime_percentiles(typed_snapshot.python_handle_age_ms),
+        mounted_read_duration_buckets=bucket_rows,
+        rust_handle_depth_rollups=[
+            _build_vfs_runtime_rust_handle_rollup(row)
+            for row in list(typed_snapshot.rust_handle_depth_rollups)
+        ],
+        python_session_rollups=[
+            _build_vfs_runtime_python_session_rollup(row)
+            for row in list(typed_snapshot.python_session_rollups)
+        ],
+        read_amplification=[
+            _build_vfs_runtime_read_amplification(row)
+            for row in list(typed_snapshot.read_amplification)
+        ],
         required_actions=list(typed_snapshot.required_actions),
         remaining_gaps=list(typed_snapshot.remaining_gaps),
     )
@@ -3005,6 +3098,17 @@ class CoreQueryResolver:
     ) -> GQLVfsRuntimeRollout:
         return _build_vfs_runtime_rollout(
             build_vfs_runtime_rollout_posture(info.context.resources)
+        )
+
+    @strawberry.field(
+        description="Detailed VFS runtime telemetry with Rust-mounted and Python-serving rollups"
+    )
+    async def vfs_runtime_telemetry(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLVfsRuntimeTelemetry:
+        return _build_vfs_runtime_telemetry(
+            build_vfs_runtime_telemetry_posture(info.context.resources)
         )
 
     @strawberry.field(
