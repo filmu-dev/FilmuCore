@@ -486,6 +486,111 @@ class GQLVfsRolloutControl:
 
 
 @strawberry.type
+class GQLAccessPolicyRevision:
+    """One persisted access-policy revision exposed through GraphQL."""
+
+    version: str
+    source: str
+    approval_status: str = strawberry.field(name="approvalStatus")
+    proposed_by: str | None = strawberry.field(name="proposedBy", default=None)
+    approved_by: str | None = strawberry.field(name="approvedBy", default=None)
+    approved_at: str | None = strawberry.field(name="approvedAt", default=None)
+    approval_notes: str | None = strawberry.field(name="approvalNotes", default=None)
+    is_active: bool = strawberry.field(name="isActive")
+    activated_at: str = strawberry.field(name="activatedAt")
+    created_at: str = strawberry.field(name="createdAt")
+    updated_at: str = strawberry.field(name="updatedAt")
+    role_grants: JSON = strawberry.field(name="roleGrants", default_factory=dict)
+    principal_roles: JSON = strawberry.field(name="principalRoles", default_factory=dict)
+    principal_scopes: JSON = strawberry.field(name="principalScopes", default_factory=dict)
+    principal_tenant_grants: JSON = strawberry.field(
+        name="principalTenantGrants",
+        default_factory=dict,
+    )
+    permission_constraints: JSON = strawberry.field(
+        name="permissionConstraints",
+        default_factory=dict,
+    )
+    audit_decisions: bool = strawberry.field(name="auditDecisions")
+    alerting_enabled: bool = strawberry.field(name="alertingEnabled")
+    repeated_denial_warning_threshold: int = strawberry.field(
+        name="repeatedDenialWarningThreshold"
+    )
+    repeated_denial_critical_threshold: int = strawberry.field(
+        name="repeatedDenialCriticalThreshold"
+    )
+
+
+@strawberry.type
+class GQLAccessPolicyRevisionList:
+    """Bounded access-policy revision inventory for GraphQL operator clients."""
+
+    active_version: str | None = strawberry.field(name="activeVersion", default=None)
+    revisions: list[GQLAccessPolicyRevision]
+
+
+@strawberry.input
+class AccessPolicyRevisionWriteInput:
+    """GraphQL input for one persisted access-policy revision write."""
+
+    version: str
+    source: str = "operator_api"
+    activate: bool = False
+    approval_notes: str | None = strawberry.field(name="approvalNotes", default=None)
+    role_grants: JSON = strawberry.field(name="roleGrants", default_factory=dict)
+    principal_roles: JSON = strawberry.field(name="principalRoles", default_factory=dict)
+    principal_scopes: JSON = strawberry.field(name="principalScopes", default_factory=dict)
+    principal_tenant_grants: JSON = strawberry.field(
+        name="principalTenantGrants",
+        default_factory=dict,
+    )
+    permission_constraints: JSON = strawberry.field(
+        name="permissionConstraints",
+        default_factory=dict,
+    )
+    audit_decisions: bool = strawberry.field(name="auditDecisions", default=True)
+    alerting_enabled: bool = strawberry.field(name="alertingEnabled", default=True)
+    repeated_denial_warning_threshold: int = strawberry.field(
+        name="repeatedDenialWarningThreshold",
+        default=3,
+    )
+    repeated_denial_critical_threshold: int = strawberry.field(
+        name="repeatedDenialCriticalThreshold",
+        default=5,
+    )
+
+
+@strawberry.input
+class AccessPolicyRevisionApprovalInput:
+    """GraphQL input for approval or rejection of one access-policy revision."""
+
+    approval_notes: str | None = strawberry.field(name="approvalNotes", default=None)
+    activate: bool = False
+
+
+@strawberry.type
+class GQLPluginGovernanceOverride:
+    """One persisted plugin-governance override exposed through GraphQL."""
+
+    plugin_name: str = strawberry.field(name="pluginName")
+    state: str
+    reason: str | None = None
+    notes: str | None = None
+    updated_by: str | None = strawberry.field(name="updatedBy", default=None)
+    created_at: str = strawberry.field(name="createdAt")
+    updated_at: str = strawberry.field(name="updatedAt")
+
+
+@strawberry.input
+class PluginGovernanceOverrideWriteInput:
+    """GraphQL input for one plugin-governance override write."""
+
+    state: str
+    reason: str | None = None
+    notes: str | None = None
+
+
+@strawberry.type
 class GQLControlPlaneStatusCount:
     """One typed control-plane subscriber-status count bucket."""
 
@@ -1573,9 +1678,9 @@ class GQLLibraryStats:
     completed_items: int = strawberry.field(name="completedItems")
     incomplete_items: int = strawberry.field(name="incompleteItems")
     failed_items: int = strawberry.field(name="failedItems")
-    # Placeholder until the future frontend defines the exact richer JSON contract it wants.
+    # Placeholder until Director or another product client defines the exact richer JSON contract it wants.
     state_breakdown: str | None = strawberry.field(name="stateBreakdown", default=None)
-    # Placeholder until the future frontend defines the exact richer JSON contract it wants.
+    # Placeholder until Director or another product client defines the exact richer JSON contract it wants.
     activity: str | None = None
 
 

@@ -36,6 +36,7 @@ from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
+from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services import governance_posture
 from filmu_py.services.media import (
     CalendarProjectionRecord,
@@ -331,6 +332,172 @@ class FakeMediaService:
         return next((record for record in self.item_records if record.id == item_id), None)
 
 
+class DummyAccessPolicyService:
+    def __init__(self, settings: Settings) -> None:
+        self.snapshot = snapshot_from_settings(settings.access_policy)
+        now = datetime(2026, 4, 11, 12, 0, tzinfo=UTC)
+        self.revisions: list[Any] = [self._build_revision_record(self.snapshot, now, True)]
+
+    def _build_revision_record(self, snapshot: Any, at: datetime, is_active: bool) -> Any:
+        record = type("AccessPolicyRevisionRecord", (), {})()
+        record.version = snapshot.version
+        record.source = snapshot.source
+        record.approval_status = "approved" if is_active else "draft"
+        record.proposed_by = "tenant-main:operator-1"
+        record.approved_by = "tenant-main:operator-1" if is_active else None
+        record.approved_at = at if is_active else None
+        record.approval_notes = "test"
+        record.is_active = is_active
+        record.activated_at = at
+        record.created_at = at
+        record.updated_at = at
+        record.role_grants = snapshot.role_grants
+        record.principal_roles = snapshot.principal_roles
+        record.principal_scopes = snapshot.principal_scopes
+        record.principal_tenant_grants = snapshot.principal_tenant_grants
+        record.permission_constraints = snapshot.permission_constraints
+        record.audit_decisions = snapshot.audit_decisions
+        record.alerting_enabled = snapshot.alerting_enabled
+        record.repeated_denial_warning_threshold = snapshot.repeated_denial_warning_threshold
+        record.repeated_denial_critical_threshold = snapshot.repeated_denial_critical_threshold
+        record.to_snapshot = lambda snapshot=snapshot: snapshot
+        return record
+
+    async def list_revisions(self, *, limit: int = 20) -> list[Any]:
+        return self.revisions[:limit]
+
+    async def write_revision(
+        self,
+        *,
+        version: str,
+        source: str,
+        role_grants: dict[str, list[str]],
+        principal_roles: dict[str, list[str]],
+        principal_scopes: dict[str, list[str]],
+        principal_tenant_grants: dict[str, list[str]],
+        permission_constraints: dict[str, dict[str, list[str]]],
+        audit_decisions: bool,
+        alerting_enabled: bool,
+        repeated_denial_warning_threshold: int,
+        repeated_denial_critical_threshold: int,
+        proposed_by: str | None = None,
+        approval_notes: str | None = None,
+        auto_approve: bool = False,
+        activate: bool = False,
+    ) -> Any:
+        now = datetime(2026, 4, 11, 12, 30, tzinfo=UTC)
+        if activate and not auto_approve:
+            raise ValueError("access policy revision must be approved before activation")
+        if activate:
+            for revision in self.revisions:
+                revision.is_active = False
+        snapshot = type(self.snapshot)(
+            version=version,
+            source=source,
+            role_grants=role_grants,
+            principal_roles=principal_roles,
+            principal_scopes=principal_scopes,
+            principal_tenant_grants=principal_tenant_grants,
+            permission_constraints=permission_constraints,
+            audit_decisions=audit_decisions,
+            alerting_enabled=alerting_enabled,
+            repeated_denial_warning_threshold=repeated_denial_warning_threshold,
+            repeated_denial_critical_threshold=repeated_denial_critical_threshold,
+        )
+        record = self._build_revision_record(snapshot, now, activate)
+        record.approval_status = "approved" if auto_approve else "draft"
+        record.proposed_by = proposed_by
+        record.approved_by = proposed_by if auto_approve else None
+        record.approved_at = now if auto_approve else None
+        record.approval_notes = approval_notes
+        self.snapshot = snapshot if activate else self.snapshot
+        self.revisions.insert(0, record)
+        return record
+
+    async def activate_revision(self, version: str) -> Any:
+        for revision in self.revisions:
+            if revision.version == version and revision.approval_status not in {
+                "approved",
+                "bootstrap",
+            }:
+                raise ValueError(
+                    f"access policy revision '{version}' must be approved before activation"
+                )
+            revision.is_active = revision.version == version
+            if revision.version == version:
+                self.snapshot = revision.to_snapshot()
+                return revision
+        raise LookupError(f"unknown access policy revision '{version}'")
+
+    async def approve_revision(
+        self,
+        version: str,
+        *,
+        approved_by: str | None,
+        approval_notes: str | None = None,
+        activate: bool = False,
+    ) -> Any:
+        for revision in self.revisions:
+            if revision.version != version:
+                continue
+            revision.approval_status = "approved"
+            revision.approved_by = approved_by
+            revision.approved_at = datetime(2026, 4, 11, 12, 45, tzinfo=UTC)
+            revision.approval_notes = approval_notes
+            if activate:
+                for candidate in self.revisions:
+                    candidate.is_active = candidate.version == version
+                self.snapshot = revision.to_snapshot()
+            return revision
+        raise LookupError(f"unknown access policy revision '{version}'")
+
+    async def reject_revision(
+        self,
+        version: str,
+        *,
+        rejected_by: str | None,
+        approval_notes: str | None = None,
+    ) -> Any:
+        for revision in self.revisions:
+            if revision.version != version:
+                continue
+            revision.approval_status = "rejected"
+            revision.approved_by = rejected_by
+            revision.approval_notes = approval_notes
+            revision.is_active = False
+            return revision
+        raise LookupError(f"unknown access policy revision '{version}'")
+
+
+class DummyPluginGovernanceService:
+    def __init__(self) -> None:
+        self.overrides: dict[str, Any] = {}
+
+    async def list_overrides(self) -> dict[str, Any]:
+        return dict(self.overrides)
+
+    async def write_override(
+        self,
+        *,
+        plugin_name: str,
+        state: str,
+        reason: str | None = None,
+        notes: str | None = None,
+        updated_by: str | None = None,
+    ) -> Any:
+        now = datetime(2026, 4, 11, 12, 50, tzinfo=UTC)
+        record = type("PluginGovernanceOverrideRecord", (), {})()
+        record.plugin_name = plugin_name
+        record.state = state
+        record.reason = reason
+        record.notes = notes
+        record.updated_by = updated_by
+        record.created_at = now
+        record.updated_at = now
+        self.overrides[plugin_name] = record
+        return record
+
+
 @dataclass
 class FakeVfsCatalogSupplier:
     snapshot: VfsCatalogSnapshot | None = None
@@ -506,6 +673,24 @@ def _build_settings(*, settings_overrides: dict[str, Any] | None = None) -> Sett
         FILMU_PY_SERVICE_NAME="filmu-python-test",
         **(settings_overrides or {}),
     )
+
+
+def _graphql_headers(*scopes: str, roles: str = "playback:operator") -> dict[str, str]:
+    return {
+        "x-api-key": "a" * 32,
+        "x-actor-id": "operator-1",
+        "x-tenant-id": "tenant-main",
+        "x-actor-roles": roles,
+        "x-actor-scopes": ",".join(scopes),
+    }
+
+
+def _allow_graphql_control_plane_permissions(settings: Settings) -> None:
+    for permission in ("settings:write", "security:policy.approve"):
+        constraint = settings.access_policy.permission_constraints.setdefault(permission, {})
+        route_prefixes = constraint.setdefault("route_prefixes", [])
+        if "/graphql" not in route_prefixes:
+            route_prefixes.append("/graphql")
 
 
 def _build_client(
@@ -6068,6 +6253,511 @@ def test_graphql_vfs_support_queries_return_delta_history_blocked_reasons_and_mo
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountGaps"])
 
 
+def test_graphql_access_policy_revisions_query_and_mutations_follow_route_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    access_policy_service = DummyAccessPolicyService(resources.settings)
+    resources.access_policy_service = access_policy_service
+    resources.access_policy_snapshot = access_policy_service.snapshot
+
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(default_routes, "audit_action", fake_audit_action)
+
+    initial_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                query AccessPolicyRevisions($limit: Int!) {
+                  accessPolicyRevisions(limit: $limit) {
+                    activeVersion
+                    revisions {
+                      version
+                      approvalStatus
+                      isActive
+                    }
+                  }
+                }
+            """,
+            "variables": {"limit": 5},
+        },
+    )
+
+    assert initial_response.status_code == 200
+    initial_body = initial_response.json()
+    assert "errors" not in initial_body
+    assert initial_body["data"]["accessPolicyRevisions"] == {
+        "activeVersion": resources.settings.access_policy.version,
+        "revisions": [
+            {
+                "version": resources.settings.access_policy.version,
+                "approvalStatus": "approved",
+                "isActive": True,
+            }
+        ],
+    }
+
+    approved_version = "2026-04-17-graphql-approval"
+    approved_input = {
+        "version": approved_version,
+        "source": "graphql_test",
+        "approvalNotes": "drafted in GraphQL",
+        "roleGrants": {"platform:admin": ["settings:write", "security:policy.approve"]},
+        "principalRoles": {"tenant-main:operator-1": ["platform:admin"]},
+        "principalScopes": {"tenant-main:operator-1": ["settings:write"]},
+        "principalTenantGrants": {"tenant-main:operator-1": ["tenant-main"]},
+        "permissionConstraints": {"settings:write": {"tenant_ids": ["tenant-main"]}},
+        "auditDecisions": True,
+        "alertingEnabled": True,
+        "repeatedDenialWarningThreshold": 4,
+        "repeatedDenialCriticalThreshold": 7,
+    }
+    write_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                mutation WriteAccessPolicyRevision($input: AccessPolicyRevisionWriteInput!) {
+                  writeAccessPolicyRevision(input: $input) {
+                    version
+                    source
+                    approvalStatus
+                    proposedBy
+                    approvalNotes
+                    isActive
+                    roleGrants
+                    principalScopes
+                    repeatedDenialWarningThreshold
+                    repeatedDenialCriticalThreshold
+                  }
+                }
+            """,
+            "variables": {"input": approved_input},
+        },
+    )
+
+    assert write_response.status_code == 200
+    write_body = write_response.json()
+    assert "errors" not in write_body
+    assert write_body["data"]["writeAccessPolicyRevision"] == {
+        "version": approved_version,
+        "source": "graphql_test",
+        "approvalStatus": "draft",
+        "proposedBy": "tenant-main:operator-1",
+        "approvalNotes": "drafted in GraphQL",
+        "isActive": False,
+        "roleGrants": {"platform:admin": ["settings:write", "security:policy.approve"]},
+        "principalScopes": {"tenant-main:operator-1": ["settings:write"]},
+        "repeatedDenialWarningThreshold": 4,
+        "repeatedDenialCriticalThreshold": 7,
+    }
+
+    approve_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("security:policy.approve"),
+        json={
+            "query": """
+                mutation ApproveAccessPolicyRevision(
+                  $version: String!
+                  $input: AccessPolicyRevisionApprovalInput
+                ) {
+                  approveAccessPolicyRevision(version: $version, input: $input) {
+                    version
+                    approvalStatus
+                    approvedBy
+                    approvalNotes
+                    isActive
+                  }
+                }
+            """,
+            "variables": {
+                "version": approved_version,
+                "input": {"approvalNotes": "approved in GraphQL", "activate": False},
+            },
+        },
+    )
+
+    assert approve_response.status_code == 200
+    approve_body = approve_response.json()
+    assert "errors" not in approve_body
+    assert approve_body["data"]["approveAccessPolicyRevision"] == {
+        "version": approved_version,
+        "approvalStatus": "approved",
+        "approvedBy": "tenant-main:operator-1",
+        "approvalNotes": "approved in GraphQL",
+        "isActive": False,
+    }
+
+    activate_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                mutation ActivateAccessPolicyRevision($version: String!) {
+                  activateAccessPolicyRevision(version: $version) {
+                    version
+                    approvalStatus
+                    isActive
+                  }
+                }
+            """,
+            "variables": {"version": approved_version},
+        },
+    )
+
+    assert activate_response.status_code == 200
+    activate_body = activate_response.json()
+    assert "errors" not in activate_body
+    assert activate_body["data"]["activateAccessPolicyRevision"] == {
+        "version": approved_version,
+        "approvalStatus": "approved",
+        "isActive": True,
+    }
+
+    rejected_version = "2026-04-17-graphql-reject"
+    reject_input = {
+        "version": rejected_version,
+        "source": "graphql_test",
+        "approvalNotes": "reject me in GraphQL",
+        "roleGrants": {"playback:operator": ["playback:read"]},
+        "principalRoles": {"tenant-main:operator-1": ["playback:operator"]},
+        "principalScopes": {"tenant-main:operator-1": ["playback:read"]},
+        "principalTenantGrants": {"tenant-main:operator-1": ["tenant-main"]},
+        "permissionConstraints": {},
+        "auditDecisions": False,
+        "alertingEnabled": True,
+        "repeatedDenialWarningThreshold": 3,
+        "repeatedDenialCriticalThreshold": 5,
+    }
+    reject_write_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                mutation WriteAccessPolicyRevision($input: AccessPolicyRevisionWriteInput!) {
+                  writeAccessPolicyRevision(input: $input) {
+                    version
+                    approvalStatus
+                  }
+                }
+            """,
+            "variables": {"input": reject_input},
+        },
+    )
+
+    assert reject_write_response.status_code == 200
+    reject_write_body = reject_write_response.json()
+    assert "errors" not in reject_write_body
+    assert reject_write_body["data"]["writeAccessPolicyRevision"] == {
+        "version": rejected_version,
+        "approvalStatus": "draft",
+    }
+
+    reject_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("security:policy.approve"),
+        json={
+            "query": """
+                mutation RejectAccessPolicyRevision(
+                  $version: String!
+                  $input: AccessPolicyRevisionApprovalInput
+                ) {
+                  rejectAccessPolicyRevision(version: $version, input: $input) {
+                    version
+                    approvalStatus
+                    approvedBy
+                    approvalNotes
+                    isActive
+                  }
+                }
+            """,
+            "variables": {
+                "version": rejected_version,
+                "input": {"approvalNotes": "rejected in GraphQL"},
+            },
+        },
+    )
+
+    assert reject_response.status_code == 200
+    reject_body = reject_response.json()
+    assert "errors" not in reject_body
+    assert reject_body["data"]["rejectAccessPolicyRevision"] == {
+        "version": rejected_version,
+        "approvalStatus": "rejected",
+        "approvedBy": "tenant-main:operator-1",
+        "approvalNotes": "rejected in GraphQL",
+        "isActive": False,
+    }
+
+    final_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                query {
+                  accessPolicyRevisions(limit: 10) {
+                    activeVersion
+                    revisions {
+                      version
+                      approvalStatus
+                      isActive
+                      approvedBy
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert final_response.status_code == 200
+    final_body = final_response.json()
+    assert "errors" not in final_body
+    assert final_body["data"]["accessPolicyRevisions"]["activeVersion"] == approved_version
+    final_revisions = {
+        row["version"]: row for row in final_body["data"]["accessPolicyRevisions"]["revisions"]
+    }
+    assert final_revisions[approved_version] == {
+        "version": approved_version,
+        "approvalStatus": "approved",
+        "isActive": True,
+        "approvedBy": "tenant-main:operator-1",
+    }
+    assert final_revisions[rejected_version] == {
+        "version": rejected_version,
+        "approvalStatus": "rejected",
+        "isActive": False,
+        "approvedBy": "tenant-main:operator-1",
+    }
+
+    assert audit_calls == [
+        {
+            "action": "security.access_policy.write_revision",
+            "target": f"access_policy.{approved_version}",
+            "details": {
+                "activate": False,
+                "source": "graphql_test",
+                "approval_status": "draft",
+            },
+        },
+        {
+            "action": "security.access_policy.approve_revision",
+            "target": f"access_policy.{approved_version}",
+            "details": {"activate": False},
+        },
+        {
+            "action": "security.access_policy.activate_revision",
+            "target": f"access_policy.{approved_version}",
+        },
+        {
+            "action": "security.access_policy.write_revision",
+            "target": f"access_policy.{rejected_version}",
+            "details": {
+                "activate": False,
+                "source": "graphql_test",
+                "approval_status": "draft",
+            },
+        },
+        {
+            "action": "security.access_policy.reject_revision",
+            "target": f"access_policy.{rejected_version}",
+        },
+    ]
+
+
+def test_graphql_write_access_policy_revision_requires_settings_write() -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    access_policy_service = DummyAccessPolicyService(resources.settings)
+    resources.access_policy_service = access_policy_service
+    resources.access_policy_snapshot = access_policy_service.snapshot
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("playback:read", roles="playback:operator"),
+        json={
+            "query": """
+                mutation WriteAccessPolicyRevision($input: AccessPolicyRevisionWriteInput!) {
+                  writeAccessPolicyRevision(input: $input) {
+                    version
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "version": "2026-04-17-graphql-authz",
+                    "roleGrants": {},
+                    "principalRoles": {},
+                    "principalScopes": {},
+                    "principalTenantGrants": {},
+                    "permissionConstraints": {},
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
+
+
+def test_graphql_plugin_governance_overrides_query_and_mutation_follow_route_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    resources.plugin_governance_service = DummyPluginGovernanceService()
+
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(default_routes, "audit_action", fake_audit_action)
+
+    initial_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                query {
+                  pluginGovernanceOverrides {
+                    pluginName
+                    state
+                  }
+                }
+            """
+        },
+    )
+
+    assert initial_response.status_code == 200
+    initial_body = initial_response.json()
+    assert "errors" not in initial_body
+    assert initial_body["data"]["pluginGovernanceOverrides"] == []
+
+    mutation_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                mutation WritePluginGovernanceOverride(
+                  $pluginName: String!
+                  $input: PluginGovernanceOverrideWriteInput!
+                ) {
+                  writePluginGovernanceOverride(pluginName: $pluginName, input: $input) {
+                    pluginName
+                    state
+                    reason
+                    notes
+                    updatedBy
+                    createdAt
+                    updatedAt
+                  }
+                }
+            """,
+            "variables": {
+                "pluginName": "torrentio",
+                "input": {
+                    "state": "quarantined",
+                    "reason": "signature drift",
+                    "notes": "hold until republished",
+                },
+            },
+        },
+    )
+
+    assert mutation_response.status_code == 200
+    mutation_body = mutation_response.json()
+    assert "errors" not in mutation_body
+    assert mutation_body["data"]["writePluginGovernanceOverride"] == {
+        "pluginName": "torrentio",
+        "state": "quarantined",
+        "reason": "signature drift",
+        "notes": "hold until republished",
+        "updatedBy": "tenant-main:operator-1",
+        "createdAt": "2026-04-11T12:50:00+00:00",
+        "updatedAt": "2026-04-11T12:50:00+00:00",
+    }
+
+    final_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                query {
+                  pluginGovernanceOverrides {
+                    pluginName
+                    state
+                    reason
+                    notes
+                    updatedBy
+                  }
+                }
+            """
+        },
+    )
+
+    assert final_response.status_code == 200
+    final_body = final_response.json()
+    assert "errors" not in final_body
+    assert final_body["data"]["pluginGovernanceOverrides"] == [
+        {
+            "pluginName": "torrentio",
+            "state": "quarantined",
+            "reason": "signature drift",
+            "notes": "hold until republished",
+            "updatedBy": "tenant-main:operator-1",
+        }
+    ]
+    assert audit_calls == [
+        {
+            "action": "security.plugin_governance.write_override",
+            "target": "plugin.torrentio",
+            "details": {"state": "quarantined"},
+        }
+    ]
+
+
+def test_graphql_write_plugin_governance_override_requires_settings_write() -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    resources.plugin_governance_service = DummyPluginGovernanceService()
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("playback:read", roles="playback:operator"),
+        json={
+            "query": """
+                mutation WritePluginGovernanceOverride(
+                  $pluginName: String!
+                  $input: PluginGovernanceOverrideWriteInput!
+                ) {
+                  writePluginGovernanceOverride(pluginName: $pluginName, input: $input) {
+                    pluginName
+                  }
+                }
+            """,
+            "variables": {
+                "pluginName": "torrentio",
+                "input": {"state": "revoked", "reason": "authz failure"},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
+
+
 def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_history_and_audit(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6137,9 +6827,7 @@ def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_h
 
     monkeypatch.setattr("filmu_py.graphql.resolvers.audit_action", fake_audit_action)
     client = _build_client(FakeMediaService())
-    expires_at = (
-        datetime(2026, 4, 17, 22, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z")
-    )
+    expires_at = (datetime.now(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
     mutation_response = client.post(
         "/graphql",
         headers={
