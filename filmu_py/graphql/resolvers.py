@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import strawberry
+from fastapi import HTTPException
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
@@ -23,6 +24,10 @@ from filmu_py.core.runtime_lifecycle import RuntimeLifecycleSnapshot
 from filmu_py.db.models import StreamORM
 from filmu_py.graphql.deps import GraphQLContext, require_graphql_permissions
 from filmu_py.graphql.types import (
+    AccessPolicyRevisionApprovalInput,
+    AccessPolicyRevisionWriteInput,
+    GQLAccessPolicyRevision,
+    GQLAccessPolicyRevisionList,
     GQLActiveStream,
     GQLActiveStreamOwner,
     GQLCalendarEntry,
@@ -77,6 +82,7 @@ from filmu_py.graphql.types import (
     GQLPluginCapabilityStatus,
     GQLPluginEventStatus,
     GQLPluginGovernance,
+    GQLPluginGovernanceOverride,
     GQLPluginGovernanceSummary,
     GQLPluginIntegrationReadiness,
     GQLPluginIntegrationReadinessPlugin,
@@ -135,6 +141,7 @@ from filmu_py.graphql.types import (
     PersistMediaEntryControlInput,
     PersistPlaybackAttachmentControlInput,
     PersistVfsRolloutControlInput,
+    PluginGovernanceOverrideWriteInput,
     RequestItemInput,
     RequestItemResult,
     ResetItemResult,
@@ -249,6 +256,14 @@ def _compat_route_module() -> Any:
     from filmu_py.api.routes import default as default_routes
 
     return default_routes
+
+
+def _raise_graphql_compat_error(exc: Exception) -> None:
+    """Normalize compatibility-route exceptions into GraphQL-safe errors."""
+
+    if isinstance(exc, HTTPException):
+        raise ValueError(str(exc.detail)) from exc
+    raise ValueError(str(exc)) from exc
 
 
 def _resolve_service_version() -> str:
@@ -1335,6 +1350,46 @@ def _build_plugin_governance_summary(snapshot: object) -> GQLPluginGovernanceSum
     )
 
 
+def _build_access_policy_revision(snapshot: object) -> GQLAccessPolicyRevision:
+    typed_snapshot: Any = snapshot
+    return GQLAccessPolicyRevision(
+        version=str(typed_snapshot.version),
+        source=str(typed_snapshot.source),
+        approval_status=str(typed_snapshot.approval_status),
+        proposed_by=typed_snapshot.proposed_by,
+        approved_by=typed_snapshot.approved_by,
+        approved_at=typed_snapshot.approved_at,
+        approval_notes=typed_snapshot.approval_notes,
+        is_active=bool(typed_snapshot.is_active),
+        activated_at=str(typed_snapshot.activated_at),
+        created_at=str(typed_snapshot.created_at),
+        updated_at=str(typed_snapshot.updated_at),
+        role_grants=cast(JSON, dict(typed_snapshot.role_grants)),
+        principal_roles=cast(JSON, dict(typed_snapshot.principal_roles)),
+        principal_scopes=cast(JSON, dict(typed_snapshot.principal_scopes)),
+        principal_tenant_grants=cast(JSON, dict(typed_snapshot.principal_tenant_grants)),
+        permission_constraints=cast(JSON, dict(typed_snapshot.permission_constraints)),
+        audit_decisions=bool(typed_snapshot.audit_decisions),
+        alerting_enabled=bool(typed_snapshot.alerting_enabled),
+        repeated_denial_warning_threshold=int(
+            typed_snapshot.repeated_denial_warning_threshold
+        ),
+        repeated_denial_critical_threshold=int(
+            typed_snapshot.repeated_denial_critical_threshold
+        ),
+    )
+
+
+def _build_access_policy_revision_list(snapshot: object) -> GQLAccessPolicyRevisionList:
+    typed_snapshot: Any = snapshot
+    return GQLAccessPolicyRevisionList(
+        active_version=typed_snapshot.active_version,
+        revisions=[
+            _build_access_policy_revision(row) for row in cast(list[object], typed_snapshot.revisions)
+        ],
+    )
+
+
 def _build_downloader_execution_trend_summary(
     snapshot: object,
 ) -> GQLDownloaderExecutionTrendSummary:
@@ -1414,6 +1469,19 @@ def _build_plugin_governance(
     return GQLPluginGovernance(
         summary=_build_plugin_governance_summary(summary),
         plugins=[_build_plugin_capability_status(row) for row in plugins],
+    )
+
+
+def _build_plugin_governance_override(snapshot: object) -> GQLPluginGovernanceOverride:
+    typed_snapshot: Any = snapshot
+    return GQLPluginGovernanceOverride(
+        plugin_name=str(typed_snapshot.plugin_name),
+        state=str(typed_snapshot.state),
+        reason=typed_snapshot.reason,
+        notes=typed_snapshot.notes,
+        updated_by=typed_snapshot.updated_by,
+        created_at=str(typed_snapshot.created_at),
+        updated_at=str(typed_snapshot.updated_at),
     )
 
 
@@ -3707,6 +3775,42 @@ class CoreQueryResolver:
         )
         return _build_plugin_governance(summary=snapshot.summary, plugins=list(snapshot.plugins))
 
+    @strawberry.field(
+        description="Persisted access-policy revisions for graph operator workflows"
+    )
+    async def access_policy_revisions(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 20,
+    ) -> GQLAccessPolicyRevisionList:
+        await require_graphql_permissions(
+            info,
+            "settings:write",
+            resource_scope="access_policy",
+        )
+        compat_routes = _compat_route_module()
+        response = await compat_routes.list_auth_policy_revisions(
+            info.context.request,
+            limit=max(1, min(limit, 50)),
+        )
+        return _build_access_policy_revision_list(response)
+
+    @strawberry.field(
+        description="Persisted plugin-governance overrides for graph operator workflows"
+    )
+    async def plugin_governance_overrides(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLPluginGovernanceOverride]:
+        await require_graphql_permissions(
+            info,
+            "settings:write",
+            resource_scope="plugin_governance",
+        )
+        compat_routes = _compat_route_module()
+        response = await compat_routes.list_plugin_governance_overrides(info.context.request)
+        return [_build_plugin_governance_override(row) for row in response]
+
     @strawberry.field(description="Bounded control-plane subscriber health rollup")
     async def control_plane_summary(
         self,
@@ -4433,6 +4537,157 @@ class CoreMutationResolver:
             },
         )
         return _build_vfs_rollout_control(compat_routes._vfs_rollout_control_response())
+
+    @strawberry.mutation(
+        description="Persist one access-policy revision through the shared control-plane service"
+    )
+    async def write_access_policy_revision(
+        self,
+        info: Info[GraphQLContext, object],
+        input: AccessPolicyRevisionWriteInput,
+    ) -> GQLAccessPolicyRevision:
+        await require_graphql_permissions(
+            info,
+            "settings:write",
+            resource_scope="access_policy",
+        )
+        compat_routes = _compat_route_module()
+        try:
+            payload = compat_routes.AccessPolicyRevisionWriteRequest(
+                version=input.version,
+                source=input.source,
+                activate=input.activate,
+                approval_notes=input.approval_notes,
+                role_grants=input.role_grants,
+                principal_roles=input.principal_roles,
+                principal_scopes=input.principal_scopes,
+                principal_tenant_grants=input.principal_tenant_grants,
+                permission_constraints=input.permission_constraints,
+                audit_decisions=input.audit_decisions,
+                alerting_enabled=input.alerting_enabled,
+                repeated_denial_warning_threshold=input.repeated_denial_warning_threshold,
+                repeated_denial_critical_threshold=input.repeated_denial_critical_threshold,
+            )
+            response = await compat_routes.write_auth_policy_revision(
+                info.context.request,
+                payload,
+            )
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_access_policy_revision(response)
+
+    @strawberry.mutation(
+        description="Approve one persisted access-policy revision through the shared control plane"
+    )
+    async def approve_access_policy_revision(
+        self,
+        info: Info[GraphQLContext, object],
+        version: str,
+        input: AccessPolicyRevisionApprovalInput | None = None,
+    ) -> GQLAccessPolicyRevision:
+        await require_graphql_permissions(
+            info,
+            "security:policy.approve",
+            resource_scope="access_policy",
+        )
+        compat_routes = _compat_route_module()
+        approval = input or AccessPolicyRevisionApprovalInput()
+        try:
+            payload = compat_routes.AccessPolicyRevisionApprovalRequest(
+                approval_notes=approval.approval_notes,
+                activate=approval.activate,
+            )
+            response = await compat_routes.approve_auth_policy_revision(
+                info.context.request,
+                version,
+                payload,
+            )
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_access_policy_revision(response)
+
+    @strawberry.mutation(
+        description="Reject one persisted access-policy revision through the shared control plane"
+    )
+    async def reject_access_policy_revision(
+        self,
+        info: Info[GraphQLContext, object],
+        version: str,
+        input: AccessPolicyRevisionApprovalInput | None = None,
+    ) -> GQLAccessPolicyRevision:
+        await require_graphql_permissions(
+            info,
+            "security:policy.approve",
+            resource_scope="access_policy",
+        )
+        compat_routes = _compat_route_module()
+        approval = input or AccessPolicyRevisionApprovalInput()
+        try:
+            payload = compat_routes.AccessPolicyRevisionApprovalRequest(
+                approval_notes=approval.approval_notes,
+                activate=approval.activate,
+            )
+            response = await compat_routes.reject_auth_policy_revision(
+                info.context.request,
+                version,
+                payload,
+            )
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_access_policy_revision(response)
+
+    @strawberry.mutation(
+        description="Activate one persisted access-policy revision through the shared control plane"
+    )
+    async def activate_access_policy_revision(
+        self,
+        info: Info[GraphQLContext, object],
+        version: str,
+    ) -> GQLAccessPolicyRevision:
+        await require_graphql_permissions(
+            info,
+            "settings:write",
+            resource_scope="access_policy",
+        )
+        compat_routes = _compat_route_module()
+        try:
+            response = await compat_routes.activate_auth_policy_revision(
+                info.context.request,
+                version,
+            )
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_access_policy_revision(response)
+
+    @strawberry.mutation(
+        description="Persist one plugin-governance override through the shared control plane"
+    )
+    async def write_plugin_governance_override(
+        self,
+        info: Info[GraphQLContext, object],
+        plugin_name: str,
+        input: PluginGovernanceOverrideWriteInput,
+    ) -> GQLPluginGovernanceOverride:
+        await require_graphql_permissions(
+            info,
+            "settings:write",
+            resource_scope="plugin_governance",
+        )
+        compat_routes = _compat_route_module()
+        try:
+            payload = compat_routes.PluginGovernanceOverrideWriteRequest(
+                state=input.state,
+                reason=input.reason,
+                notes=input.notes,
+            )
+            response = await compat_routes.write_plugin_governance_override(
+                info.context.request,
+                plugin_name,
+                payload,
+            )
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_plugin_governance_override(response)
 
     @strawberry.mutation(description="Update one compatibility settings path")
     async def update_setting(
