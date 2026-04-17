@@ -4601,13 +4601,15 @@ def test_graphql_vfs_runtime_telemetry_returns_cross_view_rollups(
     playback_gate_calls = 0
     runtime_snapshot_calls = 0
 
-    real_playback_gate_snapshot = runtime_governance._playback_gate_governance_snapshot
     real_runtime_snapshot = runtime_governance._vfs_runtime_governance_snapshot
 
     def _playback_gate_snapshot() -> dict[str, object]:
         nonlocal playback_gate_calls
         playback_gate_calls += 1
-        return real_playback_gate_snapshot()
+        return {
+            "playback_gate_environment_class": "windows-native:managed",
+            "playback_gate_windows_soak_ready": 1,
+        }
 
     def _runtime_snapshot(
         *,
