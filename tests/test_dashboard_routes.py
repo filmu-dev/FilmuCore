@@ -2898,7 +2898,7 @@ def test_playback_gate_evidence_route_surfaces_missing_operational_proofs(
     monkeypatch.setattr(
         default_routes,
         "playback_gate_governance_snapshot",
-        lambda: stream_routes._empty_playback_gate_governance_snapshot(),
+        stream_routes._empty_playback_gate_governance_snapshot,
     )
     client = _build_client()
 
