@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 
 from filmu_py.api.routes import default as default_routes
+from filmu_py.api.routes import runtime_governance
 from filmu_py.config import Settings
 from filmu_py.core import byte_streaming
 from filmu_py.core.cache import CacheManager
@@ -35,6 +36,7 @@ from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
+from filmu_py.services import governance_posture
 from filmu_py.services.media import (
     CalendarProjectionRecord,
     CalendarReleaseDataRecord,
@@ -4515,15 +4517,115 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
     }
 
 
+def test_graphql_vfs_runtime_telemetry_uses_a_single_governance_snapshot_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    playback_gate_calls = 0
+    runtime_calls = 0
+
+    def fake_playback_gate_governance_snapshot() -> dict[str, Any]:
+        nonlocal playback_gate_calls
+        playback_gate_calls += 1
+        return {
+            "playback_gate_environment_class": "canary",
+            "playback_gate_rollout_readiness": "ready",
+        }
+
+    def fake_vfs_runtime_governance_snapshot(
+        playback_gate_governance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal runtime_calls
+        runtime_calls += 1
+        assert playback_gate_governance == {
+            "playback_gate_environment_class": "canary",
+            "playback_gate_rollout_readiness": "ready",
+        }
+        return {
+            "vfs_runtime_snapshot_available": 1,
+            "vfs_runtime_open_handles": 4,
+            "vfs_runtime_active_reads": 2,
+            "vfs_runtime_cache_pressure_class": "healthy",
+            "vfs_runtime_refresh_pressure_class": "healthy",
+            "vfs_runtime_provider_pressure_incidents": 0,
+            "vfs_runtime_fairness_pressure_incidents": 0,
+            "vfs_runtime_rust_handle_age_p50_ms": 10.0,
+            "vfs_runtime_rust_handle_age_p95_ms": 20.0,
+            "vfs_runtime_rust_handle_age_p99_ms": 30.0,
+            "vfs_runtime_rust_handle_age_max_ms": 40.0,
+            "vfs_runtime_mounted_reads_bucket_le_5ms": 1,
+            "vfs_runtime_mounted_reads_bucket_le_25ms": 2,
+            "vfs_runtime_mounted_reads_bucket_le_100ms": 3,
+            "vfs_runtime_mounted_reads_bucket_le_250ms": 4,
+            "vfs_runtime_mounted_reads_bucket_gt_250ms": 5,
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_canary_decision": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_merge_gate": "ready",
+            "vfs_runtime_rollout_environment_class": "canary",
+            "vfs_runtime_rollout_reasons": ["no_blocking_runtime_signals"],
+            "vfs_runtime_python_bytes_per_read": 0.0,
+            "vfs_runtime_mounted_reads_total": 0,
+            "vfs_runtime_upstream_fetch_bytes_total": 0,
+        }
+
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._playback_gate_governance_snapshot",
+        fake_playback_gate_governance_snapshot,
+    )
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._vfs_runtime_governance_snapshot",
+        fake_vfs_runtime_governance_snapshot,
+    )
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._load_vfs_runtime_status_payload",
+        lambda: None,
+    )
+    monkeypatch.setattr(governance_posture.byte_streaming, "get_active_session_snapshot", lambda: [])
+    monkeypatch.setattr(governance_posture.byte_streaming, "get_active_handle_snapshot", lambda: [])
+
+    telemetry = governance_posture.build_vfs_runtime_telemetry_posture(
+        cast(AppResources, object())
+    )
+
+    assert playback_gate_calls == 1
+    assert runtime_calls == 1
+    assert telemetry.status == "ready"
+    assert telemetry.rust_snapshot_available is True
+    assert telemetry.required_actions == ["promote_to_next_environment_class"]
+    assert telemetry.remaining_gaps == ["vfs rollout reason: no_blocking_runtime_signals"]
+
+
 def test_graphql_vfs_runtime_telemetry_returns_cross_view_rollups(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    playback_gate_calls = 0
+    runtime_snapshot_calls = 0
+
+    real_playback_gate_snapshot = runtime_governance._playback_gate_governance_snapshot
+    real_runtime_snapshot = runtime_governance._vfs_runtime_governance_snapshot
+
+    def _playback_gate_snapshot() -> dict[str, object]:
+        nonlocal playback_gate_calls
+        playback_gate_calls += 1
+        return real_playback_gate_snapshot()
+
+    def _runtime_snapshot(
+        *,
+        playback_gate_governance: dict[str, object],
+    ) -> dict[str, object]:
+        nonlocal runtime_snapshot_calls
+        runtime_snapshot_calls += 1
+        return real_runtime_snapshot(playback_gate_governance=playback_gate_governance)
+
     monkeypatch.setattr(
-        "filmu_py.services.governance_posture.runtime_governance._playback_gate_governance_snapshot",
-        lambda: {
-            "playback_gate_environment_class": "windows-native:managed",
-            "playback_gate_windows_soak_ready": 1,
-        },
+        runtime_governance,
+        "_playback_gate_governance_snapshot",
+        _playback_gate_snapshot,
+    )
+    monkeypatch.setattr(
+        runtime_governance,
+        "_vfs_runtime_governance_snapshot",
+        _runtime_snapshot,
     )
     runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
     runtime_status_path.write_text(
@@ -4695,6 +4797,8 @@ def test_graphql_vfs_runtime_telemetry_returns_cross_view_rollups(
         ]
         assert payload["requiredActions"] == ["promote_to_next_environment_class"]
         assert payload["remainingGaps"] == ["vfs rollout reason: no_blocking_runtime_signals"]
+        assert playback_gate_calls == 1
+        assert runtime_snapshot_calls == 1
     finally:
         byte_streaming.release_handle(handle)
         byte_streaming.release_serving_session(session)

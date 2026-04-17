@@ -270,8 +270,9 @@ fn percentile_value(sorted_values: &[f64], percentile: f64) -> f64 {
         return 0.0;
     }
     let last_index = sorted_values.len() - 1;
-    let rank = ((last_index as f64) * percentile).ceil() as usize;
-    sorted_values[rank.min(last_index)]
+    let rank = (percentile * sorted_values.len() as f64).ceil() as isize - 1;
+    let rank = rank.clamp(0, last_index as isize) as usize;
+    sorted_values[rank]
 }
 
 #[derive(Debug)]
@@ -3274,7 +3275,7 @@ fn format_backend_stream_url(base_url: &str, item_id: &str, api_key: &str) -> St
 mod tests {
     use super::{
         build_chunk_read_request, format_backend_stream_url, parse_media_semantic_path,
-        InlineRefreshFlight, MountHandleState, MountReadRequest, MountRuntime,
+        percentile_value, InlineRefreshFlight, MountHandleState, MountReadRequest, MountRuntime,
     };
     use crate::catalog::state::CatalogStateStore;
     use std::{sync::Arc, time::Instant};
@@ -3374,6 +3375,15 @@ mod tests {
         assert!(telemetry.age_percentiles_ms.p95_ms >= telemetry.age_percentiles_ms.p50_ms);
         assert!(telemetry.age_percentiles_ms.p99_ms >= telemetry.age_percentiles_ms.p95_ms);
         assert!(telemetry.age_percentiles_ms.max_ms >= telemetry.age_percentiles_ms.p99_ms);
+    }
+
+    #[test]
+    fn percentile_value_uses_nearest_rank_for_small_samples() {
+        let values = [10.0, 20.0];
+
+        assert_eq!(percentile_value(&values, 0.50), 10.0);
+        assert_eq!(percentile_value(&values, 0.95), 20.0);
+        assert_eq!(percentile_value(&values, 0.99), 20.0);
     }
 
     #[test]

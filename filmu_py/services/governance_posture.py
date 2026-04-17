@@ -401,6 +401,53 @@ def _artifact_snapshot(
     ]
 
 
+def _vfs_runtime_governance_snapshots() -> tuple[dict[str, object], dict[str, object]]:
+    playback_gate = runtime_governance._playback_gate_governance_snapshot()
+    snapshot = runtime_governance._vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate,
+    )
+    return playback_gate, snapshot
+
+
+def _build_vfs_runtime_rollout_snapshot(
+    snapshot: dict[str, object],
+) -> VfsRuntimeRolloutSnapshot:
+    reasons = _as_str_list(snapshot.get("vfs_runtime_rollout_reasons"))
+    next_action = str(snapshot.get("vfs_runtime_rollout_next_action", ""))
+    canary_decision = str(snapshot.get("vfs_runtime_rollout_canary_decision", ""))
+    merge_gate = str(snapshot.get("vfs_runtime_rollout_merge_gate", "blocked"))
+    required_actions = [action for action in (next_action, canary_decision) if action]
+    remaining_gaps = [f"vfs rollout reason: {reason}" for reason in reasons]
+    if merge_gate != "ready":
+        remaining_gaps.insert(
+            0,
+            f"VFS rollout merge gate is not yet ready: merge_gate={merge_gate}",
+        )
+    return VfsRuntimeRolloutSnapshot(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=_rollout_status(str(snapshot.get("vfs_runtime_rollout_readiness", "unknown"))),
+        rollout_readiness=str(snapshot.get("vfs_runtime_rollout_readiness", "unknown")),
+        next_action=next_action,
+        canary_decision=canary_decision,
+        merge_gate=merge_gate,
+        environment_class=str(snapshot.get("vfs_runtime_rollout_environment_class", "")),
+        snapshot_available=bool(_as_int(snapshot.get("vfs_runtime_snapshot_available"))),
+        open_handles=_as_int(snapshot.get("vfs_runtime_open_handles")),
+        active_reads=_as_int(snapshot.get("vfs_runtime_active_reads")),
+        cache_pressure_class=str(snapshot.get("vfs_runtime_cache_pressure_class", "unknown")),
+        refresh_pressure_class=str(snapshot.get("vfs_runtime_refresh_pressure_class", "unknown")),
+        provider_pressure_incidents=_as_int(
+            snapshot.get("vfs_runtime_provider_pressure_incidents")
+        ),
+        fairness_pressure_incidents=_as_int(
+            snapshot.get("vfs_runtime_fairness_pressure_incidents")
+        ),
+        reasons=reasons,
+        required_actions=list(dict.fromkeys(required_actions)),
+        remaining_gaps=remaining_gaps,
+    )
+
+
 def build_playback_gate_governance_posture() -> PlaybackGateGovernanceSnapshot:
     """Return typed playback-gate rollout posture for GraphQL-first operator screens."""
 
@@ -462,56 +509,15 @@ def build_playback_gate_governance_posture() -> PlaybackGateGovernanceSnapshot:
 def build_vfs_runtime_rollout_posture(resources: AppResources) -> VfsRuntimeRolloutSnapshot:
     """Return typed VFS rollout/canary posture for GraphQL-first operator screens."""
 
-    playback_gate = runtime_governance._playback_gate_governance_snapshot()
-    snapshot = runtime_governance._vfs_runtime_governance_snapshot(
-        playback_gate_governance=playback_gate,
-    )
-    reasons = _as_str_list(snapshot.get("vfs_runtime_rollout_reasons"))
-    next_action = str(snapshot.get("vfs_runtime_rollout_next_action", ""))
-    canary_decision = str(snapshot.get("vfs_runtime_rollout_canary_decision", ""))
-    merge_gate = str(snapshot.get("vfs_runtime_rollout_merge_gate", "blocked"))
-    required_actions = [action for action in (next_action, canary_decision) if action]
-    remaining_gaps = [f"vfs rollout reason: {reason}" for reason in reasons]
-    if merge_gate != "ready":
-        remaining_gaps.insert(
-            0,
-            f"VFS rollout merge gate is not yet ready: merge_gate={merge_gate}",
-        )
-    return VfsRuntimeRolloutSnapshot(
-        generated_at=datetime.now(UTC).isoformat(),
-        status=_rollout_status(str(snapshot.get("vfs_runtime_rollout_readiness", "unknown"))),
-        rollout_readiness=str(snapshot.get("vfs_runtime_rollout_readiness", "unknown")),
-        next_action=next_action,
-        canary_decision=canary_decision,
-        merge_gate=merge_gate,
-        environment_class=str(snapshot.get("vfs_runtime_rollout_environment_class", "")),
-        snapshot_available=bool(_as_int(snapshot.get("vfs_runtime_snapshot_available"))),
-        open_handles=_as_int(snapshot.get("vfs_runtime_open_handles")),
-        active_reads=_as_int(snapshot.get("vfs_runtime_active_reads")),
-        cache_pressure_class=str(snapshot.get("vfs_runtime_cache_pressure_class", "unknown")),
-        refresh_pressure_class=str(
-            snapshot.get("vfs_runtime_refresh_pressure_class", "unknown")
-        ),
-        provider_pressure_incidents=_as_int(
-            snapshot.get("vfs_runtime_provider_pressure_incidents")
-        ),
-        fairness_pressure_incidents=_as_int(
-            snapshot.get("vfs_runtime_fairness_pressure_incidents")
-        ),
-        reasons=reasons,
-        required_actions=list(dict.fromkeys(required_actions)),
-        remaining_gaps=remaining_gaps,
-    )
+    _, snapshot = _vfs_runtime_governance_snapshots()
+    return _build_vfs_runtime_rollout_snapshot(snapshot)
 
 
 def build_vfs_runtime_telemetry_posture(resources: AppResources) -> VfsRuntimeTelemetrySnapshot:
     """Return detailed VFS runtime telemetry across Rust and Python mounted views."""
 
-    rollout = build_vfs_runtime_rollout_posture(resources)
-    playback_gate = runtime_governance._playback_gate_governance_snapshot()
-    snapshot = runtime_governance._vfs_runtime_governance_snapshot(
-        playback_gate_governance=playback_gate,
-    )
+    _, snapshot = _vfs_runtime_governance_snapshots()
+    rollout = _build_vfs_runtime_rollout_snapshot(snapshot)
     payload = runtime_governance._load_vfs_runtime_status_payload()
 
     rust_handle_age = VfsRuntimePercentileSnapshot(
