@@ -27,18 +27,23 @@ from filmu_py.graphql.types import (
     GQLCalendarEntry,
     GQLCalendarReleaseWindow,
     GQLControlPlaneAutomation,
+    GQLControlPlaneConsumerSummary,
+    GQLControlPlaneOwnershipSummary,
     GQLControlPlaneRecoveryReadiness,
     GQLControlPlaneReplayBackplane,
     GQLControlPlaneStatusCount,
     GQLControlPlaneSubscriber,
     GQLControlPlaneSummary,
+    GQLDownloaderDeadLetterTimelinePoint,
     GQLDownloaderExecutionDeadLetter,
     GQLDownloaderExecutionEvidence,
     GQLDownloaderExecutionTrendSummary,
+    GQLDownloaderFailureKindSummary,
     GQLDownloaderOrchestration,
     GQLDownloaderProviderCandidate,
     GQLDownloaderProviderSummary,
     GQLDownloaderReasonSummary,
+    GQLDownloaderStatusCodeSummary,
     GQLEnterpriseOperationsGovernance,
     GQLEnterpriseOperationsSlice,
     GQLEnterpriseRolloutEvidence,
@@ -58,6 +63,7 @@ from filmu_py.graphql.types import (
     GQLNamedCountBucket,
     GQLObservabilityConvergence,
     GQLObservabilityConvergenceSummary,
+    GQLObservabilityFieldContractSummary,
     GQLObservabilityPipelineStage,
     GQLObservabilityRolloutSummary,
     GQLOperatorActionItem,
@@ -77,6 +83,7 @@ from filmu_py.graphql.types import (
     GQLPluginProofCoverageSummary,
     GQLPluginRuntimeCapabilitySummary,
     GQLPluginRuntimeOverview,
+    GQLPluginRuntimePublisherSummary,
     GQLPluginRuntimeRow,
     GQLPluginRuntimeWarning,
     GQLProofArtifact,
@@ -92,6 +99,7 @@ from filmu_py.graphql.types import (
     GQLVfsBlockedItem,
     GQLVfsBreadcrumb,
     GQLVfsCatalogDelta,
+    GQLVfsCatalogDeltaHistorySummary,
     GQLVfsCatalogEntry,
     GQLVfsCatalogGovernance,
     GQLVfsCatalogGovernanceSummary,
@@ -147,6 +155,37 @@ from filmu_py.services.governance_posture import (
     build_vfs_generation_history_posture,
     build_vfs_generation_history_summary,
     build_vfs_runtime_rollout_posture,
+)
+from filmu_py.services.graphql_support_posture import (
+    build_control_plane_action_items,
+    build_control_plane_consumer_summaries,
+    build_control_plane_gap_items,
+    build_control_plane_node_counts,
+    build_control_plane_ownership_summary,
+    build_control_plane_replay_consumer_counts,
+    build_control_plane_status_counts,
+    build_control_plane_tenant_counts,
+    build_downloader_action_items,
+    build_downloader_alert_level_counts,
+    build_downloader_dead_letter_timeline,
+    build_downloader_failure_kind_summaries,
+    build_downloader_gap_items,
+    build_downloader_status_code_summaries,
+    build_observability_action_items,
+    build_observability_field_contract_summary,
+    build_observability_gap_items,
+    build_observability_proof_inventory,
+    build_observability_stage_counts,
+    build_plugin_runtime_capability_action_counts,
+    build_plugin_runtime_capability_gap_counts,
+    build_plugin_runtime_publisher_summaries,
+    build_plugin_runtime_status_counts,
+    build_plugin_runtime_wiring_status_counts,
+    build_vfs_blocked_reason_summaries,
+    build_vfs_catalog_delta_history,
+    build_vfs_catalog_delta_history_summary,
+    build_vfs_mount_action_items,
+    build_vfs_mount_gap_items,
 )
 from filmu_py.services.media import (
     ArqNotEnabledError,
@@ -613,6 +652,21 @@ def _build_named_count_buckets(counts: dict[str, int]) -> list[GQLNamedCountBuck
     ]
 
 
+def _build_observability_field_contract_summary(
+    snapshot: object,
+) -> GQLObservabilityFieldContractSummary:
+    typed_snapshot: Any = snapshot
+    return GQLObservabilityFieldContractSummary(
+        total_required_correlation_fields=int(typed_snapshot.total_required_correlation_fields),
+        expected_field_count=int(typed_snapshot.expected_field_count),
+        configured_expected_field_count=int(typed_snapshot.configured_expected_field_count),
+        missing_expected_field_count=int(typed_snapshot.missing_expected_field_count),
+        trace_context_header_count=int(typed_snapshot.trace_context_header_count),
+        correlation_header_count=int(typed_snapshot.correlation_header_count),
+        shared_header_count=int(typed_snapshot.shared_header_count),
+    )
+
+
 def _build_proof_artifact_rows(rows: list[object]) -> list[GQLProofArtifact]:
     return [
         GQLProofArtifact(
@@ -735,6 +789,34 @@ def _build_operator_gap_item(snapshot: object) -> GQLOperatorGapItem:
     )
 
 
+def _build_control_plane_consumer_summary(snapshot: object) -> GQLControlPlaneConsumerSummary:
+    typed_snapshot: Any = snapshot
+    return GQLControlPlaneConsumerSummary(
+        consumer_name=str(typed_snapshot.consumer_name),
+        subscriber_count=int(typed_snapshot.subscriber_count),
+        active_subscribers=int(typed_snapshot.active_subscribers),
+        ack_pending_subscribers=int(typed_snapshot.ack_pending_subscribers),
+        fenced_subscribers=int(typed_snapshot.fenced_subscribers),
+        error_subscribers=int(typed_snapshot.error_subscribers),
+        latest_heartbeat_at=typed_snapshot.latest_heartbeat_at,
+    )
+
+
+def _build_control_plane_ownership_summary(snapshot: object) -> GQLControlPlaneOwnershipSummary:
+    typed_snapshot: Any = snapshot
+    return GQLControlPlaneOwnershipSummary(
+        total_subscribers=int(typed_snapshot.total_subscribers),
+        active_subscribers=int(typed_snapshot.active_subscribers),
+        stale_subscribers=int(typed_snapshot.stale_subscribers),
+        error_subscribers=int(typed_snapshot.error_subscribers),
+        fenced_subscribers=int(typed_snapshot.fenced_subscribers),
+        ack_pending_subscribers=int(typed_snapshot.ack_pending_subscribers),
+        unique_consumers=int(typed_snapshot.unique_consumers),
+        unique_nodes=int(typed_snapshot.unique_nodes),
+        unique_tenants=int(typed_snapshot.unique_tenants),
+    )
+
+
 def _build_vfs_runtime_rollout(snapshot: object) -> GQLVfsRuntimeRollout:
     typed_snapshot: Any = snapshot
     return GQLVfsRuntimeRollout(
@@ -837,6 +919,18 @@ def _build_plugin_proof_coverage_summary(snapshot: object) -> GQLPluginProofCove
     )
 
 
+def _build_plugin_runtime_publisher_summary(snapshot: object) -> GQLPluginRuntimePublisherSummary:
+    typed_snapshot: Any = snapshot
+    return GQLPluginRuntimePublisherSummary(
+        publisher=str(typed_snapshot.publisher),
+        plugin_count=int(typed_snapshot.plugin_count),
+        ready_plugins=int(typed_snapshot.ready_plugins),
+        quarantined_plugins=int(typed_snapshot.quarantined_plugins),
+        warning_count=int(typed_snapshot.warning_count),
+        capability_counts=_build_named_count_buckets(dict(typed_snapshot.capability_counts)),
+    )
+
+
 def _build_vfs_generation_history_point(snapshot: object) -> GQLVfsGenerationHistoryPoint:
     typed_snapshot: Any = snapshot
     return GQLVfsGenerationHistoryPoint(
@@ -878,6 +972,38 @@ def _build_vfs_generation_history_summary(snapshot: object) -> GQLVfsGenerationH
         provider_family_counts=_build_named_count_buckets(
             dict(typed_snapshot.provider_family_counts)
         ),
+        lease_state_counts=_build_named_count_buckets(dict(typed_snapshot.lease_state_counts)),
+    )
+
+
+def _build_vfs_catalog_delta(delta: VfsCatalogDelta) -> GQLVfsCatalogDelta:
+    summary = summarize_vfs_catalog_delta(delta)
+    return GQLVfsCatalogDelta(
+        generation_id=str(delta.generation_id),
+        base_generation_id=(
+            str(delta.base_generation_id) if delta.base_generation_id is not None else None
+        ),
+        published_at=delta.published_at.isoformat(),
+        upsert_directory_count=summary.upsert_directory_count,
+        upsert_file_count=summary.upsert_file_count,
+        removal_directory_count=summary.removal_directory_count,
+        removal_file_count=summary.removal_file_count,
+        provider_family_counts=_build_named_count_buckets(dict(summary.provider_family_counts)),
+        lease_state_counts=_build_named_count_buckets(dict(summary.lease_state_counts)),
+    )
+
+
+def _build_vfs_catalog_delta_history_summary(snapshot: object) -> GQLVfsCatalogDeltaHistorySummary:
+    typed_snapshot: Any = snapshot
+    return GQLVfsCatalogDeltaHistorySummary(
+        delta_count=int(typed_snapshot.delta_count),
+        max_upsert_count=int(typed_snapshot.max_upsert_count),
+        max_removal_count=int(typed_snapshot.max_removal_count),
+        total_upsert_count=int(typed_snapshot.total_upsert_count),
+        total_removal_count=int(typed_snapshot.total_removal_count),
+        total_upsert_file_count=int(typed_snapshot.total_upsert_file_count),
+        total_removal_file_count=int(typed_snapshot.total_removal_file_count),
+        provider_family_counts=_build_named_count_buckets(dict(typed_snapshot.provider_family_counts)),
         lease_state_counts=_build_named_count_buckets(dict(typed_snapshot.lease_state_counts)),
     )
 
@@ -1086,6 +1212,39 @@ def _build_downloader_provider_summary(snapshot: object) -> GQLDownloaderProvide
         reason_code_counts=_build_named_count_buckets(dict(typed_snapshot.reason_code_counts)),
         status_code_counts=_build_named_count_buckets(dict(typed_snapshot.status_code_counts)),
         retry_after_hint_count=int(typed_snapshot.retry_after_hint_count),
+    )
+
+
+def _build_downloader_dead_letter_timeline_point(
+    snapshot: object,
+) -> GQLDownloaderDeadLetterTimelinePoint:
+    typed_snapshot: Any = snapshot
+    return GQLDownloaderDeadLetterTimelinePoint(
+        bucket_at=str(typed_snapshot.bucket_at),
+        sample_count=int(typed_snapshot.sample_count),
+        provider_counts=_build_named_count_buckets(dict(typed_snapshot.provider_counts)),
+        reason_code_counts=_build_named_count_buckets(dict(typed_snapshot.reason_code_counts)),
+        failure_kind_counts=_build_named_count_buckets(dict(typed_snapshot.failure_kind_counts)),
+    )
+
+
+def _build_downloader_failure_kind_summary(snapshot: object) -> GQLDownloaderFailureKindSummary:
+    typed_snapshot: Any = snapshot
+    return GQLDownloaderFailureKindSummary(
+        failure_kind=str(typed_snapshot.failure_kind),
+        sample_count=int(typed_snapshot.sample_count),
+        provider_counts=_build_named_count_buckets(dict(typed_snapshot.provider_counts)),
+        reason_code_counts=_build_named_count_buckets(dict(typed_snapshot.reason_code_counts)),
+    )
+
+
+def _build_downloader_status_code_summary(snapshot: object) -> GQLDownloaderStatusCodeSummary:
+    typed_snapshot: Any = snapshot
+    return GQLDownloaderStatusCodeSummary(
+        status_code=int(typed_snapshot.status_code),
+        sample_count=int(typed_snapshot.sample_count),
+        provider_counts=_build_named_count_buckets(dict(typed_snapshot.provider_counts)),
+        reason_code_counts=_build_named_count_buckets(dict(typed_snapshot.reason_code_counts)),
     )
 
 
@@ -2392,6 +2551,38 @@ class CoreQueryResolver:
             await build_vfs_mount_diagnostics_posture(info.context.resources)
         )
 
+    @strawberry.field(description="Flattened VFS mount action feed")
+    async def vfs_mount_actions(
+        self,
+        info: Info[GraphQLContext, object],
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorActionItem]:
+        rows = await build_vfs_mount_action_items(info.context.resources)
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_action_item(row) for row in filtered]
+
+    @strawberry.field(description="Flattened VFS mount gap feed")
+    async def vfs_mount_gaps(
+        self,
+        info: Info[GraphQLContext, object],
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorGapItem]:
+        rows = await build_vfs_mount_gap_items(info.context.resources)
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_gap_item(row) for row in filtered]
+
     @strawberry.field(
         description="Retained VFS generation history with snapshot and delta rollups for Director browse/operator screens"
     )
@@ -2416,6 +2607,31 @@ class CoreQueryResolver:
     ) -> GQLVfsGenerationHistorySummary:
         return _build_vfs_generation_history_summary(
             await build_vfs_generation_history_summary(
+                info.context.resources,
+                limit=max(1, min(limit, 100)),
+            )
+        )
+
+    @strawberry.field(description="Sequential retained VFS catalog delta history")
+    async def vfs_catalog_delta_history(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 20,
+    ) -> list[GQLVfsCatalogDelta]:
+        rows = await build_vfs_catalog_delta_history(
+            info.context.resources,
+            limit=max(1, min(limit, 100)),
+        )
+        return [_build_vfs_catalog_delta(row) for row in rows]
+
+    @strawberry.field(description="Aggregate rollup over sequential retained VFS deltas")
+    async def vfs_catalog_delta_history_summary(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 20,
+    ) -> GQLVfsCatalogDeltaHistorySummary:
+        return _build_vfs_catalog_delta_history_summary(
+            await build_vfs_catalog_delta_history_summary(
                 info.context.resources,
                 limit=max(1, min(limit, 100)),
             )
@@ -2447,6 +2663,18 @@ class CoreQueryResolver:
             if not title_filter or title_filter in str(getattr(item, "title", "")).casefold()
         ]
         return [_build_vfs_blocked_item(item) for item in matches[: max(1, min(limit, 500))]]
+
+    @strawberry.field(description="Blocked-item counts grouped by reason")
+    async def vfs_blocked_reason_summaries(
+        self,
+        info: Info[GraphQLContext, object],
+        generation_id: str | None = None,
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_vfs_blocked_reason_summaries(
+            info.context.resources,
+            generation_id=generation_id,
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
 
     @strawberry.field(
         description="GraphQL-native VFS search scoped to one path prefix for Director browse surfaces"
@@ -2529,6 +2757,98 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
     ) -> GQLObservabilityRolloutSummary:
         return _build_observability_rollout(info)
+
+    @strawberry.field(
+        description="Typed observability pipeline stages with optional GraphQL-native filters"
+    )
+    async def observability_pipeline_stages(
+        self,
+        info: Info[GraphQLContext, object],
+        status: str | None = None,
+        ready: bool | None = None,
+    ) -> list[GQLObservabilityPipelineStage]:
+        snapshot = build_observability_convergence_snapshot(info.context.resources.settings)
+        rows = [
+            stage
+            for stage in snapshot.pipeline_stages
+            if (status is None or stage.status == status)
+            and (ready is None or stage.ready == ready)
+        ]
+        return [
+            GQLObservabilityPipelineStage(
+                name=str(stage.name),
+                status=str(stage.status),
+                configured=bool(stage.configured),
+                ready=bool(stage.ready),
+                required_actions=list(stage.required_actions),
+                remaining_gaps=list(stage.remaining_gaps),
+            )
+            for stage in rows
+        ]
+
+    @strawberry.field(
+        description="Compact field/header contract summary for Python and Rust observability correlation"
+    )
+    async def observability_field_contract_summary(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLObservabilityFieldContractSummary:
+        return _build_observability_field_contract_summary(
+            build_observability_field_contract_summary(info.context.resources)
+        )
+
+    @strawberry.field(description="Status buckets across observability pipeline stages")
+    async def observability_stage_counts(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLGovernanceStatusCount]:
+        return [
+            _build_governance_status_count(row)
+            for row in build_observability_stage_counts(info.context.resources)
+        ]
+
+    @strawberry.field(description="Retained observability proof inventory")
+    async def observability_proof_inventory(
+        self,
+        info: Info[GraphQLContext, object],
+        recorded: bool | None = None,
+    ) -> list[GQLProofArtifact]:
+        rows = build_observability_proof_inventory(info.context.resources)
+        if recorded is not None:
+            rows = [row for row in rows if row.recorded == recorded]
+        return _build_proof_artifact_rows(list(rows))
+
+    @strawberry.field(description="Flattened observability action feed")
+    async def observability_actions(
+        self,
+        info: Info[GraphQLContext, object],
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorActionItem]:
+        rows = build_observability_action_items(info.context.resources)
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_action_item(row) for row in filtered]
+
+    @strawberry.field(description="Flattened observability gap feed")
+    async def observability_gaps(
+        self,
+        info: Info[GraphQLContext, object],
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorGapItem]:
+        rows = build_observability_gap_items(info.context.resources)
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_gap_item(row) for row in filtered]
 
     @strawberry.field(
         description="Retained rollout evidence checks across playback, VFS, identity, plugin runtime, observability, and control-plane domains"
@@ -2783,6 +3103,102 @@ class CoreQueryResolver:
         ]
         return [_build_downloader_reason_summary(row) for row in filtered]
 
+    @strawberry.field(description="Alert-level counts across bounded downloader queue history")
+    async def downloader_alert_level_counts(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 20,
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_downloader_alert_level_counts(
+            info.context.resources,
+            limit=max(1, min(limit, 100)),
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
+    @strawberry.field(description="Time-bucketed downloader dead-letter evidence")
+    async def downloader_dead_letter_timeline(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 50,
+        bucket_minutes: int = 60,
+        provider: str | None = None,
+        reason_code: str | None = None,
+        failure_kind: str | None = None,
+    ) -> list[GQLDownloaderDeadLetterTimelinePoint]:
+        rows = await build_downloader_dead_letter_timeline(
+            info.context.resources,
+            limit=max(1, min(limit, 200)),
+            bucket_minutes=bucket_minutes,
+            provider=provider,
+            reason_code=reason_code,
+            failure_kind=failure_kind,
+        )
+        return [_build_downloader_dead_letter_timeline_point(row) for row in rows]
+
+    @strawberry.field(description="Failure-kind grouped downloader dead-letter evidence")
+    async def downloader_failure_kind_summaries(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 50,
+        provider: str | None = None,
+        reason_code: str | None = None,
+    ) -> list[GQLDownloaderFailureKindSummary]:
+        rows = await build_downloader_failure_kind_summaries(
+            info.context.resources,
+            limit=max(1, min(limit, 200)),
+            provider=provider,
+            reason_code=reason_code,
+        )
+        return [_build_downloader_failure_kind_summary(row) for row in rows]
+
+    @strawberry.field(description="Status-code grouped downloader dead-letter evidence")
+    async def downloader_status_code_summaries(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 50,
+        provider: str | None = None,
+        reason_code: str | None = None,
+    ) -> list[GQLDownloaderStatusCodeSummary]:
+        rows = await build_downloader_status_code_summaries(
+            info.context.resources,
+            limit=max(1, min(limit, 200)),
+            provider=provider,
+            reason_code=reason_code,
+        )
+        return [_build_downloader_status_code_summary(row) for row in rows]
+
+    @strawberry.field(description="Flattened downloader action feed")
+    async def downloader_actions(
+        self,
+        info: Info[GraphQLContext, object],
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorActionItem]:
+        rows = await build_downloader_action_items(info.context.resources)
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_action_item(row) for row in filtered]
+
+    @strawberry.field(description="Flattened downloader gap feed")
+    async def downloader_gaps(
+        self,
+        info: Info[GraphQLContext, object],
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorGapItem]:
+        rows = await build_downloader_gap_items(info.context.resources)
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_gap_item(row) for row in filtered]
+
     @strawberry.field(
         description="Bounded downloader-focused queue history so Director does not need to repurpose the generic worker queue graph"
     )
@@ -2993,6 +3409,64 @@ class CoreQueryResolver:
             summaries = [row for row in summaries if row.capability_kind == capability_kind]
         return [_build_plugin_proof_coverage_summary(row) for row in summaries]
 
+    @strawberry.field(description="Status buckets across plugin runtime rows")
+    async def plugin_runtime_status_counts(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLGovernanceStatusCount]:
+        rows = await build_plugin_runtime_status_counts(
+            info.context.resources,
+            app_state=info.context.request.app.state,
+        )
+        return [_build_governance_status_count(row) for row in rows]
+
+    @strawberry.field(description="Wiring-status buckets across plugin runtime rows")
+    async def plugin_runtime_wiring_status_counts(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_plugin_runtime_wiring_status_counts(
+            info.context.resources,
+            app_state=info.context.request.app.state,
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
+    @strawberry.field(description="Publisher-grouped plugin runtime summary")
+    async def plugin_runtime_publisher_summaries(
+        self,
+        info: Info[GraphQLContext, object],
+        publisher: str | None = None,
+    ) -> list[GQLPluginRuntimePublisherSummary]:
+        rows = await build_plugin_runtime_publisher_summaries(
+            info.context.resources,
+            app_state=info.context.request.app.state,
+        )
+        if publisher is not None:
+            rows = [row for row in rows if row.publisher == publisher]
+        return [_build_plugin_runtime_publisher_summary(row) for row in rows]
+
+    @strawberry.field(description="Capability-grouped action counts across plugin runtime posture")
+    async def plugin_runtime_capability_action_counts(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_plugin_runtime_capability_action_counts(
+            info.context.resources,
+            app_state=info.context.request.app.state,
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
+    @strawberry.field(description="Capability-grouped gap counts across plugin runtime posture")
+    async def plugin_runtime_capability_gap_counts(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_plugin_runtime_capability_gap_counts(
+            info.context.resources,
+            app_state=info.context.request.app.state,
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
     @strawberry.field(
         description="Flattened plugin runtime action feed for Director/operator consoles"
     )
@@ -3071,6 +3545,18 @@ class CoreQueryResolver:
             )
         )
 
+    @strawberry.field(description="Status buckets across control-plane subscriber states")
+    async def control_plane_status_counts(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_control_plane_status_counts(
+            info.context.resources,
+            active_within_seconds=active_within_seconds,
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
     @strawberry.field(
         description="Durable replay/control-plane subscriber ledger rows for GraphQL-first operator consoles"
     )
@@ -3106,6 +3592,58 @@ class CoreQueryResolver:
             and (fenced is None or row.fenced == fenced)
         ]
         return filtered[: max(1, min(limit, 500))]
+
+    @strawberry.field(description="Grouped control-plane summary per consumer")
+    async def control_plane_consumer_summaries(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+        consumer_name: str | None = None,
+    ) -> list[GQLControlPlaneConsumerSummary]:
+        rows = await build_control_plane_consumer_summaries(
+            info.context.resources,
+            active_within_seconds=active_within_seconds,
+        )
+        if consumer_name is not None:
+            rows = [row for row in rows if row.consumer_name == consumer_name]
+        return [_build_control_plane_consumer_summary(row) for row in rows]
+
+    @strawberry.field(description="Subscriber counts grouped by owning node")
+    async def control_plane_node_counts(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_control_plane_node_counts(
+            info.context.resources,
+            active_within_seconds=active_within_seconds,
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
+    @strawberry.field(description="Subscriber counts grouped by tenant")
+    async def control_plane_tenant_counts(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_control_plane_tenant_counts(
+            info.context.resources,
+            active_within_seconds=active_within_seconds,
+        )
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
+    @strawberry.field(description="Aggregated ownership summary across control-plane subscribers")
+    async def control_plane_ownership_summary(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+    ) -> GQLControlPlaneOwnershipSummary:
+        return _build_control_plane_ownership_summary(
+            await build_control_plane_ownership_summary(
+                info.context.resources,
+                active_within_seconds=active_within_seconds,
+            )
+        )
 
     @strawberry.field(
         description="GraphQL-first recovery readiness rollup for control-plane evidence and automation"
@@ -3143,6 +3681,54 @@ class CoreQueryResolver:
         return _build_control_plane_replay_backplane(
             await build_control_plane_replay_backplane_posture(info.context.resources)
         )
+
+    @strawberry.field(description="Replay consumer counts grouped by consumer name")
+    async def control_plane_replay_consumer_counts(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[GQLNamedCountBucket]:
+        rows = await build_control_plane_replay_consumer_counts(info.context.resources)
+        return _build_named_count_buckets({row.key: row.count for row in rows})
+
+    @strawberry.field(description="Flattened control-plane action feed")
+    async def control_plane_actions(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorActionItem]:
+        rows = await build_control_plane_action_items(
+            info.context.resources,
+            active_within_seconds=active_within_seconds,
+        )
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_action_item(row) for row in filtered]
+
+    @strawberry.field(description="Flattened control-plane gap feed")
+    async def control_plane_gaps(
+        self,
+        info: Info[GraphQLContext, object],
+        active_within_seconds: int = 120,
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> list[GQLOperatorGapItem]:
+        rows = await build_control_plane_gap_items(
+            info.context.resources,
+            active_within_seconds=active_within_seconds,
+        )
+        filtered = [
+            row
+            for row in rows
+            if (severity is None or row.severity == severity)
+            and (status is None or row.status == status)
+        ]
+        return [_build_operator_gap_item(row) for row in filtered]
 
     @strawberry.field(
         description="Machine-readable enterprise operations posture across current governance slices"

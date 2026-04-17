@@ -26,6 +26,7 @@ from filmu_py.core.runtime_lifecycle import (
 )
 from filmu_py.db.models import StreamORM
 from filmu_py.graphql import GraphQLPluginRegistry, create_graphql_router
+from filmu_py.observability_convergence import EXPECTED_CORRELATION_FIELDS
 from filmu_py.plugins import TestPluginContext
 from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.manifest import PluginManifest
@@ -858,6 +859,99 @@ def test_graphql_observability_convergence_returns_typed_cross_process_snapshot(
     }
 
 
+def test_graphql_observability_support_queries_return_contract_counts_inventory_actions_and_gaps() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "opensearch://logs-filmu",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "search_backend": "opensearch",
+                "environment_shipping_enabled": False,
+                "alerting_enabled": False,
+                "rust_trace_correlation_enabled": False,
+                "required_correlation_fields": ["request.id", "trace.id", "tenant.id"],
+                "proof_refs": ["   ", "ops/observability/rollout.md"],
+            },
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  observabilityFieldContractSummary {
+                    totalRequiredCorrelationFields
+                    expectedFieldCount
+                    configuredExpectedFieldCount
+                    missingExpectedFieldCount
+                    traceContextHeaderCount
+                    correlationHeaderCount
+                    sharedHeaderCount
+                  }
+                  observabilityStageCounts {
+                    status
+                    count
+                  }
+                  observabilityProofInventory(recorded: true) {
+                    ref
+                    category
+                    recorded
+                  }
+                  observabilityActions {
+                    domain
+                    subject
+                    severity
+                    status
+                    action
+                  }
+                  observabilityGaps {
+                    domain
+                    subject
+                    severity
+                    status
+                    message
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["observabilityFieldContractSummary"] == {
+        "totalRequiredCorrelationFields": 3,
+        "expectedFieldCount": len(EXPECTED_CORRELATION_FIELDS),
+        "configuredExpectedFieldCount": 3,
+        "missingExpectedFieldCount": len(EXPECTED_CORRELATION_FIELDS) - 3,
+        "traceContextHeaderCount": 3,
+        "correlationHeaderCount": 7,
+        "sharedHeaderCount": 10,
+    }
+    assert sum(row["count"] for row in payload["observabilityStageCounts"]) == 5
+    assert payload["observabilityProofInventory"] == [
+        {
+            "ref": "ops/observability/rollout.md",
+            "category": "observability_rollout",
+            "recorded": True,
+        }
+    ]
+    assert any(
+        row["domain"] == "observability" and row["subject"] == "observability_convergence"
+        for row in payload["observabilityActions"]
+    )
+    assert any(
+        row["domain"] == "observability" and row["subject"] == "observability_convergence"
+        for row in payload["observabilityGaps"]
+    )
+
+
 def test_graphql_observability_convergence_sanitizes_blank_proofs_and_requires_live_log_shipping() -> None:
     client = _build_client(
         FakeMediaService(),
@@ -1409,6 +1503,196 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
     }
+
+
+def test_graphql_control_plane_support_queries_return_grouped_counts_and_feeds() -> None:
+    class FakeControlPlaneService:
+        async def summarize_subscribers(self, *, active_within_seconds: int) -> object:
+            _ = active_within_seconds
+            return SimpleNamespace(
+                total_subscribers=2,
+                active_subscribers=1,
+                stale_subscribers=1,
+                error_subscribers=0,
+                fenced_subscribers=1,
+                ack_pending_subscribers=1,
+                stream_count=1,
+                group_count=1,
+                node_count=1,
+                tenant_count=1,
+                oldest_heartbeat_age_seconds=45.0,
+                status_counts={"active": 1, "stale": 1},
+                required_actions=["recover_stale_control_plane_subscribers"],
+                remaining_gaps=["control-plane backlog needs recovery"],
+            )
+
+        async def list_subscribers(self, *, active_within_seconds: int) -> list[object]:
+            _ = active_within_seconds
+            return [
+                SimpleNamespace(
+                    stream_name="filmu:events",
+                    group_name="filmu-api",
+                    consumer_name="worker-a",
+                    node_id="node-a",
+                    tenant_id="tenant-main",
+                    status="stale",
+                    last_read_offset="100-0",
+                    last_delivered_event_id="120-0",
+                    last_acked_event_id="110-0",
+                    last_error="consumer_fenced owner=node-b contender=node-a",
+                    claimed_at=datetime(2026, 4, 16, 9, 58, tzinfo=UTC),
+                    last_heartbeat_at=datetime(2026, 4, 16, 9, 59, tzinfo=UTC),
+                    created_at=datetime(2026, 4, 16, 9, 50, tzinfo=UTC),
+                    updated_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                )
+            ]
+
+    class FakeAutomation:
+        def snapshot(self) -> object:
+            return SimpleNamespace(
+                enabled=True,
+                runner_status="running",
+                interval_seconds=30,
+                active_within_seconds=180,
+                pending_min_idle_ms=60000,
+                claim_limit=25,
+                max_claim_passes=2,
+                consumer_group="filmu-api",
+                consumer_name="automation",
+                service_attached=True,
+                backplane_attached=True,
+                last_run_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                last_success_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                last_failure_at=None,
+                consecutive_failures=0,
+                last_error=None,
+                remediation_updated_subscribers=1,
+                rewound_subscribers=1,
+                claimed_pending_events=2,
+                claim_passes=1,
+                pending_count_after=0,
+                summary=None,
+            )
+
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_CONTROL_PLANE": {
+                "event_backplane": "redis_stream",
+                "proof_refs": ["ops/control-plane/redis-consumer-group-soak.md"],
+                "automation": {"enabled": True},
+            }
+        },
+        control_plane_service=FakeControlPlaneService(),
+        control_plane_automation=FakeAutomation(),
+        replay_backplane=FakeReplayBackplane(
+            pending_count=3,
+            oldest_event_id="100-0",
+            latest_event_id="120-0",
+            consumer_counts={"worker-a": 2, "worker-b": 1},
+        ),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  controlPlaneStatusCounts(activeWithinSeconds: 180) {
+                    key
+                    count
+                  }
+                  controlPlaneConsumerSummaries(activeWithinSeconds: 180) {
+                    consumerName
+                    subscriberCount
+                    activeSubscribers
+                    ackPendingSubscribers
+                    fencedSubscribers
+                    errorSubscribers
+                    latestHeartbeatAt
+                  }
+                  controlPlaneNodeCounts(activeWithinSeconds: 180) {
+                    key
+                    count
+                  }
+                  controlPlaneTenantCounts(activeWithinSeconds: 180) {
+                    key
+                    count
+                  }
+                  controlPlaneOwnershipSummary(activeWithinSeconds: 180) {
+                    totalSubscribers
+                    activeSubscribers
+                    staleSubscribers
+                    fencedSubscribers
+                    ackPendingSubscribers
+                    uniqueConsumers
+                    uniqueNodes
+                    uniqueTenants
+                  }
+                  controlPlaneReplayConsumerCounts {
+                    key
+                    count
+                  }
+                  controlPlaneActions(activeWithinSeconds: 180) {
+                    domain
+                    subject
+                    action
+                  }
+                  controlPlaneGaps(activeWithinSeconds: 180) {
+                    domain
+                    subject
+                    message
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["controlPlaneStatusCounts"] == [
+        {"key": "active", "count": 1},
+        {"key": "stale", "count": 1},
+    ]
+    assert payload["controlPlaneConsumerSummaries"] == [
+        {
+            "consumerName": "worker-a",
+            "subscriberCount": 1,
+            "activeSubscribers": 0,
+            "ackPendingSubscribers": 1,
+            "fencedSubscribers": 1,
+            "errorSubscribers": 0,
+            "latestHeartbeatAt": "2026-04-16T09:59:00+00:00",
+        }
+    ]
+    assert payload["controlPlaneNodeCounts"] == [{"key": "node-a", "count": 1}]
+    assert payload["controlPlaneTenantCounts"] == [{"key": "tenant-main", "count": 1}]
+    assert payload["controlPlaneOwnershipSummary"] == {
+        "totalSubscribers": 1,
+        "activeSubscribers": 0,
+        "staleSubscribers": 1,
+        "fencedSubscribers": 1,
+        "ackPendingSubscribers": 1,
+        "uniqueConsumers": 1,
+        "uniqueNodes": 1,
+        "uniqueTenants": 1,
+    }
+    assert payload["controlPlaneReplayConsumerCounts"] == [
+        {"key": "worker-a", "count": 2},
+        {"key": "worker-b", "count": 1},
+    ]
+    assert any(
+        row["domain"] == "control_plane"
+        and row["subject"] == "control_plane_summary"
+        and row["action"] == "recover_stale_control_plane_subscribers"
+        for row in payload["controlPlaneActions"]
+    )
+    assert any(
+        row["domain"] == "control_plane"
+        and row["subject"] == "control_plane_summary"
+        and row["message"] == "control-plane backlog needs recovery"
+        for row in payload["controlPlaneGaps"]
+    )
 
 
 def test_graphql_control_plane_recovery_requires_healthy_automation_backplane() -> None:
@@ -4830,6 +5114,156 @@ def test_graphql_downloader_supporting_summaries_return_typed_grouped_evidence()
     ]
 
 
+def test_graphql_downloader_support_queries_return_typed_timeline_failure_and_status_summaries() -> None:
+    redis = FakeOperatorRedis(
+        lists={
+            "arq:queue-status-history:filmu-py": [
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-16T11:10:00Z",
+                        "total_jobs": 6,
+                        "ready_jobs": 2,
+                        "deferred_jobs": 1,
+                        "in_progress_jobs": 1,
+                        "retry_jobs": 2,
+                        "dead_letter_jobs": 2,
+                        "alert_level": "critical",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "observed_at": "2026-04-16T11:05:00Z",
+                        "total_jobs": 3,
+                        "ready_jobs": 1,
+                        "deferred_jobs": 0,
+                        "in_progress_jobs": 1,
+                        "retry_jobs": 0,
+                        "dead_letter_jobs": 0,
+                        "alert_level": "ok",
+                    }
+                ),
+            ],
+            "arq:dead-letter:filmu-py": [
+                json.dumps(
+                    {
+                        "stage": "debrid_item",
+                        "task": "debrid_item",
+                        "item_id": "item-2",
+                        "reason": "provider timeout",
+                        "reason_code": "provider_timeout",
+                        "idempotency_key": "item-2:timeout",
+                        "attempt": 2,
+                        "queued_at": "2026-04-16T11:12:00Z",
+                        "metadata": {
+                            "provider": "alldebrid",
+                            "failure_kind": "timeout",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "stage": "debrid_item",
+                        "task": "debrid_item",
+                        "item_id": "item-1",
+                        "reason": "provider rate limited",
+                        "reason_code": "provider_rate_limit",
+                        "idempotency_key": "item-1:ratelimit",
+                        "attempt": 1,
+                        "queued_at": "2026-04-16T11:15:00Z",
+                        "metadata": {
+                            "provider": "realdebrid",
+                            "failure_kind": "rate_limit",
+                            "status_code": 429,
+                            "retry_after_seconds": 30,
+                        },
+                    }
+                ),
+            ],
+        }
+    )
+    client = _build_client(FakeMediaService(), redis=redis)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  downloaderAlertLevelCounts(limit: 5) {
+                    key
+                    count
+                  }
+                  downloaderDeadLetterTimeline(limit: 10, bucketMinutes: 30) {
+                    bucketAt
+                    sampleCount
+                    providerCounts { key count }
+                    reasonCodeCounts { key count }
+                    failureKindCounts { key count }
+                  }
+                  downloaderFailureKindSummaries(limit: 10) {
+                    failureKind
+                    sampleCount
+                    providerCounts { key count }
+                    reasonCodeCounts { key count }
+                  }
+                  downloaderStatusCodeSummaries(limit: 10) {
+                    statusCode
+                    sampleCount
+                    providerCounts { key count }
+                    reasonCodeCounts { key count }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["downloaderAlertLevelCounts"] == [
+        {"key": "critical", "count": 1},
+        {"key": "ok", "count": 1},
+    ]
+    assert payload["downloaderDeadLetterTimeline"] == [
+        {
+            "bucketAt": "2026-04-16T11:00:00+00:00",
+            "sampleCount": 2,
+            "providerCounts": [
+                {"key": "alldebrid", "count": 1},
+                {"key": "realdebrid", "count": 1},
+            ],
+            "reasonCodeCounts": [
+                {"key": "provider_rate_limit", "count": 1},
+                {"key": "provider_timeout", "count": 1},
+            ],
+            "failureKindCounts": [
+                {"key": "rate_limit", "count": 1},
+                {"key": "timeout", "count": 1},
+            ],
+        }
+    ]
+    assert payload["downloaderFailureKindSummaries"] == [
+        {
+            "failureKind": "rate_limit",
+            "sampleCount": 1,
+            "providerCounts": [{"key": "realdebrid", "count": 1}],
+            "reasonCodeCounts": [{"key": "provider_rate_limit", "count": 1}],
+        },
+        {
+            "failureKind": "timeout",
+            "sampleCount": 1,
+            "providerCounts": [{"key": "alldebrid", "count": 1}],
+            "reasonCodeCounts": [{"key": "provider_timeout", "count": 1}],
+        },
+    ]
+    assert payload["downloaderStatusCodeSummaries"] == [
+        {
+            "statusCode": 429,
+            "sampleCount": 1,
+            "providerCounts": [{"key": "realdebrid", "count": 1}],
+            "reasonCodeCounts": [{"key": "provider_rate_limit", "count": 1}],
+        }
+    ]
+
+
 def test_graphql_plugin_runtime_supporting_queries_return_rows_summaries_actions_and_gaps() -> None:
     plugin_settings = {
         "scraping": {
@@ -4922,6 +5356,121 @@ def test_graphql_plugin_runtime_supporting_queries_return_rows_summaries_actions
     assert payload["pluginProofCoverageSummaries"][0]["soakValidatedPlugins"] >= 1
     assert any(row["subject"] == "listrr" for row in payload["pluginRuntimeActions"])
     assert any(row["subject"] == "listrr" for row in payload["pluginRuntimeGaps"])
+
+
+def test_graphql_plugin_runtime_support_queries_return_status_wiring_publisher_and_capability_counts() -> None:
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "external-scraper",
+                "version": "1.0.0",
+                "api_version": "1",
+                "distribution": "filesystem",
+                "publisher": "community",
+                "release_channel": "stable",
+                "trust_level": "community",
+                "sandbox_profile": "restricted",
+                "tenancy_mode": "tenant",
+                "entry_module": "plugin.py",
+                "scraper": "ExternalScraper",
+                "publishable_events": ["external.scan.completed"],
+            }
+        )
+    )
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "hook-plugin",
+                "version": "1.0.0",
+                "api_version": "1",
+                "distribution": "filesystem",
+                "entry_module": "plugin.py",
+                "event_hook": "ExampleHook",
+            }
+        )
+    )
+
+    class ExampleHook:
+        subscribed_events = frozenset({"item.completed", "item.state.changed"})
+
+    plugin_registry.register_capability(
+        plugin_name="external-scraper",
+        kind=PluginCapabilityKind.SCRAPER,
+        implementation=object(),
+    )
+    plugin_registry.register_capability(
+        plugin_name="hook-plugin",
+        kind=PluginCapabilityKind.EVENT_HOOK,
+        implementation=ExampleHook(),
+    )
+
+    client = _build_client(FakeMediaService(), plugin_registry=plugin_registry)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  pluginRuntimeStatusCounts {
+                    status
+                    count
+                  }
+                  pluginRuntimeWiringStatusCounts {
+                    key
+                    count
+                  }
+                  pluginRuntimePublisherSummaries {
+                    publisher
+                    pluginCount
+                    readyPlugins
+                    quarantinedPlugins
+                    warningCount
+                    capabilityCounts { key count }
+                  }
+                  pluginRuntimeCapabilityActionCounts {
+                    key
+                    count
+                  }
+                  pluginRuntimeCapabilityGapCounts {
+                    key
+                    count
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert sum(row["count"] for row in payload["pluginRuntimeStatusCounts"]) == 2
+    assert payload["pluginRuntimeWiringStatusCounts"] == [
+        {"key": "publisher_only", "count": 1},
+        {"key": "subscriber_only", "count": 1},
+    ]
+    assert payload["pluginRuntimePublisherSummaries"] == [
+        {
+            "publisher": "community",
+            "pluginCount": 1,
+            "readyPlugins": 1,
+            "quarantinedPlugins": 0,
+            "warningCount": 0,
+            "capabilityCounts": [{"key": "scraper", "count": 1}],
+        },
+        {
+            "publisher": "unknown",
+            "pluginCount": 1,
+            "readyPlugins": 1,
+            "quarantinedPlugins": 0,
+            "warningCount": 0,
+            "capabilityCounts": [{"key": "event_hook", "count": 1}],
+        },
+    ]
+    assert payload["pluginRuntimeCapabilityActionCounts"] == [
+        {"key": "event_hook", "count": 1},
+        {"key": "scraper", "count": 1},
+    ]
+    assert payload["pluginRuntimeCapabilityGapCounts"] == []
 
 
 def test_graphql_vfs_generation_history_summary_returns_aggregate_rollups() -> None:
@@ -5037,3 +5586,173 @@ def test_graphql_vfs_generation_history_summary_returns_aggregate_rollups() -> N
             {"key": "refreshing", "count": 1},
         ],
     }
+
+
+def test_graphql_vfs_support_queries_return_delta_history_blocked_reasons_and_mount_feeds() -> None:
+    snapshot_11 = VfsCatalogSnapshot(
+        generation_id="11",
+        published_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+        entries=(
+            VfsCatalogEntry(
+                entry_id="dir:/",
+                parent_entry_id=None,
+                path="/",
+                name="/",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/"),
+            ),
+            VfsCatalogEntry(
+                entry_id="file:entry-1",
+                parent_entry_id="dir:/",
+                path="/Example.mkv",
+                name="Example.mkv",
+                kind="file",
+                file=VfsCatalogFileEntry(
+                    item_id="item-1",
+                    item_title="Example",
+                    item_external_ref="tmdb:1",
+                    media_entry_id="entry-1",
+                    source_attachment_id="attachment-1",
+                    media_type="movie",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/1",
+                    lease_state="ready",
+                    query_strategy="persisted_media_entries",
+                    provider_family="debrid",
+                    locator_source="unrestricted_url",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=1, file_count=1, blocked_item_count=1),
+        blocked_items=(
+            cast(
+                Any,
+                type(
+                    "BlockedItem",
+                    (),
+                    {
+                        "item_id": "item-blocked-1",
+                        "external_ref": "tmdb:999",
+                        "title": "Blocked One",
+                        "reason": "missing_lifecycle",
+                    },
+                )(),
+            ),
+        ),
+    )
+    snapshot_12 = VfsCatalogSnapshot(
+        generation_id="12",
+        published_at=datetime(2026, 4, 16, 10, 5, tzinfo=UTC),
+        entries=(
+            snapshot_11.entries[0],
+            snapshot_11.entries[1],
+            VfsCatalogEntry(
+                entry_id="file:entry-2",
+                parent_entry_id="dir:/",
+                path="/Example-2.mkv",
+                name="Example-2.mkv",
+                kind="file",
+                file=VfsCatalogFileEntry(
+                    item_id="item-2",
+                    item_title="Example Two",
+                    item_external_ref="tmdb:2",
+                    media_entry_id="entry-2",
+                    source_attachment_id="attachment-2",
+                    media_type="movie",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/2",
+                    lease_state="refreshing",
+                    query_strategy="playback_snapshot",
+                    provider_family="debrid",
+                    locator_source="locator",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=1, file_count=2, blocked_item_count=1),
+        blocked_items=snapshot_11.blocked_items,
+    )
+    client = _build_client(
+        FakeMediaService(),
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(
+            snapshot=snapshot_12,
+            snapshots_by_generation={11: snapshot_11, 12: snapshot_12},
+        ),
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsCatalogDeltaHistory(limit: 5) {
+                    generationId
+                    baseGenerationId
+                    publishedAt
+                    upsertDirectoryCount
+                    upsertFileCount
+                    removalDirectoryCount
+                    removalFileCount
+                    providerFamilyCounts { key count }
+                    leaseStateCounts { key count }
+                  }
+                  vfsCatalogDeltaHistorySummary(limit: 5) {
+                    deltaCount
+                    maxUpsertCount
+                    maxRemovalCount
+                    totalUpsertCount
+                    totalRemovalCount
+                    totalUpsertFileCount
+                    totalRemovalFileCount
+                    providerFamilyCounts { key count }
+                    leaseStateCounts { key count }
+                  }
+                  vfsBlockedReasonSummaries(generationId: "12") {
+                    key
+                    count
+                  }
+                  vfsMountActions {
+                    domain
+                    subject
+                    action
+                  }
+                  vfsMountGaps {
+                    domain
+                    subject
+                    message
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["vfsCatalogDeltaHistory"] == [
+        {
+            "generationId": "12",
+            "baseGenerationId": "11",
+            "publishedAt": "2026-04-16T10:05:00+00:00",
+            "upsertDirectoryCount": 0,
+            "upsertFileCount": 1,
+            "removalDirectoryCount": 0,
+            "removalFileCount": 0,
+            "providerFamilyCounts": [{"key": "debrid", "count": 1}],
+            "leaseStateCounts": [{"key": "refreshing", "count": 1}],
+        }
+    ]
+    assert payload["vfsCatalogDeltaHistorySummary"] == {
+        "deltaCount": 1,
+        "maxUpsertCount": 1,
+        "maxRemovalCount": 0,
+        "totalUpsertCount": 1,
+        "totalRemovalCount": 0,
+        "totalUpsertFileCount": 1,
+        "totalRemovalFileCount": 0,
+        "providerFamilyCounts": [{"key": "debrid", "count": 1}],
+        "leaseStateCounts": [{"key": "refreshing", "count": 1}],
+    }
+    assert payload["vfsBlockedReasonSummaries"] == [
+        {"key": "missing_lifecycle", "count": 1}
+    ]
+    assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountActions"])
+    assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountGaps"])
