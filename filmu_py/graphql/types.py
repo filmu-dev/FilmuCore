@@ -354,6 +354,60 @@ class GQLVfsRuntimeRollout:
 
 
 @strawberry.type
+class GQLVfsRolloutLedgerEntry:
+    """One retained operator history row for VFS rollout control."""
+
+    entry_id: str = strawberry.field(name="entryId")
+    recorded_at: str = strawberry.field(name="recordedAt")
+    actor_id: str | None = strawberry.field(name="actorId", default=None)
+    action: str
+    summary: str
+    environment_class: str = strawberry.field(name="environmentClass")
+    runtime_status_path: str | None = strawberry.field(name="runtimeStatusPath", default=None)
+    promotion_paused: bool = strawberry.field(name="promotionPaused")
+    promotion_pause_reason: str | None = strawberry.field(name="promotionPauseReason", default=None)
+    promotion_pause_expires_at: str | None = strawberry.field(
+        name="promotionPauseExpiresAt",
+        default=None,
+    )
+    promotion_pause_active: bool = strawberry.field(name="promotionPauseActive")
+    rollback_requested: bool = strawberry.field(name="rollbackRequested")
+    rollback_reason: str | None = strawberry.field(name="rollbackReason", default=None)
+    rollback_expires_at: str | None = strawberry.field(name="rollbackExpiresAt", default=None)
+    rollback_active: bool = strawberry.field(name="rollbackActive")
+    notes: str | None = None
+
+
+@strawberry.type
+class GQLVfsRolloutControl:
+    """Persisted VFS rollout-control state plus the derived current canary posture."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    environment_class: str = strawberry.field(name="environmentClass")
+    runtime_status_path: str | None = strawberry.field(name="runtimeStatusPath", default=None)
+    promotion_paused: bool = strawberry.field(name="promotionPaused")
+    promotion_pause_reason: str | None = strawberry.field(name="promotionPauseReason", default=None)
+    promotion_pause_expires_at: str | None = strawberry.field(
+        name="promotionPauseExpiresAt",
+        default=None,
+    )
+    promotion_pause_active: bool = strawberry.field(name="promotionPauseActive")
+    rollback_requested: bool = strawberry.field(name="rollbackRequested")
+    rollback_reason: str | None = strawberry.field(name="rollbackReason", default=None)
+    rollback_expires_at: str | None = strawberry.field(name="rollbackExpiresAt", default=None)
+    rollback_active: bool = strawberry.field(name="rollbackActive")
+    notes: str | None = None
+    updated_at: str | None = strawberry.field(name="updatedAt", default=None)
+    updated_by: str | None = strawberry.field(name="updatedBy", default=None)
+    rollout_readiness: str = strawberry.field(name="rolloutReadiness")
+    next_action: str = strawberry.field(name="nextAction")
+    canary_decision: str = strawberry.field(name="canaryDecision")
+    merge_gate: str = strawberry.field(name="mergeGate")
+    reasons: list[str]
+    history: list[GQLVfsRolloutLedgerEntry]
+
+
+@strawberry.type
 class GQLControlPlaneStatusCount:
     """One typed control-plane subscriber-status count bucket."""
 
@@ -1715,6 +1769,30 @@ class PersistMediaEntryControlInput:
     refresh_state: str | None = strawberry.field(name="refreshState", default=None)
     last_refresh_error: str | None = strawberry.field(name="lastRefreshError", default=None)
     expires_at: str | None = strawberry.field(name="expiresAt", default=None)
+
+
+@strawberry.input
+class PersistVfsRolloutControlInput:
+    """Bounded GraphQL mutation input for VFS rollout-control state."""
+
+    environment_class: str | None = strawberry.field(name="environmentClass", default=None)
+    runtime_status_path: str | None = strawberry.field(name="runtimeStatusPath", default=None)
+    promotion_paused: bool | None = strawberry.field(name="promotionPaused", default=None)
+    promotion_pause_reason: str | None = strawberry.field(
+        name="promotionPauseReason",
+        default=None,
+    )
+    promotion_pause_expires_at: str | None = strawberry.field(
+        name="promotionPauseExpiresAt",
+        default=None,
+    )
+    rollback_requested: bool | None = strawberry.field(name="rollbackRequested", default=None)
+    rollback_reason: str | None = strawberry.field(name="rollbackReason", default=None)
+    rollback_expires_at: str | None = strawberry.field(
+        name="rollbackExpiresAt",
+        default=None,
+    )
+    notes: str | None = None
 
 
 @strawberry.type

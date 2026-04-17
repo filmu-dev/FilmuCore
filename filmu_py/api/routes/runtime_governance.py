@@ -9,6 +9,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+from filmu_py.services.vfs_rollout_control import (
+    apply_vfs_rollout_control_updates,
+    build_vfs_rollout_control_state,
+    has_active_promotion_pause,
+    has_active_rollback,
+    serialize_vfs_rollout_control_state,
+)
+
 _PLAYBACK_PROOF_ARTIFACTS_ROOT = Path(__file__).resolve().parents[3] / "playback-proof-artifacts"
 _MANAGED_WINDOWS_VFS_STATE_PATH = (
     _PLAYBACK_PROOF_ARTIFACTS_ROOT / "windows-native-stack" / "filmuvfs-windows-state.json"
@@ -479,16 +487,16 @@ def _preferred_managed_windows_vfs_state_path() -> Path:
 
 def _persist_managed_windows_vfs_state(
     updates: dict[str, object | None],
+    *,
+    actor_id: str | None = None,
 ) -> dict[str, object]:
     """Persist managed Windows rollout-control state while preserving unrelated fields."""
 
-    state = dict(_load_managed_windows_vfs_state() or {})
-    for key, value in updates.items():
-        if value is None:
-            state.pop(key, None)
-            continue
-        state[key] = value
-
+    state = apply_vfs_rollout_control_updates(
+        _load_managed_windows_vfs_state(),
+        updates,
+        actor_id=actor_id,
+    )
     state_path = _preferred_managed_windows_vfs_state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
@@ -1119,8 +1127,8 @@ def _apply_vfs_rollout_policy(
     if not canary_environment:
         canary_environment = _as_str(state_payload.get("environment_class"))
 
-    operator_pause = bool(state_payload.get("promotion_paused"))
-    operator_rollback = bool(state_payload.get("rollback_requested"))
+    operator_pause = has_active_promotion_pause(state_payload)
+    operator_rollback = has_active_rollback(state_payload)
 
     governance["vfs_runtime_rollout_environment_class"] = canary_environment
     governance["vfs_runtime_rollout_canary_decision"] = "capture_runtime_status"
@@ -1688,11 +1696,17 @@ def as_str(value: object, *, default: str = "") -> str:
 def managed_windows_vfs_state_snapshot() -> dict[str, object]:
     """Return the current managed Windows rollout-control state payload."""
 
-    return dict(_load_managed_windows_vfs_state() or {})
+    return serialize_vfs_rollout_control_state(
+        build_vfs_rollout_control_state(_load_managed_windows_vfs_state())
+    )
 
 
-def persist_managed_windows_vfs_state(updates: dict[str, object | None]) -> dict[str, object]:
+def persist_managed_windows_vfs_state(
+    updates: dict[str, object | None],
+    *,
+    actor_id: str | None = None,
+) -> dict[str, object]:
     """Persist managed Windows rollout-control state and return the resulting payload."""
 
-    return _persist_managed_windows_vfs_state(updates)
+    return _persist_managed_windows_vfs_state(updates, actor_id=actor_id)
 

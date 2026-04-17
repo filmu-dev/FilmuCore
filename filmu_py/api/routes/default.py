@@ -40,6 +40,10 @@ from filmu_py.services.operator_posture import (
 )
 from filmu_py.services.settings_service import save_settings
 from filmu_py.services.vfs_catalog import summarize_vfs_catalog_snapshot
+from filmu_py.services.vfs_rollout_control import (
+    build_vfs_rollout_control_state,
+    format_rollout_timestamp,
+)
 from filmu_py.workers.stage_observability import (
     worker_blocker_snapshot as _stage_worker_blocker_snapshot,
 )
@@ -110,6 +114,7 @@ from ..models import (
     VfsCatalogRollupResponse,
     VfsCatalogStatsResponse,
     VfsRolloutControlRequest,
+    VfsRolloutHistoryEntryResponse,
     VfsRolloutControlResponse,
 )
 from .runtime_governance import (
@@ -585,24 +590,34 @@ def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
     runtime_governance = vfs_runtime_governance_snapshot(
         playback_gate_governance=playback_gate_governance,
     )
-    state = managed_windows_vfs_state_snapshot()
+    state = build_vfs_rollout_control_state(managed_windows_vfs_state_snapshot())
     environment_class = (
-        str(state.get("environment_class") or "").strip()
+        str(state.environment_class).strip()
         or cast(str, runtime_governance["vfs_runtime_rollout_environment_class"])
     )
-    runtime_status_path = state.get("runtime_status_path")
     return VfsRolloutControlResponse(
         generated_at=datetime.now(UTC).isoformat(),
         environment_class=environment_class,
-        runtime_status_path=runtime_status_path if isinstance(runtime_status_path, str) else None,
-        promotion_paused=bool(state.get("promotion_paused")),
-        rollback_requested=bool(state.get("rollback_requested")),
-        notes=cast(str | None, state.get("notes") if isinstance(state.get("notes"), str) else None),
+        runtime_status_path=state.runtime_status_path,
+        promotion_paused=bool(state.promotion_paused),
+        promotion_pause_reason=state.promotion_pause_reason,
+        promotion_pause_expires_at=format_rollout_timestamp(
+            state.promotion_pause_expires_at
+        ),
+        promotion_pause_active=bool(state.promotion_pause_active),
+        rollback_requested=bool(state.rollback_requested),
+        rollback_reason=state.rollback_reason,
+        rollback_expires_at=format_rollout_timestamp(state.rollback_expires_at),
+        rollback_active=bool(state.rollback_active),
+        notes=state.notes,
+        updated_at=format_rollout_timestamp(state.updated_at),
+        updated_by=state.updated_by,
         rollout_readiness=cast(str, runtime_governance["vfs_runtime_rollout_readiness"]),
         next_action=cast(str, runtime_governance["vfs_runtime_rollout_next_action"]),
         canary_decision=cast(str, runtime_governance["vfs_runtime_rollout_canary_decision"]),
         merge_gate=cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"]),
         reasons=list(cast(list[str], runtime_governance["vfs_runtime_rollout_reasons"])),
+        history=[_vfs_rollout_history_entry_response(record) for record in state.history],
     )
 
 
@@ -1318,6 +1333,30 @@ def _actor_key(auth_context: Any) -> str:
     actor_id = str(getattr(auth_context, "actor_id", "operator")).strip() or "operator"
     tenant_id = str(getattr(auth_context, "tenant_id", "global")).strip() or "global"
     return f"{tenant_id}:{actor_id}"
+
+
+def _vfs_rollout_history_entry_response(record: Any) -> VfsRolloutHistoryEntryResponse:
+    """Return one API response row for the persisted VFS rollout ledger."""
+
+    return VfsRolloutHistoryEntryResponse(
+        entry_id=str(record.entry_id),
+        recorded_at=record.recorded_at.isoformat(),
+        actor_id=cast(str | None, record.actor_id),
+        action=str(record.action),
+        summary=str(record.summary),
+        environment_class=str(record.environment_class),
+        runtime_status_path=cast(str | None, record.runtime_status_path),
+        promotion_paused=bool(record.promotion_paused),
+        promotion_pause_reason=cast(str | None, record.promotion_pause_reason),
+        promotion_pause_expires_at=format_rollout_timestamp(record.promotion_pause_expires_at),
+        promotion_pause_active=bool(record.promotion_pause_active),
+        rollback_requested=bool(record.rollback_requested),
+        rollback_reason=cast(str | None, record.rollback_reason),
+        rollback_expires_at=format_rollout_timestamp(record.rollback_expires_at),
+        rollback_active=bool(record.rollback_active),
+        notes=cast(str | None, record.notes),
+    )
+
 
 def _authorization_audit_summary(record: Any) -> str:
     """Return a stable human-readable summary for one audit row."""
@@ -3400,22 +3439,35 @@ async def write_vfs_rollout_control(
 ) -> VfsRolloutControlResponse:
     """Persist VFS rollout-control state used by operator-managed canary promotion."""
 
-    updates: dict[str, object | None] = {
+    auth_context = get_auth_context(request)
+    updates = {
         "environment_class": payload.environment_class,
         "runtime_status_path": payload.runtime_status_path,
         "promotion_paused": payload.promotion_paused,
+        "promotion_pause_reason": payload.promotion_pause_reason,
+        "promotion_pause_expires_at": payload.promotion_pause_expires_at,
         "rollback_requested": payload.rollback_requested,
+        "rollback_reason": payload.rollback_reason,
+        "rollback_expires_at": payload.rollback_expires_at,
         "notes": payload.notes,
-        "updated_at": datetime.now(UTC).isoformat(),
     }
-    persist_managed_windows_vfs_state(updates)
+    updates = {key: value for key, value in updates.items() if value is not None}
+    try:
+        persist_managed_windows_vfs_state(
+            updates,
+            actor_id=_actor_key(auth_context),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit_action(
         request,
         action="operations.vfs_rollout.write_control",
         target="operations.vfs_rollout",
         details={
             "promotion_paused": payload.promotion_paused,
+            "promotion_pause_reason": payload.promotion_pause_reason,
             "rollback_requested": payload.rollback_requested,
+            "rollback_reason": payload.rollback_reason,
             "environment_class": payload.environment_class,
         },
     )

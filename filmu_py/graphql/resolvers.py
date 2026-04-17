@@ -16,11 +16,12 @@ import strawberry
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
+from filmu_py.audit import audit_action
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.runtime_lifecycle import RuntimeLifecycleSnapshot
 from filmu_py.db.models import StreamORM
-from filmu_py.graphql.deps import GraphQLContext
+from filmu_py.graphql.deps import GraphQLContext, require_graphql_permissions
 from filmu_py.graphql.types import (
     GQLActiveStream,
     GQLActiveStreamOwner,
@@ -115,6 +116,8 @@ from filmu_py.graphql.types import (
     GQLVfsMountDiagnostics,
     GQLVfsOverview,
     GQLVfsRollupBucket,
+    GQLVfsRolloutControl,
+    GQLVfsRolloutLedgerEntry,
     GQLVfsRuntimeRollout,
     GQLVfsSearchResult,
     GQLVfsSnapshot,
@@ -125,6 +128,7 @@ from filmu_py.graphql.types import (
     ItemStateChangedEvent,
     MediaKind,
     PersistMediaEntryControlInput,
+    PersistVfsRolloutControlInput,
     PersistPlaybackAttachmentControlInput,
     RequestItemInput,
     RequestItemResult,
@@ -837,6 +841,57 @@ def _build_vfs_runtime_rollout(snapshot: object) -> GQLVfsRuntimeRollout:
         reasons=list(typed_snapshot.reasons),
         required_actions=list(typed_snapshot.required_actions),
         remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_vfs_rollout_ledger_entry(snapshot: object) -> GQLVfsRolloutLedgerEntry:
+    typed_snapshot: Any = snapshot
+    return GQLVfsRolloutLedgerEntry(
+        entry_id=str(typed_snapshot.entry_id),
+        recorded_at=str(typed_snapshot.recorded_at),
+        actor_id=typed_snapshot.actor_id,
+        action=str(typed_snapshot.action),
+        summary=str(typed_snapshot.summary),
+        environment_class=str(typed_snapshot.environment_class),
+        runtime_status_path=typed_snapshot.runtime_status_path,
+        promotion_paused=bool(typed_snapshot.promotion_paused),
+        promotion_pause_reason=typed_snapshot.promotion_pause_reason,
+        promotion_pause_expires_at=typed_snapshot.promotion_pause_expires_at,
+        promotion_pause_active=bool(typed_snapshot.promotion_pause_active),
+        rollback_requested=bool(typed_snapshot.rollback_requested),
+        rollback_reason=typed_snapshot.rollback_reason,
+        rollback_expires_at=typed_snapshot.rollback_expires_at,
+        rollback_active=bool(typed_snapshot.rollback_active),
+        notes=typed_snapshot.notes,
+    )
+
+
+def _build_vfs_rollout_control(snapshot: object) -> GQLVfsRolloutControl:
+    typed_snapshot: Any = snapshot
+    return GQLVfsRolloutControl(
+        generated_at=str(typed_snapshot.generated_at),
+        environment_class=str(typed_snapshot.environment_class),
+        runtime_status_path=typed_snapshot.runtime_status_path,
+        promotion_paused=bool(typed_snapshot.promotion_paused),
+        promotion_pause_reason=typed_snapshot.promotion_pause_reason,
+        promotion_pause_expires_at=typed_snapshot.promotion_pause_expires_at,
+        promotion_pause_active=bool(typed_snapshot.promotion_pause_active),
+        rollback_requested=bool(typed_snapshot.rollback_requested),
+        rollback_reason=typed_snapshot.rollback_reason,
+        rollback_expires_at=typed_snapshot.rollback_expires_at,
+        rollback_active=bool(typed_snapshot.rollback_active),
+        notes=typed_snapshot.notes,
+        updated_at=typed_snapshot.updated_at,
+        updated_by=typed_snapshot.updated_by,
+        rollout_readiness=str(typed_snapshot.rollout_readiness),
+        next_action=str(typed_snapshot.next_action),
+        canary_decision=str(typed_snapshot.canary_decision),
+        merge_gate=str(typed_snapshot.merge_gate),
+        reasons=list(typed_snapshot.reasons),
+        history=[
+            _build_vfs_rollout_ledger_entry(entry)
+            for entry in list(getattr(typed_snapshot, "history", []) or [])
+        ],
     )
 
 
@@ -2953,6 +3008,22 @@ class CoreQueryResolver:
         )
 
     @strawberry.field(
+        description="Persisted VFS rollout-control state and bounded operator history for canary promotion"
+    )
+    async def vfs_rollout_control(
+        self,
+        info: Info[GraphQLContext, object],
+        history_limit: int = 20,
+    ) -> GQLVfsRolloutControl:
+        compat_routes = _compat_route_module()
+        snapshot = compat_routes._vfs_rollout_control_response()
+        bounded_limit = max(1, min(history_limit, 100))
+        payload = snapshot.model_dump()
+        payload["history"] = list(snapshot.history[:bounded_limit])
+        filtered_snapshot = SimpleNamespace(**payload)
+        return _build_vfs_rollout_control(filtered_snapshot)
+
+    @strawberry.field(
         description="Builtin plugin registration and config-validation posture for GraphQL-first clients"
     )
     async def plugin_integration_readiness(
@@ -4210,6 +4281,54 @@ class CoreMutationResolver:
             )
 
         return _build_persisted_playback_attachment_control_result(result)
+
+    @strawberry.mutation(
+        description="Persist bounded VFS rollout-control overrides with audit and permission parity"
+    )
+    async def persist_vfs_rollout_control(
+        self,
+        info: Info[GraphQLContext, object],
+        input: PersistVfsRolloutControlInput,
+    ) -> GQLVfsRolloutControl:
+        await require_graphql_permissions(
+            info,
+            "backend:admin",
+            resource_scope="operations",
+        )
+        compat_routes = _compat_route_module()
+        auth_context = compat_routes.get_auth_context(info.context.request)
+        updates = {
+            "environment_class": input.environment_class,
+            "runtime_status_path": input.runtime_status_path,
+            "promotion_paused": input.promotion_paused,
+            "promotion_pause_reason": input.promotion_pause_reason,
+            "promotion_pause_expires_at": input.promotion_pause_expires_at,
+            "rollback_requested": input.rollback_requested,
+            "rollback_reason": input.rollback_reason,
+            "rollback_expires_at": input.rollback_expires_at,
+            "notes": input.notes,
+        }
+        updates = {key: value for key, value in updates.items() if value is not None}
+        try:
+            compat_routes.persist_managed_windows_vfs_state(
+                updates,
+                actor_id=compat_routes._actor_key(auth_context),
+            )
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        audit_action(
+            info.context.request,
+            action="operations.vfs_rollout.write_control",
+            target="operations.vfs_rollout",
+            details={
+                "promotion_paused": input.promotion_paused,
+                "promotion_pause_reason": input.promotion_pause_reason,
+                "rollback_requested": input.rollback_requested,
+                "rollback_reason": input.rollback_reason,
+                "environment_class": input.environment_class,
+            },
+        )
+        return _build_vfs_rollout_control(compat_routes._vfs_rollout_control_response())
 
     @strawberry.mutation(description="Update one compatibility settings path")
     async def update_setting(

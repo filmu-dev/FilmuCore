@@ -3139,7 +3139,7 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
         json.dumps(
             {
                 "timestamp": captured_at_text,
-                "environment_class": "windows-native:enterprise",
+                "environment_class": "windows-native:managed",
                 "repeat_count": 2,
                 "dry_run": False,
                 "all_green": True,
@@ -3221,6 +3221,13 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
     )
     monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
     monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(default_routes, "audit_action", fake_audit_action)
 
     client = _build_client()
 
@@ -3228,17 +3235,40 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
         "/api/v1/operations/vfs-rollout/control",
         headers=_headers(),
         json={
-            "environment_class": "windows-native:enterprise",
+            "environment_class": "windows-native:managed",
             "runtime_status_path": str(runtime_status_path),
             "promotion_paused": True,
+            "promotion_pause_reason": "repeat soak after manual review",
+            "promotion_pause_expires_at": expires_at_text,
             "notes": "holding canary for manual review",
         },
     )
 
     assert write_response.status_code == 200
-    assert write_response.json()["promotion_paused"] is True
-    assert write_response.json()["merge_gate"] == "hold"
-    assert write_response.json()["canary_decision"] == "hold_canary_and_repeat_soak"
+    write_body = write_response.json()
+    assert write_body["promotion_paused"] is True
+    assert write_body["promotion_pause_reason"] == "repeat soak after manual review"
+    assert write_body["promotion_pause_expires_at"] == expires_at_text
+    assert write_body["promotion_pause_active"] is True
+    assert write_body["rollback_requested"] is False
+    assert write_body["updated_by"] == "tenant-main:operator-1"
+    assert write_body["merge_gate"] == "hold"
+    assert write_body["canary_decision"] == "hold_canary_and_repeat_soak"
+    assert write_body["history"][0]["summary"].startswith("promotion pause enabled")
+    assert write_body["history"][0]["promotion_pause_active"] is True
+    assert audit_calls == [
+        {
+            "action": "operations.vfs_rollout.write_control",
+            "target": "operations.vfs_rollout",
+            "details": {
+                "promotion_paused": True,
+                "promotion_pause_reason": "repeat soak after manual review",
+                "rollback_requested": None,
+                "rollback_reason": None,
+                "environment_class": "windows-native:managed",
+            },
+        }
+    ]
 
     governance_response = client.get("/api/v1/operations/governance", headers=_headers())
 
@@ -3247,6 +3277,25 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
     assert "vfs_runtime_rollout_canary_decision=hold_canary_and_repeat_soak" in body[
         "vfs_data_plane"
     ]["evidence"]
+
+
+def test_vfs_rollout_control_route_rejects_rollback_without_reason(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    (artifacts_root / "windows-native-stack").mkdir(parents=True)
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/operations/vfs-rollout/control",
+        headers=_headers(),
+        json={"rollback_requested": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "rollback_reason_required"
 
 
 def test_control_plane_summary_route_returns_ack_backlog_visibility() -> None:

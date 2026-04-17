@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 
+from filmu_py.api.routes import default as default_routes
 from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
@@ -5756,3 +5757,220 @@ def test_graphql_vfs_support_queries_return_delta_history_blocked_reasons_and_mo
     ]
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountActions"])
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountGaps"])
+
+
+def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_history_and_audit(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    (artifacts_root / "windows-native-stack").mkdir(parents=True)
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: {"playback_gate_environment_class": "windows-native:managed"},
+    )
+
+    def fake_vfs_runtime_governance_snapshot(
+        playback_gate_governance: dict[str, Any] | None = None,
+        *,
+        request_tenant_id: str | None = None,
+        authorized_tenant_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        _ = (playback_gate_governance, request_tenant_id, authorized_tenant_ids)
+        state = default_routes.build_vfs_rollout_control_state(
+            default_routes.managed_windows_vfs_state_snapshot()
+        )
+        pause_active = bool(state.promotion_pause_active)
+        rollback_active = bool(state.rollback_active)
+        if rollback_active:
+            return {
+                "vfs_runtime_rollout_readiness": "blocked",
+                "vfs_runtime_rollout_next_action": "rollback_current_environment",
+                "vfs_runtime_rollout_canary_decision": "rollback_current_environment",
+                "vfs_runtime_rollout_merge_gate": "blocked",
+                "vfs_runtime_rollout_environment_class": state.environment_class
+                or "windows-native:managed",
+                "vfs_runtime_rollout_reasons": ["operator_requested_rollback"],
+            }
+        return {
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": (
+                "hold_canary_and_repeat_soak"
+                if pause_active
+                else "promote_to_next_environment_class"
+            ),
+            "vfs_runtime_rollout_canary_decision": (
+                "hold_canary_and_repeat_soak"
+                if pause_active
+                else "promote_to_next_environment_class"
+            ),
+            "vfs_runtime_rollout_merge_gate": "hold" if pause_active else "ready",
+            "vfs_runtime_rollout_environment_class": state.environment_class
+            or "windows-native:managed",
+            "vfs_runtime_rollout_reasons": (
+                ["operator_requested_promotion_pause"]
+                if pause_active
+                else ["no_blocking_runtime_signals"]
+            ),
+        }
+
+    monkeypatch.setattr(
+        default_routes,
+        "vfs_runtime_governance_snapshot",
+        fake_vfs_runtime_governance_snapshot,
+    )
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr("filmu_py.graphql.resolvers.audit_action", fake_audit_action)
+    client = _build_client(FakeMediaService())
+    expires_at = (
+        datetime(2026, 4, 17, 22, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z")
+    )
+    mutation_response = client.post(
+        "/graphql",
+        headers={
+            "x-api-key": "a" * 32,
+            "x-actor-id": "operator-1",
+            "x-tenant-id": "tenant-main",
+            "x-actor-roles": "platform:admin",
+            "x-actor-scopes": "backend:admin",
+        },
+        json={
+            "query": """
+                mutation Persist($input: PersistVfsRolloutControlInput!) {
+                  persistVfsRolloutControl(input: $input) {
+                    environmentClass
+                    promotionPaused
+                    promotionPauseReason
+                    promotionPauseExpiresAt
+                    promotionPauseActive
+                    rollbackRequested
+                    updatedBy
+                    mergeGate
+                    canaryDecision
+                    history {
+                      actorId
+                      summary
+                      promotionPauseActive
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "environmentClass": "windows-native:managed",
+                    "promotionPaused": True,
+                    "promotionPauseReason": "repeat soak after GraphQL review",
+                    "promotionPauseExpiresAt": expires_at,
+                    "notes": "hold after GraphQL check",
+                }
+            },
+        },
+    )
+
+    assert mutation_response.status_code == 200
+    mutation_payload = mutation_response.json()["data"]["persistVfsRolloutControl"]
+    assert mutation_payload == {
+        "environmentClass": "windows-native:managed",
+        "promotionPaused": True,
+        "promotionPauseReason": "repeat soak after GraphQL review",
+        "promotionPauseExpiresAt": expires_at,
+        "promotionPauseActive": True,
+        "rollbackRequested": False,
+        "updatedBy": "tenant-main:operator-1",
+        "mergeGate": "hold",
+        "canaryDecision": "hold_canary_and_repeat_soak",
+        "history": [
+            {
+                "actorId": "tenant-main:operator-1",
+                "summary": "promotion pause enabled; environment updated; notes updated (windows-native:managed)",
+                "promotionPauseActive": True,
+            }
+        ],
+    }
+    assert audit_calls == [
+        {
+            "action": "operations.vfs_rollout.write_control",
+            "target": "operations.vfs_rollout",
+            "details": {
+                "promotion_paused": True,
+                "promotion_pause_reason": "repeat soak after GraphQL review",
+                "rollback_requested": None,
+                "rollback_reason": None,
+                "environment_class": "windows-native:managed",
+            },
+        }
+    ]
+
+    query_response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsRolloutControl(historyLimit: 1) {
+                    environmentClass
+                    promotionPaused
+                    promotionPauseReason
+                    promotionPauseActive
+                    mergeGate
+                    history {
+                      summary
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert query_response.status_code == 200
+    assert query_response.json()["data"]["vfsRolloutControl"] == {
+        "environmentClass": "windows-native:managed",
+        "promotionPaused": True,
+        "promotionPauseReason": "repeat soak after GraphQL review",
+        "promotionPauseActive": True,
+        "mergeGate": "hold",
+        "history": [
+            {
+                "summary": "promotion pause enabled; environment updated; notes updated (windows-native:managed)"
+            }
+        ],
+    }
+
+
+def test_graphql_persist_vfs_rollout_control_requires_backend_admin() -> None:
+    client = _build_client(FakeMediaService())
+
+    response = client.post(
+        "/graphql",
+        headers={
+            "x-api-key": "a" * 32,
+            "x-actor-id": "operator-1",
+            "x-tenant-id": "tenant-main",
+            "x-actor-roles": "playback:operator",
+            "x-actor-scopes": "playback:read",
+        },
+        json={
+            "query": """
+                mutation Persist($input: PersistVfsRolloutControlInput!) {
+                  persistVfsRolloutControl(input: $input) {
+                    environmentClass
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "promotionPaused": True,
+                    "promotionPauseReason": "unauthorized hold",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    errors = response.json()["errors"]
+    assert "Authorization denied (missing_permissions)" in errors[0]["message"]

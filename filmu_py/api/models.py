@@ -569,7 +569,32 @@ class VfsRolloutControlRequest(BaseModel):
     environment_class: str | None = None
     runtime_status_path: str | None = None
     promotion_paused: bool | None = None
+    promotion_pause_reason: str | None = None
+    promotion_pause_expires_at: str | None = None
     rollback_requested: bool | None = None
+    rollback_reason: str | None = None
+    rollback_expires_at: str | None = None
+    notes: str | None = None
+
+
+class VfsRolloutHistoryEntryResponse(BaseModel):
+    """One retained operator history row for VFS rollout-control changes."""
+
+    entry_id: str
+    recorded_at: str
+    actor_id: str | None = None
+    action: str
+    summary: str
+    environment_class: str
+    runtime_status_path: str | None = None
+    promotion_paused: bool
+    promotion_pause_reason: str | None = None
+    promotion_pause_expires_at: str | None = None
+    promotion_pause_active: bool
+    rollback_requested: bool
+    rollback_reason: str | None = None
+    rollback_expires_at: str | None = None
+    rollback_active: bool
     notes: str | None = None
 
 
@@ -580,13 +605,22 @@ class VfsRolloutControlResponse(BaseModel):
     environment_class: str
     runtime_status_path: str | None = None
     promotion_paused: bool
+    promotion_pause_reason: str | None = None
+    promotion_pause_expires_at: str | None = None
+    promotion_pause_active: bool
     rollback_requested: bool
+    rollback_reason: str | None = None
+    rollback_expires_at: str | None = None
+    rollback_active: bool
     notes: str | None = None
+    updated_at: str | None = None
+    updated_by: str | None = None
     rollout_readiness: str
     next_action: str
     canary_decision: str
     merge_gate: str
     reasons: list[str]
+    history: list[VfsRolloutHistoryEntryResponse] = []
 
 
 class ObservabilityConvergenceResponse(BaseModel):
