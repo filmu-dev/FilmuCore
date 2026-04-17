@@ -114,8 +114,8 @@ from ..models import (
     VfsCatalogRollupResponse,
     VfsCatalogStatsResponse,
     VfsRolloutControlRequest,
-    VfsRolloutHistoryEntryResponse,
     VfsRolloutControlResponse,
+    VfsRolloutHistoryEntryResponse,
 )
 from .runtime_governance import (
     managed_windows_vfs_state_snapshot,

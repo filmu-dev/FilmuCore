@@ -468,7 +468,7 @@ def _python_runtime_rollups() -> tuple[list[float], float, list[str]]:
         read_operations = _as_int(rollup["read_operations"])
         bytes_served = _as_int(rollup["bytes_served"])
         summaries.append(
-            (
+            
                 f"{_as_str(rollup.get('owner'), default='unknown')}"
                 f"|{session_id}"
                 f"|handles={_as_int(rollup['handle_count'])}"
@@ -477,7 +477,7 @@ def _python_runtime_rollups() -> tuple[list[float], float, list[str]]:
                 f"|p95_age_ms={_percentile_value(rollup_ages, 0.95):.1f}"
                 f"|bytes_per_read={_safe_ratio(bytes_served, read_operations):.1f}"
                 f"|resource={_as_str(rollup.get('resource'), default='')}"
-            )
+            
         )
 
     return ages_ms, _safe_ratio(total_bytes, total_reads), summaries
