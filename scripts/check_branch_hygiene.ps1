@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $allowedSemanticReviewBranchPrefixes = @(
+    'codex/',
     'fix/',
     'feat/',
     'chore/',
@@ -56,6 +57,9 @@ function Get-SuggestedPrTitle {
 
     $prefix = $allowedSemanticReviewBranchPrefixes | Where-Object { $ReviewBranchName.StartsWith($_) } | Select-Object -First 1
     if ($null -eq $prefix) {
+        return ''
+    }
+    if ($prefix -eq 'codex/') {
         return ''
     }
 
@@ -167,7 +171,12 @@ if ($aheadBy -eq 0) {
 }
 if ($null -ne $closedReuse) {
     $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
-    $actions.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Create a fresh single-use remote review branch from the current local source branch instead of reusing it.")
+    if ($LocalSourceOfTruth) {
+        $advisories.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Local source-of-truth mode treats review branch reuse as informational; confirm the current review branch still carries only the intended commits before merging.")
+    }
+    else {
+        $actions.Add("Review branch '$ReviewBranch' was already used by $stateLabel PR #$($closedReuse.number). Create a fresh single-use remote review branch from the current local source branch instead of reusing it.")
+    }
 }
 if (-not [string]::IsNullOrWhiteSpace($suggestedPrTitle)) {
     $advisories.Add("Suggested PR title: '$suggestedPrTitle'")

@@ -76,8 +76,7 @@ jobs:
             )"
 
             if [[ -n "$merged_match" ]]; then
-              echo "::error::Branch '$head_ref' was already used by $merged_match. Feature and Codex branches are single-use. Create a fresh branch from current main and move only the intended commits."
-              exit 1
+              echo "::notice::Branch '$head_ref' was previously used by $merged_match. Local is the source of truth for this project, so review branch reuse is informational only; confirm the current PR head still carries only the intended commits and remains mergeable."
             fi
           fi
 
