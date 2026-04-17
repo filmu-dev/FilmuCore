@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
 from filmu_py.api.routes import runtime_governance
+from filmu_py.core import byte_streaming
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.resources import AppResources
 from filmu_py.services.operator_posture import (
@@ -91,6 +93,66 @@ class VfsRuntimeRolloutSnapshot:
     provider_pressure_incidents: int
     fairness_pressure_incidents: int
     reasons: list[str]
+    required_actions: list[str]
+    remaining_gaps: list[str]
+
+
+@dataclass(slots=True)
+class VfsRuntimePercentileSnapshot:
+    p50_ms: float
+    p95_ms: float
+    p99_ms: float
+    max_ms: float
+
+
+@dataclass(slots=True)
+class VfsRuntimeRustHandleRollupSnapshot:
+    tenant_id: str
+    session_id: str
+    open_handles: int
+    invalidated_handles: int
+    average_depth: float
+    max_depth: int
+    average_age_ms: float
+    max_age_ms: float
+
+
+@dataclass(slots=True)
+class VfsRuntimePythonSessionRollupSnapshot:
+    owner: str
+    session_id: str
+    resource: str
+    open_handles: int
+    read_operations: int
+    bytes_served: int
+    average_age_ms: float
+    p95_age_ms: float
+    average_depth: float
+    max_depth: int
+    bytes_per_read: float
+
+
+@dataclass(slots=True)
+class VfsRuntimeReadAmplificationSnapshot:
+    view: str
+    total_operations: int
+    total_bytes: int
+    bytes_per_read: float
+
+
+@dataclass(slots=True)
+class VfsRuntimeTelemetrySnapshot:
+    generated_at: str
+    status: Literal["ready", "partial", "blocked"]
+    rust_snapshot_available: bool
+    python_active_session_count: int
+    python_active_handle_count: int
+    rust_handle_age_ms: VfsRuntimePercentileSnapshot
+    python_handle_age_ms: VfsRuntimePercentileSnapshot
+    mounted_read_duration_buckets: dict[str, int]
+    rust_handle_depth_rollups: list[VfsRuntimeRustHandleRollupSnapshot]
+    python_session_rollups: list[VfsRuntimePythonSessionRollupSnapshot]
+    read_amplification: list[VfsRuntimeReadAmplificationSnapshot]
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -280,6 +342,27 @@ def _as_int(value: object) -> int:
     return 0
 
 
+def _as_float(value: object) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _as_str(value: object, *, default: str = "") -> str:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return default
+
+
 def _as_str_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -288,6 +371,14 @@ def _as_str_list(value: object) -> list[str]:
         if isinstance(item, str) and item:
             result.append(item)
     return result
+
+
+def _percentile_value(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    last_index = len(values) - 1
+    rank = min(last_index, round(last_index * percentile))
+    return values[rank]
 
 
 def _rollout_status(readiness: str) -> Literal["ready", "partial", "blocked"]:
@@ -309,6 +400,60 @@ def _artifact_snapshot(
         for ref in refs
         if ref.strip()
     ]
+
+
+def _vfs_runtime_governance_snapshots() -> tuple[
+    dict[str, int | str | list[str]],
+    dict[str, int | str | float | list[str]],
+]:
+    playback_gate: dict[str, int | str | list[str]] = (
+        runtime_governance._playback_gate_governance_snapshot()
+    )
+    snapshot: dict[str, int | str | float | list[str]] = (
+        runtime_governance._vfs_runtime_governance_snapshot(
+            playback_gate_governance=playback_gate,
+        )
+    )
+    return playback_gate, snapshot
+
+
+def _build_vfs_runtime_rollout_snapshot(
+    snapshot: Mapping[str, object],
+) -> VfsRuntimeRolloutSnapshot:
+    reasons = _as_str_list(snapshot.get("vfs_runtime_rollout_reasons"))
+    next_action = str(snapshot.get("vfs_runtime_rollout_next_action", ""))
+    canary_decision = str(snapshot.get("vfs_runtime_rollout_canary_decision", ""))
+    merge_gate = str(snapshot.get("vfs_runtime_rollout_merge_gate", "blocked"))
+    required_actions = [action for action in (next_action, canary_decision) if action]
+    remaining_gaps = [f"vfs rollout reason: {reason}" for reason in reasons]
+    if merge_gate != "ready":
+        remaining_gaps.insert(
+            0,
+            f"VFS rollout merge gate is not yet ready: merge_gate={merge_gate}",
+        )
+    return VfsRuntimeRolloutSnapshot(
+        generated_at=datetime.now(UTC).isoformat(),
+        status=_rollout_status(str(snapshot.get("vfs_runtime_rollout_readiness", "unknown"))),
+        rollout_readiness=str(snapshot.get("vfs_runtime_rollout_readiness", "unknown")),
+        next_action=next_action,
+        canary_decision=canary_decision,
+        merge_gate=merge_gate,
+        environment_class=str(snapshot.get("vfs_runtime_rollout_environment_class", "")),
+        snapshot_available=bool(_as_int(snapshot.get("vfs_runtime_snapshot_available"))),
+        open_handles=_as_int(snapshot.get("vfs_runtime_open_handles")),
+        active_reads=_as_int(snapshot.get("vfs_runtime_active_reads")),
+        cache_pressure_class=str(snapshot.get("vfs_runtime_cache_pressure_class", "unknown")),
+        refresh_pressure_class=str(snapshot.get("vfs_runtime_refresh_pressure_class", "unknown")),
+        provider_pressure_incidents=_as_int(
+            snapshot.get("vfs_runtime_provider_pressure_incidents")
+        ),
+        fairness_pressure_incidents=_as_int(
+            snapshot.get("vfs_runtime_fairness_pressure_incidents")
+        ),
+        reasons=reasons,
+        required_actions=list(dict.fromkeys(required_actions)),
+        remaining_gaps=remaining_gaps,
+    )
 
 
 def build_playback_gate_governance_posture() -> PlaybackGateGovernanceSnapshot:
@@ -372,45 +517,160 @@ def build_playback_gate_governance_posture() -> PlaybackGateGovernanceSnapshot:
 def build_vfs_runtime_rollout_posture(resources: AppResources) -> VfsRuntimeRolloutSnapshot:
     """Return typed VFS rollout/canary posture for GraphQL-first operator screens."""
 
-    playback_gate = runtime_governance._playback_gate_governance_snapshot()
-    snapshot = runtime_governance._vfs_runtime_governance_snapshot(
-        playback_gate_governance=playback_gate,
+    _, snapshot = _vfs_runtime_governance_snapshots()
+    return _build_vfs_runtime_rollout_snapshot(snapshot)
+
+
+def build_vfs_runtime_telemetry_posture(resources: AppResources) -> VfsRuntimeTelemetrySnapshot:
+    """Return detailed VFS runtime telemetry across Rust and Python mounted views."""
+
+    _, snapshot = _vfs_runtime_governance_snapshots()
+    rollout = _build_vfs_runtime_rollout_snapshot(snapshot)
+    payload = runtime_governance._load_vfs_runtime_status_payload()
+
+    rust_handle_age = VfsRuntimePercentileSnapshot(
+        p50_ms=_as_float(snapshot.get("vfs_runtime_rust_handle_age_p50_ms")),
+        p95_ms=_as_float(snapshot.get("vfs_runtime_rust_handle_age_p95_ms")),
+        p99_ms=_as_float(snapshot.get("vfs_runtime_rust_handle_age_p99_ms")),
+        max_ms=_as_float(snapshot.get("vfs_runtime_rust_handle_age_max_ms")),
     )
-    reasons = _as_str_list(snapshot.get("vfs_runtime_rollout_reasons"))
-    next_action = str(snapshot.get("vfs_runtime_rollout_next_action", ""))
-    canary_decision = str(snapshot.get("vfs_runtime_rollout_canary_decision", ""))
-    merge_gate = str(snapshot.get("vfs_runtime_rollout_merge_gate", "blocked"))
-    required_actions = [action for action in (next_action, canary_decision) if action]
-    remaining_gaps = [f"vfs rollout reason: {reason}" for reason in reasons]
-    if merge_gate != "ready":
-        remaining_gaps.insert(
-            0,
-            f"VFS rollout merge gate is not yet ready: merge_gate={merge_gate}",
+    mounted_read_duration_buckets = {
+        "le_5_ms": _as_int(snapshot.get("vfs_runtime_mounted_reads_bucket_le_5ms")),
+        "le_25_ms": _as_int(snapshot.get("vfs_runtime_mounted_reads_bucket_le_25ms")),
+        "le_100_ms": _as_int(snapshot.get("vfs_runtime_mounted_reads_bucket_le_100ms")),
+        "le_250_ms": _as_int(snapshot.get("vfs_runtime_mounted_reads_bucket_le_250ms")),
+        "gt_250_ms": _as_int(snapshot.get("vfs_runtime_mounted_reads_bucket_gt_250ms")),
+    }
+
+    rust_handle_depth_rollups: list[VfsRuntimeRustHandleRollupSnapshot] = []
+    if payload is not None:
+        runtime_payload = payload.get("runtime")
+        if isinstance(runtime_payload, dict):
+            raw_rows = runtime_payload.get("handle_depth_rollups")
+            if isinstance(raw_rows, list):
+                for row in raw_rows[:10]:
+                    if not isinstance(row, dict):
+                        continue
+                    rust_handle_depth_rollups.append(
+                        VfsRuntimeRustHandleRollupSnapshot(
+                            tenant_id=_as_str(row.get("tenant_id"), default="unknown"),
+                            session_id=_as_str(row.get("session_id")),
+                            open_handles=_as_int(row.get("open_handles")),
+                            invalidated_handles=_as_int(row.get("invalidated_handles")),
+                            average_depth=_as_float(row.get("average_depth")),
+                            max_depth=_as_int(row.get("max_depth")),
+                            average_age_ms=_as_float(row.get("average_age_ms")),
+                            max_age_ms=_as_float(row.get("max_age_ms")),
+                        )
+                    )
+
+    active_sessions = byte_streaming.get_active_session_snapshot()
+    active_handles = byte_streaming.get_active_handle_snapshot()
+    active_sessions_by_id = {session.session_id: session for session in active_sessions}
+    now = datetime.now(UTC)
+    python_handle_ages = sorted(
+        max(0.0, (now - handle.created_at).total_seconds() * 1000.0)
+        for handle in active_handles
+    )
+    python_session_accumulators: dict[str, dict[str, object]] = {}
+    for handle in active_handles:
+        session = active_sessions_by_id.get(handle.session_id)
+        age_ms = max(0.0, (now - handle.created_at).total_seconds() * 1000.0)
+        normalized_path = handle.path.replace("\\", "/")
+        depth = len([segment for segment in normalized_path.split("/") if segment])
+        accumulator = python_session_accumulators.setdefault(
+            handle.session_id,
+            {
+                "owner": handle.owner,
+                "resource": session.resource if session is not None else "",
+                "open_handles": 0,
+                "read_operations": 0,
+                "bytes_served": 0,
+                "ages": [],
+                "depth_total": 0,
+                "max_depth": 0,
+            },
         )
-    return VfsRuntimeRolloutSnapshot(
+        accumulator["open_handles"] = _as_int(accumulator["open_handles"]) + 1
+        accumulator["read_operations"] = _as_int(accumulator["read_operations"]) + max(
+            0, handle.read_operations
+        )
+        accumulator["bytes_served"] = _as_int(accumulator["bytes_served"]) + max(
+            0, handle.bytes_served
+        )
+        accumulator["depth_total"] = _as_int(accumulator["depth_total"]) + depth
+        accumulator["max_depth"] = max(_as_int(accumulator["max_depth"]), depth)
+        cast(list[float], accumulator["ages"]).append(age_ms)
+
+    python_session_rollups = []
+    for session_id, accumulator in sorted(
+        python_session_accumulators.items(),
+        key=lambda item: (
+            -_as_int(item[1]["read_operations"]),
+            -_as_int(item[1]["bytes_served"]),
+            item[0],
+        ),
+    )[:10]:
+        ages = sorted(cast(list[float], accumulator["ages"]))
+        open_handles = _as_int(accumulator["open_handles"])
+        read_operations = _as_int(accumulator["read_operations"])
+        bytes_served = _as_int(accumulator["bytes_served"])
+        python_session_rollups.append(
+            VfsRuntimePythonSessionRollupSnapshot(
+                owner=_as_str(accumulator.get("owner"), default="unknown"),
+                session_id=session_id,
+                resource=_as_str(accumulator.get("resource")),
+                open_handles=open_handles,
+                read_operations=read_operations,
+                bytes_served=bytes_served,
+                average_age_ms=(sum(ages) / len(ages)) if ages else 0.0,
+                p95_age_ms=_percentile_value(ages, 0.95),
+                average_depth=(
+                    _as_int(accumulator["depth_total"]) / open_handles if open_handles else 0.0
+                ),
+                max_depth=_as_int(accumulator["max_depth"]),
+                bytes_per_read=(
+                    bytes_served / read_operations if read_operations > 0 else 0.0
+                ),
+            )
+        )
+
+    python_handle_age = VfsRuntimePercentileSnapshot(
+        p50_ms=_percentile_value(python_handle_ages, 0.50),
+        p95_ms=_percentile_value(python_handle_ages, 0.95),
+        p99_ms=_percentile_value(python_handle_ages, 0.99),
+        max_ms=python_handle_ages[-1] if python_handle_ages else 0.0,
+    )
+
+    read_amplification = [
+        VfsRuntimeReadAmplificationSnapshot(
+            view="rust_mount",
+            total_operations=_as_int(snapshot.get("vfs_runtime_mounted_reads_total")),
+            total_bytes=_as_int(snapshot.get("vfs_runtime_upstream_fetch_bytes_total")),
+            bytes_per_read=_as_float(snapshot.get("vfs_runtime_rust_bytes_per_mounted_read")),
+        ),
+        VfsRuntimeReadAmplificationSnapshot(
+            view="python_serving",
+            total_operations=sum(max(0, handle.read_operations) for handle in active_handles),
+            total_bytes=sum(max(0, handle.bytes_served) for handle in active_handles),
+            bytes_per_read=_as_float(snapshot.get("vfs_runtime_python_bytes_per_read")),
+        ),
+    ]
+
+    return VfsRuntimeTelemetrySnapshot(
         generated_at=datetime.now(UTC).isoformat(),
-        status=_rollout_status(str(snapshot.get("vfs_runtime_rollout_readiness", "unknown"))),
-        rollout_readiness=str(snapshot.get("vfs_runtime_rollout_readiness", "unknown")),
-        next_action=next_action,
-        canary_decision=canary_decision,
-        merge_gate=merge_gate,
-        environment_class=str(snapshot.get("vfs_runtime_rollout_environment_class", "")),
-        snapshot_available=bool(_as_int(snapshot.get("vfs_runtime_snapshot_available"))),
-        open_handles=_as_int(snapshot.get("vfs_runtime_open_handles")),
-        active_reads=_as_int(snapshot.get("vfs_runtime_active_reads")),
-        cache_pressure_class=str(snapshot.get("vfs_runtime_cache_pressure_class", "unknown")),
-        refresh_pressure_class=str(
-            snapshot.get("vfs_runtime_refresh_pressure_class", "unknown")
-        ),
-        provider_pressure_incidents=_as_int(
-            snapshot.get("vfs_runtime_provider_pressure_incidents")
-        ),
-        fairness_pressure_incidents=_as_int(
-            snapshot.get("vfs_runtime_fairness_pressure_incidents")
-        ),
-        reasons=reasons,
-        required_actions=list(dict.fromkeys(required_actions)),
-        remaining_gaps=remaining_gaps,
+        status=rollout.status,
+        rust_snapshot_available=bool(_as_int(snapshot.get("vfs_runtime_snapshot_available"))),
+        python_active_session_count=len(active_sessions),
+        python_active_handle_count=len(active_handles),
+        rust_handle_age_ms=rust_handle_age,
+        python_handle_age_ms=python_handle_age,
+        mounted_read_duration_buckets=mounted_read_duration_buckets,
+        rust_handle_depth_rollups=rust_handle_depth_rollups,
+        python_session_rollups=python_session_rollups,
+        read_amplification=read_amplification,
+        required_actions=list(rollout.required_actions),
+        remaining_gaps=list(rollout.remaining_gaps),
     )
 
 

@@ -25,7 +25,10 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::{
-    catalog::state::CatalogStateStore, config::SidecarConfig, mount::MountRuntime, SERVICE_NAME,
+    catalog::state::CatalogStateStore,
+    config::SidecarConfig,
+    mount::{MountHandleAgePercentiles, MountHandleDepthRollup, MountRuntime},
+    SERVICE_NAME,
 };
 
 static FILMUVFS_METRICS: OnceLock<FilmuvfsMetrics> = OnceLock::new();
@@ -184,6 +187,8 @@ pub struct FilmuvfsRuntimeGaugeSnapshot {
     pub peak_active_reads: u64,
     pub chunk_cache_weighted_bytes: u64,
     pub active_handle_summaries: Vec<String>,
+    pub active_handle_age_percentiles_ms: MountHandleAgePercentiles,
+    pub handle_depth_rollups: Vec<MountHandleDepthRollup>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -206,6 +211,13 @@ pub struct FilmuvfsMountedReadStatusSnapshot {
     pub cancelled: u64,
     pub average_duration_ms: f64,
     pub max_duration_ms: f64,
+    pub duration_buckets: Vec<FilmuvfsDurationBucketSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FilmuvfsDurationBucketSnapshot {
+    pub label: String,
+    pub count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -403,6 +415,11 @@ pub struct FilmuvfsMetrics {
     mounted_read_duration_count: AtomicU64,
     mounted_read_duration_micros_total: AtomicU64,
     mounted_read_duration_micros_max: AtomicU64,
+    mounted_read_duration_bucket_le_5ms: AtomicU64,
+    mounted_read_duration_bucket_le_25ms: AtomicU64,
+    mounted_read_duration_bucket_le_100ms: AtomicU64,
+    mounted_read_duration_bucket_le_250ms: AtomicU64,
+    mounted_read_duration_bucket_gt_250ms: AtomicU64,
     handle_startup_ok: AtomicU64,
     handle_startup_error: AtomicU64,
     handle_startup_estale: AtomicU64,
@@ -619,6 +636,11 @@ impl FilmuvfsMetrics {
             mounted_read_duration_count: AtomicU64::new(0),
             mounted_read_duration_micros_total: AtomicU64::new(0),
             mounted_read_duration_micros_max: AtomicU64::new(0),
+            mounted_read_duration_bucket_le_5ms: AtomicU64::new(0),
+            mounted_read_duration_bucket_le_25ms: AtomicU64::new(0),
+            mounted_read_duration_bucket_le_100ms: AtomicU64::new(0),
+            mounted_read_duration_bucket_le_250ms: AtomicU64::new(0),
+            mounted_read_duration_bucket_gt_250ms: AtomicU64::new(0),
             handle_startup_ok: AtomicU64::new(0),
             handle_startup_error: AtomicU64::new(0),
             handle_startup_estale: AtomicU64::new(0),
@@ -732,6 +754,58 @@ impl FilmuvfsMetrics {
         self.mounted_read_duration_micros_total
             .fetch_add(micros, Ordering::Relaxed);
         update_max(&self.mounted_read_duration_micros_max, micros);
+        let millis = duration.as_secs_f64() * 1000.0;
+        if millis <= 5.0 {
+            self.mounted_read_duration_bucket_le_5ms
+                .fetch_add(1, Ordering::Relaxed);
+        } else if millis <= 25.0 {
+            self.mounted_read_duration_bucket_le_25ms
+                .fetch_add(1, Ordering::Relaxed);
+        } else if millis <= 100.0 {
+            self.mounted_read_duration_bucket_le_100ms
+                .fetch_add(1, Ordering::Relaxed);
+        } else if millis <= 250.0 {
+            self.mounted_read_duration_bucket_le_250ms
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.mounted_read_duration_bucket_gt_250ms
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn mounted_read_duration_buckets_snapshot(&self) -> Vec<FilmuvfsDurationBucketSnapshot> {
+        vec![
+            FilmuvfsDurationBucketSnapshot {
+                label: "le_5_ms".to_owned(),
+                count: self
+                    .mounted_read_duration_bucket_le_5ms
+                    .load(Ordering::Relaxed),
+            },
+            FilmuvfsDurationBucketSnapshot {
+                label: "le_25_ms".to_owned(),
+                count: self
+                    .mounted_read_duration_bucket_le_25ms
+                    .load(Ordering::Relaxed),
+            },
+            FilmuvfsDurationBucketSnapshot {
+                label: "le_100_ms".to_owned(),
+                count: self
+                    .mounted_read_duration_bucket_le_100ms
+                    .load(Ordering::Relaxed),
+            },
+            FilmuvfsDurationBucketSnapshot {
+                label: "le_250_ms".to_owned(),
+                count: self
+                    .mounted_read_duration_bucket_le_250ms
+                    .load(Ordering::Relaxed),
+            },
+            FilmuvfsDurationBucketSnapshot {
+                label: "gt_250_ms".to_owned(),
+                count: self
+                    .mounted_read_duration_bucket_gt_250ms
+                    .load(Ordering::Relaxed),
+            },
+        ]
     }
 
     fn record_handle_startup_duration(&self, duration: Duration, result: &'static str) {
@@ -1265,6 +1339,7 @@ impl FilmuvfsMetrics {
         let callback_max = self
             .windows_projfs_callback_duration_micros_max
             .load(Ordering::Relaxed);
+        let active_handle_telemetry = self.mount_runtime.active_handle_telemetry(8);
 
         FilmuvfsRuntimeStatusSnapshot {
             service_name: SERVICE_NAME.to_owned(),
@@ -1290,6 +1365,8 @@ impl FilmuvfsMetrics {
                 peak_active_reads: self.mount_runtime.peak_active_read_count(),
                 chunk_cache_weighted_bytes: self.mount_runtime.chunk_cache_weighted_size_bytes(),
                 active_handle_summaries: self.mount_runtime.active_handle_summaries(10),
+                active_handle_age_percentiles_ms: active_handle_telemetry.age_percentiles_ms,
+                handle_depth_rollups: active_handle_telemetry.depth_rollups,
             },
             handle_startup: FilmuvfsHandleStartupStatusSnapshot {
                 total: handle_startup_total,
@@ -1314,6 +1391,7 @@ impl FilmuvfsMetrics {
                     read_duration_count,
                 ),
                 max_duration_ms: atomic_max_millis(read_duration_max),
+                duration_buckets: self.mounted_read_duration_buckets_snapshot(),
             },
             upstream_fetch: FilmuvfsUpstreamFetchStatusSnapshot {
                 operations: self.upstream_fetch_operations_total.load(Ordering::Relaxed),

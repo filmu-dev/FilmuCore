@@ -569,7 +569,32 @@ class VfsRolloutControlRequest(BaseModel):
     environment_class: str | None = None
     runtime_status_path: str | None = None
     promotion_paused: bool | None = None
+    promotion_pause_reason: str | None = None
+    promotion_pause_expires_at: str | None = None
     rollback_requested: bool | None = None
+    rollback_reason: str | None = None
+    rollback_expires_at: str | None = None
+    notes: str | None = None
+
+
+class VfsRolloutHistoryEntryResponse(BaseModel):
+    """One retained operator history row for VFS rollout-control changes."""
+
+    entry_id: str
+    recorded_at: str
+    actor_id: str | None = None
+    action: str
+    summary: str
+    environment_class: str
+    runtime_status_path: str | None = None
+    promotion_paused: bool
+    promotion_pause_reason: str | None = None
+    promotion_pause_expires_at: str | None = None
+    promotion_pause_active: bool
+    rollback_requested: bool
+    rollback_reason: str | None = None
+    rollback_expires_at: str | None = None
+    rollback_active: bool
     notes: str | None = None
 
 
@@ -580,13 +605,22 @@ class VfsRolloutControlResponse(BaseModel):
     environment_class: str
     runtime_status_path: str | None = None
     promotion_paused: bool
+    promotion_pause_reason: str | None = None
+    promotion_pause_expires_at: str | None = None
+    promotion_pause_active: bool
     rollback_requested: bool
+    rollback_reason: str | None = None
+    rollback_expires_at: str | None = None
+    rollback_active: bool
     notes: str | None = None
+    updated_at: str | None = None
+    updated_by: str | None = None
     rollout_readiness: str
     next_action: str
     canary_decision: str
     merge_gate: str
     reasons: list[str]
+    history: list[VfsRolloutHistoryEntryResponse] = []
 
 
 class ObservabilityConvergenceResponse(BaseModel):
@@ -1247,6 +1281,23 @@ class ServingGovernanceResponse(BaseModel):
     vfs_runtime_active_handles_hidden: int = 0
     vfs_runtime_active_handle_tenant_count: int = 0
     vfs_runtime_active_handle_tenants: list[str] = []
+    vfs_runtime_rust_handle_age_p50_ms: float = 0.0
+    vfs_runtime_rust_handle_age_p95_ms: float = 0.0
+    vfs_runtime_rust_handle_age_p99_ms: float = 0.0
+    vfs_runtime_rust_handle_age_max_ms: float = 0.0
+    vfs_runtime_python_handle_age_p50_ms: float = 0.0
+    vfs_runtime_python_handle_age_p95_ms: float = 0.0
+    vfs_runtime_python_handle_age_p99_ms: float = 0.0
+    vfs_runtime_python_handle_age_max_ms: float = 0.0
+    vfs_runtime_mounted_reads_bucket_le_5ms: int = 0
+    vfs_runtime_mounted_reads_bucket_le_25ms: int = 0
+    vfs_runtime_mounted_reads_bucket_le_100ms: int = 0
+    vfs_runtime_mounted_reads_bucket_le_250ms: int = 0
+    vfs_runtime_mounted_reads_bucket_gt_250ms: int = 0
+    vfs_runtime_rust_bytes_per_mounted_read: float = 0.0
+    vfs_runtime_python_bytes_per_read: float = 0.0
+    vfs_runtime_rust_handle_depth_rollups: list[str] = []
+    vfs_runtime_python_session_rollups: list[str] = []
     playback_gate_snapshot_available: int
     playback_gate_artifact_generated_at: str
     playback_gate_environment_class: str

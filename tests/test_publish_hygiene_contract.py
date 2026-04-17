@@ -19,6 +19,15 @@ def test_forbidden_publish_paths_blocks_local_tracking_surfaces() -> None:
         assert expected in script
 
 
+def test_forbidden_publish_paths_checks_remote_review_targets_for_detached_pushes() -> None:
+    script = (REPO_ROOT / "scripts" / "check_forbidden_publish_paths.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$RemoteRef -notlike 'refs/heads/*'" in script
+    assert "$LocalRef -notlike 'refs/heads/*'" not in script
+
+
 def test_pre_push_runs_publish_guard_before_branch_hygiene() -> None:
     hook = (REPO_ROOT / ".githooks" / "pre-push").read_text(encoding="utf-8")
 
@@ -35,6 +44,14 @@ def test_pre_push_uses_local_source_of_truth_branch_hygiene_mode() -> None:
 
     assert "-NoFetch" in hook
     assert "-LocalSourceOfTruth:$true" in hook
+
+
+def test_pre_push_checks_detached_head_review_pushes() -> None:
+    hook = (REPO_ROOT / ".githooks" / "pre-push").read_text(encoding="utf-8")
+
+    assert 'if [[ "${remote_ref}" != refs/heads/* ]]; then' in hook
+    assert 'elif [[ "${local_ref}" == "HEAD" ]]; then' in hook
+    assert 'branch="HEAD"' in hook
 
 
 def test_verify_python_lint_runs_publish_hygiene_guard() -> None:
@@ -108,10 +125,20 @@ def test_check_branch_hygiene_requires_semantic_review_branch_prefixes() -> None
     )
 
     assert "$allowedSemanticReviewBranchPrefixes" in script
+    assert "'codex/'" in script
     assert "'fix/'" in script
     assert "'feat/'" in script
     assert "must start with a semantic prefix" in script
     assert "Suggested PR title:" in script
+
+
+def test_check_branch_hygiene_treats_branch_reuse_as_advisory_in_local_source_mode() -> None:
+    script = (REPO_ROOT / "scripts" / "check_branch_hygiene.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Local source-of-truth mode treats review branch reuse as informational" in script
+    assert "Create a fresh single-use remote review branch from the current local source branch" in script
 
 
 def test_push_review_branch_blocks_direct_main_target_and_uses_local_source_of_truth() -> None:
@@ -134,3 +161,13 @@ def test_pr_branch_hygiene_warns_when_branch_is_behind_base() -> None:
     assert "::notice::Branch '$head_ref' differs from '$base_ref' by $behind_by commit(s)." in workflow
     assert "Local is the source of truth for this project" in workflow
     assert "::error::Branch '$head_ref' is behind '$base_ref'" not in workflow
+
+
+def test_pr_branch_hygiene_treats_merged_branch_reuse_as_notice() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "pr-branch-hygiene.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "::notice::Branch '$head_ref' was previously used by $merged_match." in workflow
+    assert "review branch reuse is informational only" in workflow
+    assert "Feature and Codex branches are single-use." not in workflow

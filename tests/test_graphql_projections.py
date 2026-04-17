@@ -5,7 +5,8 @@ from __future__ import annotations
 import fnmatch
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -15,7 +16,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 
+from filmu_py.api.routes import default as default_routes
+from filmu_py.api.routes import runtime_governance
 from filmu_py.config import Settings
+from filmu_py.core import byte_streaming
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
@@ -32,6 +36,7 @@ from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
+from filmu_py.services import governance_posture
 from filmu_py.services.media import (
     CalendarProjectionRecord,
     CalendarReleaseDataRecord,
@@ -154,6 +159,12 @@ class FakeOperatorRedis(DummyRedis):
         return [
             row for row in rows if _matches_lower(row[1], minimum) and _matches_upper(row[1], maximum)
         ]
+
+
+class FailingAuthorizationAuditService:
+    async def record_decision(self, **payload: Any) -> None:
+        _ = payload
+        raise RuntimeError("audit store unavailable")
 
 
 class DummyDatabaseRuntime:
@@ -4506,6 +4517,305 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
     }
 
 
+def test_graphql_vfs_runtime_telemetry_uses_a_single_governance_snapshot_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    playback_gate_calls = 0
+    runtime_calls = 0
+
+    def fake_playback_gate_governance_snapshot() -> dict[str, Any]:
+        nonlocal playback_gate_calls
+        playback_gate_calls += 1
+        return {
+            "playback_gate_environment_class": "canary",
+            "playback_gate_rollout_readiness": "ready",
+        }
+
+    def fake_vfs_runtime_governance_snapshot(
+        playback_gate_governance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal runtime_calls
+        runtime_calls += 1
+        assert playback_gate_governance == {
+            "playback_gate_environment_class": "canary",
+            "playback_gate_rollout_readiness": "ready",
+        }
+        return {
+            "vfs_runtime_snapshot_available": 1,
+            "vfs_runtime_open_handles": 4,
+            "vfs_runtime_active_reads": 2,
+            "vfs_runtime_cache_pressure_class": "healthy",
+            "vfs_runtime_refresh_pressure_class": "healthy",
+            "vfs_runtime_provider_pressure_incidents": 0,
+            "vfs_runtime_fairness_pressure_incidents": 0,
+            "vfs_runtime_rust_handle_age_p50_ms": 10.0,
+            "vfs_runtime_rust_handle_age_p95_ms": 20.0,
+            "vfs_runtime_rust_handle_age_p99_ms": 30.0,
+            "vfs_runtime_rust_handle_age_max_ms": 40.0,
+            "vfs_runtime_mounted_reads_bucket_le_5ms": 1,
+            "vfs_runtime_mounted_reads_bucket_le_25ms": 2,
+            "vfs_runtime_mounted_reads_bucket_le_100ms": 3,
+            "vfs_runtime_mounted_reads_bucket_le_250ms": 4,
+            "vfs_runtime_mounted_reads_bucket_gt_250ms": 5,
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_canary_decision": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_merge_gate": "ready",
+            "vfs_runtime_rollout_environment_class": "canary",
+            "vfs_runtime_rollout_reasons": ["no_blocking_runtime_signals"],
+            "vfs_runtime_python_bytes_per_read": 0.0,
+            "vfs_runtime_mounted_reads_total": 0,
+            "vfs_runtime_upstream_fetch_bytes_total": 0,
+        }
+
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._playback_gate_governance_snapshot",
+        fake_playback_gate_governance_snapshot,
+    )
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._vfs_runtime_governance_snapshot",
+        fake_vfs_runtime_governance_snapshot,
+    )
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._load_vfs_runtime_status_payload",
+        lambda: None,
+    )
+    monkeypatch.setattr(governance_posture.byte_streaming, "get_active_session_snapshot", lambda: [])
+    monkeypatch.setattr(governance_posture.byte_streaming, "get_active_handle_snapshot", lambda: [])
+
+    telemetry = governance_posture.build_vfs_runtime_telemetry_posture(
+        cast(AppResources, object())
+    )
+
+    assert playback_gate_calls == 1
+    assert runtime_calls == 1
+    assert telemetry.status == "ready"
+    assert telemetry.rust_snapshot_available is True
+    assert telemetry.required_actions == ["promote_to_next_environment_class"]
+    assert telemetry.remaining_gaps == ["vfs rollout reason: no_blocking_runtime_signals"]
+
+
+def test_graphql_vfs_runtime_telemetry_returns_cross_view_rollups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    playback_gate_calls = 0
+    runtime_snapshot_calls = 0
+
+    real_runtime_snapshot = runtime_governance._vfs_runtime_governance_snapshot
+
+    def _playback_gate_snapshot() -> dict[str, object]:
+        nonlocal playback_gate_calls
+        playback_gate_calls += 1
+        return {
+            "playback_gate_environment_class": "windows-native:managed",
+            "playback_gate_windows_soak_ready": 1,
+        }
+
+    def _runtime_snapshot(
+        *,
+        playback_gate_governance: dict[str, object],
+    ) -> dict[str, object]:
+        nonlocal runtime_snapshot_calls
+        runtime_snapshot_calls += 1
+        return real_runtime_snapshot(playback_gate_governance=playback_gate_governance)
+
+    monkeypatch.setattr(
+        runtime_governance,
+        "_playback_gate_governance_snapshot",
+        _playback_gate_snapshot,
+    )
+    monkeypatch.setattr(
+        runtime_governance,
+        "_vfs_runtime_governance_snapshot",
+        _runtime_snapshot,
+    )
+    runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
+    runtime_status_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "open_handles": 3,
+                    "active_reads": 1,
+                    "active_handle_age_percentiles_ms": {
+                        "p50_ms": 15.0,
+                        "p95_ms": 80.0,
+                        "p99_ms": 120.0,
+                        "max_ms": 120.0,
+                    },
+                    "handle_depth_rollups": [
+                        {
+                            "tenant_id": "global",
+                            "session_id": "mount-session-1",
+                            "open_handles": 3,
+                            "invalidated_handles": 1,
+                            "average_depth": 3.5,
+                            "max_depth": 5,
+                            "average_age_ms": 48.0,
+                            "max_age_ms": 120.0,
+                        }
+                    ],
+                },
+                "mounted_reads": {
+                    "total": 4,
+                    "duration_buckets": [
+                        {"label": "le_5_ms", "count": 1},
+                        {"label": "le_25_ms", "count": 2},
+                        {"label": "le_100_ms", "count": 1},
+                        {"label": "le_250_ms", "count": 0},
+                        {"label": "gt_250_ms", "count": 0},
+                    ],
+                },
+                "upstream_fetch": {
+                    "operations": 4,
+                    "bytes_total": 8192,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
+
+    python_view_path = tmp_path / "python-runtime-view.mkv"
+    python_view_path.write_bytes(b"1" * 64)
+    session = byte_streaming.open_mount_session(resource=str(python_view_path))
+    handle = byte_streaming.open_local_file_handle(session=session, path=python_view_path)
+    handle.created_at = datetime.now(UTC) - timedelta(milliseconds=2200)
+    byte_streaming.read_from_handle(handle=handle, chunk_size=2048)
+
+    client = _build_client(FakeMediaService())
+    try:
+        response = client.post(
+            "/graphql",
+            json={
+                "query": """
+                    query {
+                      vfsRuntimeTelemetry {
+                        status
+                        rustSnapshotAvailable
+                        pythonActiveSessionCount
+                        pythonActiveHandleCount
+                        rustHandleAgeMs { p50Ms p95Ms p99Ms maxMs }
+                        pythonHandleAgeMs { p50Ms p95Ms p99Ms maxMs }
+                        mountedReadDurationBuckets { key count }
+                        rustHandleDepthRollups {
+                          tenantId
+                          sessionId
+                          openHandles
+                          invalidatedHandles
+                          averageDepth
+                          maxDepth
+                          averageAgeMs
+                          maxAgeMs
+                        }
+                        pythonSessionRollups {
+                          owner
+                          sessionId
+                          resource
+                          openHandles
+                          readOperations
+                          bytesServed
+                          averageAgeMs
+                          p95AgeMs
+                          averageDepth
+                          maxDepth
+                          bytesPerRead
+                        }
+                        readAmplification {
+                          view
+                          totalOperations
+                          totalBytes
+                          bytesPerRead
+                        }
+                        requiredActions
+                        remainingGaps
+                      }
+                    }
+                """
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()["data"]["vfsRuntimeTelemetry"]
+        assert payload["status"] == "ready"
+        assert payload["rustSnapshotAvailable"] is True
+        assert payload["pythonActiveSessionCount"] == 1
+        assert payload["pythonActiveHandleCount"] == 1
+        assert payload["rustHandleAgeMs"] == {
+            "p50Ms": 15.0,
+            "p95Ms": 80.0,
+            "p99Ms": 120.0,
+            "maxMs": 120.0,
+        }
+        assert payload["pythonHandleAgeMs"]["p50Ms"] >= 1000.0
+        assert payload["pythonHandleAgeMs"]["maxMs"] >= payload["pythonHandleAgeMs"]["p50Ms"]
+        assert payload["mountedReadDurationBuckets"] == [
+            {"key": "gt_250_ms", "count": 0},
+            {"key": "le_100_ms", "count": 1},
+            {"key": "le_250_ms", "count": 0},
+            {"key": "le_25_ms", "count": 2},
+            {"key": "le_5_ms", "count": 1},
+        ]
+        assert payload["rustHandleDepthRollups"] == [
+            {
+                "tenantId": "global",
+                "sessionId": "mount-session-1",
+                "openHandles": 3,
+                "invalidatedHandles": 1,
+                "averageDepth": 3.5,
+                "maxDepth": 5,
+                "averageAgeMs": 48.0,
+                "maxAgeMs": 120.0,
+            }
+        ]
+        assert len(payload["pythonSessionRollups"]) == 1
+        python_rollup = payload["pythonSessionRollups"][0]
+        assert python_rollup["owner"] == "future-vfs"
+        assert python_rollup["sessionId"] == session.session_id
+        assert python_rollup["resource"] == str(python_view_path)
+        assert python_rollup["openHandles"] == 1
+        assert python_rollup["readOperations"] == 1
+        assert python_rollup["bytesServed"] == 2048
+        assert python_rollup["averageAgeMs"] >= 1000.0
+        assert python_rollup["p95AgeMs"] >= python_rollup["averageAgeMs"]
+        expected_depth = len(
+            [segment for segment in str(python_view_path).replace("\\", "/").split("/") if segment]
+        )
+        assert python_rollup["averageDepth"] == float(expected_depth)
+        assert python_rollup["maxDepth"] == expected_depth
+        assert python_rollup["bytesPerRead"] == 2048.0
+        assert payload["readAmplification"] == [
+            {
+                "view": "rust_mount",
+                "totalOperations": 4,
+                "totalBytes": 8192,
+                "bytesPerRead": 2048.0,
+            },
+            {
+                "view": "python_serving",
+                "totalOperations": 1,
+                "totalBytes": 2048,
+                "bytesPerRead": 2048.0,
+            },
+        ]
+        assert payload["requiredActions"] == ["promote_to_next_environment_class"]
+        assert payload["remainingGaps"] == ["vfs rollout reason: no_blocking_runtime_signals"]
+        assert playback_gate_calls == 1
+        assert runtime_snapshot_calls == 1
+    finally:
+        byte_streaming.release_handle(handle)
+        byte_streaming.release_serving_session(session)
+        tracked_path = byte_streaming.get_path_by_key(
+            category="local-file",
+            path=str(python_view_path),
+        )
+        if tracked_path is not None and tracked_path.active_handle_count == 0:
+            byte_streaming._ACTIVE_PATHS.pop(tracked_path.path_id, None)
+            byte_streaming._PATHS_BY_KEY.pop(
+                (tracked_path.category, tracked_path.path),
+                None,
+            )
+
+
 def test_graphql_plugin_runtime_overview_and_warnings_use_shared_posture() -> None:
     plugin_settings = {
         "scraping": {
@@ -5756,3 +6066,290 @@ def test_graphql_vfs_support_queries_return_delta_history_blocked_reasons_and_mo
     ]
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountActions"])
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountGaps"])
+
+
+def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_history_and_audit(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    (artifacts_root / "windows-native-stack").mkdir(parents=True)
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: {"playback_gate_environment_class": "windows-native:managed"},
+    )
+
+    def fake_vfs_runtime_governance_snapshot(
+        playback_gate_governance: dict[str, Any] | None = None,
+        *,
+        request_tenant_id: str | None = None,
+        authorized_tenant_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        _ = (playback_gate_governance, request_tenant_id, authorized_tenant_ids)
+        state = default_routes.build_vfs_rollout_control_state(
+            default_routes.managed_windows_vfs_state_snapshot()
+        )
+        pause_active = bool(state.promotion_pause_active)
+        rollback_active = bool(state.rollback_active)
+        if rollback_active:
+            return {
+                "vfs_runtime_rollout_readiness": "blocked",
+                "vfs_runtime_rollout_next_action": "rollback_current_environment",
+                "vfs_runtime_rollout_canary_decision": "rollback_current_environment",
+                "vfs_runtime_rollout_merge_gate": "blocked",
+                "vfs_runtime_rollout_environment_class": state.environment_class
+                or "windows-native:managed",
+                "vfs_runtime_rollout_reasons": ["operator_requested_rollback"],
+            }
+        return {
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": (
+                "hold_canary_and_repeat_soak"
+                if pause_active
+                else "promote_to_next_environment_class"
+            ),
+            "vfs_runtime_rollout_canary_decision": (
+                "hold_canary_and_repeat_soak"
+                if pause_active
+                else "promote_to_next_environment_class"
+            ),
+            "vfs_runtime_rollout_merge_gate": "hold" if pause_active else "ready",
+            "vfs_runtime_rollout_environment_class": state.environment_class
+            or "windows-native:managed",
+            "vfs_runtime_rollout_reasons": (
+                ["operator_requested_promotion_pause"]
+                if pause_active
+                else ["no_blocking_runtime_signals"]
+            ),
+        }
+
+    monkeypatch.setattr(
+        default_routes,
+        "vfs_runtime_governance_snapshot",
+        fake_vfs_runtime_governance_snapshot,
+    )
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr("filmu_py.graphql.resolvers.audit_action", fake_audit_action)
+    client = _build_client(FakeMediaService())
+    expires_at = (
+        datetime(2026, 4, 17, 22, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z")
+    )
+    mutation_response = client.post(
+        "/graphql",
+        headers={
+            "x-api-key": "a" * 32,
+            "x-actor-id": "operator-1",
+            "x-tenant-id": "tenant-main",
+            "x-actor-roles": "platform:admin",
+            "x-actor-scopes": "backend:admin",
+        },
+        json={
+            "query": """
+                mutation Persist($input: PersistVfsRolloutControlInput!) {
+                  persistVfsRolloutControl(input: $input) {
+                    environmentClass
+                    promotionPaused
+                    promotionPauseReason
+                    promotionPauseExpiresAt
+                    promotionPauseActive
+                    rollbackRequested
+                    updatedBy
+                    mergeGate
+                    canaryDecision
+                    history {
+                      actorId
+                      summary
+                      promotionPauseActive
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "environmentClass": "windows-native:managed",
+                    "promotionPaused": True,
+                    "promotionPauseReason": "repeat soak after GraphQL review",
+                    "promotionPauseExpiresAt": expires_at,
+                    "notes": "hold after GraphQL check",
+                }
+            },
+        },
+    )
+
+    assert mutation_response.status_code == 200
+    mutation_payload = mutation_response.json()["data"]["persistVfsRolloutControl"]
+    assert mutation_payload == {
+        "environmentClass": "windows-native:managed",
+        "promotionPaused": True,
+        "promotionPauseReason": "repeat soak after GraphQL review",
+        "promotionPauseExpiresAt": expires_at,
+        "promotionPauseActive": True,
+        "rollbackRequested": False,
+        "updatedBy": "tenant-main:operator-1",
+        "mergeGate": "hold",
+        "canaryDecision": "hold_canary_and_repeat_soak",
+        "history": [
+            {
+                "actorId": "tenant-main:operator-1",
+                "summary": "promotion pause enabled; environment updated; notes updated (windows-native:managed)",
+                "promotionPauseActive": True,
+            }
+        ],
+    }
+    assert audit_calls == [
+        {
+            "action": "operations.vfs_rollout.write_control",
+            "target": "operations.vfs_rollout",
+            "details": {
+                "promotion_paused": True,
+                "promotion_pause_reason": "repeat soak after GraphQL review",
+                "rollback_requested": None,
+                "rollback_reason": None,
+                "environment_class": "windows-native:managed",
+            },
+        }
+    ]
+
+    query_response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  vfsRolloutControl(historyLimit: 1) {
+                    environmentClass
+                    promotionPaused
+                    promotionPauseReason
+                    promotionPauseActive
+                    mergeGate
+                    history {
+                      summary
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert query_response.status_code == 200
+    assert query_response.json()["data"]["vfsRolloutControl"] == {
+        "environmentClass": "windows-native:managed",
+        "promotionPaused": True,
+        "promotionPauseReason": "repeat soak after GraphQL review",
+        "promotionPauseActive": True,
+        "mergeGate": "hold",
+        "history": [
+            {
+                "summary": "promotion pause enabled; environment updated; notes updated (windows-native:managed)"
+            }
+        ],
+    }
+
+
+def test_graphql_authorization_audit_failures_do_not_break_allowed_rollout_mutation(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    (artifacts_root / "windows-native-stack").mkdir(parents=True)
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: {"playback_gate_environment_class": "windows-native:managed"},
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "vfs_runtime_governance_snapshot",
+        lambda playback_gate_governance=None, **kwargs: {
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_canary_decision": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_merge_gate": "ready",
+            "vfs_runtime_rollout_environment_class": "windows-native:managed",
+            "vfs_runtime_rollout_reasons": ["no_blocking_runtime_signals"],
+        },
+    )
+
+    client = _build_client(FakeMediaService())
+    cast(Any, client.app.state.resources).authorization_audit_service = (
+        FailingAuthorizationAuditService()
+    )
+
+    response = client.post(
+        "/graphql",
+        headers={
+            "x-api-key": "a" * 32,
+            "x-actor-id": "operator-1",
+            "x-tenant-id": "tenant-main",
+            "x-actor-roles": "platform:admin",
+            "x-actor-scopes": "backend:admin",
+        },
+        json={
+            "query": """
+                mutation Persist($input: PersistVfsRolloutControlInput!) {
+                  persistVfsRolloutControl(input: $input) {
+                    environmentClass
+                    promotionPaused
+                    promotionPauseReason
+                    updatedBy
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "environmentClass": "windows-native:managed",
+                    "promotionPaused": True,
+                    "promotionPauseReason": "repeat soak after audit outage",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "errors" not in body
+    assert body["data"]["persistVfsRolloutControl"] == {
+        "environmentClass": "windows-native:managed",
+        "promotionPaused": True,
+        "promotionPauseReason": "repeat soak after audit outage",
+        "updatedBy": "tenant-main:operator-1",
+    }
+
+
+def test_graphql_persist_vfs_rollout_control_requires_backend_admin() -> None:
+    client = _build_client(FakeMediaService())
+
+    response = client.post(
+        "/graphql",
+        headers={
+            "x-api-key": "a" * 32,
+            "x-actor-id": "operator-1",
+            "x-tenant-id": "tenant-main",
+            "x-actor-roles": "playback:operator",
+            "x-actor-scopes": "playback:read",
+        },
+        json={
+            "query": """
+                mutation Persist($input: PersistVfsRolloutControlInput!) {
+                  persistVfsRolloutControl(input: $input) {
+                    environmentClass
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "promotionPaused": True,
+                    "promotionPauseReason": "unauthorized hold",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    errors = response.json()["errors"]
+    assert "Authorization denied (missing_permissions)" in errors[0]["message"]
