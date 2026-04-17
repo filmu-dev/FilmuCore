@@ -4518,6 +4518,13 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
 def test_graphql_vfs_runtime_telemetry_returns_cross_view_rollups(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        "filmu_py.services.governance_posture.runtime_governance._playback_gate_governance_snapshot",
+        lambda: {
+            "playback_gate_environment_class": "windows-native:managed",
+            "playback_gate_windows_soak_ready": 1,
+        },
+    )
     runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
     runtime_status_path.write_text(
         json.dumps(
