@@ -3440,7 +3440,7 @@ async def write_vfs_rollout_control(
     """Persist VFS rollout-control state used by operator-managed canary promotion."""
 
     auth_context = get_auth_context(request)
-    updates = {
+    updates: dict[str, object | None] = {
         "environment_class": payload.environment_class,
         "runtime_status_path": payload.runtime_status_path,
         "promotion_paused": payload.promotion_paused,

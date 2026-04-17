@@ -118,15 +118,27 @@ def build_vfs_rollout_control_state(
     payload = raw_state or {}
     promotion_pause_expires_at = _parse_timestamp(payload.get("promotion_pause_expires_at"))
     rollback_expires_at = _parse_timestamp(payload.get("rollback_expires_at"))
+    raw_history = payload.get("history")
+    history_entries = raw_history if isinstance(raw_history, list) else []
+    raw_schema_version = payload.get("schema_version", _SCHEMA_VERSION)
+    if isinstance(raw_schema_version, int):
+        schema_version = raw_schema_version
+    elif isinstance(raw_schema_version, str):
+        try:
+            schema_version = int(raw_schema_version)
+        except ValueError:
+            schema_version = _SCHEMA_VERSION
+    else:
+        schema_version = _SCHEMA_VERSION
     history = tuple(
         _build_history_entry(entry, now=current_time)
-        for entry in payload.get("history", [])
+        for entry in history_entries
         if isinstance(entry, Mapping)
     )[:_MAX_HISTORY_ENTRIES]
     promotion_paused = _clean_bool(payload.get("promotion_paused"))
     rollback_requested = _clean_bool(payload.get("rollback_requested"))
     return VfsRolloutControlState(
-        schema_version=max(1, int(payload.get("schema_version", _SCHEMA_VERSION) or _SCHEMA_VERSION)),
+        schema_version=max(1, schema_version),
         environment_class=_clean_text(payload.get("environment_class"), allow_empty=True) or "",
         runtime_status_path=_clean_text(payload.get("runtime_status_path")),
         promotion_paused=promotion_paused,
@@ -205,7 +217,7 @@ def apply_vfs_rollout_control_updates(
         now=current_time,
     )
 
-    next_state = {
+    next_state: dict[str, object] = {
         "schema_version": _SCHEMA_VERSION,
         "environment_class": next_environment_class,
         "runtime_status_path": next_runtime_status_path,
@@ -226,7 +238,8 @@ def apply_vfs_rollout_control_updates(
         for key, value in next_state.items()
         if previous_state.get(key) != value
     )
-    history = list(previous_state.get("history", []))
+    raw_previous_history = previous_state.get("history")
+    history = list(raw_previous_history) if isinstance(raw_previous_history, list) else []
     if changed_fields:
         history.insert(
             0,
