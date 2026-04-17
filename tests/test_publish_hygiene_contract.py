@@ -88,8 +88,19 @@ def test_check_branch_hygiene_defaults_to_local_source_of_truth_mode() -> None:
     )
 
     assert "[bool] $LocalSourceOfTruth = $true" in script
-    assert "Local '$Branch' remains authoritative" in script
+    assert "Local '$sourceLabel' remains authoritative" in script
     assert "fresh single-use remote review branch from the current local source branch" in script
+
+
+def test_check_branch_hygiene_blocks_merge_commits_and_supports_detached_sources() -> None:
+    script = (REPO_ROOT / "scripts" / "check_branch_hygiene.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[string] $Commitish = ''" in script
+    assert "Detached HEAD source detected" in script
+    assert "must keep a linear history relative to '$Remote/$BaseBranch'" in script
+    assert "--min-parents=2" in script
 
 
 def test_check_branch_hygiene_permanently_blocks_stale_review_branch_names() -> None:
@@ -134,3 +145,19 @@ def test_pr_branch_hygiene_warns_when_branch_is_behind_base() -> None:
     assert "::notice::Branch '$head_ref' differs from '$base_ref' by $behind_by commit(s)." in workflow
     assert "Local is the source of truth for this project" in workflow
     assert "::error::Branch '$head_ref' is behind '$base_ref'" not in workflow
+
+
+def test_pre_push_and_pr_workflow_block_merge_commits_for_review_branches() -> None:
+    hook = (REPO_ROOT / ".githooks" / "pre-push").read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "pr-branch-hygiene.yml").read_text(
+        encoding="utf-8"
+    )
+    publish_guard = (REPO_ROOT / "scripts" / "check_forbidden_publish_paths.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'if [[ "${remote_ref}" != refs/heads/* ]]; then' in hook
+    assert '-Commitish "${commitish}"' in hook
+    assert "merge_commit_count" in workflow
+    assert "contains $merge_commit_count merge commit(s)" in workflow
+    assert "$RemoteRef -notlike 'refs/heads/*'" in publish_guard

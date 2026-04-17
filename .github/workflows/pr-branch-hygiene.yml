@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Validate branch reuse and freshness
+      - name: Validate branch reuse and linear history
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -88,9 +88,19 @@ jobs:
 
           behind_by="$(jq -r '.behind_by // 0' <<<"$compare_json")"
           ahead_by="$(jq -r '.ahead_by // 0' <<<"$compare_json")"
+          merge_commit_count="$(jq -r '(.commits // []) | map(select((.parents | length) > 1)) | length' <<<"$compare_json")"
+          merge_commit_samples="$(
+            jq -r '
+              (.commits // [])
+              | map(select((.parents | length) > 1) | "\(.sha[0:7]) \(.commit.message | split("\n")[0])")
+              | .[0:3]
+              | .[]
+            ' <<<"$compare_json"
+          )"
 
           echo "ahead_by=$ahead_by"
           echo "behind_by=$behind_by"
+          echo "merge_commit_count=$merge_commit_count"
 
           if (( behind_by > 0 )); then
             echo "::notice::Branch '$head_ref' differs from '$base_ref' by $behind_by commit(s). Local is the source of truth for this project, so this check is informational only; review mergeability in GitHub before merging."
@@ -98,6 +108,18 @@ jobs:
 
           if (( ahead_by == 0 )); then
             echo "::error::Branch '$head_ref' does not contain any commits beyond '$base_ref'. Open the PR from a branch that actually carries the intended change."
+            exit 1
+          fi
+
+          if (( merge_commit_count > 0 )); then
+            if [[ -n "$merge_commit_samples" ]]; then
+              while IFS= read -r merge_commit; do
+                [[ -z "$merge_commit" ]] && continue
+                echo "::notice::merge-commit $merge_commit"
+              done <<<"$merge_commit_samples"
+            fi
+
+            echo "::error::Branch '$head_ref' contains $merge_commit_count merge commit(s) beyond '$base_ref'. Keep review branches linear. Recreate the review branch from current main and replay only the intended commits instead of merging '$base_ref' into it."
             exit 1
           fi
 

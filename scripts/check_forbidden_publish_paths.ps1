@@ -34,7 +34,7 @@ $forbiddenPatterns = @(
     '.release-please-manifest.json'
 )
 
-if ($LocalRef -notlike 'refs/heads/*') {
+if ($RemoteRef -notlike 'refs/heads/*') {
     return
 }
 

@@ -21,18 +21,26 @@ fi
 remote_name="${1:-origin}"
 remote_url="${2:-}"
 seen=""
+zero_sha="0000000000000000000000000000000000000000"
 
 while read -r local_ref local_sha remote_ref remote_sha; do
-  if [[ "${local_ref}" != refs/heads/* ]]; then
+  if [[ "${remote_ref}" != refs/heads/* ]]; then
+    continue
+  fi
+  if [[ "${local_sha}" == "${zero_sha}" ]]; then
     continue
   fi
 
-  branch="${local_ref#refs/heads/}"
-  review_branch="${remote_ref#refs/heads/}"
-  if [[ "${remote_ref}" != refs/heads/* ]]; then
-    review_branch="${branch}"
+  branch=""
+  commitish="${local_sha}"
+  if [[ "${local_ref}" == refs/heads/* ]]; then
+    branch="${local_ref#refs/heads/}"
+    commitish="${branch}"
   fi
-  key="${branch}->${review_branch}"
+
+  review_branch="${remote_ref#refs/heads/}"
+  source_label="${branch:-${local_sha}}"
+  key="${source_label}->${review_branch}"
   if [[ " ${seen} " == *" ${key} "* ]]; then
     continue
   fi
@@ -40,7 +48,20 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
   "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_forbidden_publish_paths.ps1" -LocalRef "${local_ref}" -LocalSha "${local_sha}" -RemoteRef "${remote_ref}" -RemoteSha "${remote_sha}"
 
-  "${ps_exe}" -NoProfile -File "${repo_root}/scripts/check_branch_hygiene.ps1" -Branch "${branch}" -ReviewBranch "${review_branch}" -Remote "${remote_name}" -NoFetch -LocalSourceOfTruth:$true
+  hygiene_args=(
+    -NoProfile
+    -File "${repo_root}/scripts/check_branch_hygiene.ps1"
+    -ReviewBranch "${review_branch}"
+    -Remote "${remote_name}"
+    -NoFetch
+    -LocalSourceOfTruth:$true
+    -Commitish "${commitish}"
+  )
+  if [[ -n "${branch}" ]]; then
+    hygiene_args+=(-Branch "${branch}")
+  fi
+
+  "${ps_exe}" "${hygiene_args[@]}"
 done
 
 exit 0

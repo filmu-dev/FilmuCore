@@ -1,5 +1,6 @@
 param(
     [string] $Branch = '',
+    [string] $Commitish = '',
     [string] $ReviewBranch = '',
     [string] $Remote = 'origin',
     [string] $BaseBranch = 'main',
@@ -73,14 +74,27 @@ function Get-SuggestedPrTitle {
     return "$kind`: $subject"
 }
 
-if ([string]::IsNullOrWhiteSpace($Branch)) {
-    $Branch = (Invoke-GitCapture -Arguments @('branch', '--show-current')).Trim()
+$resolvedBranch = $Branch
+if ([string]::IsNullOrWhiteSpace($resolvedBranch)) {
+    $resolvedBranch = (Invoke-GitCapture -Arguments @('branch', '--show-current')).Trim()
 }
-if ([string]::IsNullOrWhiteSpace($Branch)) {
-    throw 'Cannot audit branch hygiene from a detached HEAD.'
+if ([string]::IsNullOrWhiteSpace($Commitish)) {
+    if ([string]::IsNullOrWhiteSpace($resolvedBranch)) {
+        $Commitish = 'HEAD'
+    }
+    else {
+        $Commitish = $resolvedBranch
+    }
 }
+Invoke-GitCapture -Arguments @('rev-parse', '--verify', $Commitish) | Out-Null
+
 if ([string]::IsNullOrWhiteSpace($ReviewBranch)) {
-    $ReviewBranch = $Branch
+    if ([string]::IsNullOrWhiteSpace($resolvedBranch)) {
+        $ReviewBranch = $Commitish
+    }
+    else {
+        $ReviewBranch = $resolvedBranch
+    }
 }
 
 if (-not $NoFetch) {
@@ -90,13 +104,19 @@ if (-not $NoFetch) {
 $baseRef = "refs/remotes/$Remote/$BaseBranch"
 Invoke-GitCapture -Arguments @('rev-parse', '--verify', $baseRef) | Out-Null
 
-$counts = (Invoke-GitCapture -Arguments @('rev-list', '--left-right', '--count', "$baseRef...$Branch")).Trim() -split '\s+'
+$counts = (Invoke-GitCapture -Arguments @('rev-list', '--left-right', '--count', "$baseRef...$Commitish")).Trim() -split '\s+'
 if ($counts.Count -lt 2) {
     throw "Could not parse ahead/behind counts from git rev-list output: $($counts -join ' ')"
 }
 
 $behindBy = [int] $counts[0]
 $aheadBy = [int] $counts[1]
+$mergeCommitCount = [int] (Invoke-GitCapture -Arguments @('rev-list', '--count', '--min-parents=2', "$baseRef..$Commitish")).Trim()
+$mergeCommitSamples = @(
+    (Invoke-GitCapture -Arguments @('log', '--oneline', '--no-decorate', '--max-count', '5', '--min-parents=2', "$baseRef..$Commitish")) -split "`r?`n" |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
+$sourceLabel = if ([string]::IsNullOrWhiteSpace($resolvedBranch)) { $Commitish } else { $resolvedBranch }
 $repositoryName = if ([string]::IsNullOrWhiteSpace($Repository)) {
     Resolve-GitHubRepository -RemoteName $Remote
 } else {
@@ -156,14 +176,18 @@ if (-not $releasePleaseBranch -and -not ($allowedSemanticReviewBranchPrefixes | 
 }
 if ($behindBy -gt 0) {
     if ($LocalSourceOfTruth) {
-        $advisories.Add("Branch '$Branch' differs from '$Remote/$BaseBranch' by $behindBy commit(s). Local '$Branch' remains authoritative; review mergeability in GitHub without rebasing from remote main.")
+        $advisories.Add("Branch '$sourceLabel' differs from '$Remote/$BaseBranch' by $behindBy commit(s). Local '$sourceLabel' remains authoritative; review mergeability in GitHub without rebasing from remote main.")
     }
     else {
-        $actions.Add("Branch '$Branch' is behind '$Remote/$BaseBranch' by $behindBy commit(s). Rebase or recreate it from current main before opening or merging a PR.")
+        $actions.Add("Branch '$sourceLabel' is behind '$Remote/$BaseBranch' by $behindBy commit(s). Rebase or recreate it from current main before opening or merging a PR.")
     }
 }
 if ($aheadBy -eq 0) {
-    $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from a real feature branch instead.")
+    $actions.Add("Branch '$sourceLabel' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from a real feature branch instead.")
+}
+if ($mergeCommitCount -gt 0) {
+    $sampleLabel = ($mergeCommitSamples | Select-Object -First 3) -join '; '
+    $actions.Add("Review branch '$ReviewBranch' must keep a linear history relative to '$Remote/$BaseBranch'. Found $mergeCommitCount merge commit(s) beyond the base. Recreate the review branch from the current local source branch or replay only the intended commits without merging '$Remote/$BaseBranch' into it. Examples: $sampleLabel")
 }
 if ($null -ne $closedReuse) {
     $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
@@ -172,14 +196,21 @@ if ($null -ne $closedReuse) {
 if (-not [string]::IsNullOrWhiteSpace($suggestedPrTitle)) {
     $advisories.Add("Suggested PR title: '$suggestedPrTitle'")
 }
+if ([string]::IsNullOrWhiteSpace($resolvedBranch)) {
+    $advisories.Add("Detached HEAD source detected; evaluated commit '$Commitish' for review branch '$ReviewBranch'.")
+}
 
 $status = if ($actions.Count -eq 0) { 'ready' } else { 'not_ready' }
 $result = [ordered]@{
-    branch = $Branch
+    branch = if ([string]::IsNullOrWhiteSpace($resolvedBranch)) { $null } else { $resolvedBranch }
+    source = $sourceLabel
+    commitish = $Commitish
     review_branch = $ReviewBranch
     base_branch = "$Remote/$BaseBranch"
     ahead_by = $aheadBy
     behind_by = $behindBy
+    merge_commit_count = $mergeCommitCount
+    merge_commit_samples = @($mergeCommitSamples)
     local_source_of_truth = [bool] $LocalSourceOfTruth
     release_please_branch = $releasePleaseBranch
     repository = if ([string]::IsNullOrWhiteSpace($repositoryName)) { $null } else { $repositoryName }
@@ -196,10 +227,12 @@ if ($AsJson) {
     $result | ConvertTo-Json -Depth 6
 }
 else {
-    Write-Output "branch=$($result.branch)"
+    Write-Output "branch=$($result.source)"
+    Write-Output "commitish=$($result.commitish)"
     Write-Output "base_branch=$($result.base_branch)"
     Write-Output "ahead_by=$($result.ahead_by)"
     Write-Output "behind_by=$($result.behind_by)"
+    Write-Output "merge_commit_count=$($result.merge_commit_count)"
     Write-Output "local_source_of_truth=$($result.local_source_of_truth)"
     Write-Output "reuse_check_status=$($result.reuse_check_status)"
     Write-Output "status=$($result.status)"
@@ -209,6 +242,9 @@ else {
     if ($null -ne $closedReuse) {
         $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }
         Write-Output "closed_branch_reuse=#$($closedReuse.number) $stateLabel at $($closedReuse.closed_at)"
+    }
+    foreach ($mergeCommit in $result.merge_commit_samples) {
+        Write-Output "merge_commit=$mergeCommit"
     }
     if (-not [string]::IsNullOrWhiteSpace($result.suggested_pr_title)) {
         Write-Output "suggested_pr_title=$($result.suggested_pr_title)"
