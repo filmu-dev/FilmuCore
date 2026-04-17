@@ -157,6 +157,7 @@ def test_pre_push_and_pr_workflow_block_merge_commits_for_review_branches() -> N
     )
 
     assert 'if [[ "${remote_ref}" != refs/heads/* ]]; then' in hook
+    assert "'-LocalSourceOfTruth:$true'" in hook
     assert '-Commitish "${commitish}"' in hook
     assert "merge_commit_count" in workflow
     assert "contains $merge_commit_count merge commit(s)" in workflow
