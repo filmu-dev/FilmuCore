@@ -36,8 +36,8 @@ from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.manifest import PluginManifest
 from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
-from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services import governance_posture
+from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services.media import (
     CalendarProjectionRecord,
     CalendarReleaseDataRecord,
