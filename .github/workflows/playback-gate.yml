@@ -143,12 +143,27 @@ jobs:
             $checks.Add([pscustomobject]@{ name = 'debrid_provider_token'; required = $true; ok = $hasDebrid; details = 'At least one debrid provider token/key is required.' })
             $checks.Add([pscustomobject]@{ name = 'frontend_context'; required = $true; ok = $hasFrontendContext; details = 'FILMU_FRONTEND_CONTEXT must point to a readable frontend checkout.' })
             $checks.Add([pscustomobject]@{ name = 'browser_executable'; required = $true; ok = $hasBrowser; details = 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE must point to an executable browser.' })
-            [pscustomobject]@{
-              timestamp = (Get-Date).ToString('o')
+            $capturedAt = (Get-Date).ToUniversalTime()
+            $readinessPayload = [pscustomobject]@{
+              schema_version = 2
+              artifact_kind = 'playback_gate_runner_readiness'
+              timestamp = $capturedAt.ToString('yyyy-MM-ddTHH:mm:ssZ')
+              captured_at = $capturedAt.ToString('yyyy-MM-ddTHH:mm:ssZ')
+              expires_at = $capturedAt.AddHours(24).ToString('yyyy-MM-ddTHH:mm:ssZ')
+              freshness_window_hours = 24
               require_provider_gate = ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1')
+              runner_environment = 'github-hosted'
+              runner_name = '${{ runner.name }}'
+              runner_os = '${{ runner.os }}'
               status = 'dry_run'
+              required_failure_count = @($checks | Where-Object { $_.required -and -not $_.ok }).Count
+              optional_warning_count = 0
+              required_actions = @('capture_runner_prerequisites_on_github_hosted_runner')
+              failure_reasons = @('playback_gate_dry_run_fallback')
               checks = $checks
-            } | ConvertTo-Json -Depth 6 | Set-Content -Path playback-proof-artifacts/runner-readiness.json -Encoding UTF8
+            }
+            $readinessPayload | ConvertTo-Json -Depth 6 | Tee-Object -FilePath playback-proof-artifacts/runner-readiness.json |
+              Set-Content -Path playback-proof-artifacts/playback-gate-runner-readiness.json -Encoding UTF8
             "FILMU_PLAYBACK_DRY_RUN=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             if (-not $hasTmdb) {
               Write-Host '::warning title=playback gate dry-run fallback::tmdb_api_key - TMDB_API_KEY is required.'
@@ -164,7 +179,11 @@ jobs:
             }
             return
           }
-          $readinessArgs = @('-AsJson')
+          $readinessArgs = @(
+            '-AsJson'
+            '-OutputPath'
+            'playback-proof-artifacts/playback-gate-runner-readiness.json'
+          )
           if ($env:FILMU_REQUIRE_PROVIDER_GATE -eq '1') {
             $readinessArgs += '-RequireProviderGate'
           }
@@ -206,13 +225,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path playback-proof-artifacts | Out-Null
           $eventName = '${{ github.event_name }}'
           if ([string]::IsNullOrWhiteSpace([string] $env:GH_TOKEN)) {
+            $capturedAt = (Get-Date).ToUniversalTime()
             [ordered]@{
-              timestamp = (Get-Date).ToString('o')
+              schema_version = 2
+              artifact_kind = 'github_main_policy_validation'
+              timestamp = $capturedAt.ToString('yyyy-MM-ddTHH:mm:ssZ')
+              captured_at = $capturedAt.ToString('yyyy-MM-ddTHH:mm:ssZ')
+              expires_at = $capturedAt.AddHours(24).ToString('yyyy-MM-ddTHH:mm:ssZ')
+              freshness_window_hours = 24
               repository = '${{ github.repository }}'
               branch = 'main'
+              required_actions = @('configure_policy_validation_admin_token')
+              failure_reasons = @('policy_admin_token_missing')
               validation = [ordered]@{
                 status = 'skipped'
                 details = "FILMU_POLICY_ADMIN_TOKEN is not configured; live admin-authenticated branch-policy validation was skipped for $eventName."
+                stale = $false
+                failure_reasons = @('policy_admin_token_missing')
+                required_actions = @('configure_policy_validation_admin_token')
               }
             } | ConvertTo-Json -Depth 8 | Set-Content -Path 'playback-proof-artifacts/github-main-policy-current.json' -Encoding UTF8
             Write-Host "::warning title=live branch-policy validation skipped::FILMU_POLICY_ADMIN_TOKEN is not configured; configure the repository secret to restore admin-authenticated branch-policy validation for $eventName events."
@@ -262,12 +292,16 @@ jobs:
             echo "- Provider parity gate required: \`${FILMU_REQUIRE_PROVIDER_GATE}\`"
             echo "- Artifacts: \`playback-gate-artifacts-${{ github.run_id }}\`"
             echo
-            if [[ -f playback-proof-artifacts/runner-readiness.json ]]; then
+            readiness_artifact="playback-proof-artifacts/playback-gate-runner-readiness.json"
+            if [[ ! -f "${readiness_artifact}" && -f playback-proof-artifacts/runner-readiness.json ]]; then
+              readiness_artifact="playback-proof-artifacts/runner-readiness.json"
+            fi
+            if [[ -f "${readiness_artifact}" ]]; then
               echo "Runner readiness artifact captured."
               if command -v jq >/dev/null 2>&1; then
-                readiness_status="$(jq -r '.status // "unknown"' playback-proof-artifacts/runner-readiness.json)"
+                readiness_status="$(jq -r '.status // "unknown"' "${readiness_artifact}")"
                 echo "- Runner readiness status: \`${readiness_status}\`"
-                mapfile -t readiness_failures < <(jq -r '.checks[] | select(.required == true and .ok == false) | "- " + .name + ": " + .details' playback-proof-artifacts/runner-readiness.json)
+                mapfile -t readiness_failures < <(jq -r '.checks[] | select(.required == true and .ok == false) | "- " + .name + ": " + .details' "${readiness_artifact}")
                 if [[ "${#readiness_failures[@]}" -gt 0 ]]; then
                   echo
                   echo "### Missing readiness prerequisites"

@@ -39,6 +39,8 @@ def test_rollout_contract_manifests_exist_and_define_expected_keys() -> None:
     assert 'minimum_environment_count' in windows_text
     assert 'required_profiles' in windows_text
     assert 'require_runtime_capture' in windows_text
+    assert 'freshness_window_hours' in windows_text
+    assert 'required_fields' in windows_text
     assert 'required_fields' in operator_text
     assert 'minimum_green_streak' in operator_text
 

@@ -5,6 +5,7 @@ param(
     [int] $LookbackRuns = 10,
     [double] $RegressionFactor = 1.25,
     [double] $AbsoluteRegressionBuffer = 1.0,
+    [string] $ContractPath = '',
     [switch] $AllowBootstrap
 )
 
@@ -24,6 +25,11 @@ if ($AbsoluteRegressionBuffer -lt 0.0) {
 function Get-DefaultArtifactsRoot {
     $repoRoot = Split-Path -Parent $PSScriptRoot
     return Join-Path $repoRoot 'playback-proof-artifacts\windows-native-stack'
+}
+
+function Get-UtcTimestamp {
+    param([datetime] $Value)
+    return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 }
 
 function Ensure-FullPath {
@@ -67,6 +73,25 @@ if ([string]::IsNullOrWhiteSpace($HistoryRoot)) {
 }
 $HistoryRoot = Ensure-FullPath -Path $HistoryRoot
 New-Item -ItemType Directory -Force -Path $HistoryRoot | Out-Null
+
+$contract = $null
+$contractSchemaVersion = 1
+$FreshnessWindowHours = 72
+if ([string]::IsNullOrWhiteSpace($ContractPath)) {
+    $ContractPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'ops\rollout\windows-vfs-soak-program.contract.json'
+}
+if (Test-Path -LiteralPath $ContractPath) {
+    $ContractPath = Ensure-FullPath -Path $ContractPath
+    $contract = Get-Content -LiteralPath $ContractPath -Raw | ConvertFrom-Json
+    if ($null -ne $contract) {
+        if ($contract.PSObject.Properties.Name -contains 'schema_version') {
+            $contractSchemaVersion = [int]$contract.schema_version
+        }
+        if ($contract.PSObject.Properties.Name -contains 'freshness_window_hours') {
+            $FreshnessWindowHours = [int]$contract.freshness_window_hours
+        }
+    }
+}
 
 if ($SummaryPaths.Count -eq 0) {
     if (-not (Test-Path -LiteralPath $ArtifactsRoot)) {
@@ -182,8 +207,22 @@ foreach ($environmentClass in $currentByEnvironment.Keys) {
 $recordTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $recordPath = Join-Path $HistoryRoot ("soak-trend-record-{0}.json" -f $recordTimestamp)
 $summaryPath = Join-Path $ArtifactsRoot ("soak-trend-summary-{0}.json" -f $recordTimestamp)
+$capturedAt = (Get-Date).ToUniversalTime()
+$failureReasons = [System.Collections.Generic.List[string]]::new()
+$requiredActions = [System.Collections.Generic.List[string]]::new()
+if (@($failedChecks | Where-Object { [string]($_.metric ?? '') -eq 'baseline_available' }).Count -gt 0) {
+    $failureReasons.Add('windows_vfs_soak_trend_baseline_missing')
+    $requiredActions.Add('refresh_windows_vfs_soak_trend_history')
+}
+if ($failedChecks.Count -gt 0 -and $failureReasons -notcontains 'windows_vfs_soak_trend_regression_detected') {
+    $failureReasons.Add('windows_vfs_soak_trend_regression_detected')
+    $requiredActions.Add('investigate_windows_vfs_soak_regressions')
+}
 $record = [ordered]@{
-    timestamp = (Get-Date).ToString('o')
+    schema_version = $contractSchemaVersion
+    artifact_kind = 'windows_vfs_soak_trend_record'
+    timestamp = Get-UtcTimestamp -Value $capturedAt
+    captured_at = Get-UtcTimestamp -Value $capturedAt
     environments = @(
         $currentByEnvironment.GetEnumerator() |
             Sort-Object Name |
@@ -197,15 +236,23 @@ $record = [ordered]@{
     )
 }
 $summary = [ordered]@{
-    timestamp = (Get-Date).ToString('o')
+    schema_version = $contractSchemaVersion
+    artifact_kind = 'windows_vfs_soak_trend_summary'
+    timestamp = Get-UtcTimestamp -Value $capturedAt
+    captured_at = Get-UtcTimestamp -Value $capturedAt
+    expires_at = Get-UtcTimestamp -Value $capturedAt.AddHours([Math]::Max($FreshnessWindowHours, 1))
+    freshness_window_hours = [Math]::Max($FreshnessWindowHours, 1)
     artifacts_root = $ArtifactsRoot
     history_root = $HistoryRoot
+    contract_path = if ($null -ne $contract) { $ContractPath } else { $null }
     lookback_runs = $LookbackRuns
     regression_factor = $RegressionFactor
     absolute_regression_buffer = $AbsoluteRegressionBuffer
     allow_bootstrap = [bool]$AllowBootstrap
     checks = $checks
     failed_checks = $failedChecks
+    failure_reasons = @($failureReasons)
+    required_actions = @($requiredActions)
     status = if ($failedChecks.Count -eq 0) { 'passed' } else { 'failed' }
 }
 

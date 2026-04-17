@@ -8,12 +8,44 @@ param(
     [int] $MinimumApprovingReviewCount = 1,
     [switch] $RequireAdminsEnforced,
     [switch] $ValidateCurrent,
+    [string] $ContractPath = '',
     [string] $OutputPath = '',
     [switch] $AsJson
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+function Get-DefaultContractPath {
+    return (Join-Path $repoRoot 'ops\rollout\github-main-policy.contract.json')
+}
+
+function Read-ContractFile {
+    param([AllowEmptyString()][string] $Path)
+
+    $resolvedPath = $Path
+    if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
+        $resolvedPath = Get-DefaultContractPath
+    }
+    if (-not (Test-Path -LiteralPath $resolvedPath)) {
+        throw ("GitHub main-policy contract file was not found: {0}" -f $resolvedPath)
+    }
+
+    try {
+        return Get-Content -LiteralPath $resolvedPath -Raw | ConvertFrom-Json -Depth 8
+    }
+    catch {
+        throw ("GitHub main-policy contract file is not valid JSON: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Format-UtcTimestamp {
+    param([Parameter(Mandatory = $true)][datetime] $Value)
+
+    return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+}
 
 function Test-CommandAvailable {
     param([Parameter(Mandatory = $true)][string] $Name)
@@ -150,6 +182,12 @@ function Get-MappingValue {
     return $Mapping.$Key
 }
 
+function New-ValidationActionSet {
+    return [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+}
+
 function Get-ValidationExitCode {
     param([object] $Validation)
 
@@ -182,6 +220,16 @@ function Write-PolicyArtifactIfRequested {
     $Payload | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding UTF8
 }
 
+$resolvedContractPath = $ContractPath
+if ([string]::IsNullOrWhiteSpace($resolvedContractPath)) {
+    $resolvedContractPath = Get-DefaultContractPath
+}
+$contract = Read-ContractFile -Path $resolvedContractPath
+$capturedAt = (Get-Date).ToUniversalTime()
+$freshnessWindowHours = 24
+if ($contract.PSObject.Properties.Name -contains 'freshness_window_hours') {
+    $freshnessWindowHours = [Math]::Max(1, [int] $contract.freshness_window_hours)
+}
 $expected = New-ExpectedPolicy `
     -Branch $Branch `
     -RequirePlaybackGate:$RequirePlaybackGate `
@@ -192,7 +240,13 @@ $expected = New-ExpectedPolicy `
     -RequireAdminsEnforced:$RequireAdminsEnforced
 $escapedBranch = [System.Uri]::EscapeDataString($Branch)
 $result = [ordered]@{
-    timestamp = (Get-Date).ToString('o')
+    schema_version = if ($contract.PSObject.Properties.Name -contains 'schema_version') { [int] $contract.schema_version } else { 1 }
+    artifact_kind = if ($contract.PSObject.Properties.Name -contains 'artifact_kind') { [string] $contract.artifact_kind } else { 'github_main_policy_validation' }
+    timestamp = Format-UtcTimestamp -Value $capturedAt
+    captured_at = Format-UtcTimestamp -Value $capturedAt
+    expires_at = Format-UtcTimestamp -Value ($capturedAt.AddHours($freshnessWindowHours))
+    freshness_window_hours = $freshnessWindowHours
+    contract_path = [string] (Resolve-Path -LiteralPath $resolvedContractPath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path -First 1)
     repository = $Repository
     branch = $Branch
     require_playback_gate = [bool] $RequirePlaybackGate
@@ -200,6 +254,8 @@ $result = [ordered]@{
     require_windows_vfs_gate = [bool] $RequireWindowsVfsGate
     require_windows_vfs_providers_gate = [bool] $RequireWindowsVfsProvidersGate
     expected = $expected
+    required_actions = @()
+    failure_reasons = @()
     validation = $null
 }
 
@@ -209,11 +265,18 @@ if ($ValidateCurrent) {
 
     $canValidate = ($null -ne $repoPayload) -and ($null -ne $branchProtectionPayload)
     if (-not $canValidate) {
+        $failureReasons = @('live_policy_validation_unavailable')
+        $requiredActions = @('validate_github_main_policy_from_admin_authenticated_host')
         $result.validation = [ordered]@{
             status = 'unverified'
             details = 'Current GitHub repository policy could not be validated from this environment. Install/authenticate gh with repo-admin access, then rerun with -ValidateCurrent.'
             gh_available = (Test-CommandAvailable -Name 'gh')
+            stale = $false
+            failure_reasons = $failureReasons
+            required_actions = $requiredActions
         }
+        $result.failure_reasons = $failureReasons
+        $result.required_actions = $requiredActions
     }
     else {
         $actualChecks = @($branchProtectionPayload.required_status_checks.contexts)
@@ -247,13 +310,42 @@ if ($ValidateCurrent) {
             ($branchProtectionPayload.PSObject.Properties.Name -contains 'enforce_admins_url' -and -not [string]::IsNullOrWhiteSpace([string] $branchProtectionPayload.enforce_admins_url))
         )
         $adminsOk = if ($expected.branch_protection.require_admins_enforced) { $adminsEnforced } else { $true }
+        $failureReasonSet = New-ValidationActionSet
+        $requiredActionSet = New-ValidationActionSet
+        if (-not $mergePolicyOk) {
+            $null = $failureReasonSet.Add('merge_policy_mismatch')
+            $null = $requiredActionSet.Add('align_repository_merge_policy')
+        }
+        if (-not $pullRequestRequired) {
+            $null = $failureReasonSet.Add('pull_request_reviews_not_required')
+            $null = $requiredActionSet.Add('require_pull_request_reviews')
+        }
+        if (-not $reviewsOk) {
+            $null = $failureReasonSet.Add('insufficient_approving_review_count')
+            $null = $requiredActionSet.Add('raise_minimum_approving_review_count')
+        }
+        if (-not $adminsOk) {
+            $null = $failureReasonSet.Add('admins_enforcement_missing')
+            $null = $requiredActionSet.Add('enforce_admins_for_protected_branch')
+        }
+        if (-not $strictChecks) {
+            $null = $failureReasonSet.Add('up_to_date_branch_checks_disabled')
+            $null = $requiredActionSet.Add('require_up_to_date_branch_before_merge')
+        }
+        if ($missingChecks.Count -gt 0) {
+            $null = $failureReasonSet.Add('required_status_checks_missing')
+            $null = $requiredActionSet.Add('restore_required_status_checks')
+        }
         $status = if ($mergePolicyOk -and $pullRequestRequired -and $reviewsOk -and $adminsOk -and $strictChecks -and $missingChecks.Count -eq 0) {
             'ready'
         } else {
             'not_ready'
         }
+        $failureReasons = @($failureReasonSet)
+        $requiredActions = @($requiredActionSet)
         $result.validation = [ordered]@{
             status = $status
+            stale = $false
             merge_policy = $mergePolicy
             merge_policy_ok = $mergePolicyOk
             pull_request_required = $pullRequestRequired
@@ -266,7 +358,11 @@ if ($ValidateCurrent) {
             missing_required_checks = $missingChecks
             unexpected_required_checks = $unexpectedChecks
             proof_profiles = $expected.branch_protection.proof_profiles
+            failure_reasons = $failureReasons
+            required_actions = $requiredActions
         }
+        $result.failure_reasons = $failureReasons
+        $result.required_actions = $requiredActions
     }
 }
 
