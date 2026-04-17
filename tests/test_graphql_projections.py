@@ -4698,6 +4698,16 @@ def test_graphql_vfs_runtime_telemetry_returns_cross_view_rollups(
     finally:
         byte_streaming.release_handle(handle)
         byte_streaming.release_serving_session(session)
+        tracked_path = byte_streaming.get_path_by_key(
+            category="local-file",
+            path=str(python_view_path),
+        )
+        if tracked_path is not None and tracked_path.active_handle_count == 0:
+            byte_streaming._ACTIVE_PATHS.pop(tracked_path.path_id, None)
+            byte_streaming._PATHS_BY_KEY.pop(
+                (tracked_path.category, tracked_path.path),
+                None,
+            )
 
 
 def test_graphql_plugin_runtime_overview_and_warnings_use_shared_posture() -> None:
