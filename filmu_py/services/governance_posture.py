@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -401,16 +402,21 @@ def _artifact_snapshot(
     ]
 
 
-def _vfs_runtime_governance_snapshots() -> tuple[dict[str, object], dict[str, object]]:
-    playback_gate = runtime_governance._playback_gate_governance_snapshot()
-    snapshot = runtime_governance._vfs_runtime_governance_snapshot(
-        playback_gate_governance=playback_gate,
+def _vfs_runtime_governance_snapshots() -> tuple[Mapping[str, object], Mapping[str, object]]:
+    playback_gate = cast(
+        Mapping[str, object], runtime_governance._playback_gate_governance_snapshot()
+    )
+    snapshot = cast(
+        Mapping[str, object],
+        runtime_governance._vfs_runtime_governance_snapshot(
+            playback_gate_governance=playback_gate,
+        ),
     )
     return playback_gate, snapshot
 
 
 def _build_vfs_runtime_rollout_snapshot(
-    snapshot: dict[str, object],
+    snapshot: Mapping[str, object],
 ) -> VfsRuntimeRolloutSnapshot:
     reasons = _as_str_list(snapshot.get("vfs_runtime_rollout_reasons"))
     next_action = str(snapshot.get("vfs_runtime_rollout_next_action", ""))
