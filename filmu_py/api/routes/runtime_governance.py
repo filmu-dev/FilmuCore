@@ -1015,9 +1015,17 @@ def _playback_gate_governance_snapshot() -> dict[str, int | str | list[str]]:
                 governance.get("playback_gate_provider_gate_failure_reasons")
             )
             if provider_failure_reasons:
+                recognized_provider_failure = False
                 for reason in provider_failure_reasons:
                     if reason not in rollout_reasons:
                         rollout_reasons.append(reason)
+                    if reason == "provider_gate_not_green" or reason in _PROVIDER_GATE_BLOCKING_REASONS:
+                        recognized_provider_failure = True
+                if (
+                    not recognized_provider_failure
+                    and "provider_gate_not_green" not in rollout_reasons
+                ):
+                    rollout_reasons.append("provider_gate_not_green")
             else:
                 rollout_reasons.append("provider_gate_not_green")
 

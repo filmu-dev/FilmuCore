@@ -211,6 +211,10 @@ if (Test-Path -LiteralPath $ContractPath) {
     }
 }
 
+if ($RepeatCount -lt 1) {
+    throw 'RepeatCount must be at least 1.'
+}
+
 $dotEnv = Get-DotEnvMap -Path (Join-Path $repoRoot '.env')
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $summaryPath = Join-Path $ArtifactsRoot ("windows-media-server-gate-{0}.json" -f $timestamp)
@@ -426,7 +430,6 @@ foreach ($provider in $RequiredProviders) {
             }
     )
     if ($providerResults.Count -eq 0) {
-        Add-UniqueString -Values $missingConfiguredProviders -Value $provider
         continue
     }
     if (@($providerResults | Where-Object { [string]$_.status -eq 'passed' }).Count -gt 0) {

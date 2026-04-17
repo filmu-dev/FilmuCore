@@ -61,6 +61,9 @@ $freshnessWindowHours = if (($null -ne $contract) -and ($contract.PSObject.Prope
 else {
     24
 }
+if ($freshnessWindowHours -lt 1) {
+    $freshnessWindowHours = 1
+}
 $normalizedProviders = [System.Collections.Generic.List[string]]::new()
 foreach ($providerEntry in $Providers) {
     foreach ($providerToken in ([string] $providerEntry).Split(',',[System.StringSplitOptions]::RemoveEmptyEntries)) {

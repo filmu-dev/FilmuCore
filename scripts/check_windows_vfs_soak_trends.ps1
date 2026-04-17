@@ -210,11 +210,14 @@ $summaryPath = Join-Path $ArtifactsRoot ("soak-trend-summary-{0}.json" -f $recor
 $capturedAt = (Get-Date).ToUniversalTime()
 $failureReasons = [System.Collections.Generic.List[string]]::new()
 $requiredActions = [System.Collections.Generic.List[string]]::new()
+$nonBaselineFailedChecks = @(
+    $failedChecks | Where-Object { [string]($_.metric ?? '') -ne 'baseline_available' }
+)
 if (@($failedChecks | Where-Object { [string]($_.metric ?? '') -eq 'baseline_available' }).Count -gt 0) {
     $failureReasons.Add('windows_vfs_soak_trend_baseline_missing')
     $requiredActions.Add('refresh_windows_vfs_soak_trend_history')
 }
-if ($failedChecks.Count -gt 0 -and $failureReasons -notcontains 'windows_vfs_soak_trend_regression_detected') {
+if ($nonBaselineFailedChecks.Count -gt 0 -and $failureReasons -notcontains 'windows_vfs_soak_trend_regression_detected') {
     $failureReasons.Add('windows_vfs_soak_trend_regression_detected')
     $requiredActions.Add('investigate_windows_vfs_soak_regressions')
 }
