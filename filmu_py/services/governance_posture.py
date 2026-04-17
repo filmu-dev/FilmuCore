@@ -320,7 +320,7 @@ def build_playback_gate_governance_posture() -> PlaybackGateGovernanceSnapshot:
     remaining_gaps = [
         f"playback gate rollout reason: {reason}"
         for reason in reasons
-        if reason != "enterprise_playback_gate_green"
+        if reason != "playback_gate_green"
     ]
     required_actions = [next_action] if next_action else []
     if _as_int(snapshot.get("playback_gate_runner_required_failures")) > 0:
@@ -533,9 +533,13 @@ def build_enterprise_rollout_evidence_posture(
     )
 
     windows_soak_ready = bool(_as_int(playback_gate.get("playback_gate_windows_soak_ready")))
+    windows_soak_stale = bool(_as_int(playback_gate.get("playback_gate_windows_soak_stale")))
     windows_soak_recorded = (
         _as_int(playback_gate.get("playback_gate_windows_soak_repeat_count")) > 0
         or bool(_as_str_list(playback_gate.get("playback_gate_windows_soak_profile_coverage")))
+    )
+    windows_soak_actions = _as_str_list(
+        playback_gate.get("playback_gate_windows_soak_required_actions")
     )
     checks.append(
         GovernanceEvidenceCheckSnapshot(
@@ -546,11 +550,23 @@ def build_enterprise_rollout_evidence_posture(
             ready=windows_soak_ready,
             evidence_refs=[],
             proof_artifacts=[],
-            required_actions=([] if windows_soak_ready else ["run_windows_vfs_soak_enterprise_profiles"]),
+            required_actions=(
+                []
+                if windows_soak_ready
+                else (
+                    ["refresh_windows_vfs_soak_program", *windows_soak_actions]
+                    if windows_soak_stale
+                    else ["run_windows_vfs_soak_all_profiles", *windows_soak_actions]
+                )
+            ),
             remaining_gaps=(
                 []
                 if windows_soak_ready
-                else ["Windows VFS soak evidence is incomplete or not green"]
+                else (
+                    ["Windows VFS soak evidence is stale and must be recaptured"]
+                    if windows_soak_stale
+                    else ["Windows VFS soak evidence is incomplete or not green"]
+                )
             ),
         )
     )

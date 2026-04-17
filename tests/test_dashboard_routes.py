@@ -2175,7 +2175,7 @@ def test_operations_governance_route_returns_enterprise_slice_posture(
     assert "rerun_native_windows_provider_proof_tv" in body["operational_evidence"][
         "required_actions"
     ]
-    assert "run_windows_vfs_soak_enterprise_profiles" in body["operational_evidence"][
+    assert "run_windows_vfs_soak_all_profiles" in body["operational_evidence"][
         "required_actions"
     ]
     assert body["identity_authz"]["status"] == "blocked"
@@ -2263,7 +2263,7 @@ def test_operations_governance_route_blocks_operational_evidence_on_live_worker_
             "playback_gate_policy_validation_status": "ready",
             "playback_gate_policy_ready": 1,
             "playback_gate_rollout_readiness": "ready",
-            "playback_gate_rollout_reasons": ["enterprise_playback_gate_green"],
+            "playback_gate_rollout_reasons": ["playback_gate_green"],
             "playback_gate_rollout_next_action": "keep_required_checks_enforced",
         }
     )
@@ -2733,10 +2733,13 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
     artifacts_root = tmp_path / "playback-proof-artifacts"
     windows_artifacts_root = artifacts_root / "windows-native-stack"
     windows_artifacts_root.mkdir(parents=True)
+    captured_at = datetime.now(UTC).replace(microsecond=0)
+    captured_at_text = captured_at.isoformat().replace("+00:00", "Z")
+    expires_at_text = (captured_at + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
     (artifacts_root / "stability-summary-20260412-020101.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:01Z",
+                "timestamp": captured_at_text,
                 "environment_class": "windows-native:enterprise",
                 "repeat_count": 2,
                 "dry_run": False,
@@ -2757,13 +2760,21 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
         encoding="utf-8",
     )
     (artifacts_root / "media-server-gate-20260412-020102.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T02:01:02Z", "all_green": True}),
+        json.dumps({"timestamp": captured_at_text, "all_green": True}),
         encoding="utf-8",
     )
     (artifacts_root / "windows-media-server-gate-20260412-020103.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:03Z",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:movie", "plex:movie"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
                 "media_type": "movie",
                 "results": [
                     {"provider": "emby", "status": "passed"},
@@ -2776,7 +2787,15 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
     (artifacts_root / "windows-media-server-gate-20260412-020104.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:04Z",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:tv", "plex:tv"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
                 "media_type": "tv",
                 "results": [
                     {"provider": "emby", "status": "passed"},
@@ -2786,13 +2805,24 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
         ),
         encoding="utf-8",
     )
-    (windows_artifacts_root / "soak-stability-20260412-020105.json").write_text(
+    (windows_artifacts_root / "soak-program-summary-20260412-020105.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:05Z",
+                "schema_version": 1,
+                "artifact_kind": "windows_vfs_soak_program",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "ready": True,
                 "all_green": True,
                 "repeat_count": 1,
                 "profiles": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
             }
         ),
         encoding="utf-8",
@@ -2800,8 +2830,16 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
     (artifacts_root / "playback-gate-runner-readiness.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:05Z",
+                "schema_version": 2,
+                "artifact_kind": "playback_gate_runner_readiness",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 24,
                 "status": "ready",
+                "required_failure_count": 0,
+                "required_actions": [],
+                "failure_reasons": [],
                 "checks": [
                     {"name": "docker", "required": True, "ok": True},
                     {"name": "pwsh", "required": True, "ok": True},
@@ -2811,7 +2849,24 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
         encoding="utf-8",
     )
     (artifacts_root / "github-main-policy-current.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T02:01:06Z", "validation": {"status": "ready"}}),
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_kind": "github_main_policy_validation",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 24,
+                "required_actions": [],
+                "failure_reasons": [],
+                "validation": {
+                    "status": "ready",
+                    "stale": False,
+                    "required_actions": [],
+                    "failure_reasons": [],
+                },
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("FILMU_PY_VFS_RUNTIME_STATUS_PATH", str(runtime_status_path))
@@ -2834,7 +2889,17 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
     assert "vfs_runtime_upstream_wait_class=healthy" in body["vfs_data_plane"]["evidence"]
 
 
-def test_playback_gate_evidence_route_surfaces_missing_operational_proofs() -> None:
+def test_playback_gate_evidence_route_surfaces_missing_operational_proofs(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    artifacts_root.mkdir(parents=True)
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        stream_routes._empty_playback_gate_governance_snapshot,
+    )
     client = _build_client()
 
     response = client.get("/api/v1/operations/playback-gate/evidence", headers=_headers())
@@ -2845,6 +2910,188 @@ def test_playback_gate_evidence_route_surfaces_missing_operational_proofs() -> N
     assert body["policy_ready"] is False
     assert "record_playback_gate_runner_readiness" in body["required_actions"]
     assert "record_github_main_policy_validation" in body["required_actions"]
+
+
+def test_playback_gate_evidence_route_surfaces_stale_runner_and_policy_contracts(
+    monkeypatch: Any,
+) -> None:
+    playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
+    playback_gate_governance.update(
+        {
+            "playback_gate_runner_status": "ready",
+            "playback_gate_runner_ready": 0,
+            "playback_gate_runner_required_failures": 0,
+            "playback_gate_runner_recorded_at": "2026-04-12T02:01:05Z",
+            "playback_gate_runner_expires_at": "2026-04-13T02:01:05Z",
+            "playback_gate_runner_stale": 1,
+            "playback_gate_runner_failure_reasons": [],
+            "playback_gate_runner_required_actions": [
+                "capture_runner_prerequisites_on_github_hosted_runner"
+            ],
+            "playback_gate_policy_validation_status": "ready",
+            "playback_gate_policy_ready": 0,
+            "playback_gate_policy_validation_recorded_at": "2026-04-12T02:01:06Z",
+            "playback_gate_policy_validation_expires_at": "2026-04-13T02:01:06Z",
+            "playback_gate_policy_validation_stale": 1,
+            "playback_gate_policy_failure_reasons": [],
+            "playback_gate_policy_required_actions": [
+                "validate_github_main_policy_from_admin_authenticated_host"
+            ],
+            "playback_gate_rollout_readiness": "blocked",
+            "playback_gate_rollout_reasons": [
+                "runner_readiness_stale",
+                "github_main_policy_stale",
+            ],
+            "playback_gate_rollout_next_action": "resolve_failed_playback_gate_proofs",
+        }
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: dict(playback_gate_governance),
+    )
+    client = _build_client()
+
+    response = client.get("/api/v1/operations/playback-gate/evidence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runner_stale"] is True
+    assert body["policy_stale"] is True
+    assert body["runner_required_actions"] == [
+        "capture_runner_prerequisites_on_github_hosted_runner"
+    ]
+    assert body["policy_required_actions"] == [
+        "validate_github_main_policy_from_admin_authenticated_host"
+    ]
+    assert "refresh_playback_gate_runner_readiness" in body["required_actions"]
+    assert "refresh_github_main_policy_validation" in body["required_actions"]
+
+
+def test_playback_gate_evidence_route_surfaces_provider_gate_taxonomy(
+    monkeypatch: Any,
+) -> None:
+    playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
+    playback_gate_governance.update(
+        {
+            "playback_gate_runner_status": "ready",
+            "playback_gate_runner_ready": 1,
+            "playback_gate_policy_validation_status": "ready",
+            "playback_gate_policy_ready": 1,
+            "playback_gate_provider_gate_required": 1,
+            "playback_gate_provider_gate_ran": 1,
+            "playback_gate_provider_parity_ready": 0,
+            "playback_gate_provider_gate_recorded_at": "2026-04-12T02:01:04Z",
+            "playback_gate_provider_gate_expires_at": "2026-04-13T02:01:04Z",
+            "playback_gate_provider_gate_stale": 0,
+            "playback_gate_provider_gate_failure_reasons": [
+                "provider_gate_docker_plex_mount_path_drift",
+                "provider_gate_wsl_host_binary_stale",
+            ],
+            "playback_gate_provider_gate_required_actions": [
+                "realign_docker_plex_mount_path",
+                "rebuild_wsl_host_mount_binary",
+            ],
+            "playback_gate_windows_provider_ready": 1,
+            "playback_gate_windows_soak_ready": 1,
+            "playback_gate_rollout_readiness": "blocked",
+            "playback_gate_rollout_reasons": [
+                "provider_gate_docker_plex_mount_path_drift",
+                "provider_gate_wsl_host_binary_stale",
+            ],
+            "playback_gate_rollout_next_action": "resolve_failed_playback_gate_proofs",
+        }
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: dict(playback_gate_governance),
+    )
+    client = _build_client()
+
+    response = client.get("/api/v1/operations/playback-gate/evidence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider_gate_required"] is True
+    assert body["provider_gate_ran"] is True
+    assert body["provider_parity_ready"] is False
+    assert body["provider_gate_stale"] is False
+    assert body["provider_gate_failure_reasons"] == [
+        "provider_gate_docker_plex_mount_path_drift",
+        "provider_gate_wsl_host_binary_stale",
+    ]
+    assert body["provider_gate_required_actions"] == [
+        "realign_docker_plex_mount_path",
+        "rebuild_wsl_host_mount_binary",
+    ]
+    assert "rerun_media_server_provider_gate" in body["required_actions"]
+    assert "realign_docker_plex_mount_path" in body["required_actions"]
+    assert "rebuild_wsl_host_mount_binary" in body["required_actions"]
+
+
+def test_playback_gate_evidence_route_surfaces_stale_windows_soak_and_media_proofs(
+    monkeypatch: Any,
+) -> None:
+    playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
+    playback_gate_governance.update(
+        {
+            "playback_gate_runner_status": "ready",
+            "playback_gate_runner_ready": 1,
+            "playback_gate_policy_validation_status": "ready",
+            "playback_gate_policy_ready": 1,
+            "playback_gate_windows_provider_ready": 0,
+            "playback_gate_windows_provider_recorded_at": "2026-04-12T02:01:03Z",
+            "playback_gate_windows_provider_expires_at": "2026-04-13T02:01:03Z",
+            "playback_gate_windows_provider_stale": 1,
+            "playback_gate_windows_provider_failure_reasons": [
+                "windows_provider_movie_proof_stale",
+                "windows_provider_tv_proof_stale",
+            ],
+            "playback_gate_windows_provider_required_actions": [
+                "refresh_native_windows_provider_proof_matrix",
+                "rerun_native_windows_provider_proof_movie",
+                "rerun_native_windows_provider_proof_tv",
+            ],
+            "playback_gate_windows_soak_ready": 0,
+            "playback_gate_windows_soak_recorded_at": "2026-04-12T02:01:05Z",
+            "playback_gate_windows_soak_expires_at": "2026-04-13T02:01:05Z",
+            "playback_gate_windows_soak_stale": 1,
+            "playback_gate_windows_soak_failure_reasons": [
+                "windows_vfs_soak_program_stale"
+            ],
+            "playback_gate_windows_soak_required_actions": [
+                "refresh_windows_vfs_soak_program"
+            ],
+            "playback_gate_rollout_readiness": "blocked",
+            "playback_gate_rollout_reasons": [
+                "windows_provider_gate_stale",
+                "windows_vfs_soak_stale",
+            ],
+            "playback_gate_rollout_next_action": "resolve_failed_playback_gate_proofs",
+        }
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: dict(playback_gate_governance),
+    )
+    client = _build_client()
+
+    response = client.get("/api/v1/operations/playback-gate/evidence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["windows_provider_stale"] is True
+    assert body["windows_soak_stale"] is True
+    assert body["windows_provider_required_actions"] == [
+        "refresh_native_windows_provider_proof_matrix",
+        "rerun_native_windows_provider_proof_movie",
+        "rerun_native_windows_provider_proof_tv",
+    ]
+    assert body["windows_soak_required_actions"] == ["refresh_windows_vfs_soak_program"]
+    assert "refresh_native_windows_provider_proof_matrix" in body["required_actions"]
+    assert "refresh_windows_vfs_soak_program" in body["required_actions"]
 
 
 def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gate(
@@ -2885,10 +3132,13 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
     artifacts_root = tmp_path / "playback-proof-artifacts"
     windows_artifacts_root = artifacts_root / "windows-native-stack"
     windows_artifacts_root.mkdir(parents=True)
+    captured_at = datetime.now(UTC).replace(microsecond=0)
+    captured_at_text = captured_at.isoformat().replace("+00:00", "Z")
+    expires_at_text = (captured_at + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
     (artifacts_root / "stability-summary-20260412-020101.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:01Z",
+                "timestamp": captured_at_text,
                 "environment_class": "windows-native:enterprise",
                 "repeat_count": 2,
                 "dry_run": False,
@@ -2902,13 +3152,21 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
         encoding="utf-8",
     )
     (artifacts_root / "media-server-gate-20260412-020102.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T02:01:02Z", "all_green": True}),
+        json.dumps({"timestamp": captured_at_text, "all_green": True}),
         encoding="utf-8",
     )
     (artifacts_root / "windows-media-server-gate-20260412-020103.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:03Z",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:movie", "plex:movie"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
                 "media_type": "movie",
                 "results": [
                     {"provider": "emby", "status": "passed"},
@@ -2921,7 +3179,15 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
     (artifacts_root / "windows-media-server-gate-20260412-020104.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:04Z",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:tv", "plex:tv"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
                 "media_type": "tv",
                 "results": [
                     {"provider": "emby", "status": "passed"},
@@ -2931,13 +3197,24 @@ def test_vfs_rollout_control_route_persists_operator_pause_and_affects_merge_gat
         ),
         encoding="utf-8",
     )
-    (windows_artifacts_root / "soak-stability-20260412-020105.json").write_text(
+    (windows_artifacts_root / "soak-program-summary-20260412-020105.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T02:01:05Z",
+                "schema_version": 1,
+                "artifact_kind": "windows_vfs_soak_program",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "ready": True,
                 "all_green": True,
                 "repeat_count": 1,
                 "profiles": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
             }
         ),
         encoding="utf-8",

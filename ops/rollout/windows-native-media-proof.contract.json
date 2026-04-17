@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "windows_native_media_proof",
+  "freshness_window_hours": 72,
+  "required_providers": ["emby", "plex"],
+  "required_media_types": ["movie", "tv"],
+  "required_topology": "native_windows",
+  "repeat_count": 1,
+  "require_filmuvfs": true,
+  "required_fields": [
+    "schema_version",
+    "artifact_kind",
+    "captured_at",
+    "expires_at",
+    "freshness_window_hours",
+    "status",
+    "media_type",
+    "coverage",
+    "coverage_complete",
+    "failure_reasons",
+    "required_actions"
+  ]
+}

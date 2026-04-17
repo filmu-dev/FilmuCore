@@ -1,4 +1,7 @@
 {
+  "schema_version": 1,
+  "artifact_kind": "windows_vfs_soak_program",
+  "freshness_window_hours": 72,
   "minimum_environment_count": 2,
   "required_environment_classes": [],
   "required_profiles": ["continuous", "seek", "concurrent", "full"],
@@ -7,5 +10,17 @@
   "require_backend_status_capture": true,
   "max_reconnect_incidents": 0,
   "max_provider_pressure_incidents": 0,
-  "max_fatal_error_incidents": 0
+  "max_fatal_error_incidents": 0,
+  "required_fields": [
+    "schema_version",
+    "artifact_kind",
+    "captured_at",
+    "expires_at",
+    "freshness_window_hours",
+    "status",
+    "profile_coverage",
+    "profile_coverage_complete",
+    "failure_reasons",
+    "required_actions"
+  ]
 }

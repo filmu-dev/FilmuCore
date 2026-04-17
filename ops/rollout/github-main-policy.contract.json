@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "artifact_kind": "github_main_policy_validation",
+  "freshness_window_hours": 24,
+  "required_fields": [
+    "schema_version",
+    "artifact_kind",
+    "captured_at",
+    "expires_at",
+    "repository",
+    "branch",
+    "expected",
+    "validation",
+    "required_actions",
+    "failure_reasons"
+  ]
+}

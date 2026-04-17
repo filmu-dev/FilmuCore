@@ -2,11 +2,49 @@ param(
     [switch] $RequireProviderGate,
     [switch] $AsJson,
     [switch] $NoExitOnFailure,
+    [string] $ContractPath = '',
     [string] $OutputPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+function Get-DefaultContractPath {
+    return (Join-Path $repoRoot 'ops\rollout\playback-gate-runner-readiness.contract.json')
+}
+
+function Read-ContractFile {
+    param([AllowEmptyString()][string] $Path)
+
+    $resolvedPath = $Path
+    if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
+        $resolvedPath = Get-DefaultContractPath
+    }
+    if (-not (Test-Path -LiteralPath $resolvedPath)) {
+        throw ("Playback-gate runner contract file was not found: {0}" -f $resolvedPath)
+    }
+
+    try {
+        return Get-Content -LiteralPath $resolvedPath -Raw | ConvertFrom-Json -Depth 8
+    }
+    catch {
+        throw ("Playback-gate runner contract file is not valid JSON: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Format-UtcTimestamp {
+    param([Parameter(Mandatory = $true)][datetime] $Value)
+
+    return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+}
+
+function Convert-ToReasonToken {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    return (($Value.ToLowerInvariant() -replace '[^a-z0-9]+', '_').Trim('_'))
+}
 
 function Get-DotEnvMap {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -94,15 +132,29 @@ function Resolve-BrowserExecutablePath {
 }
 
 $scriptRoot = $PSScriptRoot
-$repoRoot = Split-Path -Parent $scriptRoot
+$resolvedContractPath = $ContractPath
+if ([string]::IsNullOrWhiteSpace($resolvedContractPath)) {
+    $resolvedContractPath = Get-DefaultContractPath
+}
+$contract = Read-ContractFile -Path $resolvedContractPath
+$capturedAt = (Get-Date).ToUniversalTime()
+$freshnessWindowHours = 24
+if ($contract.PSObject.Properties.Name -contains 'freshness_window_hours') {
+    $freshnessWindowHours = [Math]::Max(1, [int] $contract.freshness_window_hours)
+}
 $dotEnv = Get-DotEnvMap -Path (Join-Path $repoRoot '.env')
 $isLinuxHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
 
+$runnerEnvironment = [string] [System.Environment]::GetEnvironmentVariable('RUNNER_ENVIRONMENT')
+$runnerName = [string] [System.Environment]::GetEnvironmentVariable('RUNNER_NAME')
+$runnerOs = [string] [System.Environment]::GetEnvironmentVariable('RUNNER_OS')
+$githubActions = [string] [System.Environment]::GetEnvironmentVariable('GITHUB_ACTIONS')
 $frontendContext = Get-EnvValue -Name 'FILMU_FRONTEND_CONTEXT' -DotEnv $dotEnv
 $browserPath = Resolve-BrowserExecutablePath -ConfiguredPath (Get-EnvValue -Name 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE' -DotEnv $dotEnv)
 $tmdbKey = Get-EnvValue -Name 'TMDB_API_KEY' -DotEnv $dotEnv
 $plexToken = Get-EnvValue -Name 'PLEX_TOKEN' -DotEnv $dotEnv
 $embyApiKey = Get-EnvValue -Name 'EMBY_API_KEY' -DotEnv $dotEnv
+$policyAdminToken = Get-EnvValue -Name 'FILMU_POLICY_ADMIN_TOKEN' -DotEnv $dotEnv
 $debridKeys = @(
     (Get-EnvValue -Name 'FILMU_PY_REALDEBRID_API_TOKEN' -DotEnv $dotEnv)
     (Get-EnvValue -Name 'REAL_DEBRID_API_KEY' -DotEnv $dotEnv)
@@ -118,24 +170,49 @@ $checks = [System.Collections.Generic.List[object]]::new()
 $checks.Add([pscustomobject]@{ name = 'docker'; required = $true; ok = (Test-CommandAvailable -Name 'docker'); details = 'docker must be installed on the runner.' })
 $checks.Add([pscustomobject]@{ name = 'curl'; required = $true; ok = (Test-CommandAvailable -Name 'curl'); details = 'curl must be installed on the runner.' })
 $checks.Add([pscustomobject]@{ name = 'pwsh'; required = $true; ok = (Test-CommandAvailable -Name 'pwsh'); details = 'PowerShell 7+ must be installed on the runner.' })
+$checks.Add([pscustomobject]@{ name = 'github_hosted_runner'; required = $true; ok = ([string]::Equals($githubActions, 'true', [System.StringComparison]::OrdinalIgnoreCase) -and [string]::Equals($runnerEnvironment, 'github-hosted', [System.StringComparison]::OrdinalIgnoreCase)); details = 'The readiness artifact must be captured from a GitHub-hosted runner.' })
 $checks.Add([pscustomobject]@{ name = 'frontend_context'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($frontendContext) -and (Test-Path -LiteralPath $frontendContext)); details = 'FILMU_FRONTEND_CONTEXT must point to a readable frontend checkout.' })
 $checks.Add([pscustomobject]@{ name = 'browser_executable'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($browserPath) -and (Test-Path -LiteralPath $browserPath)); details = 'FILMU_PREFERRED_CLIENT_BROWSER_EXECUTABLE must point to an executable browser.' })
 $checks.Add([pscustomobject]@{ name = 'tmdb_api_key'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($tmdbKey)); details = 'TMDB_API_KEY is required.' })
 $checks.Add([pscustomobject]@{ name = 'debrid_provider_token'; required = $true; ok = ($debridKeys.Count -gt 0); details = 'At least one debrid provider token/key is required.' })
 $checks.Add([pscustomobject]@{ name = 'linux_fuse'; required = $true; ok = (Test-LinuxFuseAvailable -IsLinuxHost $isLinuxHost); details = 'The playback gate requires a Linux runner with /dev/fuse.' })
+$checks.Add([pscustomobject]@{ name = 'policy_admin_token'; required = $true; ok = (-not [string]::IsNullOrWhiteSpace($policyAdminToken)); details = 'FILMU_POLICY_ADMIN_TOKEN is required for live protected-branch validation.' })
 $checks.Add([pscustomobject]@{ name = 'plex_token'; required = $RequireProviderGate.IsPresent; ok = (-not [string]::IsNullOrWhiteSpace($plexToken)); details = 'PLEX_TOKEN enables the provider parity gate.' })
 $checks.Add([pscustomobject]@{ name = 'emby_api_key'; required = $RequireProviderGate.IsPresent; ok = (-not [string]::IsNullOrWhiteSpace($embyApiKey)); details = 'EMBY_API_KEY enables the provider parity gate.' })
 
 $requiredFailures = @($checks | Where-Object { $_.required -and -not $_.ok })
 $optionalWarnings = @($checks | Where-Object { -not $_.required -and -not $_.ok })
 $status = if ($requiredFailures.Count -eq 0) { 'ready' } else { 'not_ready' }
+$failureReasons = @(
+    $requiredFailures | ForEach-Object {
+        "{0}_missing_or_unready" -f (Convert-ToReasonToken -Value ([string] $_.name))
+    }
+)
+$requiredActions = @(
+    $requiredFailures | ForEach-Object {
+        "repair_{0}" -f (Convert-ToReasonToken -Value ([string] $_.name))
+    }
+)
 
 $result = [pscustomobject]@{
-    timestamp = (Get-Date).ToString('o')
+    schema_version = if ($contract.PSObject.Properties.Name -contains 'schema_version') { [int] $contract.schema_version } else { 1 }
+    artifact_kind = if ($contract.PSObject.Properties.Name -contains 'artifact_kind') { [string] $contract.artifact_kind } else { 'playback_gate_runner_readiness' }
+    timestamp = Format-UtcTimestamp -Value $capturedAt
+    captured_at = Format-UtcTimestamp -Value $capturedAt
+    expires_at = Format-UtcTimestamp -Value ($capturedAt.AddHours($freshnessWindowHours))
+    freshness_window_hours = $freshnessWindowHours
+    contract_path = [string] (Resolve-Path -LiteralPath $resolvedContractPath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path -First 1)
     repo_root = $repoRoot
     require_provider_gate = $RequireProviderGate.IsPresent
+    runner_environment = if (-not [string]::IsNullOrWhiteSpace($runnerEnvironment)) { $runnerEnvironment } else { 'unknown' }
+    runner_name = if (-not [string]::IsNullOrWhiteSpace($runnerName)) { $runnerName } else { 'unknown' }
+    runner_os = if (-not [string]::IsNullOrWhiteSpace($runnerOs)) { $runnerOs } else { [System.Environment]::OSVersion.Platform.ToString() }
     browser_executable_path = $browserPath
     status = $status
+    required_failure_count = $requiredFailures.Count
+    optional_warning_count = $optionalWarnings.Count
+    required_actions = $requiredActions
+    failure_reasons = $failureReasons
     checks = $checks
 }
 

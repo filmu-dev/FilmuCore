@@ -22,6 +22,42 @@ if ($RepeatCount -lt 1) {
     throw 'RepeatCount must be at least 1.'
 }
 
+function Add-UniqueString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[string]] $Values,
+        [string] $Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+
+    $trimmed = $Value.Trim()
+    if ($Values -notcontains $trimmed) {
+        $Values.Add($trimmed)
+    }
+}
+
+function Get-UtcTimestamp {
+    param([datetime] $Value)
+    return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+}
+
+function Read-JsonFile {
+    param([string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+}
+
+$contractSchemaVersion = 1
+$artifactKind = 'windows_vfs_soak_program'
+$FreshnessWindowHours = 72
+
 if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
     $ArtifactsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'playback-proof-artifacts\windows-native-stack'
 }
@@ -44,6 +80,15 @@ if (Test-Path -LiteralPath $ContractPath) {
         }
         if ($contract.PSObject.Properties.Name -contains 'required_profiles') {
             $Profiles = @($contract.required_profiles)
+        }
+        if ($contract.PSObject.Properties.Name -contains 'schema_version') {
+            $contractSchemaVersion = [int]$contract.schema_version
+        }
+        if ($contract.PSObject.Properties.Name -contains 'artifact_kind') {
+            $artifactKind = [string]$contract.artifact_kind
+        }
+        if ($contract.PSObject.Properties.Name -contains 'freshness_window_hours') {
+            $FreshnessWindowHours = [int]$contract.freshness_window_hours
         }
         if ($contract.PSObject.Properties.Name -contains 'repeat_count') {
             $RepeatCount = [int]$contract.repeat_count
@@ -89,6 +134,9 @@ $trendScript = Join-Path $PSScriptRoot 'check_windows_vfs_soak_trends.ps1'
 
 $summaryPaths = [System.Collections.Generic.List[string]]::new()
 $results = [System.Collections.Generic.List[object]]::new()
+$loadedSummaries = [System.Collections.Generic.List[object]]::new()
+$failureReasons = [System.Collections.Generic.List[string]]::new()
+$requiredActions = [System.Collections.Generic.List[string]]::new()
 
 foreach ($environmentClass in $EnvironmentClasses) {
     $before = @(
@@ -143,41 +191,63 @@ foreach ($environmentClass in $EnvironmentClasses) {
     $results.Add([pscustomobject]@{
         environment_class = $environmentClass
         exit_code = $exitCode
+        status = if ($exitCode -eq 0) { 'passed' } else { 'failed' }
         summary_path = $newSummaryPath
     })
 
+    if ($exitCode -ne 0) {
+        Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_run_failed'
+        Add-UniqueString -Values $requiredActions -Value 'run_windows_vfs_soak_all_profiles'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$newSummaryPath)) {
+        $summaryPayload = Read-JsonFile -Path $newSummaryPath
+        if ($null -ne $summaryPayload) {
+            $loadedSummaries.Add($summaryPayload)
+        }
+    }
+
     if ($exitCode -ne 0 -and $FailFast) {
-        throw ("[windows-vfs-soak-program] failed for environment '{0}'" -f $environmentClass)
+        break
     }
 }
 
 if ($summaryPaths.Count -eq 0) {
-    throw '[windows-vfs-soak-program] no soak stability summaries were produced.'
+    Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_summary_missing'
+    Add-UniqueString -Values $requiredActions -Value 'run_windows_vfs_soak_all_profiles'
 }
 
-& pwsh -NoProfile -File $multiEnvScript `
-    -ArtifactsRoot $ArtifactsRoot `
-    -SummaryPaths @($summaryPaths) `
-    -MinimumEnvironmentCount $MinimumEnvironmentCount `
-    -ContractPath $ContractPath `
-    -RequireRuntimeCapture:$RequireRuntimeCapture `
-    -RequireBackendStatusCapture:$RequireBackendStatusCapture
-$multiEnvironmentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-if ($multiEnvironmentExitCode -ne 0) {
-    throw ("[windows-vfs-soak-program] multi-environment gate failed with exit code {0}" -f $multiEnvironmentExitCode)
+$multiEnvironmentExitCode = -1
+$trendExitCode = -1
+if ($summaryPaths.Count -gt 0) {
+    & pwsh -NoProfile -File $multiEnvScript `
+        -ArtifactsRoot $ArtifactsRoot `
+        -SummaryPaths @($summaryPaths) `
+        -MinimumEnvironmentCount $MinimumEnvironmentCount `
+        -ContractPath $ContractPath `
+        -RequireRuntimeCapture:$RequireRuntimeCapture `
+        -RequireBackendStatusCapture:$RequireBackendStatusCapture
+    $multiEnvironmentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    if ($multiEnvironmentExitCode -ne 0) {
+        Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_environment_policy_failed'
+        Add-UniqueString -Values $requiredActions -Value 'rerun_windows_vfs_soak_multi_environment_gate'
+    }
+
+    & pwsh -NoProfile -File $trendScript `
+        -ArtifactsRoot $ArtifactsRoot `
+        -SummaryPaths @($summaryPaths) `
+        -HistoryRoot $HistoryRoot `
+        -ContractPath $ContractPath `
+        -AllowBootstrap:$AllowTrendBootstrap
+    $trendExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    if ($trendExitCode -ne 0) {
+        Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_trend_regression_detected'
+        Add-UniqueString -Values $requiredActions -Value 'refresh_windows_vfs_soak_trend_history'
+    }
 }
 
-& pwsh -NoProfile -File $trendScript `
-    -ArtifactsRoot $ArtifactsRoot `
-    -SummaryPaths @($summaryPaths) `
-    -HistoryRoot $HistoryRoot `
-    -AllowBootstrap:$AllowTrendBootstrap
-$trendExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-if ($trendExitCode -ne 0) {
-    throw ("[windows-vfs-soak-program] trend gate failed with exit code {0}" -f $trendExitCode)
-}
-
-$timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$capturedAt = (Get-Date).ToUniversalTime()
+$timestamp = $capturedAt.ToString('yyyyMMdd-HHmmss')
 $latestMultiEnvironmentSummary = @(
     Get-ChildItem -LiteralPath $ArtifactsRoot -Filter 'multi-environment-vfs-summary-*.json' -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTimeUtc -Descending |
@@ -189,14 +259,96 @@ $latestTrendSummary = @(
         Select-Object -First 1
 )
 $programSummaryPath = Join-Path $ArtifactsRoot ("soak-program-summary-{0}.json" -f $timestamp)
+$multiEnvironmentSummaryPath = if ($latestMultiEnvironmentSummary.Count -gt 0) { $latestMultiEnvironmentSummary[0].FullName } else { $null }
+$trendSummaryPath = if ($latestTrendSummary.Count -gt 0) { $latestTrendSummary[0].FullName } else { $null }
+$multiEnvironmentSummary = if ($null -ne $multiEnvironmentSummaryPath) { Read-JsonFile -Path $multiEnvironmentSummaryPath } else { $null }
+$trendSummary = if ($null -ne $trendSummaryPath) { Read-JsonFile -Path $trendSummaryPath } else { $null }
+
+$profileCoverage = [System.Collections.Generic.List[string]]::new()
+$observedEnvironmentClasses = [System.Collections.Generic.List[string]]::new()
+foreach ($summary in $loadedSummaries) {
+    Add-UniqueString -Values $observedEnvironmentClasses -Value ([string]$summary.environment_class)
+    foreach ($profile in @($summary.profiles)) {
+        Add-UniqueString -Values $profileCoverage -Value ([string]$profile)
+    }
+}
+
+$missingProfiles = @(
+    @($Profiles) |
+        Where-Object {
+            $normalized = ([string]$_).Trim().ToLowerInvariant()
+            $profileCoverage -notcontains $normalized
+        }
+)
+$missingEnvironmentClasses = @(
+    @($EnvironmentClasses) |
+        Where-Object {
+            $normalized = ([string]$_).Trim()
+            $observedEnvironmentClasses -notcontains $normalized
+        }
+)
+$profileCoverageComplete = $missingProfiles.Count -eq 0
+$environmentCoverageComplete = (
+    ($observedEnvironmentClasses.Count -ge $MinimumEnvironmentCount) -and
+    ($missingEnvironmentClasses.Count -eq 0)
+)
+
+if (-not $profileCoverageComplete) {
+    Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_profile_coverage_incomplete'
+    Add-UniqueString -Values $requiredActions -Value 'run_windows_vfs_soak_all_profiles'
+}
+if (-not $environmentCoverageComplete) {
+    Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_environment_coverage_incomplete'
+    Add-UniqueString -Values $requiredActions -Value 'rerun_windows_vfs_soak_multi_environment_gate'
+}
+
+$multiEnvironmentStatus = if ($null -eq $multiEnvironmentSummary) {
+    'missing'
+}
+elseif ([bool]($multiEnvironmentSummary.all_green ?? $false)) {
+    'passed'
+}
+else {
+    'failed'
+}
+if ($multiEnvironmentStatus -eq 'missing') {
+    Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_environment_summary_missing'
+    Add-UniqueString -Values $requiredActions -Value 'rerun_windows_vfs_soak_multi_environment_gate'
+}
+
+$trendStatus = if ($null -eq $trendSummary) {
+    'missing'
+}
+else {
+    [string]($trendSummary.status ?? 'missing')
+}
+if ($trendStatus -eq 'missing') {
+    Add-UniqueString -Values $failureReasons -Value 'windows_vfs_soak_trend_summary_missing'
+    Add-UniqueString -Values $requiredActions -Value 'refresh_windows_vfs_soak_trend_history'
+}
+
+$ready = $failureReasons.Count -eq 0
+$summaryStatus = if ($ready) { 'passed' } else { 'failed' }
+
 [ordered]@{
-    timestamp = (Get-Date).ToString('o')
-    status = 'passed'
+    schema_version = $contractSchemaVersion
+    artifact_kind = $artifactKind
+    timestamp = Get-UtcTimestamp -Value $capturedAt
+    captured_at = Get-UtcTimestamp -Value $capturedAt
+    expires_at = Get-UtcTimestamp -Value $capturedAt.AddHours([Math]::Max($FreshnessWindowHours, 1))
+    freshness_window_hours = [Math]::Max($FreshnessWindowHours, 1)
+    status = $summaryStatus
+    ready = $ready
     contract_path = if ($null -ne $contract) { $ContractPath } else { $null }
     environment_classes = $EnvironmentClasses
     environment_count = @($EnvironmentClasses).Count
+    observed_environment_classes = @($observedEnvironmentClasses)
+    missing_environment_classes = $missingEnvironmentClasses
+    environment_coverage_complete = $environmentCoverageComplete
     profiles = @($Profiles)
     required_profiles = @($Profiles)
+    profile_coverage = @($profileCoverage)
+    profile_coverage_complete = $profileCoverageComplete
     repeat_count = $RepeatCount
     minimum_environment_count = $MinimumEnvironmentCount
     require_runtime_capture = [bool]$RequireRuntimeCapture
@@ -205,10 +357,18 @@ $programSummaryPath = Join-Path $ArtifactsRoot ("soak-program-summary-{0}.json" 
     max_provider_pressure_incidents = $MaxProviderPressureIncidents
     max_fatal_error_incidents = $MaxFatalErrorIncidents
     allow_trend_bootstrap = [bool]$AllowTrendBootstrap
-    multi_environment_summary_path = if ($latestMultiEnvironmentSummary.Count -gt 0) { $latestMultiEnvironmentSummary[0].FullName } else { $null }
-    trend_summary_path = if ($latestTrendSummary.Count -gt 0) { $latestTrendSummary[0].FullName } else { $null }
+    multi_environment_status = $multiEnvironmentStatus
+    multi_environment_summary_path = $multiEnvironmentSummaryPath
+    trend_status = $trendStatus
+    trend_summary_path = $trendSummaryPath
+    failure_reasons = @($failureReasons)
+    required_actions = @($requiredActions)
     results = $results
     summary_paths = @($summaryPaths)
-} | ConvertTo-Json -Depth 8 | Set-Content -Path $programSummaryPath -Encoding UTF8
+} | ConvertTo-Json -Depth 10 | Set-Content -Path $programSummaryPath -Encoding UTF8
+
+if (-not $ready) {
+    throw ("[windows-vfs-soak-program] FAIL. Summary: {0}" -f $programSummaryPath)
+}
 
 Write-Host ("[windows-vfs-soak-program] PASS. Summary: {0}" -f $programSummaryPath) -ForegroundColor Green

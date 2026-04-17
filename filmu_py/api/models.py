@@ -524,13 +524,40 @@ class PlaybackGateEvidenceResponse(BaseModel):
     reasons: list[str]
     runner_status: str
     runner_ready: bool
+    runner_recorded_at: str | None = None
+    runner_expires_at: str | None = None
+    runner_stale: bool = False
+    runner_required_failures: int = 0
+    runner_failure_reasons: list[str] = []
+    runner_required_actions: list[str] = []
     policy_validation_status: str
     policy_ready: bool
+    policy_recorded_at: str | None = None
+    policy_expires_at: str | None = None
+    policy_stale: bool = False
+    policy_failure_reasons: list[str] = []
+    policy_required_actions: list[str] = []
     provider_gate_required: bool
     provider_gate_ran: bool
+    provider_parity_ready: bool
+    provider_gate_recorded_at: str | None = None
+    provider_gate_expires_at: str | None = None
+    provider_gate_stale: bool = False
+    provider_gate_failure_reasons: list[str] = []
+    provider_gate_required_actions: list[str] = []
     windows_provider_ready: bool
+    windows_provider_recorded_at: str | None = None
+    windows_provider_expires_at: str | None = None
+    windows_provider_stale: bool = False
+    windows_provider_failure_reasons: list[str] = []
+    windows_provider_required_actions: list[str] = []
     windows_provider_coverage: list[str]
     windows_soak_ready: bool
+    windows_soak_recorded_at: str | None = None
+    windows_soak_expires_at: str | None = None
+    windows_soak_stale: bool = False
+    windows_soak_failure_reasons: list[str] = []
+    windows_soak_required_actions: list[str] = []
     windows_soak_profiles: list[str]
     required_actions: list[str]
     remaining_gaps: list[str]
@@ -1225,14 +1252,48 @@ class ServingGovernanceResponse(BaseModel):
     playback_gate_environment_class: str
     playback_gate_repeat_count: int
     playback_gate_gate_mode: str
+    playback_gate_runner_status: str
+    playback_gate_runner_ready: int
+    playback_gate_runner_required_failures: int
+    playback_gate_runner_recorded_at: str = ""
+    playback_gate_runner_expires_at: str = ""
+    playback_gate_runner_stale: int = 0
+    playback_gate_runner_failure_reasons: list[str] = []
+    playback_gate_runner_required_actions: list[str] = []
     playback_gate_provider_gate_required: int
     playback_gate_provider_gate_ran: int
     playback_gate_stability_ready: int
     playback_gate_provider_parity_ready: int
+    playback_gate_provider_gate_recorded_at: str = ""
+    playback_gate_provider_gate_expires_at: str = ""
+    playback_gate_provider_gate_stale: int = 0
+    playback_gate_provider_gate_failure_reasons: list[str] = []
+    playback_gate_provider_gate_required_actions: list[str] = []
     playback_gate_windows_provider_ready: int
+    playback_gate_windows_provider_movie_ready: int
+    playback_gate_windows_provider_tv_ready: int
+    playback_gate_windows_provider_coverage: list[str] = []
+    playback_gate_windows_provider_recorded_at: str = ""
+    playback_gate_windows_provider_expires_at: str = ""
+    playback_gate_windows_provider_stale: int = 0
+    playback_gate_windows_provider_failure_reasons: list[str] = []
+    playback_gate_windows_provider_required_actions: list[str] = []
     playback_gate_windows_soak_ready: int
+    playback_gate_windows_soak_repeat_count: int
+    playback_gate_windows_soak_profile_coverage_complete: int
+    playback_gate_windows_soak_profile_coverage: list[str] = []
+    playback_gate_windows_soak_recorded_at: str = ""
+    playback_gate_windows_soak_expires_at: str = ""
+    playback_gate_windows_soak_stale: int = 0
+    playback_gate_windows_soak_failure_reasons: list[str] = []
+    playback_gate_windows_soak_required_actions: list[str] = []
     playback_gate_policy_validation_status: str
     playback_gate_policy_ready: int
+    playback_gate_policy_validation_recorded_at: str = ""
+    playback_gate_policy_validation_expires_at: str = ""
+    playback_gate_policy_validation_stale: int = 0
+    playback_gate_policy_failure_reasons: list[str] = []
+    playback_gate_policy_required_actions: list[str] = []
     playback_gate_rollout_readiness: str
     playback_gate_rollout_reasons: list[str]
     playback_gate_rollout_next_action: str

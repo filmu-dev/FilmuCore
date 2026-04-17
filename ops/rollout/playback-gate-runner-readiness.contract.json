@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "artifact_kind": "playback_gate_runner_readiness",
+  "freshness_window_hours": 24,
+  "required_checks": [
+    "docker",
+    "curl",
+    "pwsh",
+    "github_hosted_runner",
+    "frontend_context",
+    "browser_executable",
+    "tmdb_api_key",
+    "debrid_provider_token",
+    "linux_fuse",
+    "policy_admin_token"
+  ],
+  "provider_gate_required_checks": [
+    "plex_token",
+    "emby_api_key"
+  ],
+  "required_fields": [
+    "schema_version",
+    "artifact_kind",
+    "captured_at",
+    "expires_at",
+    "status",
+    "runner_environment",
+    "checks",
+    "required_actions",
+    "failure_reasons"
+  ]
+}

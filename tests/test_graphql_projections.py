@@ -4378,7 +4378,7 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
             "playback_gate_policy_validation_status": "ready",
             "playback_gate_policy_ready": 1,
             "playback_gate_rollout_readiness": "ready",
-            "playback_gate_rollout_reasons": ["enterprise_playback_gate_green"],
+            "playback_gate_rollout_reasons": ["playback_gate_green"],
             "playback_gate_rollout_next_action": "keep_required_checks_enforced",
         },
     )
@@ -4878,7 +4878,7 @@ def test_graphql_enterprise_rollout_supporting_queries_return_typed_counts_inven
             "playback_gate_policy_validation_status": "ready",
             "playback_gate_policy_ready": 1,
             "playback_gate_rollout_readiness": "ready",
-            "playback_gate_rollout_reasons": ["enterprise_playback_gate_green"],
+            "playback_gate_rollout_reasons": ["playback_gate_green"],
             "playback_gate_rollout_next_action": "keep_required_checks_enforced",
         },
     )

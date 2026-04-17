@@ -394,30 +394,124 @@ def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
     required_actions: list[str] = []
     remaining_gaps: list[str] = []
 
-    if cast(int, governance["playback_gate_runner_ready"]) == 0:
+    runner_failure_reasons = list(cast(list[str], governance["playback_gate_runner_failure_reasons"]))
+    runner_required_actions = list(cast(list[str], governance["playback_gate_runner_required_actions"]))
+    policy_failure_reasons = list(cast(list[str], governance["playback_gate_policy_failure_reasons"]))
+    policy_required_actions = list(cast(list[str], governance["playback_gate_policy_required_actions"]))
+    provider_gate_failure_reasons = list(
+        cast(list[str], governance["playback_gate_provider_gate_failure_reasons"])
+    )
+    provider_gate_required_actions = list(
+        cast(list[str], governance["playback_gate_provider_gate_required_actions"])
+    )
+    windows_provider_failure_reasons = list(
+        cast(list[str], governance["playback_gate_windows_provider_failure_reasons"])
+    )
+    windows_provider_required_actions = list(
+        cast(list[str], governance["playback_gate_windows_provider_required_actions"])
+    )
+    windows_soak_failure_reasons = list(
+        cast(list[str], governance["playback_gate_windows_soak_failure_reasons"])
+    )
+    windows_soak_required_actions = list(
+        cast(list[str], governance["playback_gate_windows_soak_required_actions"])
+    )
+
+    if cast(int, governance["playback_gate_runner_stale"]) > 0:
+        required_actions.append("refresh_playback_gate_runner_readiness")
+        required_actions.extend(runner_required_actions)
+        remaining_gaps.append(
+            "playback-gate runner readiness evidence is stale and must be recaptured from a GitHub-hosted runner"
+        )
+    elif cast(int, governance["playback_gate_runner_ready"]) == 0:
         required_actions.append("record_playback_gate_runner_readiness")
+        required_actions.extend(runner_required_actions)
         remaining_gaps.append(
             "playback-gate runner readiness is not yet recorded as ready for the current environment"
         )
-    if cast(str, governance["playback_gate_policy_validation_status"]) != "ready":
+    if runner_failure_reasons:
+        remaining_gaps.append(
+            "playback-gate runner readiness failures: " + ", ".join(runner_failure_reasons)
+        )
+    if cast(int, governance["playback_gate_policy_validation_stale"]) > 0:
+        required_actions.append("refresh_github_main_policy_validation")
+        required_actions.extend(policy_required_actions)
+        remaining_gaps.append(
+            "live GitHub protected-branch policy evidence is stale and must be recaptured from an admin-authenticated host"
+        )
+    elif cast(str, governance["playback_gate_policy_validation_status"]) != "ready":
         required_actions.append("record_github_main_policy_validation")
+        required_actions.extend(policy_required_actions)
         remaining_gaps.append(
             "live GitHub protected-branch policy is not yet recorded as ready from an admin-authenticated host"
         )
-    if cast(int, governance["playback_gate_windows_provider_movie_ready"]) == 0:
+    if policy_failure_reasons:
+        remaining_gaps.append(
+            "GitHub protected-branch policy failures: " + ", ".join(policy_failure_reasons)
+        )
+    provider_gate_required = bool(cast(int, governance["playback_gate_provider_gate_required"]))
+    provider_gate_ran = bool(cast(int, governance["playback_gate_provider_gate_ran"]))
+    if provider_gate_required and not provider_gate_ran:
+        required_actions.append("run_media_server_provider_gate")
+        remaining_gaps.append(
+            "Linux/WSL provider parity proof is required for this playback gate run but has not been captured yet"
+        )
+    elif provider_gate_ran and cast(int, governance["playback_gate_provider_gate_stale"]) > 0:
+        required_actions.append("refresh_media_server_provider_gate")
+        required_actions.extend(provider_gate_required_actions)
+        remaining_gaps.append(
+            "Linux/WSL provider parity evidence is stale and must be recaptured on the current runner topology"
+        )
+    elif provider_gate_ran and cast(int, governance["playback_gate_provider_parity_ready"]) == 0:
+        required_actions.append("rerun_media_server_provider_gate")
+        required_actions.extend(provider_gate_required_actions)
+        remaining_gaps.append(
+            "Linux/WSL provider parity proof is not yet green across the required provider paths"
+        )
+    if provider_gate_failure_reasons:
+        remaining_gaps.append(
+            "Linux/WSL provider parity failures: " + ", ".join(provider_gate_failure_reasons)
+        )
+    if cast(int, governance["playback_gate_windows_provider_stale"]) > 0:
+        required_actions.append("refresh_native_windows_provider_proof_matrix")
+        required_actions.extend(windows_provider_required_actions)
+        remaining_gaps.append(
+            "native Windows provider proof matrix is stale and must be recaptured across the required media types"
+        )
+    elif cast(int, governance["playback_gate_windows_provider_movie_ready"]) == 0:
         required_actions.append("rerun_native_windows_provider_proof_movie")
+        required_actions.extend(windows_provider_required_actions)
         remaining_gaps.append(
             "native Windows provider proof coverage is incomplete for movie across Emby/Plex"
         )
-    if cast(int, governance["playback_gate_windows_provider_tv_ready"]) == 0:
+    if (
+        cast(int, governance["playback_gate_windows_provider_stale"]) == 0
+        and cast(int, governance["playback_gate_windows_provider_tv_ready"]) == 0
+    ):
         required_actions.append("rerun_native_windows_provider_proof_tv")
+        required_actions.extend(windows_provider_required_actions)
         remaining_gaps.append(
             "native Windows provider proof coverage is incomplete for tv across Emby/Plex"
         )
-    if cast(int, governance["playback_gate_windows_soak_ready"]) == 0:
-        required_actions.append("run_windows_vfs_soak_enterprise_profiles")
+    if windows_provider_failure_reasons:
         remaining_gaps.append(
-            "Windows soak evidence is not yet green across the full enterprise profile set"
+            "native Windows provider proof failures: " + ", ".join(windows_provider_failure_reasons)
+        )
+    if cast(int, governance["playback_gate_windows_soak_stale"]) > 0:
+        required_actions.append("refresh_windows_vfs_soak_program")
+        required_actions.extend(windows_soak_required_actions)
+        remaining_gaps.append(
+            "Windows soak continuity evidence is stale and must be recaptured across the required profile set"
+        )
+    elif cast(int, governance["playback_gate_windows_soak_ready"]) == 0:
+        required_actions.append("run_windows_vfs_soak_all_profiles")
+        required_actions.extend(windows_soak_required_actions)
+        remaining_gaps.append(
+            "Windows soak evidence is not yet green across the full required profile set"
+        )
+    if windows_soak_failure_reasons:
+        remaining_gaps.append(
+            "Windows soak evidence failures: " + ", ".join(windows_soak_failure_reasons)
         )
 
     return PlaybackGateEvidenceResponse(
@@ -427,20 +521,60 @@ def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
         reasons=list(cast(list[str], governance["playback_gate_rollout_reasons"])),
         runner_status=cast(str, governance["playback_gate_runner_status"]),
         runner_ready=bool(cast(int, governance["playback_gate_runner_ready"])),
+        runner_recorded_at=cast(str, governance["playback_gate_runner_recorded_at"]) or None,
+        runner_expires_at=cast(str, governance["playback_gate_runner_expires_at"]) or None,
+        runner_stale=bool(cast(int, governance["playback_gate_runner_stale"])),
+        runner_required_failures=cast(int, governance["playback_gate_runner_required_failures"]),
+        runner_failure_reasons=runner_failure_reasons,
+        runner_required_actions=runner_required_actions,
         policy_validation_status=cast(str, governance["playback_gate_policy_validation_status"]),
         policy_ready=bool(cast(int, governance["playback_gate_policy_ready"])),
-        provider_gate_required=bool(cast(int, governance["playback_gate_provider_gate_required"])),
-        provider_gate_ran=bool(cast(int, governance["playback_gate_provider_gate_ran"])),
+        policy_recorded_at=cast(str, governance["playback_gate_policy_validation_recorded_at"])
+        or None,
+        policy_expires_at=cast(str, governance["playback_gate_policy_validation_expires_at"]) or None,
+        policy_stale=bool(cast(int, governance["playback_gate_policy_validation_stale"])),
+        policy_failure_reasons=policy_failure_reasons,
+        policy_required_actions=policy_required_actions,
+        provider_gate_required=provider_gate_required,
+        provider_gate_ran=provider_gate_ran,
+        provider_parity_ready=bool(cast(int, governance["playback_gate_provider_parity_ready"])),
+        provider_gate_recorded_at=cast(
+            str, governance["playback_gate_provider_gate_recorded_at"]
+        )
+        or None,
+        provider_gate_expires_at=cast(str, governance["playback_gate_provider_gate_expires_at"])
+        or None,
+        provider_gate_stale=bool(cast(int, governance["playback_gate_provider_gate_stale"])),
+        provider_gate_failure_reasons=provider_gate_failure_reasons,
+        provider_gate_required_actions=provider_gate_required_actions,
         windows_provider_ready=bool(cast(int, governance["playback_gate_windows_provider_ready"])),
+        windows_provider_recorded_at=cast(
+            str, governance["playback_gate_windows_provider_recorded_at"]
+        )
+        or None,
+        windows_provider_expires_at=cast(
+            str, governance["playback_gate_windows_provider_expires_at"]
+        )
+        or None,
+        windows_provider_stale=bool(cast(int, governance["playback_gate_windows_provider_stale"])),
+        windows_provider_failure_reasons=windows_provider_failure_reasons,
+        windows_provider_required_actions=windows_provider_required_actions,
         windows_provider_coverage=list(
             cast(list[str], governance["playback_gate_windows_provider_coverage"])
         ),
         windows_soak_ready=bool(cast(int, governance["playback_gate_windows_soak_ready"])),
+        windows_soak_recorded_at=cast(str, governance["playback_gate_windows_soak_recorded_at"])
+        or None,
+        windows_soak_expires_at=cast(str, governance["playback_gate_windows_soak_expires_at"])
+        or None,
+        windows_soak_stale=bool(cast(int, governance["playback_gate_windows_soak_stale"])),
+        windows_soak_failure_reasons=windows_soak_failure_reasons,
+        windows_soak_required_actions=windows_soak_required_actions,
         windows_soak_profiles=list(
             cast(list[str], governance["playback_gate_windows_soak_profile_coverage"])
         ),
-        required_actions=required_actions,
-        remaining_gaps=remaining_gaps,
+        required_actions=list(dict.fromkeys(required_actions)),
+        remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )
 
 
@@ -1601,9 +1735,9 @@ async def _enterprise_operations_governance(
             "native Windows provider proof coverage is incomplete for tv across Emby/Plex"
         )
     if cast(int, playback_gate_governance["playback_gate_windows_soak_ready"]) == 0:
-        operational_evidence_required_actions.append("run_windows_vfs_soak_enterprise_profiles")
+        operational_evidence_required_actions.append("run_windows_vfs_soak_all_profiles")
         operational_evidence_remaining_gaps.append(
-            "Windows soak evidence is not yet green across the full enterprise profile set"
+            "Windows soak evidence is not yet green across the full required profile set"
         )
     if settings.oidc.enabled and not settings.oidc.rollout_evidence_refs:
         operational_evidence_required_actions.append("record_oidc_rollout_evidence")

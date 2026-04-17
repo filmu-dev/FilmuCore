@@ -9903,6 +9903,9 @@ def test_stream_status_route_exposes_vfs_runtime_governance_snapshot(
 def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
+    captured_at = datetime.now(UTC).replace(microsecond=0)
+    captured_at_text = captured_at.isoformat().replace("+00:00", "Z")
+    expires_at_text = (captured_at + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
     runtime_status_path = tmp_path / "filmuvfs-runtime-status.json"
     runtime_status_path.write_text(
         json.dumps(
@@ -10028,8 +10031,8 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     (artifacts_root / "stability-summary-20260412-010101.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T01:01:01Z",
-                "environment_class": "windows-native:enterprise",
+                "timestamp": captured_at_text,
+                "environment_class": "windows-native:managed",
                 "repeat_count": 2,
                 "dry_run": False,
                 "all_green": True,
@@ -10049,13 +10052,39 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
         encoding="utf-8",
     )
     (artifacts_root / "media-server-gate-20260412-010102.json").write_text(
-        json.dumps({"timestamp": "2026-04-12T01:01:02Z", "all_green": True}),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_kind": "media_server_provider_parity",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 24,
+                "status": "passed",
+                "ready": True,
+                "all_green": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     (artifacts_root / "windows-media-server-gate-20260412-010103.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T01:01:03Z",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:movie", "plex:movie"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
                 "media_type": "movie",
                 "results": [
                     {"provider": "plex", "status": "passed"},
@@ -10068,7 +10097,15 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     (artifacts_root / "windows-media-server-gate-20260412-010103-tv.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T01:01:03Z",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:tv", "plex:tv"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
                 "media_type": "tv",
                 "results": [
                     {"provider": "plex", "status": "passed"},
@@ -10078,11 +10115,18 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
         ),
         encoding="utf-8",
     )
-    (windows_artifacts_root / "soak-stability-20260412-010104.json").write_text(
+    (windows_artifacts_root / "soak-program-summary-20260412-010104.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T01:01:04Z",
-                "environment_class": "windows-native:enterprise",
+                "schema_version": 1,
+                "artifact_kind": "windows_vfs_soak_program",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "ready": True,
+                "environment_class": "windows-native:managed",
                 "repeat_count": 1,
                 "profiles": [
                     "continuous",
@@ -10090,6 +10134,15 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
                     "concurrent",
                     "full",
                 ],
+                "profile_coverage": [
+                    "continuous",
+                    "seek",
+                    "concurrent",
+                    "full",
+                ],
+                "profile_coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
                 "all_green": True,
             }
         ),
@@ -10098,8 +10151,20 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     (artifacts_root / "github-main-policy-current.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T01:01:05Z",
-                "validation": {"status": "ready"},
+                "schema_version": 2,
+                "artifact_kind": "github_main_policy_validation",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 24,
+                "failure_reasons": [],
+                "required_actions": [],
+                "validation": {
+                    "status": "ready",
+                    "stale": False,
+                    "failure_reasons": [],
+                    "required_actions": [],
+                },
             }
         ),
         encoding="utf-8",
@@ -10107,8 +10172,16 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     (artifacts_root / "playback-gate-runner-readiness.json").write_text(
         json.dumps(
             {
-                "timestamp": "2026-04-12T01:01:06Z",
+                "schema_version": 2,
+                "artifact_kind": "playback_gate_runner_readiness",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 24,
                 "status": "ready",
+                "required_failure_count": 0,
+                "required_actions": [],
+                "failure_reasons": [],
                 "checks": [
                     {
                         "name": "frontend_context",
@@ -10142,20 +10215,557 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     assert governance["playback_gate_stability_ready"] == 1
     assert governance["playback_gate_provider_parity_ready"] == 1
     assert governance["playback_gate_windows_provider_ready"] == 1
+    assert governance["playback_gate_windows_provider_stale"] == 0
     assert governance["playback_gate_windows_soak_ready"] == 1
+    assert governance["playback_gate_windows_soak_stale"] == 0
     assert governance["playback_gate_policy_validation_status"] == "ready"
     assert governance["playback_gate_policy_ready"] == 1
+    assert governance["playback_gate_policy_validation_stale"] == 0
+    assert governance["playback_gate_runner_stale"] == 0
     assert governance["playback_gate_rollout_readiness"] == "ready"
-    assert governance["playback_gate_rollout_reasons"] == ["enterprise_playback_gate_green"]
+    assert governance["playback_gate_rollout_reasons"] == ["playback_gate_green"]
     assert governance["playback_gate_rollout_next_action"] == "keep_required_checks_enforced"
     assert governance["vfs_runtime_rollout_readiness"] == "ready"
     assert governance["vfs_runtime_rollout_canary_decision"] == "promote_to_next_environment_class"
     assert governance["vfs_runtime_rollout_merge_gate"] == "ready"
-    assert governance["vfs_runtime_rollout_environment_class"] == "windows-native:enterprise"
+    assert governance["vfs_runtime_rollout_environment_class"] == "windows-native:managed"
     assert governance["vfs_runtime_cache_pressure_class"] == "healthy"
     assert governance["vfs_runtime_chunk_coalescing_pressure_class"] == "healthy"
     assert governance["vfs_runtime_upstream_wait_class"] == "healthy"
     assert governance["vfs_runtime_refresh_pressure_class"] == "healthy"
+
+
+def test_stream_status_route_blocks_stale_playback_gate_runner_and_policy_evidence(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    captured_at = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3)
+    captured_at_text = captured_at.isoformat().replace("+00:00", "Z")
+    expires_at_text = (captured_at + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+    fresh_proof_captured_at = datetime.now(UTC).replace(microsecond=0)
+    fresh_proof_captured_at_text = fresh_proof_captured_at.isoformat().replace("+00:00", "Z")
+    fresh_proof_expires_at_text = (
+        fresh_proof_captured_at + timedelta(hours=4)
+    ).isoformat().replace("+00:00", "Z")
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    (artifacts_root / "stability-summary-20260412-010101.json").write_text(
+        json.dumps(
+            {
+                "timestamp": fresh_proof_captured_at_text,
+                "environment_class": "windows-native:managed",
+                "repeat_count": 2,
+                "dry_run": False,
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "ci-execution-summary.json").write_text(
+        json.dumps(
+            {
+                "required_check_name": "Playback Gate / Playback Gate",
+                "gate_mode": "full",
+                "provider_gate_required": True,
+                "provider_gate_ran": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "media-server-gate-20260412-010102.json").write_text(
+        json.dumps({"timestamp": fresh_proof_captured_at_text, "all_green": True}),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103.json").write_text(
+        json.dumps(
+            {
+                "timestamp": fresh_proof_captured_at_text,
+                "captured_at": fresh_proof_captured_at_text,
+                "expires_at": fresh_proof_expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:movie", "plex:movie"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "media_type": "movie",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103-tv.json").write_text(
+        json.dumps(
+            {
+                "timestamp": fresh_proof_captured_at_text,
+                "captured_at": fresh_proof_captured_at_text,
+                "expires_at": fresh_proof_expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:tv", "plex:tv"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "media_type": "tv",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (windows_artifacts_root / "soak-program-summary-20260412-010104.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_kind": "windows_vfs_soak_program",
+                "timestamp": fresh_proof_captured_at_text,
+                "captured_at": fresh_proof_captured_at_text,
+                "expires_at": fresh_proof_expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "ready": True,
+                "environment_class": "windows-native:managed",
+                "repeat_count": 1,
+                "profiles": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "github-main-policy-current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_kind": "github_main_policy_validation",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 12,
+                "failure_reasons": [],
+                "required_actions": ["validate_github_main_policy_from_admin_authenticated_host"],
+                "validation": {
+                    "status": "ready",
+                    "stale": False,
+                    "failure_reasons": [],
+                    "required_actions": ["validate_github_main_policy_from_admin_authenticated_host"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "playback-gate-runner-readiness.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_kind": "playback_gate_runner_readiness",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 12,
+                "status": "ready",
+                "required_failure_count": 0,
+                "required_actions": ["capture_runner_prerequisites_on_github_hosted_runner"],
+                "failure_reasons": [],
+                "checks": [{"name": "github_hosted_runner", "required": True, "ok": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    client, _ = _build_client()
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["playback_gate_runner_ready"] == 0
+    assert governance["playback_gate_runner_stale"] == 1
+    assert governance["playback_gate_policy_ready"] == 0
+    assert governance["playback_gate_policy_validation_stale"] == 1
+    assert governance["playback_gate_windows_provider_stale"] == 0
+    assert governance["playback_gate_windows_soak_stale"] == 0
+    assert governance["playback_gate_rollout_readiness"] == "blocked"
+    assert "runner_readiness_stale" in governance["playback_gate_rollout_reasons"]
+    assert "github_main_policy_stale" in governance["playback_gate_rollout_reasons"]
+
+
+def test_stream_status_route_blocks_classified_provider_gate_failures(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    captured_at = datetime.now(UTC).replace(microsecond=0)
+    captured_at_text = captured_at.isoformat().replace("+00:00", "Z")
+    expires_at_text = (captured_at + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    (artifacts_root / "stability-summary-20260412-010101.json").write_text(
+        json.dumps(
+            {
+                "timestamp": captured_at_text,
+                "environment_class": "windows-native:managed",
+                "repeat_count": 2,
+                "dry_run": False,
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "ci-execution-summary.json").write_text(
+        json.dumps(
+            {
+                "required_check_name": "Playback Gate / Playback Gate",
+                "gate_mode": "full",
+                "provider_gate_required": True,
+                "provider_gate_ran": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "media-server-gate-20260412-010102.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_kind": "media_server_provider_parity",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 24,
+                "status": "failed",
+                "ready": False,
+                "all_green": False,
+                "failure_reasons": [
+                    "provider_gate_docker_plex_mount_path_drift",
+                    "provider_gate_wsl_host_binary_stale",
+                ],
+                "required_actions": [
+                    "realign_docker_plex_mount_path",
+                    "rebuild_wsl_host_mount_binary",
+                ],
+                "results": [
+                    {
+                        "provider": "plex",
+                        "status": "failed",
+                        "failure_reasons": [
+                            "provider_gate_docker_plex_mount_path_drift",
+                            "provider_gate_wsl_host_binary_stale",
+                        ],
+                        "required_actions": [
+                            "realign_docker_plex_mount_path",
+                            "rebuild_wsl_host_mount_binary",
+                        ],
+                    },
+                    {
+                        "provider": "emby",
+                        "status": "passed",
+                        "failure_reasons": [],
+                        "required_actions": [],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103.json").write_text(
+        json.dumps(
+            {
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:movie", "plex:movie"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "media_type": "movie",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103-tv.json").write_text(
+        json.dumps(
+            {
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "coverage": ["emby:tv", "plex:tv"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "media_type": "tv",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (windows_artifacts_root / "soak-program-summary-20260412-010104.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_kind": "windows_vfs_soak_program",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 72,
+                "status": "passed",
+                "ready": True,
+                "environment_class": "windows-native:managed",
+                "repeat_count": 1,
+                "profiles": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "github-main-policy-current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_kind": "github_main_policy_validation",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 12,
+                "failure_reasons": [],
+                "required_actions": [],
+                "validation": {
+                    "status": "ready",
+                    "stale": False,
+                    "failure_reasons": [],
+                    "required_actions": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "playback-gate-runner-readiness.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_kind": "playback_gate_runner_readiness",
+                "timestamp": captured_at_text,
+                "captured_at": captured_at_text,
+                "expires_at": expires_at_text,
+                "freshness_window_hours": 12,
+                "status": "ready",
+                "required_failure_count": 0,
+                "required_actions": [],
+                "failure_reasons": [],
+                "checks": [{"name": "github_hosted_runner", "required": True, "ok": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    client, _ = _build_client()
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["playback_gate_provider_parity_ready"] == 0
+    assert governance["playback_gate_provider_gate_stale"] == 0
+    assert governance["playback_gate_provider_gate_failure_reasons"] == [
+        "provider_gate_docker_plex_mount_path_drift",
+        "provider_gate_wsl_host_binary_stale",
+    ]
+    assert governance["playback_gate_provider_gate_required_actions"] == [
+        "realign_docker_plex_mount_path",
+        "rebuild_wsl_host_mount_binary",
+        "rerun_media_server_provider_gate",
+    ]
+    assert governance["playback_gate_rollout_readiness"] == "blocked"
+    assert (
+        "provider_gate_docker_plex_mount_path_drift"
+        in governance["playback_gate_rollout_reasons"]
+    )
+    assert "provider_gate_wsl_host_binary_stale" in governance["playback_gate_rollout_reasons"]
+    assert "provider_gate_not_green" not in governance["playback_gate_rollout_reasons"]
+
+
+def test_stream_status_route_blocks_stale_windows_soak_and_native_media_proofs(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    stale_captured_at = datetime.now(UTC).replace(microsecond=0) - timedelta(days=4)
+    stale_captured_at_text = stale_captured_at.isoformat().replace("+00:00", "Z")
+    stale_expires_at_text = (stale_captured_at + timedelta(hours=12)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    fresh_captured_at = datetime.now(UTC).replace(microsecond=0)
+    fresh_captured_at_text = fresh_captured_at.isoformat().replace("+00:00", "Z")
+    fresh_expires_at_text = (fresh_captured_at + timedelta(hours=4)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    (artifacts_root / "stability-summary-20260412-010101.json").write_text(
+        json.dumps(
+            {
+                "timestamp": fresh_captured_at_text,
+                "environment_class": "windows-native:managed",
+                "repeat_count": 2,
+                "dry_run": False,
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "ci-execution-summary.json").write_text(
+        json.dumps(
+            {
+                "required_check_name": "Playback Gate / Playback Gate",
+                "gate_mode": "full",
+                "provider_gate_required": True,
+                "provider_gate_ran": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "media-server-gate-20260412-010102.json").write_text(
+        json.dumps({"timestamp": fresh_captured_at_text, "all_green": True}),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103.json").write_text(
+        json.dumps(
+            {
+                "timestamp": stale_captured_at_text,
+                "captured_at": stale_captured_at_text,
+                "expires_at": stale_expires_at_text,
+                "freshness_window_hours": 12,
+                "status": "passed",
+                "coverage": ["emby:movie", "plex:movie"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "media_type": "movie",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "windows-media-server-gate-20260412-010103-tv.json").write_text(
+        json.dumps(
+            {
+                "timestamp": stale_captured_at_text,
+                "captured_at": stale_captured_at_text,
+                "expires_at": stale_expires_at_text,
+                "freshness_window_hours": 12,
+                "status": "passed",
+                "coverage": ["emby:tv", "plex:tv"],
+                "coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "media_type": "tv",
+                "results": [
+                    {"provider": "plex", "status": "passed"},
+                    {"provider": "emby", "status": "passed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (windows_artifacts_root / "soak-program-summary-20260412-010104.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_kind": "windows_vfs_soak_program",
+                "timestamp": stale_captured_at_text,
+                "captured_at": stale_captured_at_text,
+                "expires_at": stale_expires_at_text,
+                "freshness_window_hours": 12,
+                "status": "passed",
+                "ready": True,
+                "environment_class": "windows-native:managed",
+                "repeat_count": 1,
+                "profiles": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage": ["continuous", "seek", "concurrent", "full"],
+                "profile_coverage_complete": True,
+                "failure_reasons": [],
+                "required_actions": [],
+                "all_green": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "github-main-policy-current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_kind": "github_main_policy_validation",
+                "timestamp": fresh_captured_at_text,
+                "captured_at": fresh_captured_at_text,
+                "expires_at": fresh_expires_at_text,
+                "freshness_window_hours": 24,
+                "failure_reasons": [],
+                "required_actions": [],
+                "validation": {
+                    "status": "ready",
+                    "stale": False,
+                    "failure_reasons": [],
+                    "required_actions": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_root / "playback-gate-runner-readiness.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_kind": "playback_gate_runner_readiness",
+                "timestamp": fresh_captured_at_text,
+                "captured_at": fresh_captured_at_text,
+                "expires_at": fresh_expires_at_text,
+                "freshness_window_hours": 24,
+                "status": "ready",
+                "required_failure_count": 0,
+                "required_actions": [],
+                "failure_reasons": [],
+                "checks": [{"name": "github_hosted_runner", "required": True, "ok": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    client, _ = _build_client()
+
+    response = client.get("/api/v1/stream/status", headers=_headers())
+
+    assert response.status_code == 200
+    governance = response.json()["governance"]
+    assert governance["playback_gate_windows_provider_ready"] == 0
+    assert governance["playback_gate_windows_provider_stale"] == 1
+    assert governance["playback_gate_windows_soak_ready"] == 0
+    assert governance["playback_gate_windows_soak_stale"] == 1
+    assert governance["playback_gate_rollout_readiness"] == "blocked"
+    assert "windows_provider_gate_stale" in governance["playback_gate_rollout_reasons"]
+    assert "windows_vfs_soak_stale" in governance["playback_gate_rollout_reasons"]
 
 
 def test_stream_status_route_filters_runtime_handle_summaries_to_request_tenant(

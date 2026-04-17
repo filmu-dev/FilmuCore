@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "media_server_provider_parity",
+  "freshness_window_hours": 24,
+  "required_providers": ["emby", "plex"],
+  "required_media_types": ["movie", "tv"],
+  "docker_wsl_evidence_checks": [
+    "mount_visibility",
+    "host_binary_freshness",
+    "refresh_identity_evidence",
+    "foreground_fetch_evidence"
+  ],
+  "required_fields": [
+    "schema_version",
+    "artifact_kind",
+    "captured_at",
+    "expires_at",
+    "freshness_window_hours",
+    "status",
+    "all_green",
+    "failure_reasons",
+    "required_actions",
+    "results"
+  ]
+}
