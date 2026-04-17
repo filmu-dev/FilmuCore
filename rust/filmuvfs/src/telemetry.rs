@@ -777,23 +777,33 @@ impl FilmuvfsMetrics {
         vec![
             FilmuvfsDurationBucketSnapshot {
                 label: "le_5_ms".to_owned(),
-                count: self.mounted_read_duration_bucket_le_5ms.load(Ordering::Relaxed),
+                count: self
+                    .mounted_read_duration_bucket_le_5ms
+                    .load(Ordering::Relaxed),
             },
             FilmuvfsDurationBucketSnapshot {
                 label: "le_25_ms".to_owned(),
-                count: self.mounted_read_duration_bucket_le_25ms.load(Ordering::Relaxed),
+                count: self
+                    .mounted_read_duration_bucket_le_25ms
+                    .load(Ordering::Relaxed),
             },
             FilmuvfsDurationBucketSnapshot {
                 label: "le_100_ms".to_owned(),
-                count: self.mounted_read_duration_bucket_le_100ms.load(Ordering::Relaxed),
+                count: self
+                    .mounted_read_duration_bucket_le_100ms
+                    .load(Ordering::Relaxed),
             },
             FilmuvfsDurationBucketSnapshot {
                 label: "le_250_ms".to_owned(),
-                count: self.mounted_read_duration_bucket_le_250ms.load(Ordering::Relaxed),
+                count: self
+                    .mounted_read_duration_bucket_le_250ms
+                    .load(Ordering::Relaxed),
             },
             FilmuvfsDurationBucketSnapshot {
                 label: "gt_250_ms".to_owned(),
-                count: self.mounted_read_duration_bucket_gt_250ms.load(Ordering::Relaxed),
+                count: self
+                    .mounted_read_duration_bucket_gt_250ms
+                    .load(Ordering::Relaxed),
             },
         ]
     }

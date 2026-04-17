@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from fastapi import HTTPException, status
-from fastapi import Request
+from fastapi import HTTPException, Request, status
 from strawberry.fastapi import BaseContext
 from strawberry.types import Info
 
@@ -17,8 +16,8 @@ from filmu_py.authz import evaluate_permissions, permission_constraints_from_map
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.log_stream import LogStreamBroker
 from filmu_py.resources import AppResources
-from filmu_py.services.media import MediaService
 from filmu_py.services.access_policy import snapshot_from_settings
+from filmu_py.services.media import MediaService
 from filmu_py.services.settings_service import update_settings_path
 
 logger = structlog.get_logger("filmu.graphql.auth")

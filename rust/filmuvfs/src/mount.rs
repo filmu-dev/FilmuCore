@@ -260,7 +260,9 @@ fn path_depth(path: &str) -> u64 {
     if path.starts_with("invalidated:") {
         return 0;
     }
-    path.split('/').filter(|segment| !segment.is_empty()).count() as u64
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .count() as u64
 }
 
 fn percentile_value(sorted_values: &[f64], percentile: f64) -> f64 {
@@ -898,24 +900,26 @@ impl MountRuntime {
 
         let mut depth_rollups = rollups
             .into_iter()
-            .map(|((tenant_id, session_id), accumulator)| MountHandleDepthRollup {
-                tenant_id,
-                session_id,
-                open_handles: accumulator.open_handles,
-                invalidated_handles: accumulator.invalidated_handles,
-                average_depth: if accumulator.open_handles == 0 {
-                    0.0
-                } else {
-                    accumulator.total_depth as f64 / accumulator.open_handles as f64
+            .map(
+                |((tenant_id, session_id), accumulator)| MountHandleDepthRollup {
+                    tenant_id,
+                    session_id,
+                    open_handles: accumulator.open_handles,
+                    invalidated_handles: accumulator.invalidated_handles,
+                    average_depth: if accumulator.open_handles == 0 {
+                        0.0
+                    } else {
+                        accumulator.total_depth as f64 / accumulator.open_handles as f64
+                    },
+                    max_depth: accumulator.max_depth,
+                    average_age_ms: if accumulator.open_handles == 0 {
+                        0.0
+                    } else {
+                        accumulator.total_age_ms / accumulator.open_handles as f64
+                    },
+                    max_age_ms: accumulator.max_age_ms,
                 },
-                max_depth: accumulator.max_depth,
-                average_age_ms: if accumulator.open_handles == 0 {
-                    0.0
-                } else {
-                    accumulator.total_age_ms / accumulator.open_handles as f64
-                },
-                max_age_ms: accumulator.max_age_ms,
-            })
+            )
             .collect::<Vec<_>>();
         depth_rollups.sort_by(|left, right| {
             right
