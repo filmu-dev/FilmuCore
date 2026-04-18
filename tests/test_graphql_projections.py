@@ -6252,7 +6252,6 @@ def test_graphql_vfs_support_queries_return_delta_history_blocked_reasons_and_mo
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountActions"])
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountGaps"])
 
-
 def test_graphql_access_policy_revisions_query_and_mutations_follow_route_parity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6757,7 +6756,6 @@ def test_graphql_write_plugin_governance_override_requires_settings_write() -> N
     assert response.status_code == 200
     assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
 
-
 def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_history_and_audit(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6827,7 +6825,9 @@ def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_h
 
     monkeypatch.setattr("filmu_py.graphql.resolvers.audit_action", fake_audit_action)
     client = _build_client(FakeMediaService())
-    expires_at = (datetime.now(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    expires_at = (
+        datetime(2099, 4, 17, 22, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z")
+    )
     mutation_response = client.post(
         "/graphql",
         headers={
