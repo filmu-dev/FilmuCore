@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import PurePosixPath
@@ -256,6 +257,54 @@ def _compat_route_module() -> Any:
     from filmu_py.api.routes import default as default_routes
 
     return default_routes
+
+
+_GRAPHQL_CONTROL_PLANE_CACHE_TTL_SECONDS = 30
+_GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY = (
+    "graphql:control_plane:access_policy_revisions"
+)
+_GRAPHQL_PLUGIN_GOVERNANCE_CACHE_KEY = "graphql:control_plane:plugin_governance"
+_GRAPHQL_PLUGIN_GOVERNANCE_OVERRIDES_CACHE_KEY = (
+    "graphql:control_plane:plugin_governance_overrides"
+)
+
+
+async def _read_cached_graphql_payload(
+    info: Info[GraphQLContext, object],
+    *,
+    key: str,
+) -> object | None:
+    cached = await info.context.resources.cache.get(key)
+    if not isinstance(cached, bytes):
+        return None
+    try:
+        return cast(object, json.loads(cached.decode("utf-8")))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        await info.context.resources.cache.invalidate(key, reason="decode_error")
+        return None
+
+
+async def _write_cached_graphql_payload(
+    info: Info[GraphQLContext, object],
+    *,
+    key: str,
+    payload: object,
+    ttl_seconds: int = _GRAPHQL_CONTROL_PLANE_CACHE_TTL_SECONDS,
+) -> None:
+    await info.context.resources.cache.set(
+        key,
+        json.dumps(payload, default=str, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+        ttl_seconds=ttl_seconds,
+    )
+
+
+async def _invalidate_graphql_control_plane_cache(
+    info: Info[GraphQLContext, object],
+    *keys: str,
+    reason: str,
+) -> None:
+    for key in keys:
+        await info.context.resources.cache.invalidate(key, reason=reason)
 
 
 def _raise_graphql_compat_error(exc: Exception) -> None:
@@ -1482,6 +1531,61 @@ def _build_plugin_governance_override(snapshot: object) -> GQLPluginGovernanceOv
         updated_by=typed_snapshot.updated_by,
         created_at=str(typed_snapshot.created_at),
         updated_at=str(typed_snapshot.updated_at),
+    )
+
+
+def _hydrate_named_count_bucket(snapshot: object) -> GQLNamedCountBucket:
+    return GQLNamedCountBucket(**cast(dict[str, Any], snapshot))
+
+
+def _hydrate_access_policy_revision(snapshot: object) -> GQLAccessPolicyRevision:
+    return GQLAccessPolicyRevision(**cast(dict[str, Any], snapshot))
+
+
+def _hydrate_access_policy_revision_list(
+    snapshot: object,
+    *,
+    limit: int,
+) -> GQLAccessPolicyRevisionList:
+    typed_snapshot = cast(dict[str, Any], snapshot)
+    return GQLAccessPolicyRevisionList(
+        active_version=cast(str | None, typed_snapshot.get("active_version")),
+        revisions=[
+            _hydrate_access_policy_revision(row)
+            for row in cast(list[object], typed_snapshot.get("revisions", ()))[:limit]
+        ],
+    )
+
+
+def _hydrate_plugin_governance_summary(snapshot: object) -> GQLPluginGovernanceSummary:
+    typed_snapshot = dict(cast(dict[str, Any], snapshot))
+    typed_snapshot["sandbox_profile_counts"] = [
+        _hydrate_named_count_bucket(row)
+        for row in cast(list[object], typed_snapshot.get("sandbox_profile_counts", ()))
+    ]
+    typed_snapshot["tenancy_mode_counts"] = [
+        _hydrate_named_count_bucket(row)
+        for row in cast(list[object], typed_snapshot.get("tenancy_mode_counts", ()))
+    ]
+    return GQLPluginGovernanceSummary(**typed_snapshot)
+
+
+def _hydrate_plugin_governance_override(snapshot: object) -> GQLPluginGovernanceOverride:
+    return GQLPluginGovernanceOverride(**cast(dict[str, Any], snapshot))
+
+
+def _hydrate_plugin_capability_status(snapshot: object) -> GQLPluginCapabilityStatus:
+    return GQLPluginCapabilityStatus(**cast(dict[str, Any], snapshot))
+
+
+def _hydrate_plugin_governance(snapshot: object) -> GQLPluginGovernance:
+    typed_snapshot = cast(dict[str, Any], snapshot)
+    return GQLPluginGovernance(
+        summary=_hydrate_plugin_governance_summary(typed_snapshot["summary"]),
+        plugins=[
+            _hydrate_plugin_capability_status(row)
+            for row in cast(list[object], typed_snapshot.get("plugins", ()))
+        ],
     )
 
 
@@ -3769,11 +3873,24 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLPluginGovernance:
+        cached = await _read_cached_graphql_payload(
+            info,
+            key=_GRAPHQL_PLUGIN_GOVERNANCE_CACHE_KEY,
+        )
+        if isinstance(cached, dict):
+            return _hydrate_plugin_governance(cached)
+
         snapshot = await build_plugin_governance_posture(
             info.context.resources,
             app_state=info.context.request.app.state,
         )
-        return _build_plugin_governance(summary=snapshot.summary, plugins=list(snapshot.plugins))
+        result = _build_plugin_governance(summary=snapshot.summary, plugins=list(snapshot.plugins))
+        await _write_cached_graphql_payload(
+            info,
+            key=_GRAPHQL_PLUGIN_GOVERNANCE_CACHE_KEY,
+            payload=asdict(result),
+        )
+        return result
 
     @strawberry.field(
         description="Persisted access-policy revisions for graph operator workflows"
@@ -3788,12 +3905,29 @@ class CoreQueryResolver:
             "settings:write",
             resource_scope="access_policy",
         )
+        normalized_limit = max(1, min(limit, 50))
+        cached = await _read_cached_graphql_payload(
+            info,
+            key=_GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
+        )
+        if isinstance(cached, dict):
+            return _hydrate_access_policy_revision_list(cached, limit=normalized_limit)
+
         compat_routes = _compat_route_module()
         response = await compat_routes.list_auth_policy_revisions(
             info.context.request,
-            limit=max(1, min(limit, 50)),
+            limit=50,
         )
-        return _build_access_policy_revision_list(response)
+        result = _build_access_policy_revision_list(response)
+        await _write_cached_graphql_payload(
+            info,
+            key=_GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
+            payload=asdict(result),
+        )
+        return GQLAccessPolicyRevisionList(
+            active_version=result.active_version,
+            revisions=list(result.revisions[:normalized_limit]),
+        )
 
     @strawberry.field(
         description="Persisted plugin-governance overrides for graph operator workflows"
@@ -3807,9 +3941,22 @@ class CoreQueryResolver:
             "settings:write",
             resource_scope="plugin_governance",
         )
+        cached = await _read_cached_graphql_payload(
+            info,
+            key=_GRAPHQL_PLUGIN_GOVERNANCE_OVERRIDES_CACHE_KEY,
+        )
+        if isinstance(cached, list):
+            return [_hydrate_plugin_governance_override(row) for row in cached]
+
         compat_routes = _compat_route_module()
         response = await compat_routes.list_plugin_governance_overrides(info.context.request)
-        return [_build_plugin_governance_override(row) for row in response]
+        result = [_build_plugin_governance_override(row) for row in response]
+        await _write_cached_graphql_payload(
+            info,
+            key=_GRAPHQL_PLUGIN_GOVERNANCE_OVERRIDES_CACHE_KEY,
+            payload=[asdict(row) for row in result],
+        )
+        return result
 
     @strawberry.field(description="Bounded control-plane subscriber health rollup")
     async def control_plane_summary(
@@ -4574,6 +4721,11 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _invalidate_graphql_control_plane_cache(
+            info,
+            _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
+            reason="access_policy_mutation",
+        )
         return _build_access_policy_revision(response)
 
     @strawberry.mutation(
@@ -4604,6 +4756,11 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _invalidate_graphql_control_plane_cache(
+            info,
+            _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
+            reason="access_policy_mutation",
+        )
         return _build_access_policy_revision(response)
 
     @strawberry.mutation(
@@ -4634,6 +4791,11 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _invalidate_graphql_control_plane_cache(
+            info,
+            _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
+            reason="access_policy_mutation",
+        )
         return _build_access_policy_revision(response)
 
     @strawberry.mutation(
@@ -4657,6 +4819,11 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _invalidate_graphql_control_plane_cache(
+            info,
+            _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
+            reason="access_policy_mutation",
+        )
         return _build_access_policy_revision(response)
 
     @strawberry.mutation(
@@ -4687,6 +4854,12 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _invalidate_graphql_control_plane_cache(
+            info,
+            _GRAPHQL_PLUGIN_GOVERNANCE_CACHE_KEY,
+            _GRAPHQL_PLUGIN_GOVERNANCE_OVERRIDES_CACHE_KEY,
+            reason="plugin_governance_mutation",
+        )
         return _build_plugin_governance_override(response)
 
     @strawberry.mutation(description="Update one compatibility settings path")
