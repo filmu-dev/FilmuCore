@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import json
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 
@@ -20,7 +21,7 @@ from filmu_py.api.routes import default as default_routes
 from filmu_py.api.routes import runtime_governance
 from filmu_py.config import Settings
 from filmu_py.core import byte_streaming
-from filmu_py.core.cache import CacheManager
+from filmu_py.core.cache import CACHE_HITS_TOTAL, CACHE_INVALIDATIONS_TOTAL, CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.core.runtime_lifecycle import (
@@ -76,10 +77,34 @@ from filmu_py.services.vfs_catalog import (
 from filmu_py.state.item import ItemState
 
 
+@dataclass
 class DummyRedis:
+    values: dict[str, bytes] = field(default_factory=dict)
+    expirations: dict[str, int] = field(default_factory=dict)
+
     def ping(self, **kwargs: Any) -> bool:
         _ = kwargs
         return True
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+    async def set(self, name: str, value: bytes | str, ex: int | None = None) -> bool:
+        self.values[name] = value.encode("utf-8") if isinstance(value, str) else value
+        if ex is not None:
+            self.expirations[name] = ex
+        else:
+            self.expirations.pop(name, None)
+        return True
+
+    async def delete(self, *names: str) -> int:
+        removed = 0
+        for name in names:
+            if name in self.values:
+                removed += 1
+            self.values.pop(name, None)
+            self.expirations.pop(name, None)
+        return removed
 
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
@@ -171,6 +196,17 @@ class FailingAuthorizationAuditService:
 class DummyDatabaseRuntime:
     async def dispose(self) -> None:
         return None
+
+
+def _counter_value(counter: Any, **labels: str) -> float:
+    total = 0.0
+    for metric in counter.collect():
+        for sample in metric.samples:
+            if not sample.name.endswith("_total"):
+                continue
+            if all(sample.labels.get(key) == value for key, value in labels.items()):
+                total += float(sample.value)
+    return total
 
 
 @dataclass
@@ -741,6 +777,31 @@ def _build_client(
     app.state.resources = resources
     app.include_router(create_graphql_router(resources.graphql_plugin_registry), prefix="/graphql")
     return TestClient(app)
+
+
+def _build_graphql_info(app: FastAPI, *, headers: dict[str, str] | None = None) -> Any:
+    from filmu_py.graphql.deps import get_graphql_context
+
+    normalized_headers = headers or {"x-api-key": "a" * 32}
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/graphql",
+        "raw_path": b"/graphql",
+        "scheme": "http",
+        "query_string": b"",
+        "headers": [
+            (key.lower().encode("latin-1"), value.encode("latin-1"))
+            for key, value in normalized_headers.items()
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "root_path": "",
+        "app": app,
+    }
+    request = Request(scope)
+    return SimpleNamespace(context=get_graphql_context(request))
 
 
 def test_graphql_calendar_entries_returns_list_shape() -> None:
@@ -6608,6 +6669,69 @@ def test_graphql_write_access_policy_revision_requires_settings_write() -> None:
     assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
 
 
+def test_graphql_access_policy_revisions_cache_hot_read_and_invalidate_on_mutation() -> None:
+    from filmu_py.graphql.resolvers import CoreMutationResolver, CoreQueryResolver
+    from filmu_py.graphql.types import AccessPolicyRevisionWriteInput
+
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    access_policy_service = DummyAccessPolicyService(resources.settings)
+    resources.access_policy_service = access_policy_service
+    resources.access_policy_snapshot = access_policy_service.snapshot
+    info = _build_graphql_info(client.app, headers=_graphql_headers("settings:write"))
+    query = CoreQueryResolver()
+    mutation = CoreMutationResolver()
+
+    async def _scenario() -> None:
+        hits_before = _counter_value(CACHE_HITS_TOTAL, namespace="test")
+        invalidations_before = _counter_value(
+            CACHE_INVALIDATIONS_TOTAL,
+            namespace="test",
+            reason="access_policy_mutation",
+        )
+
+        first_result = await query.access_policy_revisions(info, limit=1)
+        second_result = await query.access_policy_revisions(info, limit=10)
+
+        assert len(first_result.revisions) == 1
+        assert _counter_value(CACHE_HITS_TOTAL, namespace="test") == hits_before + 1
+        assert second_result.active_version == resources.settings.access_policy.version
+        assert [row.version for row in second_result.revisions] == [
+            resources.settings.access_policy.version
+        ]
+
+        await mutation.write_access_policy_revision(
+            info,
+            AccessPolicyRevisionWriteInput(
+                version="2026-04-18-graphql-cache-refresh",
+                source="graphql_test",
+                role_grants={"platform:admin": ["settings:write"]},
+                principal_roles={"tenant-main:operator-1": ["platform:admin"]},
+                principal_scopes={"tenant-main:operator-1": ["settings:write"]},
+                principal_tenant_grants={"tenant-main:operator-1": ["tenant-main"]},
+                permission_constraints={},
+            ),
+        )
+
+        assert (
+            _counter_value(
+                CACHE_INVALIDATIONS_TOTAL,
+                namespace="test",
+                reason="access_policy_mutation",
+            )
+            == invalidations_before + 1
+        )
+
+        third_result = await query.access_policy_revisions(info, limit=10)
+        assert [row.version for row in third_result.revisions] == [
+            "2026-04-18-graphql-cache-refresh",
+            resources.settings.access_policy.version,
+        ]
+
+    asyncio.run(_scenario())
+
+
 def test_graphql_plugin_governance_overrides_query_and_mutation_follow_route_parity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6725,6 +6849,101 @@ def test_graphql_plugin_governance_overrides_query_and_mutation_follow_route_par
             "details": {"state": "quarantined"},
         }
     ]
+
+
+def test_graphql_plugin_governance_cache_hot_read_and_invalidate_on_override_write() -> None:
+    from filmu_py.graphql.resolvers import CoreMutationResolver, CoreQueryResolver
+    from filmu_py.graphql.types import PluginGovernanceOverrideWriteInput
+
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "external-scraper",
+                "version": "1.0.0",
+                "api_version": "1",
+                "distribution": "filesystem",
+                "publisher": "community",
+                "release_channel": "stable",
+                "trust_level": "community",
+                "sandbox_profile": "restricted",
+                "tenancy_mode": "tenant",
+                "entry_module": "plugin.py",
+                "scraper": "ExternalScraper",
+                "publishable_events": ["external.scan.completed"],
+            }
+        )
+    )
+    plugin_registry.register_capability(
+        plugin_name="external-scraper",
+        kind=PluginCapabilityKind.SCRAPER,
+        implementation=object(),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        plugin_registry=plugin_registry,
+        settings_overrides={"FILMU_PY_PLUGIN_RUNTIME": {"enforcement_mode": "report_only"}},
+    )
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    resources.plugin_governance_service = DummyPluginGovernanceService()
+    info = _build_graphql_info(client.app, headers=_graphql_headers("settings:write"))
+    query = CoreQueryResolver()
+    mutation = CoreMutationResolver()
+
+    async def _scenario() -> None:
+        hits_before = _counter_value(CACHE_HITS_TOTAL, namespace="test")
+        invalidations_before = _counter_value(
+            CACHE_INVALIDATIONS_TOTAL,
+            namespace="test",
+            reason="plugin_governance_mutation",
+        )
+
+        first_governance = await query.plugin_governance(info)
+        first_overrides = await query.plugin_governance_overrides(info)
+        second_governance = await query.plugin_governance(info)
+        second_overrides = await query.plugin_governance_overrides(info)
+
+        assert first_governance.summary.override_count == 0
+        assert first_overrides == []
+        assert _counter_value(CACHE_HITS_TOTAL, namespace="test") == hits_before + 2
+        assert second_governance.summary.override_count == 0
+        assert second_governance.summary.quarantined_overrides == 0
+        assert [(row.name, row.override_state) for row in second_governance.plugins] == [
+            ("external-scraper", None)
+        ]
+        assert second_overrides == []
+
+        await mutation.write_plugin_governance_override(
+            info,
+            "external-scraper",
+            PluginGovernanceOverrideWriteInput(
+                state="quarantined",
+                reason="signature drift",
+            ),
+        )
+
+        assert (
+            _counter_value(
+                CACHE_INVALIDATIONS_TOTAL,
+                namespace="test",
+                reason="plugin_governance_mutation",
+            )
+            == invalidations_before + 2
+        )
+
+        third_governance = await query.plugin_governance(info)
+        third_overrides = await query.plugin_governance_overrides(info)
+        assert third_governance.summary.override_count == 1
+        assert third_governance.summary.quarantined_overrides == 1
+        assert [(row.name, row.override_state) for row in third_governance.plugins] == [
+            ("external-scraper", "quarantined")
+        ]
+        assert [(row.plugin_name, row.state) for row in third_overrides] == [
+            ("external-scraper", "quarantined")
+        ]
+
+    asyncio.run(_scenario())
 
 
 def test_graphql_write_plugin_governance_override_requires_settings_write() -> None:
