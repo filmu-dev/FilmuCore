@@ -1115,14 +1115,181 @@ function Get-PressureClass {
     return 'healthy'
 }
 
+function Get-UniqueStringValues {
+    param([object[]] $Values)
+
+    $normalized = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in @($Values)) {
+        if ($null -eq $entry) {
+            continue
+        }
+        if ($entry -is [string]) {
+            $candidate = ([string]$entry).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and $normalized -notcontains $candidate) {
+                [void]$normalized.Add($candidate)
+            }
+            continue
+        }
+        foreach ($nested in @($entry)) {
+            if ($null -eq $nested) {
+                continue
+            }
+            $candidate = ([string]$nested).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and $normalized -notcontains $candidate) {
+                [void]$normalized.Add($candidate)
+            }
+        }
+    }
+    return @($normalized)
+}
+
+function Get-MergedPressureClass {
+    param(
+        [string] $PrimaryClass,
+        [string] $SecondaryClass
+    )
+
+    $classes = @(
+        [string]$PrimaryClass,
+        [string]$SecondaryClass
+    ) | ForEach-Object {
+        ([string]$_).Trim().ToLowerInvariant()
+    } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    if ($classes -contains 'critical') {
+        return 'critical'
+    }
+    if ($classes -contains 'warning') {
+        return 'warning'
+    }
+    if ($classes -contains 'healthy') {
+        return 'healthy'
+    }
+    return 'unknown'
+}
+
+function New-PressureCauseBucket {
+    param(
+        [string] $Class,
+        $Incidents,
+        [object[]] $Reasons,
+        [string] $RuntimeClass,
+        [string] $BackendClass
+    )
+
+    return [ordered]@{
+        class = if ([string]::IsNullOrWhiteSpace($Class)) { 'unknown' } else { $Class }
+        incidents = if ($null -eq $Incidents) { $null } else { [int64]$Incidents }
+        reasons = @(Get-UniqueStringValues -Values $Reasons)
+        runtime_class = if ([string]::IsNullOrWhiteSpace($RuntimeClass)) { $null } else { $RuntimeClass }
+        backend_class = if ([string]::IsNullOrWhiteSpace($BackendClass)) { $null } else { $BackendClass }
+    }
+}
+
+function Get-PressureCauseBuckets {
+    param(
+        $RuntimeDiagnostics,
+        $BackendPressure
+    )
+
+    $cacheRuntimeClass = if ($null -ne $RuntimeDiagnostics) { [string]$RuntimeDiagnostics.cache_pressure_class } else { $null }
+    $chunkRuntimeClass = if ($null -ne $RuntimeDiagnostics) { [string]$RuntimeDiagnostics.chunk_coalescing_pressure_class } else { $null }
+    $upstreamRuntimeClass = if ($null -ne $RuntimeDiagnostics) { [string]$RuntimeDiagnostics.upstream_wait_class } else { $null }
+    $refreshRuntimeClass = if ($null -ne $RuntimeDiagnostics) { [string]$RuntimeDiagnostics.refresh_pressure_class } else { $null }
+    $fairnessRuntimeClass = if ($null -ne $RuntimeDiagnostics) { [string]$RuntimeDiagnostics.fairness_pressure_class } else { $null }
+    $cancellationRuntimeClass = if ($null -ne $RuntimeDiagnostics) { [string]$RuntimeDiagnostics.cancellation_churn_class } else { $null }
+
+    return [ordered]@{
+        cache_pressure = New-PressureCauseBucket `
+            -Class (Get-MergedPressureClass -PrimaryClass $cacheRuntimeClass -SecondaryClass ([string]$BackendPressure.vfs_runtime_cache_pressure_class)) `
+            -Incidents (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.cache_pressure_incidents } else { $null }) `
+            -Reasons @(
+                if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.cache_pressure_reasons }
+                $BackendPressure.vfs_runtime_cache_pressure_reasons
+            ) `
+            -RuntimeClass $cacheRuntimeClass `
+            -BackendClass ([string]$BackendPressure.vfs_runtime_cache_pressure_class)
+        chunk_coalescing = New-PressureCauseBucket `
+            -Class (Get-MergedPressureClass -PrimaryClass $chunkRuntimeClass -SecondaryClass ([string]$BackendPressure.vfs_runtime_chunk_coalescing_pressure_class)) `
+            -Incidents (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.chunk_coalescing_waits_total } else { $null }) `
+            -Reasons @(
+                if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.chunk_coalescing_pressure_reasons }
+                $BackendPressure.vfs_runtime_chunk_coalescing_pressure_reasons
+            ) `
+            -RuntimeClass $chunkRuntimeClass `
+            -BackendClass ([string]$BackendPressure.vfs_runtime_chunk_coalescing_pressure_class)
+        upstream_wait = New-PressureCauseBucket `
+            -Class (Get-MergedPressureClass -PrimaryClass $upstreamRuntimeClass -SecondaryClass ([string]$BackendPressure.vfs_runtime_upstream_wait_class)) `
+            -Incidents (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.provider_pressure_incidents + $RuntimeDiagnostics.upstream_retryable_network + $RuntimeDiagnostics.upstream_retryable_read_body } else { $null }) `
+            -Reasons @(
+                if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.upstream_wait_reasons }
+                $BackendPressure.vfs_runtime_upstream_wait_reasons
+            ) `
+            -RuntimeClass $upstreamRuntimeClass `
+            -BackendClass ([string]$BackendPressure.vfs_runtime_upstream_wait_class)
+        fairness_denial = New-PressureCauseBucket `
+            -Class $fairnessRuntimeClass `
+            -Incidents (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.fairness_denial_incidents } else { $null }) `
+            -Reasons (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.fairness_pressure_reasons } else { @() }) `
+            -RuntimeClass $fairnessRuntimeClass `
+            -BackendClass $null
+        provider_refresh_pressure = New-PressureCauseBucket `
+            -Class (Get-MergedPressureClass -PrimaryClass $refreshRuntimeClass -SecondaryClass ([string]$BackendPressure.vfs_runtime_refresh_pressure_class)) `
+            -Incidents (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.backend_fallback_attempts + $RuntimeDiagnostics.inline_refresh_error + $RuntimeDiagnostics.inline_refresh_timeout } else { $null }) `
+            -Reasons @(
+                if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.refresh_pressure_reasons }
+                $BackendPressure.vfs_runtime_refresh_pressure_reasons
+            ) `
+            -RuntimeClass $refreshRuntimeClass `
+            -BackendClass ([string]$BackendPressure.vfs_runtime_refresh_pressure_class)
+        cancellation_churn = New-PressureCauseBucket `
+            -Class $cancellationRuntimeClass `
+            -Incidents (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.cancellation_churn_incidents } else { $null }) `
+            -Reasons (if ($null -ne $RuntimeDiagnostics) { $RuntimeDiagnostics.cancellation_churn_reasons } else { @() }) `
+            -RuntimeClass $cancellationRuntimeClass `
+            -BackendClass $null
+    }
+}
+
+function Get-PressureCauseFindings {
+    param($PressureCauseBuckets)
+
+    $findings = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in $PressureCauseBuckets.GetEnumerator()) {
+        $bucketClass = [string]($entry.Value.class ?? '')
+        if ($bucketClass -in @('warning', 'critical')) {
+            [void]$findings.Add([string]$entry.Key)
+        }
+    }
+    return @($findings)
+}
+
 function Get-BackendVfsPressureSnapshot {
     param($Governance)
 
     if ($null -eq $Governance) {
-        return $null
+        return [ordered]@{
+            vfs_runtime_cache_pressure_class = $null
+            vfs_runtime_cache_pressure_reasons = @()
+            vfs_runtime_chunk_coalescing_pressure_class = $null
+            vfs_runtime_chunk_coalescing_pressure_reasons = @()
+            vfs_runtime_upstream_wait_class = $null
+            vfs_runtime_upstream_wait_reasons = @()
+            vfs_runtime_refresh_pressure_class = $null
+            vfs_runtime_refresh_pressure_reasons = @()
+        }
     }
 
-    $result = [ordered]@{}
+    $result = [ordered]@{
+        vfs_runtime_cache_pressure_class = $null
+        vfs_runtime_cache_pressure_reasons = @()
+        vfs_runtime_chunk_coalescing_pressure_class = $null
+        vfs_runtime_chunk_coalescing_pressure_reasons = @()
+        vfs_runtime_upstream_wait_class = $null
+        vfs_runtime_upstream_wait_reasons = @()
+        vfs_runtime_refresh_pressure_class = $null
+        vfs_runtime_refresh_pressure_reasons = @()
+    }
     foreach ($name in @(
         'vfs_runtime_cache_pressure_class',
         'vfs_runtime_cache_pressure_reasons',
@@ -1155,12 +1322,14 @@ function Get-FilmuvfsRuntimeDelta {
         handle_startup_ok = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'ok')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'ok'))
         handle_startup_error = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'error')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'error'))
         handle_startup_estale = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'estale')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'estale'))
+        handle_startup_cancelled = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'cancelled')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'cancelled'))
         handle_startup_average_duration_ms = Get-WeightedAverageDelta -BeforeAverage (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('handle_startup', 'average_duration_ms')) -BeforeTotal (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('handle_startup', 'total')) -AfterAverage (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('handle_startup', 'average_duration_ms')) -AfterTotal (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('handle_startup', 'total'))
         handle_startup_new_max_duration_ms = Get-NewMaximumDelta -BeforeMaximum (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('handle_startup', 'max_duration_ms')) -AfterMaximum (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('handle_startup', 'max_duration_ms'))
         mounted_reads_total = ([int64]$AfterSnapshot.mounted_reads.total) - ([int64]$BeforeSnapshot.mounted_reads.total)
         mounted_reads_ok = ([int64]$AfterSnapshot.mounted_reads.ok) - ([int64]$BeforeSnapshot.mounted_reads.ok)
         mounted_reads_error = ([int64]$AfterSnapshot.mounted_reads.error) - ([int64]$BeforeSnapshot.mounted_reads.error)
         mounted_reads_estale = ([int64]$AfterSnapshot.mounted_reads.estale) - ([int64]$BeforeSnapshot.mounted_reads.estale)
+        mounted_reads_cancelled = ([int64]$AfterSnapshot.mounted_reads.cancelled) - ([int64]$BeforeSnapshot.mounted_reads.cancelled)
         upstream_fetch_operations = ([int64]$AfterSnapshot.upstream_fetch.operations) - ([int64]$BeforeSnapshot.upstream_fetch.operations)
         upstream_fetch_bytes_total = ([int64]$AfterSnapshot.upstream_fetch.bytes_total) - ([int64]$BeforeSnapshot.upstream_fetch.bytes_total)
         upstream_fetch_average_duration_ms = Get-WeightedAverageDelta -BeforeAverage (Get-NestedRuntimeFloat -Snapshot $BeforeSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -BeforeTotal (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('upstream_fetch', 'operations')) -AfterAverage (Get-NestedRuntimeFloat -Snapshot $AfterSnapshot -Path @('upstream_fetch', 'average_duration_ms')) -AfterTotal (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('upstream_fetch', 'operations'))
@@ -1205,6 +1374,8 @@ function Get-FilmuvfsRuntimeDelta {
         prefetch_active_background_tasks = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('prefetch', 'active_background_tasks')
         prefetch_background_spawned = ([int64]$AfterSnapshot.prefetch.background_spawned) - ([int64]$BeforeSnapshot.prefetch.background_spawned)
         prefetch_background_backpressure = ([int64]$AfterSnapshot.prefetch.background_backpressure) - ([int64]$BeforeSnapshot.prefetch.background_backpressure)
+        prefetch_fairness_denied = ([int64]$AfterSnapshot.prefetch.fairness_denied) - ([int64]$BeforeSnapshot.prefetch.fairness_denied)
+        prefetch_global_backpressure_denied = ([int64]$AfterSnapshot.prefetch.global_backpressure_denied) - ([int64]$BeforeSnapshot.prefetch.global_backpressure_denied)
         prefetch_background_error = ([int64]$AfterSnapshot.prefetch.background_error) - ([int64]$BeforeSnapshot.prefetch.background_error)
         chunk_coalescing_in_flight_chunks = Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'in_flight_chunks')
         chunk_coalescing_waits_total = (Get-NestedRuntimeMetric -Snapshot $AfterSnapshot -Path @('chunk_coalescing', 'waits_total')) - (Get-NestedRuntimeMetric -Snapshot $BeforeSnapshot -Path @('chunk_coalescing', 'waits_total'))
@@ -1218,6 +1389,7 @@ function Get-FilmuvfsRuntimeDelta {
         inline_refresh_timeout = ([int64]$AfterSnapshot.inline_refresh.timeout) - ([int64]$BeforeSnapshot.inline_refresh.timeout)
         windows_callbacks_error = ([int64]$AfterSnapshot.windows_projfs.callbacks_error) - ([int64]$BeforeSnapshot.windows_projfs.callbacks_error)
         windows_callbacks_estale = ([int64]$AfterSnapshot.windows_projfs.callbacks_estale) - ([int64]$BeforeSnapshot.windows_projfs.callbacks_estale)
+        windows_callbacks_cancelled = ([int64]$AfterSnapshot.windows_projfs.callbacks_cancelled) - ([int64]$BeforeSnapshot.windows_projfs.callbacks_cancelled)
     }
 }
 
@@ -1261,17 +1433,28 @@ function Get-RuntimeDiagnostics {
             chunk_coalescing_wait_new_max_duration_ms = $null
             provider_pressure_incidents = $null
             unrecovered_stale_refresh_incidents = $null
+            mounted_reads_cancelled = $null
             upstream_fetch_average_duration_ms = $null
             upstream_fetch_new_max_duration_ms = $null
+            handle_startup_cancelled = $null
             fatal_error_incidents = $null
+            prefetch_fairness_denied = $null
+            prefetch_global_backpressure_denied = $null
+            fairness_denial_incidents = $null
             cache_pressure_class = $null
             cache_pressure_reasons = $null
             chunk_coalescing_pressure_class = $null
             chunk_coalescing_pressure_reasons = $null
+            fairness_pressure_class = $null
+            fairness_pressure_reasons = $null
             upstream_wait_class = $null
             upstream_wait_reasons = $null
             refresh_pressure_class = $null
             refresh_pressure_reasons = $null
+            windows_callbacks_cancelled = $null
+            cancellation_churn_incidents = $null
+            cancellation_churn_class = $null
+            cancellation_churn_reasons = $null
             failure_classifications = $null
         }
     }
@@ -1354,6 +1537,18 @@ function Get-RuntimeDiagnostics {
         [void]$upstreamWaitReasons.Add('max_fetch_latency_high')
     }
 
+    $fairnessDenialIncidents = (
+        [int64]$RuntimeDelta.prefetch_fairness_denied +
+        [int64]$RuntimeDelta.prefetch_global_backpressure_denied
+    )
+    $fairnessPressureReasons = [System.Collections.Generic.List[string]]::new()
+    if ([int64]$RuntimeDelta.prefetch_fairness_denied -gt 0) {
+        [void]$fairnessPressureReasons.Add('prefetch_fairness_denied')
+    }
+    if ([int64]$RuntimeDelta.prefetch_global_backpressure_denied -gt 0) {
+        [void]$fairnessPressureReasons.Add('prefetch_global_backpressure_denied')
+    }
+
     $refreshPressureReasons = [System.Collections.Generic.List[string]]::new()
     if ([int64]$RuntimeDelta.backend_fallback_failure -gt 0) {
         [void]$refreshPressureReasons.Add('backend_fallback_failures')
@@ -1366,6 +1561,22 @@ function Get-RuntimeDiagnostics {
     }
     if ([int64]$RuntimeDelta.backend_fallback_attempts -gt 0) {
         [void]$refreshPressureReasons.Add('backend_fallback_activity')
+    }
+
+    $cancellationChurnIncidents = (
+        [int64]$RuntimeDelta.mounted_reads_cancelled +
+        [int64]$RuntimeDelta.handle_startup_cancelled +
+        [int64]$RuntimeDelta.windows_callbacks_cancelled
+    )
+    $cancellationChurnReasons = [System.Collections.Generic.List[string]]::new()
+    if ([int64]$RuntimeDelta.mounted_reads_cancelled -gt 0) {
+        [void]$cancellationChurnReasons.Add('mounted_read_cancellations')
+    }
+    if ([int64]$RuntimeDelta.handle_startup_cancelled -gt 0) {
+        [void]$cancellationChurnReasons.Add('handle_startup_cancellations')
+    }
+    if ([int64]$RuntimeDelta.windows_callbacks_cancelled -gt 0) {
+        [void]$cancellationChurnReasons.Add('callback_cancellations')
     }
 
     return [ordered]@{
@@ -1392,6 +1603,8 @@ function Get-RuntimeDiagnostics {
         prefetch_active_permits = [int64]$RuntimeDelta.prefetch_active_permits
         prefetch_active_background_tasks = [int64]$RuntimeDelta.prefetch_active_background_tasks
         prefetch_peak_active_background_tasks = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('prefetch', 'peak_active_background_tasks')
+        prefetch_fairness_denied = [int64]$RuntimeDelta.prefetch_fairness_denied
+        prefetch_global_backpressure_denied = [int64]$RuntimeDelta.prefetch_global_backpressure_denied
         chunk_coalescing_in_flight_chunks = [int64]$RuntimeDelta.chunk_coalescing_in_flight_chunks
         chunk_coalescing_peak_in_flight_chunks = Get-NestedRuntimeMetric -Snapshot $RuntimeAfterSnapshot -Path @('chunk_coalescing', 'peak_in_flight_chunks')
         chunk_coalescing_waits_total = [int64]$RuntimeDelta.chunk_coalescing_waits_total
@@ -1401,8 +1614,10 @@ function Get-RuntimeDiagnostics {
         chunk_coalescing_wait_new_max_duration_ms = [double]$RuntimeDelta.chunk_coalescing_wait_new_max_duration_ms
         provider_pressure_incidents = $providerPressureIncidents
         unrecovered_stale_refresh_incidents = [int64]$RuntimeDelta.mounted_reads_estale
+        mounted_reads_cancelled = [int64]$RuntimeDelta.mounted_reads_cancelled
         handle_startup_total = [int64]$RuntimeDelta.handle_startup_total
         handle_startup_failures = ([int64]$RuntimeDelta.handle_startup_error + [int64]$RuntimeDelta.handle_startup_estale)
+        handle_startup_cancelled = [int64]$RuntimeDelta.handle_startup_cancelled
         handle_startup_average_duration_ms = [int64]$RuntimeDelta.handle_startup_average_duration_ms
         handle_startup_max_duration_ms = [double]$RuntimeDelta.handle_startup_new_max_duration_ms
         upstream_fetch_average_duration_ms = [double]$RuntimeDelta.upstream_fetch_average_duration_ms
@@ -1415,10 +1630,17 @@ function Get-RuntimeDiagnostics {
         cache_pressure_reasons = @($cachePressureReasons)
         chunk_coalescing_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.chunk_coalescing_waits_miss -ge 5) -or ([double]$RuntimeDelta.chunk_coalescing_wait_average_duration_ms -ge 1000.0) -or ([double]$RuntimeDelta.chunk_coalescing_wait_new_max_duration_ms -ge 2000.0)) -Warning ($chunkCoalescingPressureReasons.Count -gt 0)
         chunk_coalescing_pressure_reasons = @($chunkCoalescingPressureReasons)
+        fairness_denial_incidents = $fairnessDenialIncidents
+        fairness_pressure_class = Get-PressureClass -Critical (($fairnessDenialIncidents -ge 5) -or ([int64]$RuntimeDelta.prefetch_global_backpressure_denied -ge 2)) -Warning ($fairnessPressureReasons.Count -gt 0)
+        fairness_pressure_reasons = @($fairnessPressureReasons)
         upstream_wait_class = Get-PressureClass -Critical (($providerPressureIncidents -ge 10) -or ([double]$RuntimeDelta.upstream_fetch_average_duration_ms -ge 250.0) -or (([double]$RuntimeDelta.upstream_fetch_average_duration_ms -ge 100.0) -and ([double]$RuntimeDelta.upstream_fetch_new_max_duration_ms -ge 5000.0))) -Warning ($upstreamWaitReasons.Count -gt 0)
         upstream_wait_reasons = @($upstreamWaitReasons)
         refresh_pressure_class = Get-PressureClass -Critical (([int64]$RuntimeDelta.backend_fallback_failure -gt 0) -or ([int64]$RuntimeDelta.inline_refresh_timeout -ge 3)) -Warning ($refreshPressureReasons.Count -gt 0)
         refresh_pressure_reasons = @($refreshPressureReasons)
+        windows_callbacks_cancelled = [int64]$RuntimeDelta.windows_callbacks_cancelled
+        cancellation_churn_incidents = $cancellationChurnIncidents
+        cancellation_churn_class = Get-PressureClass -Critical (($cancellationChurnIncidents -ge 8) -or ([int64]$RuntimeDelta.windows_callbacks_cancelled -ge 3)) -Warning ($cancellationChurnReasons.Count -gt 0)
+        cancellation_churn_reasons = @($cancellationChurnReasons)
         failure_classifications = $failureClassifications
     }
 }
@@ -1795,6 +2017,19 @@ finally {
     }
     $thresholdFailures = @($thresholdChecks | Where-Object { -not $_.passed })
 
+    $backendVfsPressureBefore = if ($backendStatusBefore.captured) {
+        Get-BackendVfsPressureSnapshot -Governance $backendStatusBefore.governance
+    } else {
+        Get-BackendVfsPressureSnapshot -Governance $null
+    }
+    $backendVfsPressureAfter = if ($backendStatusAfter.captured) {
+        Get-BackendVfsPressureSnapshot -Governance $backendStatusAfter.governance
+    } else {
+        Get-BackendVfsPressureSnapshot -Governance $null
+    }
+    $pressureCauseBuckets = Get-PressureCauseBuckets -RuntimeDiagnostics $runtimeDiagnostics -BackendPressure $backendVfsPressureAfter
+    $pressureCauseFindings = Get-PressureCauseFindings -PressureCauseBuckets $pressureCauseBuckets
+
     $summary = [ordered]@{
         soak_profile = $SoakProfile
         mount_path = $MountPath
@@ -1815,16 +2050,10 @@ finally {
         } else {
             $null
         }
-        backend_vfs_pressure_before = if ($backendStatusBefore.captured) {
-            Get-BackendVfsPressureSnapshot -Governance $backendStatusBefore.governance
-        } else {
-            $null
-        }
-        backend_vfs_pressure_after = if ($backendStatusAfter.captured) {
-            Get-BackendVfsPressureSnapshot -Governance $backendStatusAfter.governance
-        } else {
-            $null
-        }
+        backend_vfs_pressure_before = $backendVfsPressureBefore
+        backend_vfs_pressure_after = $backendVfsPressureAfter
+        pressure_cause_buckets = $pressureCauseBuckets
+        pressure_cause_findings = $pressureCauseFindings
         scenarios = $scenarioResults
         mount_survived = [bool]($afterState.mount_exists -and ((-not $RequireFilmuvfs) -or $afterState.running))
         failed = $failed

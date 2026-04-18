@@ -533,7 +533,6 @@ class DummyPluginGovernanceService:
         self.overrides[plugin_name] = record
         return record
 
-
 @dataclass
 class FakeControlPlaneService:
     summary_snapshot: object = field(
@@ -606,8 +605,6 @@ class FakeControlPlaneService:
             total_updated_subscribers=2,
             summary=self.summary_snapshot,
         )
-
-
 @dataclass
 class FakeVfsCatalogSupplier:
     snapshot: VfsCatalogSnapshot | None = None
@@ -6697,7 +6694,6 @@ def test_graphql_vfs_support_queries_return_delta_history_blocked_reasons_and_mo
     ]
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountActions"])
     assert any(row["domain"] == "vfs_mount" for row in payload["vfsMountGaps"])
-
 
 def test_graphql_access_policy_revisions_query_and_mutations_follow_route_parity(
     monkeypatch: pytest.MonkeyPatch,

@@ -55,6 +55,7 @@ def test_windows_soak_and_native_media_contract_manifests_define_freshness() -> 
     assert "artifact_kind" in soak_text
     assert "freshness_window_hours" in soak_text
     assert "required_fields" in soak_text
+    assert "pressure_cause_buckets" in soak_text
     assert "schema_version" in media_text
     assert "artifact_kind" in media_text
     assert "freshness_window_hours" in media_text
@@ -111,6 +112,12 @@ def test_media_server_provider_gate_script_emits_contract_and_taxonomy_fields() 
 
 
 def test_windows_soak_program_and_trend_scripts_emit_normalized_artifact_fields() -> None:
+    single_run = (REPO_ROOT / "scripts" / "run_windows_vfs_soak.ps1").read_text(
+        encoding="utf-8"
+    )
+    soak_stability = (REPO_ROOT / "scripts" / "run_windows_vfs_soak_stability.ps1").read_text(
+        encoding="utf-8"
+    )
     soak_program = (REPO_ROOT / "scripts" / "run_windows_vfs_soak_program.ps1").read_text(
         encoding="utf-8"
     )
@@ -118,12 +125,22 @@ def test_windows_soak_program_and_trend_scripts_emit_normalized_artifact_fields(
         encoding="utf-8"
     )
 
+    assert "pressure_cause_buckets" in single_run
+    assert "fairness_denial" in single_run
+    assert "provider_refresh_pressure" in single_run
+    assert "cancellation_churn" in single_run
+    assert "pressure_cause_buckets" in soak_stability
+    assert "critical_fairness_denial_runs" in soak_stability
+    assert "critical_cancellation_churn_runs" in soak_stability
+    assert "rollout_policy" in soak_stability
     assert "schema_version" in soak_program
     assert "artifact_kind" in soak_program
     assert "captured_at" in soak_program
     assert "expires_at" in soak_program
     assert "failure_reasons" in soak_program
     assert "required_actions" in soak_program
+    assert "pressure_cause_buckets" in soak_program
+    assert "pressure_cause_findings" in soak_program
     assert "ContractPath" in soak_trends
     assert "schema_version" in soak_trends
     assert "artifact_kind" in soak_trends
@@ -131,6 +148,8 @@ def test_windows_soak_program_and_trend_scripts_emit_normalized_artifact_fields(
     assert "expires_at" in soak_trends
     assert "failure_reasons" in soak_trends
     assert "required_actions" in soak_trends
+    assert "critical_fairness_denial_runs" in soak_trends
+    assert "critical_cancellation_churn_runs" in soak_trends
 
 
 def test_windows_native_media_proof_script_emits_contract_and_coverage_fields() -> None:

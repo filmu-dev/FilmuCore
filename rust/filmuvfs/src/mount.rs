@@ -41,6 +41,7 @@ use tracing::{debug, error, info_span, warn, Instrument};
 use crate::catalog::client::CatalogWatchRuntime;
 #[cfg(not(target_os = "windows"))]
 use crate::cross_process_observability::apply_http_observability_headers;
+use crate::cross_process_observability::{apply_span_correlation_attributes, SpanCorrelation};
 #[cfg(target_os = "windows")]
 use crate::windows_host::WindowsMountedFilesystem;
 use crate::{
@@ -438,16 +439,29 @@ impl CatalogEntryRefreshClient for GrpcCatalogEntryRefreshClient {
             handle_key = %handle_key,
             entry_id = %entry_id,
         );
+        let request_id = cross_process_request_id(&self.session_id, "refresh-catalog-entry");
         let mut request = Request::new(RefreshCatalogEntryRequest {
             provider_file_id: provider_file_id.to_owned(),
             handle_key: handle_key.to_owned(),
             entry_id: entry_id.to_owned(),
         });
         refresh_span.in_scope(|| {
+            apply_span_correlation_attributes(
+                &refresh_span,
+                SpanCorrelation {
+                    request_id: Some(request_id.as_str()),
+                    daemon_id: Some(self.daemon_id.as_str()),
+                    session_id: Some(self.session_id.as_str()),
+                    entry_id: Some(entry_id),
+                    provider_file_id: Some(provider_file_id),
+                    handle_key: Some(handle_key),
+                    ..SpanCorrelation::default()
+                },
+            );
             apply_tonic_observability_metadata(
                 request.metadata_mut(),
                 &refresh_span,
-                &cross_process_request_id(&self.session_id, "refresh-catalog-entry"),
+                request_id.as_str(),
                 &self.daemon_id,
                 &self.session_id,
                 &[
@@ -497,6 +511,21 @@ impl CatalogEntryRefreshClient for HttpCatalogEntryRefreshClient {
                 handle_key = %handle_key,
                 entry_id = %entry_id,
             );
+            let request_id = cross_process_request_id(&self.session_id, "refresh-catalog-entry");
+            refresh_span.in_scope(|| {
+                apply_span_correlation_attributes(
+                    &refresh_span,
+                    SpanCorrelation {
+                        request_id: Some(request_id.as_str()),
+                        daemon_id: Some(self.daemon_id.as_str()),
+                        session_id: Some(self.session_id.as_str()),
+                        entry_id: Some(entry_id),
+                        provider_file_id: Some(provider_file_id),
+                        handle_key: Some(handle_key),
+                        ..SpanCorrelation::default()
+                    },
+                );
+            });
             let uri = format!(
                 "{}/internal/vfs/refresh-entry.pb",
                 self.endpoint.trim_end_matches('/')
@@ -516,7 +545,7 @@ impl CatalogEntryRefreshClient for HttpCatalogEntryRefreshClient {
             let request = apply_http_observability_headers(
                 request,
                 &refresh_span,
-                &cross_process_request_id(&self.session_id, "refresh-catalog-entry"),
+                request_id.as_str(),
                 &self.daemon_id,
                 &self.session_id,
                 &[

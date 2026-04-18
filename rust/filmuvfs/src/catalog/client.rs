@@ -30,7 +30,10 @@ use crate::{
         inode_for_entry_id as hashed_inode_for_entry_id, CatalogStateError, CatalogStateStore,
     },
     config::SidecarConfig,
-    cross_process_observability::{apply_tonic_observability_metadata, cross_process_request_id},
+    cross_process_observability::{
+        apply_span_correlation_attributes, apply_tonic_observability_metadata,
+        cross_process_request_id, SpanCorrelation,
+    },
     mount::MountRuntime,
     proto::{
         filmu::vfs::catalog::v1::filmu_vfs_catalog_service_client::FilmuVfsCatalogServiceClient,
@@ -142,6 +145,18 @@ impl CatalogHttpFallbackClient {
                 session_id = %self.session_id,
                 fallback_target = %self.fallback_target(),
             );
+            let request_id = cross_process_request_id(&self.session_id, "watch-event");
+            poll_span.in_scope(|| {
+                apply_span_correlation_attributes(
+                    &poll_span,
+                    SpanCorrelation {
+                        request_id: Some(request_id.as_str()),
+                        daemon_id: Some(self.daemon_id.as_str()),
+                        session_id: Some(self.session_id.as_str()),
+                        ..SpanCorrelation::default()
+                    },
+                );
+            });
             let request = HttpRequest::builder()
                 .method("GET")
                 .uri(uri)
@@ -149,7 +164,7 @@ impl CatalogHttpFallbackClient {
             let request = apply_http_observability_headers(
                 request,
                 &poll_span,
-                &cross_process_request_id(&self.session_id, "watch-event"),
+                request_id.as_str(),
                 &self.daemon_id,
                 &self.session_id,
                 &[],
@@ -451,12 +466,22 @@ impl CatalogWatchRuntime {
             session_id = %self.config.session_id,
             grpc_endpoint = %self.config.grpc_endpoint,
         );
+        let request_id = cross_process_request_id(&self.config.session_id, "watch-catalog");
         let mut request = Request::new(outbound_stream);
         session_span.in_scope(|| {
+            apply_span_correlation_attributes(
+                &session_span,
+                SpanCorrelation {
+                    request_id: Some(request_id.as_str()),
+                    daemon_id: Some(self.config.daemon_id.as_str()),
+                    session_id: Some(self.config.session_id.as_str()),
+                    ..SpanCorrelation::default()
+                },
+            );
             apply_tonic_observability_metadata(
                 request.metadata_mut(),
                 &session_span,
-                &cross_process_request_id(&self.config.session_id, "watch-catalog"),
+                request_id.as_str(),
                 &self.config.daemon_id,
                 &self.config.session_id,
                 &[],

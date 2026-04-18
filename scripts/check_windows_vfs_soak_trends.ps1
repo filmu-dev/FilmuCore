@@ -48,6 +48,8 @@ function Get-MetricSnapshot {
         critical_chunk_coalescing_pressure_runs = [double]($Summary.critical_chunk_coalescing_pressure_runs ?? 0)
         critical_upstream_wait_runs = [double]($Summary.critical_upstream_wait_runs ?? 0)
         critical_refresh_pressure_runs = [double]($Summary.critical_refresh_pressure_runs ?? 0)
+        critical_fairness_denial_runs = [double]($Summary.critical_fairness_denial_runs ?? 0)
+        critical_cancellation_churn_runs = [double]($Summary.critical_cancellation_churn_runs ?? 0)
     }
 }
 
@@ -59,7 +61,9 @@ function Get-MetricKeys {
         'critical_cache_pressure_runs',
         'critical_chunk_coalescing_pressure_runs',
         'critical_upstream_wait_runs',
-        'critical_refresh_pressure_runs'
+        'critical_refresh_pressure_runs',
+        'critical_fairness_denial_runs',
+        'critical_cancellation_churn_runs'
     )
 }
 

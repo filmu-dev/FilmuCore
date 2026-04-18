@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import warnings
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
@@ -27,6 +29,7 @@ from filmu_py.plugins import (
     MagnetAddResult,
     NotificationEvent,
     NotificationPlugin,
+    PluginCapabilityKind,
     PluginEventHookWorker,
     PluginRegistry,
     PluginSettingsRegistry,
@@ -439,6 +442,54 @@ def test_load_plugins_registers_event_hook_workers(tmp_path: Path) -> None:
     assert len(hooks) == 1
     assert isinstance(hooks[0], PluginEventHookWorker)
     assert hooks[0].subscribed_events == frozenset({"item.completed"})
+
+
+def test_safe_register_capability_running_loop_rejects_without_leaking_coroutines() -> None:
+    events: list[str] = []
+
+    class TrackingDatasource:
+        async def initialize(self, ctx: object) -> None:
+            _ = ctx
+            events.append("datasource.initialize")
+
+        async def teardown(self) -> None:
+            events.append("datasource.teardown")
+
+    class RunningLoopScraper:
+        async def initialize(self, ctx: object) -> None:
+            _ = ctx
+            events.append("plugin.initialize")
+
+        async def search(self, metadata: ScraperSearchInput) -> list[ScraperResult]:
+            _ = metadata
+            return [ScraperResult(title="never-called")]
+
+    harness = TestPluginContext(
+        datasource_factory=lambda _plugin_name, datasource_name: (
+            TrackingDatasource() if datasource_name == "host" else None
+        )
+    )
+    context = harness.provider().build("loop-aware-plugin", datasource_name="host")
+    registry = PluginRegistry()
+
+    async def exercise() -> tuple[int, list[str]]:
+        return registry.safe_register_capability(
+            plugin_name="loop-aware-plugin",
+            kind=PluginCapabilityKind.SCRAPER,
+            candidate=RunningLoopScraper(),
+            context=context,
+        )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        added, skipped = asyncio.run(exercise())
+        gc.collect()
+
+    assert added == 0
+    assert any("synchronous load phase" in message for message in skipped)
+    assert registry.get_scrapers() == []
+    assert events == []
+    assert all("was never awaited" not in str(item.message) for item in caught)
 
 
 def test_protocol_dataclasses_are_runtime_friendly() -> None:

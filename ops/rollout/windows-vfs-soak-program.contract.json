@@ -20,6 +20,7 @@
     "status",
     "profile_coverage",
     "profile_coverage_complete",
+    "pressure_cause_buckets",
     "failure_reasons",
     "required_actions"
   ]

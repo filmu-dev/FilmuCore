@@ -826,10 +826,10 @@ async def scrape_item(
 ) -> ScrapeItemResponse | StreamingResponse:
     """Return the current minimal manual-scrape compatibility response.
 
-    The present backend does not yet implement real scraper fan-out or stream ranking.
-    This route therefore resolves the target item safely and returns an empty-result
-    baseline in either JSON or SSE form so the manual scrape UI can operate without a
-    hard backend failure.
+    The repo now has real async scrape, parse, rank, and debrid worker stages, but
+    this legacy manual-scrape compatibility route still resolves the target safely and
+    returns the minimal JSON/SSE scaffold expected by the old UI instead of driving
+    the full pipeline inline.
     """
 
     auth_context = get_auth_context(request)

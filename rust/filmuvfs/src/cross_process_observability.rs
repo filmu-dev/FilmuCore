@@ -1,4 +1,4 @@
-use opentelemetry::{global, propagation::Injector};
+use opentelemetry::{global, propagation::Injector, trace::TraceContextExt, KeyValue};
 use tonic::metadata::{Ascii, MetadataKey, MetadataMap, MetadataValue};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -12,6 +12,17 @@ pub const DAEMON_ID_HEADER: &str = "x-filmu-vfs-daemon-id";
 pub const ENTRY_ID_HEADER: &str = "x-filmu-vfs-entry-id";
 pub const PROVIDER_FILE_ID_HEADER: &str = "x-filmu-vfs-provider-file-id";
 pub const HANDLE_KEY_HEADER: &str = "x-filmu-vfs-handle-key";
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpanCorrelation<'a> {
+    pub request_id: Option<&'a str>,
+    pub daemon_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub tenant_id: Option<&'a str>,
+    pub entry_id: Option<&'a str>,
+    pub provider_file_id: Option<&'a str>,
+    pub handle_key: Option<&'a str>,
+}
 
 struct HeaderCollector<'a> {
     headers: &'a mut Vec<(String, String)>,
@@ -46,6 +57,41 @@ fn insert_metadata_value(metadata: &mut MetadataMap, key: &str, value: &str) {
         MetadataValue::try_from(value),
     ) {
         metadata.insert(name, metadata_value);
+    }
+}
+
+fn push_attribute(attributes: &mut Vec<KeyValue>, key: &'static str, value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return;
+    }
+    attributes.push(KeyValue::new(key, normalized.to_owned()));
+}
+
+pub fn normalized_correlation_attributes(correlation: SpanCorrelation<'_>) -> Vec<KeyValue> {
+    let mut attributes = Vec::with_capacity(7);
+    push_attribute(&mut attributes, "request.id", correlation.request_id);
+    push_attribute(&mut attributes, "vfs.daemon_id", correlation.daemon_id);
+    push_attribute(&mut attributes, "vfs.session_id", correlation.session_id);
+    push_attribute(&mut attributes, "tenant.id", correlation.tenant_id);
+    push_attribute(&mut attributes, "catalog.entry_id", correlation.entry_id);
+    push_attribute(
+        &mut attributes,
+        "provider.file_id",
+        correlation.provider_file_id,
+    );
+    push_attribute(&mut attributes, "vfs.handle_key", correlation.handle_key);
+    attributes
+}
+
+pub fn apply_span_correlation_attributes(span: &Span, correlation: SpanCorrelation<'_>) {
+    let context = span.context();
+    let otel_span = context.span();
+    for attribute in normalized_correlation_attributes(correlation) {
+        otel_span.set_attribute(attribute);
     }
 }
 
@@ -100,9 +146,9 @@ pub fn cross_process_request_id(session_id: &str, suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_tonic_observability_metadata, cross_process_request_id, DAEMON_ID_HEADER,
-        ENTRY_ID_HEADER, HANDLE_KEY_HEADER, PROVIDER_FILE_ID_HEADER, REQUEST_ID_HEADER,
-        SESSION_ID_HEADER,
+        apply_tonic_observability_metadata, cross_process_request_id,
+        normalized_correlation_attributes, SpanCorrelation, DAEMON_ID_HEADER, ENTRY_ID_HEADER,
+        HANDLE_KEY_HEADER, PROVIDER_FILE_ID_HEADER, REQUEST_ID_HEADER, SESSION_ID_HEADER,
     };
     use tonic::metadata::MetadataMap;
     use tracing::info_span;
@@ -167,6 +213,35 @@ mod tests {
                 .get(HANDLE_KEY_HEADER)
                 .and_then(|value| value.to_str().ok()),
             Some("handle-1")
+        );
+    }
+
+    #[test]
+    fn normalized_span_attributes_use_shared_vfs_field_names() {
+        let attribute_keys: Vec<_> = normalized_correlation_attributes(SpanCorrelation {
+            request_id: Some("req-1"),
+            daemon_id: Some("daemon-1"),
+            session_id: Some("session-1"),
+            tenant_id: Some("tenant-1"),
+            entry_id: Some("entry-1"),
+            provider_file_id: Some("provider-file-1"),
+            handle_key: Some("handle-1"),
+        })
+        .into_iter()
+        .map(|attribute| attribute.key.as_str().to_owned())
+        .collect();
+
+        assert_eq!(
+            attribute_keys,
+            vec![
+                "request.id",
+                "vfs.daemon_id",
+                "vfs.session_id",
+                "tenant.id",
+                "catalog.entry_id",
+                "provider.file_id",
+                "vfs.handle_key",
+            ]
         );
     }
 }

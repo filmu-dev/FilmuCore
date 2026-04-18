@@ -1000,10 +1000,10 @@ def _next_api_key_id(auth_context: Any) -> str:
 def _generate_api_key() -> str:
     """Return a strong API key candidate for compatibility-driven admin flows.
 
-    The current python backend does not yet support persisted settings mutation, so
-    this helper generates a replacement candidate without applying it to the live
-    process configuration. That keeps the frontend settings UX unblocked without
-    invalidating the currently configured BFF/backend trust relationship mid-session.
+    `/api/v1/generateapikey` now applies the generated key to the live runtime,
+    persists it through the settings store, and rotates the exposed `api_key_id`.
+    This helper only generates the candidate material; rollout to the frontend/BFF
+    environment still remains an operator-coordinated step.
     """
 
     return token_hex(32)

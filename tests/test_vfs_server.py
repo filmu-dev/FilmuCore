@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
+from filmu_py.observability_contract import build_span_attributes
 from filmu_py.services.playback import (
     PlaybackAttachmentProviderUnrestrictedLink,
     PlaybackAttachmentRefreshRequest,
@@ -363,6 +364,29 @@ def test_watch_catalog_binds_cross_process_observability_metadata(monkeypatch: A
     assert bound["tenant_id"] == "tenant-main"
     assert bound["vfs_session_id"] == "session-1"
     assert bound["vfs_daemon_id"] == "daemon-1"
+
+
+def test_build_span_attributes_uses_normalized_vfs_field_names() -> None:
+    assert build_span_attributes(
+        {
+            "request_id": "req-watch-1",
+            "tenant_id": "tenant-main",
+            "vfs_session_id": "session-1",
+            "vfs_daemon_id": "daemon-1",
+            "vfs_entry_id": "entry-1",
+            "provider_file_id": "provider-file-1",
+            "handle_key": "handle-1",
+            "ignored": "value",
+        }
+    ) == {
+        "request.id": "req-watch-1",
+        "tenant.id": "tenant-main",
+        "vfs.session_id": "session-1",
+        "vfs.daemon_id": "daemon-1",
+        "catalog.entry_id": "entry-1",
+        "provider.file_id": "provider-file-1",
+        "vfs.handle_key": "handle-1",
+    }
 
 
 def test_refresh_catalog_entry_forces_provider_refresh_and_returns_new_url() -> None:

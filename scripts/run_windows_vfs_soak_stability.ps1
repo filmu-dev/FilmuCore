@@ -65,6 +65,68 @@ if ([string]::IsNullOrWhiteSpace($shellExecutable)) {
     $shellExecutable = 'pwsh'
 }
 
+function Get-PressureCauseBucketClass {
+    param(
+        $Buckets,
+        [string] $Name
+    )
+
+    if ($null -eq $Buckets -or $Buckets.PSObject.Properties.Match($Name).Count -eq 0) {
+        return ''
+    }
+    $bucket = $Buckets.$Name
+    if ($null -eq $bucket -or $bucket.PSObject.Properties.Match('class').Count -eq 0) {
+        return ''
+    }
+    return [string]($bucket.class ?? '')
+}
+
+function Build-PressureCauseBucketRollups {
+    param([object[]] $Results)
+
+    $rollups = [ordered]@{}
+    foreach ($bucketName in @(
+        'cache_pressure',
+        'chunk_coalescing',
+        'upstream_wait',
+        'fairness_denial',
+        'provider_refresh_pressure',
+        'cancellation_churn'
+    )) {
+        $bucketEntries = @(
+            $Results |
+                ForEach-Object {
+                    if ($null -ne $_.pressure_cause_buckets -and $_.pressure_cause_buckets.PSObject.Properties.Match($bucketName).Count -gt 0) {
+                        $_.pressure_cause_buckets.$bucketName
+                    }
+                } |
+                Where-Object { $null -ne $_ }
+        )
+        $rollups[$bucketName] = [ordered]@{
+            critical_runs = @($bucketEntries | Where-Object { [string]($_.class ?? '') -eq 'critical' }).Count
+            warning_runs = @($bucketEntries | Where-Object { [string]($_.class ?? '') -eq 'warning' }).Count
+            reasons = @(
+                $bucketEntries |
+                    ForEach-Object { @($_.reasons) } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                    ForEach-Object { [string]$_ } |
+                    Select-Object -Unique
+            )
+        }
+    }
+    return $rollups
+}
+
+function Get-PressureCauseFindings {
+    param($PressureCauseBuckets)
+
+    return @(
+        $PressureCauseBuckets.GetEnumerator() |
+            Where-Object { ([int]($_.Value.critical_runs ?? 0) -gt 0) -or ([int]($_.Value.warning_runs ?? 0) -gt 0) } |
+            ForEach-Object { [string]$_.Key }
+    )
+}
+
 function Get-SoakRunResultFromArtifact {
     param(
         [string] $ArtifactDir,
@@ -92,6 +154,9 @@ function Get-SoakRunResultFromArtifact {
     $runtimeChunkCoalescingPressureClass = $null
     $runtimeUpstreamWaitClass = $null
     $runtimeRefreshPressureClass = $null
+    $runtimeFairnessDenialClass = $null
+    $runtimeCancellationChurnClass = $null
+    $pressureCauseBuckets = $null
     $artifactFailed = $false
     if (-not [string]::IsNullOrWhiteSpace([string] $ArtifactDir)) {
         $artifactSummaryPath = Join-Path $ArtifactDir 'summary.json'
@@ -116,6 +181,13 @@ function Get-SoakRunResultFromArtifact {
             $runtimeChunkCoalescingPressureClass = [string]($artifactSummary.runtime_diagnostics.chunk_coalescing_pressure_class ?? '')
             $runtimeUpstreamWaitClass = [string]($artifactSummary.runtime_diagnostics.upstream_wait_class ?? '')
             $runtimeRefreshPressureClass = [string]($artifactSummary.runtime_diagnostics.refresh_pressure_class ?? '')
+            $pressureCauseBuckets = if ($artifactSummary.PSObject.Properties.Name -contains 'pressure_cause_buckets') {
+                $artifactSummary.pressure_cause_buckets
+            } else {
+                $null
+            }
+            $runtimeFairnessDenialClass = Get-PressureCauseBucketClass -Buckets $pressureCauseBuckets -Name 'fairness_denial'
+            $runtimeCancellationChurnClass = Get-PressureCauseBucketClass -Buckets $pressureCauseBuckets -Name 'cancellation_churn'
         }
     }
 
@@ -155,6 +227,9 @@ function Get-SoakRunResultFromArtifact {
         runtime_chunk_coalescing_pressure_class = $runtimeChunkCoalescingPressureClass
         runtime_upstream_wait_class = $runtimeUpstreamWaitClass
         runtime_refresh_pressure_class = $runtimeRefreshPressureClass
+        runtime_fairness_denial_class = $runtimeFairnessDenialClass
+        runtime_cancellation_churn_class = $runtimeCancellationChurnClass
+        pressure_cause_buckets = $pressureCauseBuckets
         runtime_captured = $runtimeCaptured
         backend_status_captured = $backendCaptured
         runtime_capture_ok = $runtimeCaptureOk
@@ -297,12 +372,15 @@ foreach ($profile in $Profiles) {
     }
 }
 
+$pressureCauseBucketRollups = Build-PressureCauseBucketRollups -Results @($results)
+$pressureCauseFindings = Get-PressureCauseFindings -PressureCauseBuckets $pressureCauseBucketRollups
+
 $summary = [ordered]@{
     timestamp = (Get-Date).ToString('o')
     environment_class = $EnvironmentClass
     repeat_count = $RepeatCount
     profiles = $Profiles
-    enterprise_policy = [ordered]@{
+    rollout_policy = [ordered]@{
         require_runtime_capture = [bool] $RequireRuntimeCapture
         require_backend_status_capture = [bool] $RequireBackendStatusCapture
         max_reconnect_incidents = $MaxReconnectIncidents
@@ -318,6 +396,10 @@ $summary = [ordered]@{
     critical_chunk_coalescing_pressure_runs = @($results | Where-Object { $_.status -ne 'passed' -and $_.runtime_chunk_coalescing_pressure_class -eq 'critical' }).Count
     critical_upstream_wait_runs = @($results | Where-Object { $_.status -ne 'passed' -and $_.runtime_upstream_wait_class -eq 'critical' }).Count
     critical_refresh_pressure_runs = @($results | Where-Object { $_.status -ne 'passed' -and $_.runtime_refresh_pressure_class -eq 'critical' }).Count
+    critical_fairness_denial_runs = @($results | Where-Object { $_.status -ne 'passed' -and $_.runtime_fairness_denial_class -eq 'critical' }).Count
+    critical_cancellation_churn_runs = @($results | Where-Object { $_.status -ne 'passed' -and $_.runtime_cancellation_churn_class -eq 'critical' }).Count
+    pressure_cause_buckets = $pressureCauseBucketRollups
+    pressure_cause_findings = $pressureCauseFindings
     results = $results
 }
 $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $summaryPath -Encoding UTF8

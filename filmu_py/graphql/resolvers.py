@@ -309,8 +309,6 @@ async def _invalidate_graphql_control_plane_cache(
 ) -> None:
     for key in keys:
         await info.context.resources.cache.invalidate(key, reason=reason)
-
-
 def _raise_graphql_compat_error(exc: Exception) -> None:
     """Normalize compatibility-route exceptions into GraphQL-safe errors."""
 
@@ -1641,8 +1639,6 @@ def _hydrate_plugin_governance(snapshot: object) -> GQLPluginGovernance:
             for row in cast(list[object], typed_snapshot.get("plugins", ()))
         ],
     )
-
-
 def _build_enterprise_operations_slice(snapshot: object) -> GQLEnterpriseOperationsSlice:
     typed_snapshot: Any = snapshot
     return GQLEnterpriseOperationsSlice(

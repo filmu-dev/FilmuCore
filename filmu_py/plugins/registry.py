@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -329,24 +329,28 @@ class PluginRegistry:
         typed_candidate = cast(Any, candidate)
         typed_candidate.plugin_name = context.plugin_name
 
-        def _run_initialization(awaitable: object, *, phase: str) -> None:
-            if not isawaitable(awaitable):
-                raise TypeError(f"{phase} must return an awaitable")
-
+        def _run_initialization(awaitable_factory: Callable[[], object], *, phase: str) -> None:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
-                asyncio.run(cast(Coroutine[Any, Any, Any], awaitable))
-                return
+                awaitable = awaitable_factory()
+            else:
+                raise RuntimeError("plugin initialization requires a synchronous load phase")
 
-            raise RuntimeError("plugin initialization requires a synchronous load phase")
+            if not isawaitable(awaitable):
+                raise TypeError(f"{phase} must return an awaitable")
+
+            asyncio.run(cast(Coroutine[Any, Any, Any], awaitable))
 
         datasource = context.datasource
         if datasource is not None and not getattr(datasource, "_initialized", False):
-            _run_initialization(datasource.initialize(context), phase="datasource.initialize(ctx)")
+            _run_initialization(
+                lambda: datasource.initialize(context),
+                phase="datasource.initialize(ctx)",
+            )
 
         initialize = getattr(candidate, "initialize", None)
         if not callable(initialize):
             raise TypeError("missing initialize(ctx) coroutine")
 
-        _run_initialization(initialize(context), phase="initialize(ctx)")
+        _run_initialization(lambda: initialize(context), phase="initialize(ctx)")
