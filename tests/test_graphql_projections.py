@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import json
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 from arq.constants import in_progress_key_prefix, result_key_prefix, retry_key_prefix
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 
@@ -20,7 +21,7 @@ from filmu_py.api.routes import default as default_routes
 from filmu_py.api.routes import runtime_governance
 from filmu_py.config import Settings
 from filmu_py.core import byte_streaming
-from filmu_py.core.cache import CacheManager
+from filmu_py.core.cache import CACHE_HITS_TOTAL, CACHE_INVALIDATIONS_TOTAL, CacheManager
 from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.core.runtime_lifecycle import (
@@ -76,10 +77,34 @@ from filmu_py.services.vfs_catalog import (
 from filmu_py.state.item import ItemState
 
 
+@dataclass
 class DummyRedis:
+    values: dict[str, bytes] = field(default_factory=dict)
+    expirations: dict[str, int] = field(default_factory=dict)
+
     def ping(self, **kwargs: Any) -> bool:
         _ = kwargs
         return True
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+    async def set(self, name: str, value: bytes | str, ex: int | None = None) -> bool:
+        self.values[name] = value.encode("utf-8") if isinstance(value, str) else value
+        if ex is not None:
+            self.expirations[name] = ex
+        else:
+            self.expirations.pop(name, None)
+        return True
+
+    async def delete(self, *names: str) -> int:
+        removed = 0
+        for name in names:
+            if name in self.values:
+                removed += 1
+            self.values.pop(name, None)
+            self.expirations.pop(name, None)
+        return removed
 
     async def aclose(self, close_connection_pool: bool | None = None) -> None:
         _ = close_connection_pool
@@ -171,6 +196,17 @@ class FailingAuthorizationAuditService:
 class DummyDatabaseRuntime:
     async def dispose(self) -> None:
         return None
+
+
+def _counter_value(counter: Any, **labels: str) -> float:
+    total = 0.0
+    for metric in counter.collect():
+        for sample in metric.samples:
+            if not sample.name.endswith("_total"):
+                continue
+            if all(sample.labels.get(key) == value for key, value in labels.items()):
+                total += float(sample.value)
+    return total
 
 
 @dataclass
@@ -499,6 +535,80 @@ class DummyPluginGovernanceService:
 
 
 @dataclass
+class FakeControlPlaneService:
+    summary_snapshot: object = field(
+        default_factory=lambda: SimpleNamespace(
+            total_subscribers=2,
+            active_subscribers=1,
+            stale_subscribers=1,
+            error_subscribers=0,
+            fenced_subscribers=0,
+            ack_pending_subscribers=1,
+            stream_count=1,
+            group_count=1,
+            node_count=1,
+            tenant_count=1,
+            oldest_heartbeat_age_seconds=45.0,
+            status_counts={"active": 1, "stale": 1},
+            required_actions=["recover_stale_control_plane_subscribers"],
+            remaining_gaps=["control-plane backlog needs recovery"],
+        )
+    )
+    subscribers: list[object] = field(
+        default_factory=lambda: [
+            SimpleNamespace(
+                stream_name="filmu:events",
+                group_name="filmu-api",
+                consumer_name="worker-a",
+                node_id="node-a",
+                tenant_id="tenant-main",
+                status="stale",
+                last_read_offset="100-0",
+                last_delivered_event_id="120-0",
+                last_acked_event_id="110-0",
+                last_error="consumer_fenced owner=node-b contender=node-a",
+                claimed_at=datetime(2026, 4, 16, 9, 58, tzinfo=UTC),
+                last_heartbeat_at=datetime(2026, 4, 16, 9, 59, tzinfo=UTC),
+                created_at=datetime(2026, 4, 16, 9, 50, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                ack_pending=True,
+                fenced=True,
+            )
+        ]
+    )
+    remediation_calls: list[int] = field(default_factory=list)
+    ack_recovery_calls: list[int] = field(default_factory=list)
+
+    async def summarize_subscribers(self, *, active_within_seconds: int) -> object:
+        _ = active_within_seconds
+        return self.summary_snapshot
+
+    async def list_subscribers(self, *, active_within_seconds: int) -> list[object]:
+        _ = active_within_seconds
+        return list(self.subscribers)
+
+    async def remediate_subscribers(self, *, active_within_seconds: int) -> object:
+        self.remediation_calls.append(active_within_seconds)
+        return SimpleNamespace(
+            stale_marked_subscribers=1,
+            fence_resolved_subscribers=1,
+            error_recovered_subscribers=0,
+            total_updated_subscribers=2,
+            summary=self.summary_snapshot,
+        )
+
+    async def recover_ack_backlog(self, *, active_within_seconds: int) -> object:
+        self.ack_recovery_calls.append(active_within_seconds)
+        return SimpleNamespace(
+            rewound_subscribers=1,
+            stale_marked_subscribers=1,
+            pending_without_ack_subscribers=2,
+            total_updated_subscribers=2,
+            summary=self.summary_snapshot,
+        )
+
+
+@dataclass
 class FakeVfsCatalogSupplier:
     snapshot: VfsCatalogSnapshot | None = None
     snapshots_by_generation: dict[int, VfsCatalogSnapshot] = field(default_factory=dict)
@@ -552,6 +662,8 @@ class FakeReplayBackplane:
     oldest_event_id: str | None = None
     latest_event_id: str | None = None
     consumer_counts: dict[str, int] = field(default_factory=dict)
+    claim_calls: list[dict[str, object]] = field(default_factory=list)
+    claim_pending_result: object | None = None
 
     async def pending_summary(self, *, group_name: str) -> object:
         _ = group_name
@@ -560,6 +672,45 @@ class FakeReplayBackplane:
             oldest_event_id=self.oldest_event_id,
             latest_event_id=self.latest_event_id,
             consumer_counts=dict(self.consumer_counts),
+        )
+
+    async def claim_pending(
+        self,
+        *,
+        group_name: str,
+        consumer_name: str,
+        node_id: str,
+        tenant_id: str,
+        min_idle_ms: int,
+        count: int,
+        start_id: str,
+        heartbeat_expiry_seconds: int,
+    ) -> object:
+        self.claim_calls.append(
+            {
+                "group_name": group_name,
+                "consumer_name": consumer_name,
+                "node_id": node_id,
+                "tenant_id": tenant_id,
+                "min_idle_ms": min_idle_ms,
+                "count": count,
+                "start_id": start_id,
+                "heartbeat_expiry_seconds": heartbeat_expiry_seconds,
+            }
+        )
+        if self.claim_pending_result is not None:
+            return self.claim_pending_result
+        pending_snapshot = SimpleNamespace(
+            pending_count=self.pending_count,
+            oldest_event_id=self.oldest_event_id,
+            latest_event_id=self.latest_event_id,
+            consumer_counts=dict(self.consumer_counts),
+        )
+        return SimpleNamespace(
+            claimed_events=[],
+            next_start_id="0-0",
+            pending_before=pending_snapshot,
+            pending_after=pending_snapshot,
         )
 
 
@@ -741,6 +892,31 @@ def _build_client(
     app.state.resources = resources
     app.include_router(create_graphql_router(resources.graphql_plugin_registry), prefix="/graphql")
     return TestClient(app)
+
+
+def _build_graphql_info(app: FastAPI, *, headers: dict[str, str] | None = None) -> Any:
+    from filmu_py.graphql.deps import get_graphql_context
+
+    normalized_headers = headers or {"x-api-key": "a" * 32}
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/graphql",
+        "raw_path": b"/graphql",
+        "scheme": "http",
+        "query_string": b"",
+        "headers": [
+            (key.lower().encode("latin-1"), value.encode("latin-1"))
+            for key, value in normalized_headers.items()
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "root_path": "",
+        "app": app,
+    }
+    request = Request(scope)
+    return SimpleNamespace(context=get_graphql_context(request))
 
 
 def test_graphql_calendar_entries_returns_list_shape() -> None:
@@ -1699,6 +1875,276 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
     }
+
+
+def test_graphql_control_plane_recovery_mutations_follow_route_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_plane_service = FakeControlPlaneService()
+    replay_backplane = FakeReplayBackplane(
+        pending_count=3,
+        oldest_event_id="100-0",
+        latest_event_id="120-0",
+        consumer_counts={"worker-a": 2, "worker-b": 1},
+        claim_pending_result=SimpleNamespace(
+            claimed_events=[
+                SimpleNamespace(event_id="110-0"),
+                SimpleNamespace(event_id="111-0"),
+            ],
+            next_start_id="112-0",
+            pending_before=SimpleNamespace(
+                pending_count=3,
+                oldest_event_id="100-0",
+                latest_event_id="120-0",
+                consumer_counts={"worker-a": 2, "worker-b": 1},
+            ),
+            pending_after=SimpleNamespace(
+                pending_count=1,
+                oldest_event_id="119-0",
+                latest_event_id="120-0",
+                consumer_counts={"recovery-ops": 1},
+            ),
+        ),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        control_plane_service=control_plane_service,
+        replay_backplane=replay_backplane,
+    )
+
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(default_routes, "audit_action", fake_audit_action)
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                mutation RecoverControlPlane {
+                  remediateControlPlaneSubscribers(activeWithinSeconds: 180) {
+                    activeWithinSeconds
+                    staleMarkedSubscribers
+                    fenceResolvedSubscribers
+                    errorRecoveredSubscribers
+                    totalUpdatedSubscribers
+                    summary {
+                      totalSubscribers
+                      staleSubscribers
+                      ackPendingSubscribers
+                    }
+                  }
+                  recoverControlPlaneAckBacklog(activeWithinSeconds: 180) {
+                    activeWithinSeconds
+                    rewoundSubscribers
+                    staleMarkedSubscribers
+                    pendingWithoutAckSubscribers
+                    totalUpdatedSubscribers
+                    summary {
+                      totalSubscribers
+                      staleSubscribers
+                      ackPendingSubscribers
+                    }
+                  }
+                  recoverControlPlanePendingEntries(
+                    input: {
+                      groupName: "filmu-api"
+                      consumerName: "recovery-ops"
+                      minIdleMs: 60000
+                      claimLimit: 25
+                      activeWithinSeconds: 180
+                    }
+                  ) {
+                    groupName
+                    consumerName
+                    minIdleMs
+                    claimLimit
+                    claimedCount
+                    claimedEventIds
+                    nextStartId
+                    pendingCountBefore
+                    pendingCountAfter
+                    oldestPendingEventId
+                    latestPendingEventId
+                    pendingConsumerCounts { key count }
+                    summary {
+                      totalSubscribers
+                      staleSubscribers
+                      ackPendingSubscribers
+                    }
+                    requiredActions
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["remediateControlPlaneSubscribers"] == {
+        "activeWithinSeconds": 180,
+        "staleMarkedSubscribers": 1,
+        "fenceResolvedSubscribers": 1,
+        "errorRecoveredSubscribers": 0,
+        "totalUpdatedSubscribers": 2,
+        "summary": {
+            "totalSubscribers": 2,
+            "staleSubscribers": 1,
+            "ackPendingSubscribers": 1,
+        },
+    }
+    assert payload["recoverControlPlaneAckBacklog"] == {
+        "activeWithinSeconds": 180,
+        "rewoundSubscribers": 1,
+        "staleMarkedSubscribers": 1,
+        "pendingWithoutAckSubscribers": 2,
+        "totalUpdatedSubscribers": 2,
+        "summary": {
+            "totalSubscribers": 2,
+            "staleSubscribers": 1,
+            "ackPendingSubscribers": 1,
+        },
+    }
+    assert payload["recoverControlPlanePendingEntries"] == {
+        "groupName": "filmu-api",
+        "consumerName": "recovery-ops",
+        "minIdleMs": 60000,
+        "claimLimit": 25,
+        "claimedCount": 2,
+        "claimedEventIds": ["110-0", "111-0"],
+        "nextStartId": "112-0",
+        "pendingCountBefore": 3,
+        "pendingCountAfter": 1,
+        "oldestPendingEventId": "100-0",
+        "latestPendingEventId": "120-0",
+        "pendingConsumerCounts": [{"key": "recovery-ops", "count": 1}],
+        "summary": {
+            "totalSubscribers": 2,
+            "staleSubscribers": 1,
+            "ackPendingSubscribers": 1,
+        },
+        "requiredActions": ["repeat_pending_claim_until_backlog_drained"],
+        "remainingGaps": [
+            "bounded claim window left replay pending entries in the consumer group"
+        ],
+    }
+    assert control_plane_service.remediation_calls == [180]
+    assert control_plane_service.ack_recovery_calls == [180]
+    assert replay_backplane.claim_calls == [
+        {
+            "group_name": "filmu-api",
+            "consumer_name": "recovery-ops",
+            "node_id": "operator:operator-1",
+            "tenant_id": "tenant-main",
+            "min_idle_ms": 60000,
+            "count": 25,
+            "start_id": "0-0",
+            "heartbeat_expiry_seconds": 180,
+        }
+    ]
+    assert audit_calls == [
+        {
+            "action": "operations.control_plane.remediate",
+            "target": "operations.control_plane",
+            "details": {
+                "active_within_seconds": 180,
+                "total_updated_subscribers": 2,
+            },
+        },
+        {
+            "action": "operations.control_plane.ack_recovery",
+            "target": "operations.control_plane",
+            "details": {
+                "active_within_seconds": 180,
+                "rewound_subscribers": 1,
+                "pending_without_ack_subscribers": 2,
+                "total_updated_subscribers": 2,
+            },
+        },
+        {
+            "action": "operations.control_plane.pending_recovery",
+            "target": "operations.control_plane",
+            "details": {
+                "group_name": "filmu-api",
+                "consumer_name": "recovery-ops",
+                "min_idle_ms": 60000,
+                "claim_limit": 25,
+                "claimed_count": 2,
+                "pending_count_before": 3,
+                "pending_count_after": 1,
+            },
+        },
+    ]
+
+
+def test_graphql_control_plane_pending_recovery_returns_gap_state_without_backplane() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        control_plane_service=FakeControlPlaneService(),
+    )
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                mutation {
+                  recoverControlPlanePendingEntries(
+                    input: { consumerName: "recovery-ops", claimLimit: 25, activeWithinSeconds: 180 }
+                  ) {
+                    claimedCount
+                    pendingCountBefore
+                    pendingCountAfter
+                    requiredActions
+                    remainingGaps
+                    summary {
+                      totalSubscribers
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["recoverControlPlanePendingEntries"] == {
+        "claimedCount": 0,
+        "pendingCountBefore": 0,
+        "pendingCountAfter": 0,
+        "requiredActions": ["attach_redis_replay_backplane"],
+        "remainingGaps": ["durable replay backplane is not configured"],
+        "summary": {"totalSubscribers": 2},
+    }
+
+
+def test_graphql_control_plane_recovery_mutations_require_backend_admin() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        control_plane_service=FakeControlPlaneService(),
+        replay_backplane=FakeReplayBackplane(),
+    )
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("playback:read", roles="playback:operator"),
+        json={
+            "query": """
+                mutation {
+                  remediateControlPlaneSubscribers(activeWithinSeconds: 180) {
+                    totalUpdatedSubscribers
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
 
 
 def test_graphql_control_plane_support_queries_return_grouped_counts_and_feeds() -> None:
@@ -6608,6 +7054,69 @@ def test_graphql_write_access_policy_revision_requires_settings_write() -> None:
     assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
 
 
+def test_graphql_access_policy_revisions_cache_hot_read_and_invalidate_on_mutation() -> None:
+    from filmu_py.graphql.resolvers import CoreMutationResolver, CoreQueryResolver
+    from filmu_py.graphql.types import AccessPolicyRevisionWriteInput
+
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    access_policy_service = DummyAccessPolicyService(resources.settings)
+    resources.access_policy_service = access_policy_service
+    resources.access_policy_snapshot = access_policy_service.snapshot
+    info = _build_graphql_info(client.app, headers=_graphql_headers("settings:write"))
+    query = CoreQueryResolver()
+    mutation = CoreMutationResolver()
+
+    async def _scenario() -> None:
+        hits_before = _counter_value(CACHE_HITS_TOTAL, namespace="test")
+        invalidations_before = _counter_value(
+            CACHE_INVALIDATIONS_TOTAL,
+            namespace="test",
+            reason="access_policy_mutation",
+        )
+
+        first_result = await query.access_policy_revisions(info, limit=1)
+        second_result = await query.access_policy_revisions(info, limit=10)
+
+        assert len(first_result.revisions) == 1
+        assert _counter_value(CACHE_HITS_TOTAL, namespace="test") == hits_before + 1
+        assert second_result.active_version == resources.settings.access_policy.version
+        assert [row.version for row in second_result.revisions] == [
+            resources.settings.access_policy.version
+        ]
+
+        await mutation.write_access_policy_revision(
+            info,
+            AccessPolicyRevisionWriteInput(
+                version="2026-04-18-graphql-cache-refresh",
+                source="graphql_test",
+                role_grants={"platform:admin": ["settings:write"]},
+                principal_roles={"tenant-main:operator-1": ["platform:admin"]},
+                principal_scopes={"tenant-main:operator-1": ["settings:write"]},
+                principal_tenant_grants={"tenant-main:operator-1": ["tenant-main"]},
+                permission_constraints={},
+            ),
+        )
+
+        assert (
+            _counter_value(
+                CACHE_INVALIDATIONS_TOTAL,
+                namespace="test",
+                reason="access_policy_mutation",
+            )
+            == invalidations_before + 1
+        )
+
+        third_result = await query.access_policy_revisions(info, limit=10)
+        assert [row.version for row in third_result.revisions] == [
+            "2026-04-18-graphql-cache-refresh",
+            resources.settings.access_policy.version,
+        ]
+
+    asyncio.run(_scenario())
+
+
 def test_graphql_plugin_governance_overrides_query_and_mutation_follow_route_parity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6725,6 +7234,101 @@ def test_graphql_plugin_governance_overrides_query_and_mutation_follow_route_par
             "details": {"state": "quarantined"},
         }
     ]
+
+
+def test_graphql_plugin_governance_cache_hot_read_and_invalidate_on_override_write() -> None:
+    from filmu_py.graphql.resolvers import CoreMutationResolver, CoreQueryResolver
+    from filmu_py.graphql.types import PluginGovernanceOverrideWriteInput
+
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "external-scraper",
+                "version": "1.0.0",
+                "api_version": "1",
+                "distribution": "filesystem",
+                "publisher": "community",
+                "release_channel": "stable",
+                "trust_level": "community",
+                "sandbox_profile": "restricted",
+                "tenancy_mode": "tenant",
+                "entry_module": "plugin.py",
+                "scraper": "ExternalScraper",
+                "publishable_events": ["external.scan.completed"],
+            }
+        )
+    )
+    plugin_registry.register_capability(
+        plugin_name="external-scraper",
+        kind=PluginCapabilityKind.SCRAPER,
+        implementation=object(),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        plugin_registry=plugin_registry,
+        settings_overrides={"FILMU_PY_PLUGIN_RUNTIME": {"enforcement_mode": "report_only"}},
+    )
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    resources.plugin_governance_service = DummyPluginGovernanceService()
+    info = _build_graphql_info(client.app, headers=_graphql_headers("settings:write"))
+    query = CoreQueryResolver()
+    mutation = CoreMutationResolver()
+
+    async def _scenario() -> None:
+        hits_before = _counter_value(CACHE_HITS_TOTAL, namespace="test")
+        invalidations_before = _counter_value(
+            CACHE_INVALIDATIONS_TOTAL,
+            namespace="test",
+            reason="plugin_governance_mutation",
+        )
+
+        first_governance = await query.plugin_governance(info)
+        first_overrides = await query.plugin_governance_overrides(info)
+        second_governance = await query.plugin_governance(info)
+        second_overrides = await query.plugin_governance_overrides(info)
+
+        assert first_governance.summary.override_count == 0
+        assert first_overrides == []
+        assert _counter_value(CACHE_HITS_TOTAL, namespace="test") == hits_before + 2
+        assert second_governance.summary.override_count == 0
+        assert second_governance.summary.quarantined_overrides == 0
+        assert [(row.name, row.override_state) for row in second_governance.plugins] == [
+            ("external-scraper", None)
+        ]
+        assert second_overrides == []
+
+        await mutation.write_plugin_governance_override(
+            info,
+            "external-scraper",
+            PluginGovernanceOverrideWriteInput(
+                state="quarantined",
+                reason="signature drift",
+            ),
+        )
+
+        assert (
+            _counter_value(
+                CACHE_INVALIDATIONS_TOTAL,
+                namespace="test",
+                reason="plugin_governance_mutation",
+            )
+            == invalidations_before + 2
+        )
+
+        third_governance = await query.plugin_governance(info)
+        third_overrides = await query.plugin_governance_overrides(info)
+        assert third_governance.summary.override_count == 1
+        assert third_governance.summary.quarantined_overrides == 1
+        assert [(row.name, row.override_state) for row in third_governance.plugins] == [
+            ("external-scraper", "quarantined")
+        ]
+        assert [(row.plugin_name, row.state) for row in third_overrides] == [
+            ("external-scraper", "quarantined")
+        ]
+
+    asyncio.run(_scenario())
 
 
 def test_graphql_write_plugin_governance_override_requires_settings_write() -> None:
