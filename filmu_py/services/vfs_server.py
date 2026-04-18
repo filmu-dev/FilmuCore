@@ -22,6 +22,7 @@ from filmu_py.observability_contract import (
     VFS_ENTRY_ID_HEADER,
     VFS_HANDLE_KEY_HEADER,
     VFS_PROVIDER_FILE_ID_HEADER,
+    build_span_attributes,
     extract_structlog_bindings,
     normalize_text_carrier,
 )
@@ -230,21 +231,7 @@ async def _grpc_observability_scope(
             "rpc.service": "filmu.vfs.catalog.v1.FilmuVfsCatalogService",
             "rpc.method": operation,
         }
-        attributes.update(
-            {
-                key: value
-                for key, value in {
-                    "request.id": bindings.get("request_id"),
-                    "filmuvfs.session_id": bindings.get("vfs_session_id"),
-                    "filmuvfs.daemon_id": bindings.get("vfs_daemon_id"),
-                    "catalog.entry_id": bindings.get("vfs_entry_id"),
-                    "provider.file_id": bindings.get("provider_file_id"),
-                    "vfs.handle_key": bindings.get("handle_key"),
-                    "tenant.id": bindings.get("tenant_id"),
-                }.items()
-                if value is not None
-            }
-        )
+        attributes.update(build_span_attributes(bindings))
         span_manager = tracer.start_as_current_span(
             f"filmuvfs.grpc.{operation}",
             attributes=attributes,

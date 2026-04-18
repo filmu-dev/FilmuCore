@@ -1602,7 +1602,8 @@ impl TelemetryGuard {
             .with_attributes([
                 KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
                 KeyValue::new("service.instance.id", config.daemon_id.clone()),
-                KeyValue::new("filmuvfs.session_id", config.session_id.clone()),
+                KeyValue::new("vfs.daemon_id", config.daemon_id.clone()),
+                KeyValue::new("vfs.session_id", config.session_id.clone()),
             ])
             .build();
         global::set_text_map_propagator(TraceContextPropagator::new());

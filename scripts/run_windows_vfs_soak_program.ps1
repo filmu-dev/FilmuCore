@@ -54,6 +54,53 @@ function Read-JsonFile {
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
+function Get-PressureCauseBucketRollupsFromSummaries {
+    param([object[]] $Summaries)
+
+    $rollups = [ordered]@{}
+    foreach ($bucketName in @(
+        'cache_pressure',
+        'chunk_coalescing',
+        'upstream_wait',
+        'fairness_denial',
+        'provider_refresh_pressure',
+        'cancellation_churn'
+    )) {
+        $reasons = [System.Collections.Generic.List[string]]::new()
+        $criticalRuns = 0
+        $warningRuns = 0
+        foreach ($summary in @($Summaries)) {
+            if ($null -eq $summary -or $summary.PSObject.Properties.Match('pressure_cause_buckets').Count -eq 0) {
+                continue
+            }
+            $pressureBuckets = $summary.pressure_cause_buckets
+            if ($null -eq $pressureBuckets -or $pressureBuckets.PSObject.Properties.Match($bucketName).Count -eq 0) {
+                continue
+            }
+            $bucket = $pressureBuckets.$bucketName
+            if ($null -eq $bucket) {
+                continue
+            }
+            $bucketClass = [string]($bucket.class ?? '')
+            if ($bucketClass -eq 'critical') {
+                $criticalRuns += 1
+            }
+            elseif ($bucketClass -eq 'warning') {
+                $warningRuns += 1
+            }
+            foreach ($reason in @($bucket.reasons)) {
+                Add-UniqueString -Values $reasons -Value ([string]$reason)
+            }
+        }
+        $rollups[$bucketName] = [ordered]@{
+            critical_runs = $criticalRuns
+            warning_runs = $warningRuns
+            reasons = @($reasons)
+        }
+    }
+    return $rollups
+}
+
 $contractSchemaVersion = 1
 $artifactKind = 'windows_vfs_soak_program'
 $FreshnessWindowHours = 72
@@ -327,6 +374,12 @@ if ($trendStatus -eq 'missing') {
     Add-UniqueString -Values $requiredActions -Value 'refresh_windows_vfs_soak_trend_history'
 }
 
+$pressureCauseBuckets = Get-PressureCauseBucketRollupsFromSummaries -Summaries @($loadedSummaries)
+$pressureCauseFindings = @(
+    $pressureCauseBuckets.GetEnumerator() |
+        Where-Object { ([int]($_.Value.critical_runs ?? 0) -gt 0) -or ([int]($_.Value.warning_runs ?? 0) -gt 0) } |
+        ForEach-Object { [string]$_.Key }
+)
 $ready = $failureReasons.Count -eq 0
 $summaryStatus = if ($ready) { 'passed' } else { 'failed' }
 
@@ -363,6 +416,8 @@ $summaryStatus = if ($ready) { 'passed' } else { 'failed' }
     trend_summary_path = $trendSummaryPath
     failure_reasons = @($failureReasons)
     required_actions = @($requiredActions)
+    pressure_cause_buckets = $pressureCauseBuckets
+    pressure_cause_findings = $pressureCauseFindings
     results = $results
     summary_paths = @($summaryPaths)
 } | ConvertTo-Json -Depth 10 | Set-Content -Path $programSummaryPath -Encoding UTF8

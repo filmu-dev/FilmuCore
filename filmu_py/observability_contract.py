@@ -31,6 +31,15 @@ CORRELATION_HEADERS = (
     VFS_HANDLE_KEY_HEADER,
 )
 REQUIRED_CROSS_PROCESS_HEADERS = TRACE_CONTEXT_HEADERS + CORRELATION_HEADERS
+STRUCTLOG_BINDING_TO_SPAN_ATTRIBUTE = (
+    ("request_id", "request.id"),
+    ("tenant_id", "tenant.id"),
+    ("vfs_session_id", "vfs.session_id"),
+    ("vfs_daemon_id", "vfs.daemon_id"),
+    ("vfs_entry_id", "catalog.entry_id"),
+    ("provider_file_id", "provider.file_id"),
+    ("handle_key", "vfs.handle_key"),
+)
 
 
 def normalize_text_carrier(
@@ -64,3 +73,17 @@ def extract_structlog_bindings(carrier: Mapping[str, str]) -> dict[str, str]:
         "handle_key": carrier.get(VFS_HANDLE_KEY_HEADER),
     }
     return {key: value for key, value in bindings.items() if isinstance(value, str) and value}
+
+
+def build_span_attributes(bindings: Mapping[str, str]) -> dict[str, str]:
+    """Return normalized span attributes derived from shared correlation bindings."""
+
+    attributes: dict[str, str] = {}
+    for binding_key, attribute_key in STRUCTLOG_BINDING_TO_SPAN_ATTRIBUTE:
+        value = bindings.get(binding_key)
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if normalized:
+            attributes[attribute_key] = normalized
+    return attributes
