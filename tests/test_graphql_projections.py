@@ -535,6 +535,80 @@ class DummyPluginGovernanceService:
 
 
 @dataclass
+class FakeControlPlaneService:
+    summary_snapshot: object = field(
+        default_factory=lambda: SimpleNamespace(
+            total_subscribers=2,
+            active_subscribers=1,
+            stale_subscribers=1,
+            error_subscribers=0,
+            fenced_subscribers=0,
+            ack_pending_subscribers=1,
+            stream_count=1,
+            group_count=1,
+            node_count=1,
+            tenant_count=1,
+            oldest_heartbeat_age_seconds=45.0,
+            status_counts={"active": 1, "stale": 1},
+            required_actions=["recover_stale_control_plane_subscribers"],
+            remaining_gaps=["control-plane backlog needs recovery"],
+        )
+    )
+    subscribers: list[object] = field(
+        default_factory=lambda: [
+            SimpleNamespace(
+                stream_name="filmu:events",
+                group_name="filmu-api",
+                consumer_name="worker-a",
+                node_id="node-a",
+                tenant_id="tenant-main",
+                status="stale",
+                last_read_offset="100-0",
+                last_delivered_event_id="120-0",
+                last_acked_event_id="110-0",
+                last_error="consumer_fenced owner=node-b contender=node-a",
+                claimed_at=datetime(2026, 4, 16, 9, 58, tzinfo=UTC),
+                last_heartbeat_at=datetime(2026, 4, 16, 9, 59, tzinfo=UTC),
+                created_at=datetime(2026, 4, 16, 9, 50, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 16, 10, 0, tzinfo=UTC),
+                ack_pending=True,
+                fenced=True,
+            )
+        ]
+    )
+    remediation_calls: list[int] = field(default_factory=list)
+    ack_recovery_calls: list[int] = field(default_factory=list)
+
+    async def summarize_subscribers(self, *, active_within_seconds: int) -> object:
+        _ = active_within_seconds
+        return self.summary_snapshot
+
+    async def list_subscribers(self, *, active_within_seconds: int) -> list[object]:
+        _ = active_within_seconds
+        return list(self.subscribers)
+
+    async def remediate_subscribers(self, *, active_within_seconds: int) -> object:
+        self.remediation_calls.append(active_within_seconds)
+        return SimpleNamespace(
+            stale_marked_subscribers=1,
+            fence_resolved_subscribers=1,
+            error_recovered_subscribers=0,
+            total_updated_subscribers=2,
+            summary=self.summary_snapshot,
+        )
+
+    async def recover_ack_backlog(self, *, active_within_seconds: int) -> object:
+        self.ack_recovery_calls.append(active_within_seconds)
+        return SimpleNamespace(
+            rewound_subscribers=1,
+            stale_marked_subscribers=1,
+            pending_without_ack_subscribers=2,
+            total_updated_subscribers=2,
+            summary=self.summary_snapshot,
+        )
+
+
+@dataclass
 class FakeVfsCatalogSupplier:
     snapshot: VfsCatalogSnapshot | None = None
     snapshots_by_generation: dict[int, VfsCatalogSnapshot] = field(default_factory=dict)
@@ -588,6 +662,8 @@ class FakeReplayBackplane:
     oldest_event_id: str | None = None
     latest_event_id: str | None = None
     consumer_counts: dict[str, int] = field(default_factory=dict)
+    claim_calls: list[dict[str, object]] = field(default_factory=list)
+    claim_pending_result: object | None = None
 
     async def pending_summary(self, *, group_name: str) -> object:
         _ = group_name
@@ -596,6 +672,45 @@ class FakeReplayBackplane:
             oldest_event_id=self.oldest_event_id,
             latest_event_id=self.latest_event_id,
             consumer_counts=dict(self.consumer_counts),
+        )
+
+    async def claim_pending(
+        self,
+        *,
+        group_name: str,
+        consumer_name: str,
+        node_id: str,
+        tenant_id: str,
+        min_idle_ms: int,
+        count: int,
+        start_id: str,
+        heartbeat_expiry_seconds: int,
+    ) -> object:
+        self.claim_calls.append(
+            {
+                "group_name": group_name,
+                "consumer_name": consumer_name,
+                "node_id": node_id,
+                "tenant_id": tenant_id,
+                "min_idle_ms": min_idle_ms,
+                "count": count,
+                "start_id": start_id,
+                "heartbeat_expiry_seconds": heartbeat_expiry_seconds,
+            }
+        )
+        if self.claim_pending_result is not None:
+            return self.claim_pending_result
+        pending_snapshot = SimpleNamespace(
+            pending_count=self.pending_count,
+            oldest_event_id=self.oldest_event_id,
+            latest_event_id=self.latest_event_id,
+            consumer_counts=dict(self.consumer_counts),
+        )
+        return SimpleNamespace(
+            claimed_events=[],
+            next_start_id="0-0",
+            pending_before=pending_snapshot,
+            pending_after=pending_snapshot,
         )
 
 
@@ -1760,6 +1875,276 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
     }
+
+
+def test_graphql_control_plane_recovery_mutations_follow_route_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_plane_service = FakeControlPlaneService()
+    replay_backplane = FakeReplayBackplane(
+        pending_count=3,
+        oldest_event_id="100-0",
+        latest_event_id="120-0",
+        consumer_counts={"worker-a": 2, "worker-b": 1},
+        claim_pending_result=SimpleNamespace(
+            claimed_events=[
+                SimpleNamespace(event_id="110-0"),
+                SimpleNamespace(event_id="111-0"),
+            ],
+            next_start_id="112-0",
+            pending_before=SimpleNamespace(
+                pending_count=3,
+                oldest_event_id="100-0",
+                latest_event_id="120-0",
+                consumer_counts={"worker-a": 2, "worker-b": 1},
+            ),
+            pending_after=SimpleNamespace(
+                pending_count=1,
+                oldest_event_id="119-0",
+                latest_event_id="120-0",
+                consumer_counts={"recovery-ops": 1},
+            ),
+        ),
+    )
+    client = _build_client(
+        FakeMediaService(),
+        control_plane_service=control_plane_service,
+        replay_backplane=replay_backplane,
+    )
+
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(default_routes, "audit_action", fake_audit_action)
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                mutation RecoverControlPlane {
+                  remediateControlPlaneSubscribers(activeWithinSeconds: 180) {
+                    activeWithinSeconds
+                    staleMarkedSubscribers
+                    fenceResolvedSubscribers
+                    errorRecoveredSubscribers
+                    totalUpdatedSubscribers
+                    summary {
+                      totalSubscribers
+                      staleSubscribers
+                      ackPendingSubscribers
+                    }
+                  }
+                  recoverControlPlaneAckBacklog(activeWithinSeconds: 180) {
+                    activeWithinSeconds
+                    rewoundSubscribers
+                    staleMarkedSubscribers
+                    pendingWithoutAckSubscribers
+                    totalUpdatedSubscribers
+                    summary {
+                      totalSubscribers
+                      staleSubscribers
+                      ackPendingSubscribers
+                    }
+                  }
+                  recoverControlPlanePendingEntries(
+                    input: {
+                      groupName: "filmu-api"
+                      consumerName: "recovery-ops"
+                      minIdleMs: 60000
+                      claimLimit: 25
+                      activeWithinSeconds: 180
+                    }
+                  ) {
+                    groupName
+                    consumerName
+                    minIdleMs
+                    claimLimit
+                    claimedCount
+                    claimedEventIds
+                    nextStartId
+                    pendingCountBefore
+                    pendingCountAfter
+                    oldestPendingEventId
+                    latestPendingEventId
+                    pendingConsumerCounts { key count }
+                    summary {
+                      totalSubscribers
+                      staleSubscribers
+                      ackPendingSubscribers
+                    }
+                    requiredActions
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["remediateControlPlaneSubscribers"] == {
+        "activeWithinSeconds": 180,
+        "staleMarkedSubscribers": 1,
+        "fenceResolvedSubscribers": 1,
+        "errorRecoveredSubscribers": 0,
+        "totalUpdatedSubscribers": 2,
+        "summary": {
+            "totalSubscribers": 2,
+            "staleSubscribers": 1,
+            "ackPendingSubscribers": 1,
+        },
+    }
+    assert payload["recoverControlPlaneAckBacklog"] == {
+        "activeWithinSeconds": 180,
+        "rewoundSubscribers": 1,
+        "staleMarkedSubscribers": 1,
+        "pendingWithoutAckSubscribers": 2,
+        "totalUpdatedSubscribers": 2,
+        "summary": {
+            "totalSubscribers": 2,
+            "staleSubscribers": 1,
+            "ackPendingSubscribers": 1,
+        },
+    }
+    assert payload["recoverControlPlanePendingEntries"] == {
+        "groupName": "filmu-api",
+        "consumerName": "recovery-ops",
+        "minIdleMs": 60000,
+        "claimLimit": 25,
+        "claimedCount": 2,
+        "claimedEventIds": ["110-0", "111-0"],
+        "nextStartId": "112-0",
+        "pendingCountBefore": 3,
+        "pendingCountAfter": 1,
+        "oldestPendingEventId": "100-0",
+        "latestPendingEventId": "120-0",
+        "pendingConsumerCounts": [{"key": "recovery-ops", "count": 1}],
+        "summary": {
+            "totalSubscribers": 2,
+            "staleSubscribers": 1,
+            "ackPendingSubscribers": 1,
+        },
+        "requiredActions": ["repeat_pending_claim_until_backlog_drained"],
+        "remainingGaps": [
+            "bounded claim window left replay pending entries in the consumer group"
+        ],
+    }
+    assert control_plane_service.remediation_calls == [180]
+    assert control_plane_service.ack_recovery_calls == [180]
+    assert replay_backplane.claim_calls == [
+        {
+            "group_name": "filmu-api",
+            "consumer_name": "recovery-ops",
+            "node_id": "operator:operator-1",
+            "tenant_id": "tenant-main",
+            "min_idle_ms": 60000,
+            "count": 25,
+            "start_id": "0-0",
+            "heartbeat_expiry_seconds": 180,
+        }
+    ]
+    assert audit_calls == [
+        {
+            "action": "operations.control_plane.remediate",
+            "target": "operations.control_plane",
+            "details": {
+                "active_within_seconds": 180,
+                "total_updated_subscribers": 2,
+            },
+        },
+        {
+            "action": "operations.control_plane.ack_recovery",
+            "target": "operations.control_plane",
+            "details": {
+                "active_within_seconds": 180,
+                "rewound_subscribers": 1,
+                "pending_without_ack_subscribers": 2,
+                "total_updated_subscribers": 2,
+            },
+        },
+        {
+            "action": "operations.control_plane.pending_recovery",
+            "target": "operations.control_plane",
+            "details": {
+                "group_name": "filmu-api",
+                "consumer_name": "recovery-ops",
+                "min_idle_ms": 60000,
+                "claim_limit": 25,
+                "claimed_count": 2,
+                "pending_count_before": 3,
+                "pending_count_after": 1,
+            },
+        },
+    ]
+
+
+def test_graphql_control_plane_pending_recovery_returns_gap_state_without_backplane() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        control_plane_service=FakeControlPlaneService(),
+    )
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                mutation {
+                  recoverControlPlanePendingEntries(
+                    input: { consumerName: "recovery-ops", claimLimit: 25, activeWithinSeconds: 180 }
+                  ) {
+                    claimedCount
+                    pendingCountBefore
+                    pendingCountAfter
+                    requiredActions
+                    remainingGaps
+                    summary {
+                      totalSubscribers
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["recoverControlPlanePendingEntries"] == {
+        "claimedCount": 0,
+        "pendingCountBefore": 0,
+        "pendingCountAfter": 0,
+        "requiredActions": ["attach_redis_replay_backplane"],
+        "remainingGaps": ["durable replay backplane is not configured"],
+        "summary": {"totalSubscribers": 2},
+    }
+
+
+def test_graphql_control_plane_recovery_mutations_require_backend_admin() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        control_plane_service=FakeControlPlaneService(),
+        replay_backplane=FakeReplayBackplane(),
+    )
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("playback:read", roles="playback:operator"),
+        json={
+            "query": """
+                mutation {
+                  remediateControlPlaneSubscribers(activeWithinSeconds: 180) {
+                    totalUpdatedSubscribers
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
 
 
 def test_graphql_control_plane_support_queries_return_grouped_counts_and_feeds() -> None:
