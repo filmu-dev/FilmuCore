@@ -723,6 +723,69 @@ class GQLControlPlaneRecoveryReadiness:
 
 
 @strawberry.type
+class GQLControlPlaneRemediation:
+    """One operator-triggered stale/fence/error remediation result."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    active_within_seconds: int = strawberry.field(name="activeWithinSeconds")
+    stale_marked_subscribers: int = strawberry.field(name="staleMarkedSubscribers")
+    fence_resolved_subscribers: int = strawberry.field(name="fenceResolvedSubscribers")
+    error_recovered_subscribers: int = strawberry.field(name="errorRecoveredSubscribers")
+    total_updated_subscribers: int = strawberry.field(name="totalUpdatedSubscribers")
+    summary: GQLControlPlaneSummary
+
+
+@strawberry.type
+class GQLControlPlaneAckRecovery:
+    """One operator-triggered ack-backlog recovery result."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    active_within_seconds: int = strawberry.field(name="activeWithinSeconds")
+    rewound_subscribers: int = strawberry.field(name="rewoundSubscribers")
+    stale_marked_subscribers: int = strawberry.field(name="staleMarkedSubscribers")
+    pending_without_ack_subscribers: int = strawberry.field(
+        name="pendingWithoutAckSubscribers"
+    )
+    total_updated_subscribers: int = strawberry.field(name="totalUpdatedSubscribers")
+    summary: GQLControlPlaneSummary
+
+
+@strawberry.type
+class GQLControlPlanePendingRecovery:
+    """One operator-triggered replay pending-entry recovery result."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    group_name: str = strawberry.field(name="groupName")
+    consumer_name: str = strawberry.field(name="consumerName")
+    min_idle_ms: int = strawberry.field(name="minIdleMs")
+    claim_limit: int = strawberry.field(name="claimLimit")
+    claimed_count: int = strawberry.field(name="claimedCount")
+    claimed_event_ids: list[str] = strawberry.field(name="claimedEventIds")
+    next_start_id: str = strawberry.field(name="nextStartId")
+    pending_count_before: int = strawberry.field(name="pendingCountBefore")
+    pending_count_after: int = strawberry.field(name="pendingCountAfter")
+    oldest_pending_event_id: str | None = strawberry.field(name="oldestPendingEventId", default=None)
+    latest_pending_event_id: str | None = strawberry.field(name="latestPendingEventId", default=None)
+    pending_consumer_counts: list[GQLNamedCountBucket] = strawberry.field(
+        name="pendingConsumerCounts"
+    )
+    summary: GQLControlPlaneSummary
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.input
+class ControlPlanePendingRecoveryInput:
+    """GraphQL input for one replay pending-entry recovery run."""
+
+    group_name: str | None = strawberry.field(name="groupName", default=None)
+    consumer_name: str = strawberry.field(name="consumerName", default="recovery-ops")
+    min_idle_ms: int = strawberry.field(name="minIdleMs", default=60_000)
+    claim_limit: int = strawberry.field(name="claimLimit", default=100)
+    active_within_seconds: int = strawberry.field(name="activeWithinSeconds", default=120)
+
+
+@strawberry.type
 class GQLControlPlaneConsumerSummary:
     """Grouped control-plane ownership summary per consumer."""
 
