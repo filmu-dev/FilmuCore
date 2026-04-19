@@ -62,6 +62,80 @@ async def update_settings_path(
     return validated
 
 
+async def persist_tenant_quota_policy(
+    *,
+    request: Request,
+    db: DatabaseRuntime,
+    tenant_id: str,
+    enabled: bool,
+    policy_version: str,
+    api_requests_per_minute: int | None,
+    worker_enqueues_per_minute: int | None,
+    playback_refreshes_per_minute: int | None,
+    provider_refreshes_per_minute: int | None,
+) -> Settings:
+    """Persist one tenant-scoped quota policy and synchronize runtime state."""
+
+    normalized_tenant_id = tenant_id.strip()
+    normalized_policy_version = policy_version.strip()
+    if not normalized_tenant_id:
+        raise ValueError("tenant_id must not be empty")
+    if not normalized_policy_version:
+        raise ValueError("policy_version must not be empty")
+
+    payload = deepcopy(request.app.state.resources.settings.to_compatibility_dict())
+    tenant_quotas = cast(dict[str, Any], payload.get("tenant_quotas"))
+    if not isinstance(tenant_quotas, dict):
+        raise ValueError("tenant_quotas settings are unavailable")
+
+    tenants = tenant_quotas.setdefault("tenants", {})
+    if not isinstance(tenants, dict):
+        raise ValueError("tenant quota tenant overrides are unavailable")
+
+    tenant_quotas["enabled"] = enabled
+    tenant_quotas["version"] = normalized_policy_version
+    tenants[normalized_tenant_id] = {
+        "api_requests_per_minute": _normalize_quota_limit(
+            "api_requests_per_minute",
+            api_requests_per_minute,
+        ),
+        "worker_enqueues_per_minute": _normalize_quota_limit(
+            "worker_enqueues_per_minute",
+            worker_enqueues_per_minute,
+        ),
+        "playback_refreshes_per_minute": _normalize_quota_limit(
+            "playback_refreshes_per_minute",
+            playback_refreshes_per_minute,
+        ),
+        "provider_refreshes_per_minute": _normalize_quota_limit(
+            "provider_refreshes_per_minute",
+            provider_refreshes_per_minute,
+        ),
+    }
+
+    validated = Settings.from_compatibility_dict(payload)
+    await save_settings(db, payload)
+    resources = request.app.state.resources
+    resources.settings = validated
+    resources.plugin_settings_payload = payload
+    set_runtime_settings(validated)
+    return validated
+
+
+def _normalize_quota_limit(field: str, value: Any) -> int | None:
+    """Return a bounded quota ceiling or None when unset."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer or null")
+    if value < 1:
+        raise ValueError(f"{field} must be greater than or equal to 1")
+    if value > 1_000_000:
+        raise ValueError(f"{field} must be less than or equal to 1000000")
+    return value
+
+
 def _path_set(root: dict[str, Any], path: str, value: Any) -> None:
     """Set one existing dot-path value or raise when invalid."""
 

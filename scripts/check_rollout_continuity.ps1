@@ -15,7 +15,7 @@ param(
     [switch] $ProbeOperatorNow,
     [switch] $AllowOfflineOperator,
     [switch] $AllowBootstrap,
-    [string] $OutputPath = 'artifacts/operations/enterprise-rollout/continuity-summary.json'
+    [string] $OutputPath = 'artifacts/operations/rollout/continuity-summary.json'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -293,7 +293,7 @@ if ($ProbeOperatorNow) {
     }
     & pwsh @operatorArgs
     if ($LASTEXITCODE -ne 0) {
-        throw '[enterprise-rollout-continuity] operator rollout probe failed.'
+        throw '[rollout-continuity] operator rollout probe failed.'
     }
 }
 
@@ -388,7 +388,7 @@ if ($null -eq $playbackTrendSummaryPath) {
         }
         & pwsh @playbackTrendArgs
         if ($LASTEXITCODE -ne 0) {
-            throw '[enterprise-rollout-continuity] playback stability trend probe failed.'
+            throw '[rollout-continuity] playback stability trend probe failed.'
         }
         $playbackTrendSummaryFile = Get-LatestByPattern -Root $PlaybackArtifactsRoot -Filter 'playback-stability-trend-summary-*.json'
         $playbackTrendSummaryPath = if ($null -ne $playbackTrendSummaryFile) { $playbackTrendSummaryFile.FullName } else { $null }
@@ -503,10 +503,10 @@ else {
 }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $absoluteOutputPath) | Out-Null
 $summary | ConvertTo-Json -Depth 8 | Set-Content -Path $absoluteOutputPath -Encoding UTF8
-Write-Host ("[enterprise-rollout-continuity] Summary: {0}" -f $absoluteOutputPath)
+Write-Host ("[rollout-continuity] Summary: {0}" -f $absoluteOutputPath)
 
 if ($summary.status -eq 'failed') {
-    throw ("[enterprise-rollout-continuity] continuity gate failed; see {0}" -f $absoluteOutputPath)
+    throw ("[rollout-continuity] continuity gate failed; see {0}" -f $absoluteOutputPath)
 }
 
-Write-Host '[enterprise-rollout-continuity] PASS' -ForegroundColor Green
+Write-Host '[rollout-continuity] PASS' -ForegroundColor Green

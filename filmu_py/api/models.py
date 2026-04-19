@@ -229,6 +229,24 @@ class PluginEventStatusResponse(BaseModel):
     publisher: str | None = None
     publishable_events: list[str]
     hook_subscriptions: list[str]
+    queued_hook_subscriptions: list[str] = []
+    publishable_event_count: int = 0
+    hook_subscription_count: int = 0
+    queued_hook_subscription_count: int = 0
+    wiring_status: str = "idle"
+    hook_dispatch_mode: str = "in_process"
+    queued_dispatch_enabled: bool = False
+    queue_health_status: str = "inactive"
+    queue_delivery_observed: bool = False
+    queue_observation_count: int = 0
+    latest_queue_lag_seconds: float | None = None
+    max_queue_lag_seconds: float | None = None
+    successful_deliveries: int = 0
+    timeout_deliveries: int = 0
+    failed_deliveries: int = 0
+    retried_deliveries: int = 0
+    required_actions: list[str] = []
+    remaining_gaps: list[str] = []
 
 
 class PluginStreamControlRequest(BaseModel):
@@ -429,25 +447,47 @@ class ControlPlaneAutomationResponse(BaseModel):
     remaining_gaps: list[str]
 
 
+class ProofArtifactResponse(BaseModel):
+    """One recorded proof artifact reference."""
+
+    ref: str
+    category: str
+    label: str
+    recorded: bool
+
+
 class PluginIntegrationReadinessPluginResponse(BaseModel):
-    """One builtin enterprise plugin integration-readiness row."""
+    """One integration-readiness row."""
 
     name: str
-    capability_kind: Literal["scraper", "content_service", "event_hook"]
+    capability_kind: str
     status: Literal["ready", "partial", "blocked"]
     registered: bool
     enabled: bool
     configured: bool
     ready: bool
+    endpoint: str | None = None
+    endpoint_configured: bool = False
     config_source: str | None = None
     required_settings: list[str]
     missing_settings: list[str]
+    contract_proof_refs: list[str] = []
+    soak_proof_refs: list[str] = []
+    contract_proofs: list[ProofArtifactResponse] = []
+    soak_proofs: list[ProofArtifactResponse] = []
+    contract_validated: bool = False
+    soak_validated: bool = False
+    proof_gap_count: int = 0
+    verification_status: Literal["verified", "partial", "missing"] = "missing"
+    verification_check_count: int = 0
+    verified_check_count: int = 0
+    missing_verification_checks: list[str] = []
     required_actions: list[str]
     remaining_gaps: list[str]
 
 
 class PluginIntegrationReadinessResponse(BaseModel):
-    """Operator-facing readiness for builtin enterprise plugin integrations."""
+    """Operator-facing readiness for runtime integrations."""
 
     generated_at: str
     status: Literal["ready", "partial", "blocked"]
@@ -456,8 +496,8 @@ class PluginIntegrationReadinessResponse(BaseModel):
     remaining_gaps: list[str]
 
 
-class EnterpriseOperationsSliceResponse(BaseModel):
-    """One enterprise-operations workstream posture summary."""
+class OperationsSliceResponse(BaseModel):
+    """One operations workstream posture summary."""
 
     name: str
     status: Literal["ready", "partial", "blocked", "not_ready"]
@@ -497,22 +537,22 @@ class RuntimeLifecycleResponse(BaseModel):
     transitions: list[RuntimeLifecycleTransitionResponse]
 
 
-class EnterpriseOperationsGovernanceResponse(BaseModel):
-    """Machine-readable posture for the current enterprise operations slices."""
+class OperationsGovernanceResponse(BaseModel):
+    """Machine-readable posture for the current operations slices."""
 
     generated_at: str
-    playback_gate: EnterpriseOperationsSliceResponse
-    operational_evidence: EnterpriseOperationsSliceResponse
-    identity_authz: EnterpriseOperationsSliceResponse
-    tenant_boundary: EnterpriseOperationsSliceResponse
-    vfs_data_plane: EnterpriseOperationsSliceResponse
-    distributed_control_plane: EnterpriseOperationsSliceResponse
-    runtime_lifecycle: EnterpriseOperationsSliceResponse
-    sre_program: EnterpriseOperationsSliceResponse
-    operator_log_pipeline: EnterpriseOperationsSliceResponse
-    plugin_runtime_isolation: EnterpriseOperationsSliceResponse
-    heavy_stage_workload_isolation: EnterpriseOperationsSliceResponse
-    release_metadata_performance: EnterpriseOperationsSliceResponse
+    playback_gate: OperationsSliceResponse
+    operational_evidence: OperationsSliceResponse
+    identity_authz: OperationsSliceResponse
+    tenant_boundary: OperationsSliceResponse
+    vfs_data_plane: OperationsSliceResponse
+    distributed_control_plane: OperationsSliceResponse
+    runtime_lifecycle: OperationsSliceResponse
+    sre_program: OperationsSliceResponse
+    operator_log_pipeline: OperationsSliceResponse
+    plugin_runtime_isolation: OperationsSliceResponse
+    heavy_stage_workload_isolation: OperationsSliceResponse
+    release_metadata_performance: OperationsSliceResponse
 
 
 class PlaybackGateEvidenceResponse(BaseModel):
@@ -559,6 +599,7 @@ class PlaybackGateEvidenceResponse(BaseModel):
     windows_soak_failure_reasons: list[str] = []
     windows_soak_required_actions: list[str] = []
     windows_soak_profiles: list[str]
+    windows_soak_pressure_cause_buckets: dict[str, int] = {}
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -575,6 +616,16 @@ class VfsRolloutControlRequest(BaseModel):
     rollback_reason: str | None = None
     rollback_expires_at: str | None = None
     notes: str | None = None
+
+
+class ExecuteVfsRolloutActionRequest(BaseModel):
+    """Validated operator action request for VFS rollout transitions."""
+
+    action: Literal["promote", "hold", "clear_hold", "rollback", "clear_rollback"]
+    reason: str | None = None
+    target_environment_class: str | None = None
+    expected_canary_decision: str | None = None
+    expected_merge_gate: str | None = None
 
 
 class VfsRolloutHistoryEntryResponse(BaseModel):
@@ -620,6 +671,7 @@ class VfsRolloutControlResponse(BaseModel):
     canary_decision: str
     merge_gate: str
     reasons: list[str]
+    allowed_actions: list[str] = []
     history: list[VfsRolloutHistoryEntryResponse] = []
 
 
@@ -636,13 +688,27 @@ class ObservabilityConvergenceResponse(BaseModel):
     log_shipper_type: str
     log_shipper_target_configured: bool
     log_shipper_healthcheck_configured: bool
+    log_field_mapping_version: str
     search_backend: str
     environment_shipping_enabled: bool
+    environment_rollout_ready: bool
     alerting_enabled: bool
+    alert_rollout_ready: bool
     rust_trace_correlation_enabled: bool
     correlation_contract_complete: bool
     proof_refs: list[str]
+    proof_ref_count: int
     required_correlation_fields: list[str]
+    trace_context_headers: list[str]
+    correlation_headers: list[str]
+    shared_cross_process_headers: list[str]
+    expected_correlation_fields: list[str]
+    expected_correlation_fields_ready: bool
+    missing_expected_correlation_fields: list[str]
+    grpc_bind_address: str
+    grpc_service_name: str
+    otlp_endpoint: str | None = None
+    log_shipper_target: str | None = None
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -665,11 +731,18 @@ class DownloaderOrchestrationResponse(BaseModel):
     generated_at: str
     selection_mode: str
     selected_provider: str | None = None
+    selected_provider_source: str | None = None
+    enabled_provider_count: int = 0
+    configured_provider_count: int = 0
+    builtin_enabled_provider_count: int = 0
+    plugin_enabled_provider_count: int = 0
     multi_provider_enabled: bool
     plugin_downloaders_registered: int
     worker_plugin_dispatch_ready: bool
+    ordered_failover_ready: bool = False
     fanout_ready: bool
     multi_container_ready: bool
+    provider_priority_order: list[str] = []
     providers: list[DownloaderProviderCandidateResponse]
     required_actions: list[str]
     remaining_gaps: list[str]
@@ -890,6 +963,83 @@ class QueueStatusHistoryResponse(BaseModel):
     history: list[QueueStatusHistoryPointResponse]
 
 
+class ItemWorkflowDrillStatusResponse(BaseModel):
+    """Latest item-workflow replay/compensation drill summary."""
+
+    queue_name: str
+    has_history: bool = False
+    observed_at: str
+    examined_checkpoints: int
+    replayed_checkpoints: int
+    compensated_checkpoints: int
+    finalize_requeues: int
+    parse_requeues: int
+    scrape_requeues: int
+    index_requeues: int
+    skipped_active: int
+    unrecoverable: int
+    failed: int
+    candidate_status_counts: dict[str, int] = {}
+    compensation_stage_counts: dict[str, int] = {}
+    outcome: Literal["ok", "warning", "critical"] = "ok"
+    run_failed: bool = False
+    last_error: str | None = None
+
+
+class ItemWorkflowDrillHistoryPointResponse(BaseModel):
+    """One persisted item-workflow replay/compensation drill run."""
+
+    observed_at: str
+    examined_checkpoints: int
+    replayed_checkpoints: int
+    compensated_checkpoints: int
+    finalize_requeues: int
+    parse_requeues: int
+    scrape_requeues: int
+    index_requeues: int
+    skipped_active: int
+    unrecoverable: int
+    failed: int
+    candidate_status_counts: dict[str, int] = {}
+    compensation_stage_counts: dict[str, int] = {}
+    outcome: Literal["ok", "warning", "critical"] = "ok"
+    run_failed: bool = False
+    last_error: str | None = None
+
+
+class ItemWorkflowDrillHistorySummaryResponse(BaseModel):
+    """Derived operator rollup for bounded item-workflow drill history."""
+
+    points: int
+    latest_outcome: Literal["ok", "warning", "critical"] = "ok"
+    critical_points: int
+    warning_points: int
+    total_examined_checkpoints: int
+    total_replayed_checkpoints: int
+    total_compensated_checkpoints: int
+    total_finalize_requeues: int
+    total_parse_requeues: int
+    total_scrape_requeues: int
+    total_index_requeues: int
+    total_skipped_active: int
+    total_unrecoverable: int
+    total_failed: int
+    max_examined_checkpoints: int
+    max_failed: int
+    latest_run_failed: bool = False
+    latest_error: str | None = None
+    aggregate_candidate_status_counts: dict[str, int] = {}
+    aggregate_compensation_stage_counts: dict[str, int] = {}
+
+
+class ItemWorkflowDrillHistoryResponse(BaseModel):
+    """Bounded item-workflow drill history for operator views."""
+
+    queue_name: str
+    summary: ItemWorkflowDrillHistorySummaryResponse
+    history: list[ItemWorkflowDrillHistoryPointResponse]
+
+
 class MetadataReindexStatusResponse(BaseModel):
     """Latest metadata reindex/reconciliation run summary."""
 
@@ -1056,12 +1206,30 @@ class ServingGovernanceResponse(BaseModel):
     hls_disk_usage_bytes: int
     hls_manifest_invalid: int
     hls_manifest_regenerated: int
+    hls_ffmpeg_failures_unavailable: int
+    hls_ffmpeg_failures_timeout: int
+    hls_ffmpeg_failures_manifest_invalid: int
+    hls_ffmpeg_failures_incomplete_output: int
+    hls_ffmpeg_failures_empty: int
+    hls_ffmpeg_failures_io: int
+    hls_ffmpeg_failures_input: int
+    hls_ffmpeg_failures_codec: int
+    hls_ffmpeg_failures_transport: int
+    hls_ffmpeg_failures_unknown: int
+    hls_ffmpeg_retry_attempts: int
+    hls_ffmpeg_retry_recovered: int
+    hls_ffmpeg_retry_suppressed: int
+    hls_ffmpeg_cleanup_failures: int
+    hls_ffmpeg_cleanup_suppressed_usable_output: int
     hls_route_failures_total: int
     hls_route_failures_generation_failed: int
     hls_route_failures_generation_timeout: int
     hls_route_failures_generation_capacity_exceeded: int
     hls_route_failures_generator_unavailable: int
     hls_route_failures_lease_failed: int
+    hls_route_failures_transcode_source_requires_refresh: int
+    hls_route_failures_transcode_source_provider_circuit_open: int
+    hls_route_failures_transcode_source_rate_limited: int
     hls_route_failures_transcode_source_unavailable: int
     hls_route_failures_manifest_invalid: int
     hls_route_failures_generated_missing: int
@@ -1135,6 +1303,10 @@ class ServingGovernanceResponse(BaseModel):
     selected_hls_streams_needing_refresh: int
     selected_direct_streams_failed: int
     selected_hls_streams_failed: int
+    hls_transcode_remote_direct_candidates: int
+    hls_transcode_remote_direct_blocked_requires_refresh: int
+    hls_transcode_remote_direct_blocked_provider_circuit_open: int
+    hls_transcode_remote_direct_blocked_failed_lease: int
     direct_playback_refresh_rate_limited: int
     direct_playback_refresh_provider_circuit_open: int
     hls_failed_lease_refresh_rate_limited: int
@@ -1333,6 +1505,7 @@ class ServingGovernanceResponse(BaseModel):
     playback_gate_windows_soak_repeat_count: int
     playback_gate_windows_soak_profile_coverage_complete: int
     playback_gate_windows_soak_profile_coverage: list[str] = []
+    playback_gate_windows_soak_pressure_cause_buckets: dict[str, int] = {}
     playback_gate_windows_soak_recorded_at: str = ""
     playback_gate_windows_soak_expires_at: str = ""
     playback_gate_windows_soak_stale: int = 0
@@ -1569,6 +1742,28 @@ class ActiveStreamDetailResponse(BaseModel):
     hls_owner: ActiveStreamOwnerResponse | None = None
 
 
+class MediaEntryLifecycleResponse(BaseModel):
+    """Expanded lifecycle view for one item-detail media-entry row."""
+
+    owner_kind: str
+    owner_id: str | None = None
+    active_roles: list[str]
+    source_key: str | None = None
+    source_attachment_id: str | None = None
+    provider_family: str
+    locator_source: str
+    match_basis: str | None = None
+    restricted_fallback: bool
+    refresh_state: str | None = None
+    expires_at: str | None = None
+    last_refreshed_at: str | None = None
+    last_refresh_error: str | None = None
+    effective_refresh_state: str
+    ready_for_direct: bool
+    ready_for_hls: bool
+    ready_for_playback: bool
+
+
 class MediaEntryDetailResponse(BaseModel):
     """VFS-facing media-entry projection for item-detail compatibility responses."""
 
@@ -1579,6 +1774,7 @@ class MediaEntryDetailResponse(BaseModel):
     local_path: str | None = None
     download_url: str | None = None
     unrestricted_url: str | None = None
+    source_attachment_id: str | None = None
     provider: str | None = None
     provider_download_id: str | None = None
     provider_file_id: str | None = None
@@ -1593,6 +1789,7 @@ class MediaEntryDetailResponse(BaseModel):
     active_for_direct: bool = False
     active_for_hls: bool = False
     is_active_stream: bool = False
+    lifecycle: MediaEntryLifecycleResponse | None = None
 
 
 class ItemRequestSummaryResponse(BaseModel):

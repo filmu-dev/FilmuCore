@@ -70,6 +70,7 @@ class CompatSubscriptionResolver:
             yield LogEntry(
                 timestamp=payload.timestamp,
                 level=payload.level,
+                message=payload.message,
                 event=payload.event,
                 worker_id=payload.worker_id,
                 item_id=payload.item_id,

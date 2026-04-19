@@ -635,7 +635,8 @@ def _is_degraded_direct_attachment(attachment: PlaybackAttachment) -> bool:
 
     if attachment.kind != "remote-direct":
         return False
-    if attachment.source_key.endswith(":restricted-fallback"):
+    source_key = attachment.source_key or ""
+    if source_key.endswith(":restricted-fallback"):
         return True
     if attachment.restricted_url is None:
         return False

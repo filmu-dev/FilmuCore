@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 from pydantic import AnyUrl, SecretStr
@@ -19,6 +21,7 @@ from filmu_py.graphql import GraphQLPluginRegistry, build_schema
 from filmu_py.graphql.deps import GraphQLContext
 from filmu_py.resources import AppResources
 from filmu_py.services.media import (
+    ConsumerPlaybackActivityRecord,
     EnrichmentResult,
     ItemActionResult,
     MediaItemRecord,
@@ -49,8 +52,10 @@ class DummyDatabaseRuntime:
 @dataclass
 class FakeMediaService:
     requested_seasons_seen: list[int] | None = None
+    requested_episodes_seen: dict[str, list[int]] | None = None
     updated_setting_path: str | None = None
     updated_setting_value: Any = None
+    recorded_activity_calls: list[dict[str, Any]] = field(default_factory=list)
     item: MediaItemRecord = field(
         default_factory=lambda: MediaItemRecord(
             id="item-1",
@@ -71,8 +76,9 @@ class FakeMediaService:
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
     ) -> ItemActionResult:
-        _ = (media_type, tmdb_ids, tvdb_ids, requested_episodes)
+        _ = (media_type, tmdb_ids, tvdb_ids)
         self.requested_seasons_seen = requested_seasons
+        self.requested_episodes_seen = requested_episodes
         if identifiers:
             self.item = replace(self.item, external_ref=identifiers[0])
         return ItemActionResult(message="Requested 1 item.", ids=[self.item.id])
@@ -90,8 +96,9 @@ class FakeMediaService:
         requested_seasons: list[int] | None = None,
         requested_episodes: dict[str, list[int]] | None = None,
     ) -> RequestItemServiceResult:
-        _ = (title, media_type, attributes, requested_episodes)
+        _ = (title, media_type, attributes)
         self.requested_seasons_seen = requested_seasons
+        self.requested_episodes_seen = requested_episodes
         self.item = replace(self.item, external_ref=external_ref)
         return RequestItemServiceResult(
             item=self.item,
@@ -112,6 +119,54 @@ class FakeMediaService:
 
     async def remove_items(self, ids: list[str]) -> ItemActionResult:
         return ItemActionResult(message="Items removed.", ids=list(ids))
+
+    async def record_consumer_playback_activity(
+        self,
+        *,
+        item_id: str,
+        tenant_id: str,
+        actor_id: str,
+        actor_type: str,
+        activity_kind: str,
+        target: str | None = None,
+        device_key: str,
+        device_label: str,
+        session_key: str | None = None,
+        position_seconds: int | None = None,
+        duration_seconds: int | None = None,
+        completed: bool = False,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        self.recorded_activity_calls.append(
+            {
+                "item_id": item_id,
+                "tenant_id": tenant_id,
+                "actor_id": actor_id,
+                "actor_type": actor_type,
+                "activity_kind": activity_kind,
+                "target": target,
+                "device_key": device_key,
+                "device_label": device_label,
+                "session_key": session_key,
+                "position_seconds": position_seconds,
+                "duration_seconds": duration_seconds,
+                "completed": completed,
+                "occurred_at": occurred_at,
+            }
+        )
+
+    async def get_consumer_playback_activity(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        actor_type: str,
+        item_limit: int = 12,
+        device_limit: int = 6,
+        history_limit: int = 240,
+    ) -> ConsumerPlaybackActivityRecord:
+        _ = (tenant_id, actor_id, actor_type, item_limit, device_limit, history_limit)
+        return ConsumerPlaybackActivityRecord(generated_at=datetime.now(UTC).isoformat())
 
 
 def _build_settings() -> Settings:
@@ -140,14 +195,24 @@ def _build_resources(media_service: FakeMediaService) -> AppResources:
     )
 
 
-def _build_context(resources: AppResources, media_service: FakeMediaService) -> GraphQLContext:
+def _build_context(
+    resources: AppResources,
+    media_service: FakeMediaService,
+    *,
+    headers: dict[str, str] | None = None,
+) -> GraphQLContext:
+    normalized_headers = {
+        key.lower().encode("latin-1"): value.encode("latin-1")
+        for key, value in (headers or {}).items()
+    }
     request = Request(
         {
             "type": "http",
             "method": "POST",
             "path": "/graphql",
-            "headers": [],
+            "headers": list(normalized_headers.items()),
             "query_string": b"",
+            "app": SimpleNamespace(state=SimpleNamespace(resources=resources)),
         }
     )
 
@@ -166,12 +231,17 @@ def _build_context(resources: AppResources, media_service: FakeMediaService) -> 
     )
 
 
-def _execute_mutation(query: str, media_service: FakeMediaService) -> Any:
+def _execute_mutation(
+    query: str,
+    media_service: FakeMediaService,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Any:
     resources = _build_resources(media_service)
     result = asyncio.run(
         build_schema(resources.graphql_plugin_registry).execute(
             query,
-            context_value=_build_context(resources, media_service),
+            context_value=_build_context(resources, media_service, headers=headers),
         )
     )
     return result
@@ -204,6 +274,39 @@ def test_request_item_mutation_partial_seasons() -> None:
 
     assert result.errors is None
     assert media_service.requested_seasons_seen == [1, 2]
+    assert result.data["requestItem"]["itemId"] == "item-1"
+
+
+def test_request_item_mutation_partial_episodes() -> None:
+    media_service = FakeMediaService()
+
+    result = _execute_mutation(
+        """
+        mutation {
+          requestItem(
+            input: {
+              externalRef: "tmdb:1399"
+              mediaType: "tv"
+              requestedEpisodes: [
+                { seasonNumber: 1, episodeNumbers: [1, 2, 3] }
+                { seasonNumber: 2, episodeNumbers: [4] }
+              ]
+            }
+          ) {
+            itemId
+            enrichmentSource
+          }
+        }
+        """,
+        media_service,
+    )
+
+    assert result.errors is None
+    assert media_service.requested_seasons_seen == [1, 2]
+    assert media_service.requested_episodes_seen == {
+        "1": [1, 2, 3],
+        "2": [4],
+    }
     assert result.data["requestItem"]["itemId"] == "item-1"
 
 
@@ -256,6 +359,63 @@ def test_update_setting_mutation() -> None:
     assert media_service.updated_setting_value is False
 
 
+def test_record_consumer_playback_activity_mutation_tracks_shared_activity() -> None:
+    media_service = FakeMediaService()
+
+    result = _execute_mutation(
+        """
+        mutation {
+          recordConsumerPlaybackActivity(
+            input: {
+              itemId: "item-1"
+              activityType: PROGRESS
+              sessionKey: "session-item-1"
+              positionSeconds: 184
+              durationSeconds: 7200
+              deviceKey: "browser-firefox"
+              deviceLabel: "Firefox on Windows"
+            }
+          ) {
+            itemId
+            activityType
+            success
+            occurredAt
+          }
+        }
+        """,
+        media_service,
+        headers={
+            "x-actor-id": "user-1",
+            "x-actor-type": "user",
+            "x-tenant-id": "tenant-main",
+        },
+    )
+
+    assert result.errors is None
+    payload = result.data["recordConsumerPlaybackActivity"]
+    assert payload["itemId"] == "item-1"
+    assert payload["activityType"] == "progress"
+    assert payload["success"] is True
+    assert payload["occurredAt"]
+    assert media_service.recorded_activity_calls == [
+        {
+            "item_id": "item-1",
+            "tenant_id": "tenant-main",
+            "actor_id": "user-1",
+            "actor_type": "user",
+            "activity_kind": "progress",
+            "target": None,
+            "device_key": "browser-firefox",
+            "device_label": "Firefox on Windows",
+            "session_key": "session-item-1",
+            "position_seconds": 184,
+            "duration_seconds": 7200,
+            "completed": False,
+            "occurred_at": datetime.fromisoformat(payload["occurredAt"]),
+        }
+    ]
+
+
 def test_graphql_schema_includes_mutation_type() -> None:
     schema_sdl = build_schema(GraphQLPluginRegistry()).as_str()
 
@@ -263,3 +423,4 @@ def test_graphql_schema_includes_mutation_type() -> None:
     assert "requestItem" in schema_sdl
     assert "itemAction" in schema_sdl
     assert "updateSetting" in schema_sdl
+    assert "recordConsumerPlaybackActivity" in schema_sdl

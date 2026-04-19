@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -124,6 +125,8 @@ class PlaybackAttachmentRefreshResult:
     restricted_url: str | None = None
     unrestricted_url: str | None = None
     expires_at: datetime | None = None
+    provider: str | None = None
+    provider_download_id: str | None = None
     provider_file_id: str | None = None
     provider_file_path: str | None = None
     original_filename: str | None = None
@@ -202,6 +205,12 @@ class PlaybackAttachmentProviderUnrestrictedLink:
     download_url: str
     restricted_url: str | None = None
     expires_at: datetime | None = None
+    provider: str | None = None
+    provider_download_id: str | None = None
+    provider_file_id: str | None = None
+    provider_file_path: str | None = None
+    original_filename: str | None = None
+    file_size: int | None = None
 
 
 class PlaybackAttachmentProviderClient(Protocol):
@@ -295,6 +304,11 @@ HlsRestrictedFallbackRefreshControlPlaneOutcome = Literal[
 AppScopedHlsRestrictedFallbackRefreshTriggerOutcome = Literal[
     "controller_unavailable",
     "triggered",
+]
+HlsTranscodeAdmissionFailureReason = Literal[
+    "requires_refresh",
+    "provider_circuit_open",
+    "failed_lease",
 ]
 DirectPlaybackRefreshRecommendationReason = Literal[
     "selected_failed_lease",
@@ -560,6 +574,16 @@ class AppScopedHlsRestrictedFallbackRefreshTriggerResult:
     control_plane_result: HlsRestrictedFallbackRefreshControlPlaneTriggerResult | None = None
 
 
+@dataclass(frozen=True)
+class HlsTranscodeAdmissionDecision:
+    """Policy decision for admitting one remote-direct attachment into the HLS transcode path."""
+
+    allowed: bool
+    reason: HlsTranscodeAdmissionFailureReason | None = None
+    detail: str | None = None
+    retry_after_seconds: float | None = None
+
+
 _playback_refresh_controllers = __import__(
     "filmu_py.services.playback_refresh_controllers",
     fromlist=["ignored"],
@@ -728,91 +752,7 @@ class LinkResolver:
         *,
         now: datetime,
     ) -> PlaybackAttachment | None:
-        source_attachment = entry.source_attachment
-        kind = cast(PlaybackAttachmentKind, entry.kind)
-        provider = entry.provider
-        provider_download_id = entry.provider_download_id
-        provider_file_id = entry.provider_file_id
-        provider_file_path = entry.provider_file_path
-        original_filename = entry.original_filename
-        file_size = entry.size_bytes
-        local_path = entry.local_path
-        restricted_url = entry.download_url
-        unrestricted_url = entry.unrestricted_url
-
-        if source_attachment is not None:
-            provider = provider or source_attachment.provider
-            provider_download_id = provider_download_id or source_attachment.provider_download_id
-            provider_file_id = provider_file_id or source_attachment.provider_file_id
-            provider_file_path = provider_file_path or source_attachment.provider_file_path
-            original_filename = original_filename or source_attachment.original_filename
-            file_size = file_size if file_size is not None else source_attachment.file_size
-            local_path = local_path or source_attachment.local_path
-            restricted_url = restricted_url or source_attachment.restricted_url
-            unrestricted_url = unrestricted_url or source_attachment.unrestricted_url
-
-        restricted_url, unrestricted_url = PlaybackSourceService._normalize_media_entry_urls(
-            provider=provider,
-            restricted_url=restricted_url,
-            unrestricted_url=unrestricted_url,
-        )
-        effective_refresh_state = PlaybackSourceService._effective_media_entry_refresh_state(
-            entry.refresh_state,
-            provider=provider,
-            restricted_url=restricted_url,
-            unrestricted_url=entry.unrestricted_url,
-        )
-
-        if kind == "local-file":
-            if local_path is None or not Path(local_path).is_file():
-                return None
-            return PlaybackAttachment(
-                kind=kind,
-                locator=local_path,
-                source_key="media-entry",
-                provider=provider,
-                provider_download_id=provider_download_id,
-                provider_file_id=provider_file_id,
-                provider_file_path=provider_file_path,
-                original_filename=original_filename,
-                file_size=file_size,
-                local_path=local_path,
-                restricted_url=restricted_url,
-                unrestricted_url=unrestricted_url,
-                expires_at=entry.expires_at,
-                refresh_state=PlaybackSourceService._normalize_refresh_state(
-                    effective_refresh_state
-                ),
-            )
-
-        locator = unrestricted_url or restricted_url
-        if locator is None:
-            return None
-        if entry.expires_at is not None and entry.expires_at <= now:
-            return None
-
-        final_kind: PlaybackAttachmentKind = kind
-        if kind != "remote-hls" and is_hls_playlist_url(locator):
-            final_kind = "remote-hls"
-
-        return PlaybackAttachment(
-            kind=final_kind,
-            locator=locator,
-            source_key="media-entry",
-            provider=provider,
-            provider_download_id=provider_download_id,
-            provider_file_id=provider_file_id,
-            provider_file_path=provider_file_path,
-            original_filename=original_filename,
-            file_size=file_size,
-            local_path=local_path,
-            restricted_url=restricted_url,
-            unrestricted_url=unrestricted_url,
-            expires_at=entry.expires_at,
-            refresh_state=PlaybackSourceService._normalize_refresh_state(
-                effective_refresh_state
-            ),
-        )
+        return PlaybackSourceService.build_current_attachment_from_media_entry(entry, now=now)
 
     async def resolve_media_entry(
         self,
@@ -1085,8 +1025,182 @@ class PlaybackSourceService:
         return left_text != "" and left_text == right_text
 
     @staticmethod
+    def _basename_identity_value(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        candidate = normalized.rsplit("/", 1)[-1]
+        candidate = candidate.rsplit("\\", 1)[-1]
+        return candidate or None
+
+    @staticmethod
     def _matching_file_size(left: int | None, right: int | None) -> bool:
         return left is not None and right is not None and left == right
+
+    @staticmethod
+    def _build_media_entry_attachment_projection(
+        entry: MediaEntryORM,
+        *,
+        now: datetime,
+        require_available: bool,
+    ) -> tuple[PlaybackAttachment | None, bool]:
+        source_attachment = entry.source_attachment
+        kind = cast(PlaybackAttachmentKind, entry.kind)
+        provider = entry.provider
+        provider_download_id = entry.provider_download_id
+        provider_file_id = entry.provider_file_id
+        provider_file_path = entry.provider_file_path
+        original_filename = entry.original_filename
+        file_size = entry.size_bytes
+        local_path = entry.local_path
+        restricted_url = entry.download_url
+        unrestricted_url = entry.unrestricted_url
+
+        if source_attachment is not None:
+            provider = provider or source_attachment.provider
+            provider_download_id = provider_download_id or source_attachment.provider_download_id
+            provider_file_id = provider_file_id or source_attachment.provider_file_id
+            provider_file_path = provider_file_path or source_attachment.provider_file_path
+            original_filename = original_filename or source_attachment.original_filename
+            file_size = file_size if file_size is not None else source_attachment.file_size
+            local_path = local_path or source_attachment.local_path
+            restricted_url = restricted_url or source_attachment.restricted_url
+            unrestricted_url = unrestricted_url or source_attachment.unrestricted_url
+
+        restricted_url, unrestricted_url = PlaybackSourceService._normalize_media_entry_urls(
+            provider=provider,
+            restricted_url=restricted_url,
+            unrestricted_url=unrestricted_url,
+        )
+        effective_refresh_state = PlaybackSourceService._effective_media_entry_refresh_state(
+            entry.refresh_state,
+            provider=provider,
+            restricted_url=restricted_url,
+            unrestricted_url=entry.unrestricted_url,
+        )
+        refresh_state = PlaybackSourceService._normalize_refresh_state(effective_refresh_state)
+        source_key = "media-entry"
+        if kind != "local-file" and restricted_url is not None and unrestricted_url is None:
+            source_key = "media-entry:restricted-fallback"
+
+        if kind == "local-file":
+            if local_path is None:
+                return None, False
+            if require_available and not Path(local_path).is_file():
+                return None, True
+            return (
+                PlaybackAttachment(
+                    kind=kind,
+                    locator=local_path,
+                    source_key=source_key,
+                    provider=provider,
+                    provider_download_id=provider_download_id,
+                    provider_file_id=provider_file_id,
+                    provider_file_path=provider_file_path,
+                    original_filename=original_filename,
+                    file_size=file_size,
+                    local_path=local_path,
+                    restricted_url=restricted_url,
+                    unrestricted_url=unrestricted_url,
+                    expires_at=entry.expires_at,
+                    refresh_state=refresh_state,
+                ),
+                False,
+            )
+
+        locator = unrestricted_url or restricted_url
+        if locator is None:
+            return None, False
+        if require_available and entry.expires_at is not None and entry.expires_at <= now:
+            return None, False
+
+        final_kind: PlaybackAttachmentKind = kind
+        if kind != "remote-hls" and is_hls_playlist_url(locator):
+            final_kind = "remote-hls"
+
+        return (
+            PlaybackAttachment(
+                kind=final_kind,
+                locator=locator,
+                source_key=source_key,
+                provider=provider,
+                provider_download_id=provider_download_id,
+                provider_file_id=provider_file_id,
+                provider_file_path=provider_file_path,
+                original_filename=original_filename,
+                file_size=file_size,
+                local_path=local_path,
+                restricted_url=restricted_url,
+                unrestricted_url=unrestricted_url,
+                expires_at=entry.expires_at,
+                refresh_state=refresh_state,
+            ),
+            False,
+        )
+
+    @staticmethod
+    def merge_attachment_identity(
+        preferred: PlaybackAttachment,
+        fallback: PlaybackAttachment,
+    ) -> PlaybackAttachment:
+        return PlaybackAttachment(
+            kind=preferred.kind,
+            locator=preferred.locator,
+            source_key=preferred.source_key,
+            resolver_authoritative=preferred.resolver_authoritative,
+            provider=preferred.provider or fallback.provider,
+            provider_download_id=preferred.provider_download_id or fallback.provider_download_id,
+            provider_file_id=preferred.provider_file_id or fallback.provider_file_id,
+            provider_file_path=preferred.provider_file_path or fallback.provider_file_path,
+            original_filename=preferred.original_filename or fallback.original_filename,
+            file_size=preferred.file_size if preferred.file_size is not None else fallback.file_size,
+            local_path=preferred.local_path or fallback.local_path,
+            restricted_url=preferred.restricted_url or fallback.restricted_url,
+            unrestricted_url=preferred.unrestricted_url or fallback.unrestricted_url,
+            expires_at=preferred.expires_at or fallback.expires_at,
+            refresh_state=preferred.refresh_state or fallback.refresh_state,
+        )
+
+    @staticmethod
+    def build_current_attachment_from_media_entry(
+        entry: MediaEntryORM,
+        *,
+        now: datetime | None = None,
+    ) -> PlaybackAttachment | None:
+        reference = now or datetime.now(UTC)
+        attachment, _ = PlaybackSourceService._build_media_entry_attachment_projection(
+            entry,
+            now=reference,
+            require_available=True,
+        )
+        return attachment
+
+    @staticmethod
+    def build_media_entry_direct_file_link_snapshot(
+        entry: MediaEntryORM,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[PlaybackAttachment | None, DirectFileLinkLifecycleSnapshot | None]:
+        reference = now or datetime.now(UTC)
+        attachment, _ = PlaybackSourceService._build_media_entry_attachment_projection(
+            entry,
+            now=reference,
+            require_available=False,
+        )
+        if attachment is None:
+            return None, None
+        lifecycle = PlaybackSourceService._build_media_entry_direct_file_link_lifecycle(
+            entry,
+            attachment=attachment,
+            match_basis=PlaybackSourceService._match_basis_for_media_entry_owner(
+                entry,
+                attachment,
+                source_attachment_id=entry.source_attachment_id,
+            ),
+        )
+        return attachment, lifecycle
 
     @staticmethod
     def _normalize_refresh_state(value: str | None) -> PlaybackAttachmentRefreshState | None:
@@ -1123,7 +1237,8 @@ class PlaybackSourceService:
 
     @staticmethod
     def _is_direct_file_restricted_fallback(attachment: PlaybackAttachment) -> bool:
-        return attachment.source_key.endswith(
+        source_key = attachment.source_key or ""
+        return source_key.endswith(
             ":restricted-fallback"
         ) or _is_degraded_direct_attachment(attachment)
 
@@ -1359,9 +1474,9 @@ class PlaybackSourceService:
             provider_family=PlaybackSourceService._classify_direct_file_provider_family(provider),
             locator_source=PlaybackSourceService._classify_direct_file_locator_source(
                 attachment.locator,
-                local_path=entry.local_path,
-                unrestricted_url=entry.unrestricted_url,
-                restricted_url=entry.download_url,
+                local_path=attachment.local_path or entry.local_path,
+                unrestricted_url=attachment.unrestricted_url,
+                restricted_url=attachment.restricted_url,
             ),
             restricted_fallback=PlaybackSourceService._is_direct_file_restricted_fallback(
                 attachment
@@ -1616,6 +1731,8 @@ class PlaybackSourceService:
         target.local_path = source.local_path
         target.restricted_url = source.restricted_url
         target.unrestricted_url = source.unrestricted_url
+        target.provider = source.provider
+        target.provider_download_id = source.provider_download_id
         target.provider_file_id = source.provider_file_id
         target.provider_file_path = source.provider_file_path
         target.original_filename = source.original_filename
@@ -1704,6 +1821,8 @@ class PlaybackSourceService:
         target.local_path = source.local_path
         target.download_url = source.download_url
         target.unrestricted_url = source.unrestricted_url
+        target.provider = source.provider
+        target.provider_download_id = source.provider_download_id
         target.provider_file_id = source.provider_file_id
         target.provider_file_path = source.provider_file_path
         target.original_filename = source.original_filename
@@ -2110,6 +2229,47 @@ class PlaybackSourceService:
             False,
         )
 
+    def assess_hls_transcode_attachment(
+        self,
+        item: MediaItemORM,
+        attachment: PlaybackAttachment,
+    ) -> HlsTranscodeAdmissionDecision:
+        """Return whether one remote-direct attachment is eligible to enter the HLS transcode path."""
+
+        if attachment.kind != "remote-direct":
+            return HlsTranscodeAdmissionDecision(allowed=True)
+
+        lifecycle = self.build_direct_file_link_lifecycle(attachment, item=item)
+        refresh_state = lifecycle.refresh_state or attachment.refresh_state
+        provider = attachment.provider
+        if refresh_state == "failed":
+            return HlsTranscodeAdmissionDecision(
+                allowed=False,
+                reason="failed_lease",
+                detail=self._build_hls_transcode_failed_lease_detail(
+                    attachment,
+                    lifecycle=lifecycle,
+                ),
+                retry_after_seconds=10.0,
+            )
+
+        if lifecycle.restricted_fallback or refresh_state in {"stale", "refreshing"}:
+            if provider is not None and self._provider_circuit_breaker.is_open(provider):
+                return HlsTranscodeAdmissionDecision(
+                    allowed=False,
+                    reason="provider_circuit_open",
+                    detail=self._build_hls_transcode_provider_recovery_detail(),
+                    retry_after_seconds=self._provider_circuit_breaker.retry_after_seconds(provider),
+                )
+            return HlsTranscodeAdmissionDecision(
+                allowed=False,
+                reason="requires_refresh",
+                detail=self._build_hls_transcode_requires_refresh_detail(),
+                retry_after_seconds=10.0,
+            )
+
+        return HlsTranscodeAdmissionDecision(allowed=True)
+
     def _resolve_persisted_media_entry_attachments(
         self, item: MediaItemORM
     ) -> tuple[list[PlaybackAttachment], dict[str, PlaybackAttachment], bool]:
@@ -2352,6 +2512,42 @@ class PlaybackSourceService:
         )
 
     @staticmethod
+    def _build_hls_transcode_requires_refresh_detail() -> str:
+        return "HLS transcode source requires direct playback refresh before transcode can start"
+
+    @staticmethod
+    def _build_hls_transcode_provider_recovery_detail() -> str:
+        return "HLS transcode source refresh is paused while provider recovery is in progress"
+
+    @staticmethod
+    def _build_hls_transcode_failed_lease_detail(
+        attachment: PlaybackAttachment,
+        *,
+        lifecycle: DirectFileLinkLifecycleSnapshot | None,
+    ) -> str:
+        base_detail = "Selected direct playback lease refresh failed"
+        last_refresh_error = lifecycle.last_refresh_error if lifecycle is not None else None
+        if last_refresh_error:
+            base_detail = f"{base_detail}: {last_refresh_error}"
+        elif attachment.refresh_state == "failed":
+            base_detail = "Selected direct playback lease refresh failed"
+        return f"HLS transcode source is unavailable: {base_detail}"
+
+    @staticmethod
+    def _build_refresh_deferred_headers(
+        *,
+        retry_after_seconds: float | None,
+        deferred_reason: PlaybackRefreshDeferredReason | None,
+    ) -> dict[str, str] | None:
+        if retry_after_seconds is None:
+            return None
+
+        headers = {"Retry-After": str(max(1, math.ceil(retry_after_seconds)))}
+        if deferred_reason is not None:
+            headers["X-Filmu-Refresh-Deferred"] = deferred_reason
+        return headers
+
+    @staticmethod
     def _attachment_from_orm(attachment: PlaybackAttachmentORM) -> PlaybackAttachment:
         if attachment.kind not in _PERSISTED_ATTACHMENT_KINDS:
             raise ValueError(f"unsupported playback attachment kind: {attachment.kind}")
@@ -2507,23 +2703,43 @@ class PlaybackSourceService:
             return None
         if entry.kind not in _PERSISTED_ATTACHMENT_KINDS:
             return None
-        if not entry.download_url and not entry.provider_download_id:
+        source_attachment = entry.source_attachment
+        provider = entry.provider
+        provider_download_id = entry.provider_download_id
+        provider_file_id = entry.provider_file_id
+        provider_file_path = entry.provider_file_path
+        restricted_url = entry.download_url
+        unrestricted_url = entry.unrestricted_url
+        local_path = entry.local_path
+        original_filename = entry.original_filename
+        file_size = entry.size_bytes
+        if source_attachment is not None:
+            provider = provider or source_attachment.provider
+            provider_download_id = provider_download_id or source_attachment.provider_download_id
+            provider_file_id = provider_file_id or source_attachment.provider_file_id
+            provider_file_path = provider_file_path or source_attachment.provider_file_path
+            restricted_url = restricted_url or source_attachment.restricted_url
+            unrestricted_url = unrestricted_url or source_attachment.unrestricted_url
+            local_path = local_path or source_attachment.local_path
+            original_filename = original_filename or source_attachment.original_filename
+            file_size = file_size if file_size is not None else source_attachment.file_size
+        if not restricted_url and not provider_download_id:
             return None
         return MediaEntryLeaseRefreshRequest(
             media_entry_id=entry.id,
             item_id=entry.item_id,
             kind=cast(PlaybackAttachmentKind, entry.kind),
-            provider=entry.provider,
-            provider_download_id=entry.provider_download_id,
-            restricted_url=entry.download_url,
-            unrestricted_url=entry.unrestricted_url,
-            local_path=entry.local_path,
+            provider=provider,
+            provider_download_id=provider_download_id,
+            restricted_url=restricted_url,
+            unrestricted_url=unrestricted_url,
+            local_path=local_path,
             refresh_state=entry.refresh_state,
             roles=roles,
-            provider_file_id=entry.provider_file_id,
-            provider_file_path=entry.provider_file_path,
-            original_filename=entry.original_filename,
-            file_size=entry.size_bytes,
+            provider_file_id=provider_file_id,
+            provider_file_path=provider_file_path,
+            original_filename=original_filename,
+            file_size=file_size,
         )
 
     @staticmethod
@@ -2601,6 +2817,8 @@ class PlaybackSourceService:
                 download_url=download_url,
                 unrestricted_url=unrestricted_url,
                 expires_at=result.expires_at,
+                provider=result.provider,
+                provider_download_id=result.provider_download_id,
                 provider_file_id=result.provider_file_id,
                 provider_file_path=result.provider_file_path,
                 original_filename=result.original_filename,
@@ -2672,6 +2890,10 @@ class PlaybackSourceService:
             "selected_hls_streams_needing_refresh": 0,
             "selected_direct_streams_failed": 0,
             "selected_hls_streams_failed": 0,
+            "hls_transcode_remote_direct_candidates": 0,
+            "hls_transcode_remote_direct_blocked_requires_refresh": 0,
+            "hls_transcode_remote_direct_blocked_provider_circuit_open": 0,
+            "hls_transcode_remote_direct_blocked_failed_lease": 0,
             **playback_refresh_deferral_governance_snapshot(),
         }
 
@@ -2708,6 +2930,14 @@ class PlaybackSourceService:
                     snapshot["selected_hls_streams_failed"] += 1
                 elif self._media_entry_needs_refresh(hls_entry, now=reference):
                     snapshot["selected_hls_streams_needing_refresh"] += 1
+
+            resolution_snapshot = self.build_resolution_snapshot(item)
+            transcode_attachment = resolution_snapshot.hls
+            if transcode_attachment is not None and transcode_attachment.kind == "remote-direct":
+                snapshot["hls_transcode_remote_direct_candidates"] += 1
+                decision = self.assess_hls_transcode_attachment(item, transcode_attachment)
+                if not decision.allowed and decision.reason is not None:
+                    snapshot[f"hls_transcode_remote_direct_blocked_{decision.reason}"] += 1
 
         return snapshot
 
@@ -2780,12 +3010,31 @@ class PlaybackSourceService:
         if not projections:
             return None
 
+        candidates = list(projections)
+
+        if request.provider is not None:
+            provider_matches = [
+                projection
+                for projection in candidates
+                if projection.provider is not None and projection.provider == request.provider
+            ]
+            if provider_matches:
+                candidates = provider_matches
+
+        if request.provider_download_id is not None:
+            download_matches = [
+                projection
+                for projection in candidates
+                if projection.provider_download_id is not None
+                and projection.provider_download_id == request.provider_download_id
+            ]
+            if download_matches:
+                candidates = download_matches
+
         provider_file_id = request.provider_file_id
         if provider_file_id is not None:
             matches = [
-                projection
-                for projection in projections
-                if projection.provider_file_id == provider_file_id
+                projection for projection in candidates if projection.provider_file_id == provider_file_id
             ]
             if len(matches) == 1:
                 return matches[0]
@@ -2794,18 +3043,40 @@ class PlaybackSourceService:
         if provider_file_path is not None:
             matches = [
                 projection
-                for projection in projections
+                for projection in candidates
                 if projection.provider_file_path == provider_file_path
             ]
             if len(matches) == 1:
                 return matches[0]
+
+        requested_basename = PlaybackSourceService._basename_identity_value(
+            provider_file_path or request.original_filename
+        )
+        if requested_basename is not None:
+            file_size = request.file_size
+            basename_matches = [
+                projection
+                for projection in candidates
+                if PlaybackSourceService._basename_identity_value(
+                    projection.provider_file_path or projection.original_filename
+                )
+                == requested_basename
+            ]
+            if file_size is not None:
+                size_matches = [
+                    projection for projection in basename_matches if projection.file_size == file_size
+                ]
+                if len(size_matches) == 1:
+                    return size_matches[0]
+            if len(basename_matches) == 1:
+                return basename_matches[0]
 
         original_filename = request.original_filename
         file_size = request.file_size
         if original_filename is not None and file_size is not None:
             matches = [
                 projection
-                for projection in projections
+                for projection in candidates
                 if projection.original_filename == original_filename
                 and projection.file_size == file_size
             ]
@@ -2814,22 +3085,20 @@ class PlaybackSourceService:
 
         if original_filename is not None:
             matches = [
-                projection
-                for projection in projections
-                if projection.original_filename == original_filename
+                projection for projection in candidates if projection.original_filename == original_filename
             ]
             if len(matches) == 1:
                 return matches[0]
 
         if file_size is not None:
             matches = [
-                projection for projection in projections if projection.file_size == file_size
+                projection for projection in candidates if projection.file_size == file_size
             ]
             if len(matches) == 1:
                 return matches[0]
 
-        if len(projections) == 1:
-            return projections[0]
+        if len(candidates) == 1:
+            return candidates[0]
 
         return None
 
@@ -2885,6 +3154,24 @@ class PlaybackSourceService:
                             restricted_url=unrestricted.restricted_url,
                             unrestricted_url=download_url,
                             expires_at=unrestricted.expires_at,
+                            provider=unrestricted.provider or request.provider,
+                            provider_download_id=(
+                                unrestricted.provider_download_id or request.provider_download_id
+                            ),
+                            provider_file_id=(
+                                unrestricted.provider_file_id or request.provider_file_id
+                            ),
+                            provider_file_path=(
+                                unrestricted.provider_file_path or request.provider_file_path
+                            ),
+                            original_filename=(
+                                unrestricted.original_filename or request.original_filename
+                            ),
+                            file_size=(
+                                unrestricted.file_size
+                                if unrestricted.file_size is not None
+                                else request.file_size
+                            ),
                         )
                     )
 
@@ -2899,16 +3186,20 @@ class PlaybackSourceService:
                         )
                     if projection.unrestricted_url:
                         return _provider_success(
-                            PlaybackAttachmentRefreshResult(
-                                ok=True,
-                                locator=projection.unrestricted_url,
-                                restricted_url=projection.restricted_url,
-                                unrestricted_url=projection.unrestricted_url,
-                                provider_file_id=projection.provider_file_id,
-                                provider_file_path=projection.provider_file_path,
-                                original_filename=projection.original_filename,
-                                file_size=projection.file_size,
-                            )
+                        PlaybackAttachmentRefreshResult(
+                            ok=True,
+                            locator=projection.unrestricted_url,
+                            restricted_url=projection.restricted_url,
+                            unrestricted_url=projection.unrestricted_url,
+                            provider=projection.provider or request.provider,
+                            provider_download_id=(
+                                projection.provider_download_id or request.provider_download_id
+                            ),
+                            provider_file_id=projection.provider_file_id,
+                            provider_file_path=projection.provider_file_path,
+                            original_filename=projection.original_filename,
+                            file_size=projection.file_size,
+                        )
                         )
 
                     unrestricted = await client.unrestrict_link(
@@ -2928,10 +3219,26 @@ class PlaybackSourceService:
                             restricted_url=unrestricted.restricted_url or projection.restricted_url,
                             unrestricted_url=download_url,
                             expires_at=unrestricted.expires_at,
-                            provider_file_id=projection.provider_file_id,
-                            provider_file_path=projection.provider_file_path,
-                            original_filename=projection.original_filename,
-                            file_size=projection.file_size,
+                            provider=projection.provider or unrestricted.provider or request.provider,
+                            provider_download_id=(
+                                projection.provider_download_id
+                                or unrestricted.provider_download_id
+                                or request.provider_download_id
+                            ),
+                            provider_file_id=(
+                                projection.provider_file_id or unrestricted.provider_file_id
+                            ),
+                            provider_file_path=(
+                                projection.provider_file_path or unrestricted.provider_file_path
+                            ),
+                            original_filename=(
+                                projection.original_filename or unrestricted.original_filename
+                            ),
+                            file_size=(
+                                projection.file_size
+                                if projection.file_size is not None
+                                else unrestricted.file_size
+                            ),
                         )
                     )
 
@@ -2953,6 +3260,24 @@ class PlaybackSourceService:
                             restricted_url=unrestricted.restricted_url,
                             unrestricted_url=download_url,
                             expires_at=unrestricted.expires_at,
+                            provider=unrestricted.provider or request.provider,
+                            provider_download_id=(
+                                unrestricted.provider_download_id or request.provider_download_id
+                            ),
+                            provider_file_id=(
+                                unrestricted.provider_file_id or request.provider_file_id
+                            ),
+                            provider_file_path=(
+                                unrestricted.provider_file_path or request.provider_file_path
+                            ),
+                            original_filename=(
+                                unrestricted.original_filename or request.original_filename
+                            ),
+                            file_size=(
+                                unrestricted.file_size
+                                if unrestricted.file_size is not None
+                                else request.file_size
+                            ),
                         )
                     )
             except Exception as exc:  # pragma: no cover - defensive guard for provider clients.
@@ -4143,6 +4468,8 @@ class PlaybackSourceService:
                 restricted_url=result.restricted_url,
                 unrestricted_url=result.unrestricted_url,
                 expires_at=result.expires_at,
+                provider=result.provider,
+                provider_download_id=result.provider_download_id,
                 provider_file_id=result.provider_file_id,
                 provider_file_path=result.provider_file_path,
                 original_filename=result.original_filename,
@@ -4184,6 +4511,8 @@ class PlaybackSourceService:
         restricted_url: str | None = None,
         unrestricted_url: str | None,
         expires_at: datetime | None,
+        provider: str | None = None,
+        provider_download_id: str | None = None,
         provider_file_id: str | None = None,
         provider_file_path: str | None = None,
         original_filename: str | None = None,
@@ -4199,6 +4528,10 @@ class PlaybackSourceService:
             attachment.restricted_url = restricted_url
         attachment.unrestricted_url = unrestricted_url
         attachment.expires_at = expires_at
+        if provider is not None:
+            attachment.provider = provider
+        if provider_download_id is not None:
+            attachment.provider_download_id = provider_download_id
         if provider_file_id is not None:
             attachment.provider_file_id = provider_file_id
         if provider_file_path is not None:
@@ -4262,6 +4595,8 @@ class PlaybackSourceService:
         unrestricted_url: str | None = None,
         expires_at: datetime | None = None,
         local_path: str | None = None,
+        provider: str | None = None,
+        provider_download_id: str | None = None,
         provider_file_id: str | None = None,
         provider_file_path: str | None = None,
         original_filename: str | None = None,
@@ -4278,6 +4613,10 @@ class PlaybackSourceService:
             entry.unrestricted_url = unrestricted_url
         if local_path is not None:
             entry.local_path = local_path
+        if provider is not None:
+            entry.provider = provider
+        if provider_download_id is not None:
+            entry.provider_download_id = provider_download_id
         if provider_file_id is not None:
             entry.provider_file_id = provider_file_id
         if provider_file_path is not None:
@@ -4443,6 +4782,29 @@ class PlaybackSourceService:
                 selected_entry.last_refreshed_at = selected_entry_last_refreshed_at
                 selected_entry.last_refresh_error = selected_entry_last_refresh_error
                 selected_entry.updated_at = selected_entry_updated_at
+                deferred_headers = self._build_refresh_deferred_headers(
+                    retry_after_seconds=outcome.retry_after_seconds,
+                    deferred_reason=(
+                        "refresh_rate_limited"
+                        if outcome.limiter_bucket_key is not None
+                        else (
+                            "provider_circuit_open"
+                            if outcome.retry_after_seconds is not None
+                            else None
+                        )
+                    ),
+                )
+                if force_refresh:
+                    self._observe_resolution_duration(
+                        surface=_ACTIVE_STREAM_ROLE_DIRECT,
+                        result="failed_lease",
+                        started_at=started_at,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=outcome.detail or selected_entry_contract_detail,
+                        headers=deferred_headers,
+                    )
                 self._observe_resolution_duration(
                     surface=_ACTIVE_STREAM_ROLE_DIRECT,
                     result=decision.result,
@@ -4479,6 +4841,18 @@ class PlaybackSourceService:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail=selected_entry_contract_detail,
+                    headers=self._build_refresh_deferred_headers(
+                        retry_after_seconds=outcome.retry_after_seconds,
+                        deferred_reason=(
+                            "refresh_rate_limited"
+                            if outcome.limiter_bucket_key is not None
+                            else (
+                                "provider_circuit_open"
+                                if outcome.retry_after_seconds is not None
+                                else None
+                            )
+                        ),
+                    ),
                 )
 
             self._observe_resolution_duration(
@@ -4494,6 +4868,18 @@ class PlaybackSourceService:
                         selected_entry,
                         role=_ACTIVE_STREAM_ROLE_DIRECT,
                     )
+                ),
+                headers=self._build_refresh_deferred_headers(
+                    retry_after_seconds=outcome.retry_after_seconds,
+                    deferred_reason=(
+                        "refresh_rate_limited"
+                        if outcome.limiter_bucket_key is not None
+                        else (
+                            "provider_circuit_open"
+                            if outcome.retry_after_seconds is not None
+                            else None
+                        )
+                    ),
                 ),
             )
 
@@ -4604,6 +4990,40 @@ class PlaybackSourceService:
                     )
                     return outcome.attachment
             if hls_attachment is not None:
+                if hls_attachment.kind == "remote-direct":
+                    admission = self.assess_hls_transcode_attachment(item, hls_attachment)
+                    if not admission.allowed:
+                        risk_reason = (
+                            "provider_circuit_open"
+                            if admission.reason == "provider_circuit_open"
+                            else (
+                                "selected_failed_lease"
+                                if admission.reason == "failed_lease"
+                                else "transcode_source_requires_refresh"
+                            )
+                        )
+                        PLAYBACK_RISK_EVENTS.labels(
+                            surface=_ACTIVE_STREAM_ROLE_HLS,
+                            reason=risk_reason,
+                        ).inc()
+                        self._observe_resolution_duration(
+                            surface=_ACTIVE_STREAM_ROLE_HLS,
+                            result="failed_lease",
+                            started_at=started_at,
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=admission.detail
+                            or self._build_hls_transcode_requires_refresh_detail(),
+                            headers=self._build_refresh_deferred_headers(
+                                retry_after_seconds=admission.retry_after_seconds,
+                                deferred_reason=(
+                                    "provider_circuit_open"
+                                    if admission.reason == "provider_circuit_open"
+                                    else None
+                                ),
+                            ),
+                        )
                 self._observe_resolution_duration(
                     surface=_ACTIVE_STREAM_ROLE_HLS,
                     result="resolved",
@@ -4613,6 +5033,38 @@ class PlaybackSourceService:
 
             direct_attachment = snapshot.direct
             if direct_attachment is not None and direct_attachment.kind == "remote-direct":
+                admission = self.assess_hls_transcode_attachment(item, direct_attachment)
+                if not admission.allowed:
+                    risk_reason = (
+                        "provider_circuit_open"
+                        if admission.reason == "provider_circuit_open"
+                        else (
+                            "selected_failed_lease"
+                            if admission.reason == "failed_lease"
+                            else "transcode_source_requires_refresh"
+                        )
+                    )
+                    PLAYBACK_RISK_EVENTS.labels(
+                        surface=_ACTIVE_STREAM_ROLE_HLS,
+                        reason=risk_reason,
+                    ).inc()
+                    self._observe_resolution_duration(
+                        surface=_ACTIVE_STREAM_ROLE_HLS,
+                        result="failed_lease",
+                        started_at=started_at,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=admission.detail or self._build_hls_transcode_requires_refresh_detail(),
+                        headers=self._build_refresh_deferred_headers(
+                            retry_after_seconds=admission.retry_after_seconds,
+                            deferred_reason=(
+                                "provider_circuit_open"
+                                if admission.reason == "provider_circuit_open"
+                                else None
+                            ),
+                        ),
+                    )
                 self._observe_resolution_duration(
                     surface=_ACTIVE_STREAM_ROLE_HLS,
                     result="resolved",

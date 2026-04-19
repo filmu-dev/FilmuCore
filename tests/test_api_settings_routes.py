@@ -479,7 +479,7 @@ def test_settings_put_emits_audit_event_with_actor_and_tenant(monkeypatch: Any) 
         headers=_headers(
             **{
                 "x-actor-id": "platform-admin",
-                "x-tenant-id": "tenant-enterprise",
+                "x-tenant-id": "tenant-platform",
                 "x-actor-roles": "platform:admin,settings:write",
             }
         ),
@@ -491,7 +491,7 @@ def test_settings_put_emits_audit_event_with_actor_and_tenant(monkeypatch: Any) 
             "action": "settings.put_current",
             "target": "runtime.settings",
             "actor_id": "platform-admin",
-            "tenant_id": "tenant-enterprise",
+            "tenant_id": "tenant-platform",
             "roles": ("platform:admin", "settings:write"),
         }
     ]
@@ -520,7 +520,7 @@ def test_generate_apikey_emits_audit_event_with_actor_and_tenant(monkeypatch: An
         headers=_headers(
             **{
                 "x-actor-id": "security-admin",
-                "x-tenant-id": "tenant-enterprise",
+                "x-tenant-id": "tenant-platform",
                 "x-actor-scopes": "backend:admin,security:apikey.rotate",
             }
         ),
@@ -532,7 +532,7 @@ def test_generate_apikey_emits_audit_event_with_actor_and_tenant(monkeypatch: An
             "action": "security.generate_apikey",
             "target": "runtime.api_key",
             "actor_id": "security-admin",
-            "tenant_id": "tenant-enterprise",
+            "tenant_id": "tenant-platform",
             "scopes": ("backend:admin", "security:apikey.rotate"),
         }
     ]

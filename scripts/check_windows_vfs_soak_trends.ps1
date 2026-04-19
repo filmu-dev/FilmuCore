@@ -67,6 +67,65 @@ function Get-MetricKeys {
     )
 }
 
+function Get-PressureCauseSnapshot {
+    param([object] $Summary)
+
+    $normalized = [ordered]@{}
+    $rawBuckets = $null
+    if ($null -ne $Summary -and $Summary.PSObject.Properties.Name -contains 'pressure_cause_buckets') {
+        $rawBuckets = $Summary.pressure_cause_buckets
+    }
+    if ($null -eq $rawBuckets) {
+        return $normalized
+    }
+    if ($rawBuckets -is [System.Collections.IDictionary]) {
+        foreach ($entry in $rawBuckets.GetEnumerator()) {
+            $name = [string]$entry.Key
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                continue
+            }
+            $normalized[$name] = [int]($entry.Value ?? 0)
+        }
+        return $normalized
+    }
+    foreach ($property in $rawBuckets.PSObject.Properties) {
+        $name = [string]$property.Name
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
+        $normalized[$name] = [int]($property.Value ?? 0)
+    }
+    return $normalized
+}
+
+function Merge-PressureCauseBuckets {
+    param(
+        [hashtable] $Accumulator,
+        [object] $Buckets
+    )
+
+    if ($null -eq $Buckets) {
+        return
+    }
+    if ($Buckets -is [System.Collections.IDictionary]) {
+        foreach ($entry in $Buckets.GetEnumerator()) {
+            $name = [string]$entry.Key
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                continue
+            }
+            $Accumulator[$name] = [int]($Accumulator[$name] ?? 0) + [int]($entry.Value ?? 0)
+        }
+        return
+    }
+    foreach ($property in $Buckets.PSObject.Properties) {
+        $name = [string]$property.Name
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
+        $Accumulator[$name] = [int]($Accumulator[$name] ?? 0) + [int]($property.Value ?? 0)
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
     $ArtifactsRoot = Get-DefaultArtifactsRoot
 }
@@ -125,6 +184,7 @@ foreach ($summaryPath in $SummaryPaths) {
     $currentByEnvironment[$environmentClass] = [ordered]@{
         source_summary = $summaryPath
         metrics = Get-MetricSnapshot -Summary $summary
+        pressure_cause_buckets = Get-PressureCauseSnapshot -Summary $summary
     }
 }
 
@@ -238,9 +298,14 @@ $record = [ordered]@{
                     environment_class = $_.Name
                     source_summary = $_.Value.source_summary
                     metrics = $_.Value.metrics
+                    pressure_cause_buckets = $_.Value.pressure_cause_buckets
                 }
             }
     )
+}
+$pressureCauseBucketSummary = @{}
+foreach ($environment in @($record.environments)) {
+    Merge-PressureCauseBuckets -Accumulator $pressureCauseBucketSummary -Buckets $environment.pressure_cause_buckets
 }
 $summary = [ordered]@{
     schema_version = $contractSchemaVersion
@@ -256,11 +321,15 @@ $summary = [ordered]@{
     regression_factor = $RegressionFactor
     absolute_regression_buffer = $AbsoluteRegressionBuffer
     allow_bootstrap = [bool]$AllowBootstrap
+    pressure_cause_buckets = [ordered]@{}
     checks = $checks
     failed_checks = $failedChecks
     failure_reasons = @($failureReasons)
     required_actions = @($requiredActions)
     status = if ($failedChecks.Count -eq 0) { 'passed' } else { 'failed' }
+}
+foreach ($entry in ($pressureCauseBucketSummary.GetEnumerator() | Sort-Object Name)) {
+    $summary.pressure_cause_buckets[$entry.Name] = [int]$entry.Value
 }
 
 $record | ConvertTo-Json -Depth 8 | Set-Content -Path $recordPath -Encoding UTF8

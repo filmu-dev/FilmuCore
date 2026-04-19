@@ -29,8 +29,8 @@ def _build_alembic_config(postgres_dsn: str) -> Config:
     return cfg
 
 
-def run_migrations(postgres_dsn: str) -> None:
-    """Upgrade the configured database to Alembic head."""
+def run_migrations(postgres_dsn: str, revision: str = "head") -> None:
+    """Upgrade the configured database to one Alembic revision."""
 
     cfg = _build_alembic_config(postgres_dsn)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, revision)

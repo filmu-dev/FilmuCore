@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 from prometheus_client import Counter
 
 if TYPE_CHECKING:
-    from filmu_py.plugins.hooks import PluginHookWorkerExecutor
     from filmu_py.plugins.registry import PluginRegistry
 
 EVENTBUS_DROPPED_EVENTS = Counter(
@@ -45,7 +44,7 @@ class EventBus:
         self._known_topics: set[str] = set()
         self._replay_backplane: Any | None = None
         self._plugin_registry: PluginRegistry | None = None
-        self._hook_executor: PluginHookWorkerExecutor | None = None
+        self._hook_executor: Any | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     def attach_replay_backplane(self, replay_backplane: Any) -> None:
@@ -57,7 +56,7 @@ class EventBus:
         self,
         plugin_registry: PluginRegistry,
         *,
-        hook_executor: PluginHookWorkerExecutor | None = None,
+        hook_executor: Any | None = None,
     ) -> None:
         """Attach plugin governance and hook dispatch collaborators."""
 

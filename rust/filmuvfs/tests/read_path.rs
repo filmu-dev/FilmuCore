@@ -61,6 +61,32 @@ fn seeded_state_with_movie_size(movie_url: &str, movie_size: u64) -> Arc<Catalog
     state
 }
 
+fn seeded_state_with_movie_locator_and_unrestricted_url(
+    movie_locator: &str,
+    movie_unrestricted_url: &str,
+) -> Arc<CatalogStateStore> {
+    let state = Arc::new(CatalogStateStore::new());
+    let mut snapshot =
+        common::sample_catalog_snapshot(movie_locator, "http://127.0.0.1:18080/episode.mkv");
+    let movie_entry = snapshot
+        .entries
+        .iter_mut()
+        .find(|entry| entry.entry_id == common::MOVIE_FILE_ENTRY_ID)
+        .expect("movie entry should exist in the seeded snapshot");
+
+    match movie_entry.details.as_mut() {
+        Some(CatalogEntryDetails::File(file)) => {
+            file.unrestricted_url = Some(movie_unrestricted_url.to_owned());
+        }
+        other => panic!("expected file details for movie entry, got {other:?}"),
+    }
+
+    state
+        .apply_snapshot(snapshot)
+        .expect("custom snapshot should apply");
+    state
+}
+
 fn patterned_bytes(length: usize) -> Vec<u8> {
     (0..length).map(|index| (index % 251) as u8).collect()
 }
@@ -456,6 +482,28 @@ async fn stale_http_status_triggers_inline_refresh_and_read_succeeds() {
     fresh_server_task
         .await
         .expect("fresh server task should finish cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepare_read_request_uses_unrestricted_url_field_when_it_differs_from_locator() {
+    let fresh_locator = "https://edge.example.com/current/movie.mkv";
+    let stale_unrestricted_url = "https://cdn.example.com/old/movie.mkv";
+    let state = seeded_state_with_movie_locator_and_unrestricted_url(
+        fresh_locator,
+        stale_unrestricted_url,
+    );
+    let runtime = MountRuntime::new(Arc::clone(&state), "session-read-tests".to_owned());
+    let movie_inode = common::movie_inode();
+    let handle = runtime
+        .open_by_inode(movie_inode)
+        .expect("open_by_inode should succeed");
+
+    let request = runtime
+        .prepare_read_request(handle.handle_id, movie_inode, 0, 64)
+        .expect("prepare_read_request should succeed");
+
+    assert_eq!(request.unrestricted_url, stale_unrestricted_url);
+    assert_ne!(request.unrestricted_url, fresh_locator);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

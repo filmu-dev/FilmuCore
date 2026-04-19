@@ -3,9 +3,11 @@
 from .base import Base
 from .migrations import run_migrations
 from .models import (
+    ConsumerPlaybackActivityEventORM,
     EpisodeORM,
     ItemRequestORM,
     ItemStateEventORM,
+    ItemWorkflowCheckpointORM,
     MediaItemORM,
     MovieORM,
     SeasonORM,
@@ -19,10 +21,12 @@ from .runtime import DatabaseRuntime
 
 __all__ = [
     "Base",
+    "ConsumerPlaybackActivityEventORM",
     "DatabaseRuntime",
     "EpisodeORM",
     "ItemRequestORM",
     "ItemStateEventORM",
+    "ItemWorkflowCheckpointORM",
     "MediaItemORM",
     "MovieORM",
     "SeasonORM",

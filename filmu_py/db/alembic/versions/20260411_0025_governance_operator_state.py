@@ -1,4 +1,4 @@
-"""Add enterprise governance operator state.
+"""Add governance operator state.
 
 Revision ID: 20260411_0025
 Revises: 20260411_0024

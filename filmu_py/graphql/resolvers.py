@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import asdict
@@ -11,10 +12,12 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import PurePosixPath
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import strawberry
 from fastapi import HTTPException
+
+from filmu_py.api.deps import get_auth_context
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
@@ -28,10 +31,17 @@ from filmu_py.graphql.types import (
     AccessPolicyRevisionApprovalInput,
     AccessPolicyRevisionWriteInput,
     ControlPlanePendingRecoveryInput,
+    ExecuteVfsRolloutActionInput,
     GQLAccessPolicyRevision,
+    GQLAccessPolicyAudit,
+    GQLAccessPolicyAuditAlert,
+    GQLAccessPolicyAuditEntry,
+    GQLAccessPolicyContext,
+    GQLAccessPolicyDecision,
     GQLAccessPolicyRevisionList,
     GQLActiveStream,
     GQLActiveStreamOwner,
+    GQLApiKeyRotationResult,
     GQLCalendarEntry,
     GQLCalendarReleaseWindow,
     GQLControlPlaneAckRecovery,
@@ -55,20 +65,38 @@ from filmu_py.graphql.types import (
     GQLDownloaderProviderSummary,
     GQLDownloaderReasonSummary,
     GQLDownloaderStatusCodeSummary,
-    GQLEnterpriseOperationsGovernance,
-    GQLEnterpriseOperationsSlice,
-    GQLEnterpriseRolloutEvidence,
+    GQLOperationsGovernance,
+    GQLOperationsSlice,
+    GQLRolloutEvidence,
     GQLFilmuSettings,
     GQLGovernanceArtifactInventoryItem,
     GQLGovernanceEvidenceCheck,
     GQLGovernanceStatusCount,
     GQLHealthCheck,
     GQLItemEvent,
+    GQLItemWorkflowDrillStatus,
     GQLLibraryStats,
     GQLMarkSelectedHlsMediaEntryStaleResult,
     GQLMediaEntry,
+    GQLMediaEntryLifecycle,
     GQLMediaItem,
+    GQLConsumerPlaybackActivity,
+    GQLConsumerPlaybackActivityItem,
+    GQLConsumerPlaybackActivityType,
+    GQLConsumerPlaybackDevice,
+    GQLConsumerProfile,
+    GQLConsumerProfileAvailabilityItem,
+    GQLConsumerProfileAvailabilitySummary,
+    GQLConsumerProfileIdentity,
+    GQLConsumerProfileLibrary,
+    GQLConsumerProfilePlaybackSummary,
+    GQLConsumerProfileWorkspace,
+    GQLConsumerPlaybackItem,
+    GQLConsumerPlaybackSession,
+    GQLItemRequestSummary,
     GQLMediaItemDetail,
+    GQLMediaItemSummaryPage,
+    GQLMediaItemsPage,
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
     GQLNamedCountBucket,
@@ -84,8 +112,10 @@ from filmu_py.graphql.types import (
     GQLPlaybackAttachment,
     GQLPlaybackGateGovernance,
     GQLPlaybackRefreshTriggerResult,
+    GQLRecordConsumerPlaybackActivityResult,
     GQLPluginCapabilityStatus,
     GQLPluginEventStatus,
+    GQLPluginEventsPage,
     GQLPluginGovernance,
     GQLPluginGovernanceOverride,
     GQLPluginGovernanceSummary,
@@ -97,16 +127,26 @@ from filmu_py.graphql.types import (
     GQLPluginRuntimeOverview,
     GQLPluginRuntimePublisherSummary,
     GQLPluginRuntimeRow,
+    GQLPluginStreamControlAction,
+    GQLPluginStreamControlResult,
     GQLPluginRuntimeWarning,
     GQLProofArtifact,
     GQLQueueAlert,
     GQLRecoveryMechanism,
     GQLRecoveryPlan,
+    GQLRequestLifecycle,
     GQLRecoveryTargetStage,
     GQLResolvedPlayback,
     GQLResolvedPlaybackAttachment,
     GQLRuntimeLifecycleSnapshot,
     GQLRuntimeLifecycleTransition,
+    GQLTenantQuotaPolicy,
+    TenantQuotaPolicyWriteInput,
+    GQLServingGovernance,
+    GQLServingHandle,
+    GQLServingPath,
+    GQLServingSession,
+    GQLServingStatus,
     GQLStreamCandidate,
     GQLVfsBlockedItem,
     GQLVfsBreadcrumb,
@@ -146,9 +186,28 @@ from filmu_py.graphql.types import (
     PersistMediaEntryControlInput,
     PersistPlaybackAttachmentControlInput,
     PersistVfsRolloutControlInput,
+    PluginStreamControlInput,
     PluginGovernanceOverrideWriteInput,
+    RecordConsumerPlaybackActivityInput,
     RequestItemInput,
     RequestItemResult,
+    RequestDiscoveryFacetBucket,
+    RequestDiscoveryFacets,
+    RequestDiscoveryProjectionAction,
+    RequestDiscoveryProjectionGroup,
+    RequestDiscoveryProjectionItem,
+    RequestEditorialFamily,
+    RequestReleaseWindow,
+    RequestDiscoveryPage,
+    RequestDiscoveryRail,
+    RequestDiscoverySortOption,
+    RequestCandidateSeasonPreview,
+    RequestCandidateSeasonSummary,
+    RequestSearchLifecycle,
+    RequestSearchPage,
+    RequestedEpisodeScope,
+    RequestedEpisodeScopeInput,
+    RequestSearchCandidate,
     ResetItemResult,
     RetryItemResult,
     SettingsUpdateInput,
@@ -161,11 +220,11 @@ from filmu_py.services.governance_posture import (
     build_downloader_execution_trend_summary,
     build_downloader_provider_summaries,
     build_downloader_reason_summaries,
-    build_enterprise_rollout_action_items,
-    build_enterprise_rollout_artifact_inventory,
-    build_enterprise_rollout_evidence_posture,
-    build_enterprise_rollout_gap_items,
-    build_enterprise_rollout_status_counts,
+    build_rollout_action_items,
+    build_rollout_artifact_inventory,
+    build_rollout_evidence_posture,
+    build_rollout_gap_items,
+    build_rollout_status_counts,
     build_playback_gate_governance_posture,
     build_plugin_proof_coverage_summaries,
     build_plugin_runtime_action_items,
@@ -212,12 +271,31 @@ from filmu_py.services.graphql_support_posture import (
 from filmu_py.services.media import (
     ArqNotEnabledError,
     CalendarProjectionRecord,
+    ConsumerPlaybackActivityRecord,
+    ConsumerPlaybackActivityItemRecord,
     ItemActionResult,
+    ItemRequestSummaryRecord,
     ItemNotFoundError,
     MediaItemRecord,
     MediaItemSummaryRecord,
     RecoveryPlanRecord,
+    RequestCandidateSeasonRecord,
+    RequestCandidateSeasonSummaryRecord,
+    RequestSearchCandidateRecord,
+    RequestDiscoveryFacetBucketRecord,
+    RequestDiscoveryProjectionActionRecord,
+    RequestDiscoveryProjectionGroupRecord,
+    RequestDiscoveryProjectionItemRecord,
+    RequestEditorialFamilyRecord,
+    RequestReleaseWindowRecord,
+    RequestDiscoveryFacetSetRecord,
+    RequestDiscoveryPageRecord,
+    RequestDiscoveryRailRecord,
+    RequestDiscoverySortOptionRecord,
+    RequestSearchLifecycleRecord,
+    RequestSearchPageRecord,
     StatsProjection,
+    WorkflowCheckpointRecord,
     _canonical_item_type_name,
     _infer_request_media_type,
 )
@@ -245,6 +323,7 @@ from filmu_py.services.playback import (
     trigger_hls_failed_lease_refresh_from_resources,
     trigger_hls_restricted_fallback_refresh_from_resources,
 )
+from filmu_py.services.settings_service import persist_tenant_quota_policy
 from filmu_py.services.vfs_catalog import (
     VfsCatalogDelta,
     VfsCatalogEntry,
@@ -263,6 +342,14 @@ def _compat_route_module() -> Any:
     return default_routes
 
 
+def _stream_route_module() -> Any:
+    """Resolve stream compatibility helpers lazily to avoid import-time cycles."""
+
+    from filmu_py.api.routes import stream as stream_routes
+
+    return stream_routes
+
+
 _GRAPHQL_CONTROL_PLANE_CACHE_TTL_SECONDS = 30
 _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY = (
     "graphql:control_plane:access_policy_revisions"
@@ -271,6 +358,8 @@ _GRAPHQL_PLUGIN_GOVERNANCE_CACHE_KEY = "graphql:control_plane:plugin_governance"
 _GRAPHQL_PLUGIN_GOVERNANCE_OVERRIDES_CACHE_KEY = (
     "graphql:control_plane:plugin_governance_overrides"
 )
+_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY = "graphql:control_plane:version"
+_GRAPHQL_WORKER_SUPPORT_CACHE_VERSION_KEY = "graphql:worker_support:version"
 
 
 async def _read_cached_graphql_payload(
@@ -309,6 +398,59 @@ async def _invalidate_graphql_control_plane_cache(
 ) -> None:
     for key in keys:
         await info.context.resources.cache.invalidate(key, reason=reason)
+
+
+async def _read_graphql_cache_version(
+    info: Info[GraphQLContext, object],
+    *,
+    key: str,
+) -> int:
+    payload = await _read_cached_graphql_payload(info, key=key)
+    if isinstance(payload, int):
+        return max(payload, 0)
+    if isinstance(payload, str):
+        try:
+            return max(int(payload), 0)
+        except ValueError:
+            await info.context.resources.cache.invalidate(key, reason="decode_error")
+    return 0
+
+
+async def _bump_graphql_cache_version(
+    info: Info[GraphQLContext, object],
+    *,
+    key: str,
+) -> int:
+    next_version = await _read_graphql_cache_version(info, key=key) + 1
+    await _write_cached_graphql_payload(info, key=key, payload=next_version)
+    return next_version
+
+
+def _versioned_graphql_cache_key(
+    prefix: str,
+    *,
+    version: int,
+    **parameters: object,
+) -> str:
+    encoded_parameters = json.dumps(
+        parameters,
+        default=str,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"{prefix}:v{version}:{encoded_parameters}"
+
+
+def _namespace_from_payload(payload: object) -> object:
+    if isinstance(payload, dict):
+        return SimpleNamespace(
+            **{key: _namespace_from_payload(value) for key, value in payload.items()}
+        )
+    if isinstance(payload, list):
+        return [_namespace_from_payload(value) for value in payload]
+    return payload
+
+
 def _raise_graphql_compat_error(exc: Exception) -> None:
     """Normalize compatibility-route exceptions into GraphQL-safe errors."""
 
@@ -554,6 +696,12 @@ def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegratio
             missing_soak_proof_plugins=sum(
                 1 for row in plugins if not bool(row.soak_validated)
             ),
+            verified_plugins=sum(
+                1 for row in plugins if str(row.verification_status) == "verified"
+            ),
+            missing_verification_plugins=sum(
+                1 for row in plugins if str(row.verification_status) != "verified"
+            ),
         ),
         plugins=[
             GQLPluginIntegrationReadinessPlugin(
@@ -592,6 +740,10 @@ def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegratio
                 contract_validated=bool(row.contract_validated),
                 soak_validated=bool(row.soak_validated),
                 proof_gap_count=int(row.proof_gap_count),
+                verification_status=str(row.verification_status),
+                verification_check_count=int(row.verification_check_count),
+                verified_check_count=int(row.verified_check_count),
+                missing_verification_checks=list(row.missing_verification_checks),
                 required_actions=list(row.required_actions),
                 remaining_gaps=list(row.remaining_gaps),
             )
@@ -600,6 +752,12 @@ def _build_plugin_integration_readiness(snapshot: object) -> GQLPluginIntegratio
         required_actions=list(typed_snapshot.required_actions),
         remaining_gaps=list(typed_snapshot.remaining_gaps),
     )
+
+
+def _plugin_integration_readiness_from_payload(
+    payload: object,
+) -> GQLPluginIntegrationReadiness:
+    return _build_plugin_integration_readiness(_namespace_from_payload(payload))
 
 
 def _build_control_plane_automation(snapshot: object) -> GQLControlPlaneAutomation:
@@ -778,6 +936,199 @@ def _build_named_count_buckets(counts: dict[str, int]) -> list[GQLNamedCountBuck
     ]
 
 
+def _named_count_buckets_from_payload(payload: object) -> list[GQLNamedCountBucket]:
+    rows = cast(list[dict[str, Any]], payload)
+    return [
+        GQLNamedCountBucket(
+            key=str(row["key"]),
+            count=int(row["count"]),
+        )
+        for row in rows
+    ]
+
+
+def _proof_artifacts_from_payload(payload: object) -> list[GQLProofArtifact]:
+    rows = cast(list[dict[str, Any]], payload)
+    return [
+        GQLProofArtifact(
+            ref=str(row["ref"]),
+            category=str(row["category"]),
+            label=str(row["label"]),
+            recorded=bool(row["recorded"]),
+        )
+        for row in rows
+    ]
+
+
+def _control_plane_summary_from_payload(payload: object) -> GQLControlPlaneSummary:
+    row = cast(dict[str, Any], payload)
+    return GQLControlPlaneSummary(
+        total_subscribers=int(row["total_subscribers"]),
+        active_subscribers=int(row["active_subscribers"]),
+        stale_subscribers=int(row["stale_subscribers"]),
+        error_subscribers=int(row["error_subscribers"]),
+        fenced_subscribers=int(row["fenced_subscribers"]),
+        ack_pending_subscribers=int(row["ack_pending_subscribers"]),
+        stream_count=int(row["stream_count"]),
+        group_count=int(row["group_count"]),
+        node_count=int(row["node_count"]),
+        tenant_count=int(row["tenant_count"]),
+        oldest_heartbeat_age_seconds=cast(float | None, row["oldest_heartbeat_age_seconds"]),
+        status_counts=[
+            GQLControlPlaneStatusCount(
+                status=str(status_row["status"]),
+                count=int(status_row["count"]),
+            )
+            for status_row in cast(list[dict[str, Any]], row["status_counts"])
+        ],
+        required_actions=list(cast(list[str], row["required_actions"])),
+        remaining_gaps=list(cast(list[str], row["remaining_gaps"])),
+    )
+
+
+def _control_plane_subscribers_from_payload(payload: object) -> list[GQLControlPlaneSubscriber]:
+    rows = cast(list[dict[str, Any]], payload)
+    return [
+        GQLControlPlaneSubscriber(
+            stream_name=str(row["stream_name"]),
+            group_name=str(row["group_name"]),
+            consumer_name=str(row["consumer_name"]),
+            node_id=str(row["node_id"]),
+            tenant_id=cast(str | None, row["tenant_id"]),
+            status=str(row["status"]),
+            last_read_offset=cast(str | None, row["last_read_offset"]),
+            last_delivered_event_id=cast(str | None, row["last_delivered_event_id"]),
+            last_acked_event_id=cast(str | None, row["last_acked_event_id"]),
+            ack_pending=bool(row["ack_pending"]),
+            fenced=bool(row["fenced"]),
+            last_error=cast(str | None, row["last_error"]),
+            claimed_at=str(row["claimed_at"]),
+            last_heartbeat_at=str(row["last_heartbeat_at"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+        for row in rows
+    ]
+
+
+def _control_plane_consumer_summaries_from_payload(
+    payload: object,
+) -> list[GQLControlPlaneConsumerSummary]:
+    rows = cast(list[dict[str, Any]], payload)
+    return [
+        GQLControlPlaneConsumerSummary(
+            consumer_name=str(row["consumer_name"]),
+            subscriber_count=int(row["subscriber_count"]),
+            active_subscribers=int(row["active_subscribers"]),
+            ack_pending_subscribers=int(row["ack_pending_subscribers"]),
+            fenced_subscribers=int(row["fenced_subscribers"]),
+            error_subscribers=int(row["error_subscribers"]),
+            latest_heartbeat_at=cast(str | None, row["latest_heartbeat_at"]),
+        )
+        for row in rows
+    ]
+
+
+def _control_plane_ownership_summary_from_payload(
+    payload: object,
+) -> GQLControlPlaneOwnershipSummary:
+    row = cast(dict[str, Any], payload)
+    return GQLControlPlaneOwnershipSummary(
+        total_subscribers=int(row["total_subscribers"]),
+        active_subscribers=int(row["active_subscribers"]),
+        stale_subscribers=int(row["stale_subscribers"]),
+        error_subscribers=int(row["error_subscribers"]),
+        fenced_subscribers=int(row["fenced_subscribers"]),
+        ack_pending_subscribers=int(row["ack_pending_subscribers"]),
+        unique_consumers=int(row["unique_consumers"]),
+        unique_nodes=int(row["unique_nodes"]),
+        unique_tenants=int(row["unique_tenants"]),
+    )
+
+
+def _control_plane_automation_from_payload(payload: object) -> GQLControlPlaneAutomation:
+    row = cast(dict[str, Any], payload)
+    return GQLControlPlaneAutomation(
+        generated_at=str(row["generated_at"]),
+        enabled=bool(row["enabled"]),
+        runner_status=str(row["runner_status"]),
+        interval_seconds=int(row["interval_seconds"]),
+        active_within_seconds=int(row["active_within_seconds"]),
+        pending_min_idle_ms=int(row["pending_min_idle_ms"]),
+        claim_limit=int(row["claim_limit"]),
+        max_claim_passes=int(row["max_claim_passes"]),
+        consumer_group=str(row["consumer_group"]),
+        consumer_name=str(row["consumer_name"]),
+        service_attached=bool(row["service_attached"]),
+        backplane_attached=bool(row["backplane_attached"]),
+        last_run_at=cast(str | None, row["last_run_at"]),
+        last_success_at=cast(str | None, row["last_success_at"]),
+        last_failure_at=cast(str | None, row["last_failure_at"]),
+        consecutive_failures=int(row["consecutive_failures"]),
+        last_error=cast(str | None, row["last_error"]),
+        remediation_updated_subscribers=int(row["remediation_updated_subscribers"]),
+        rewound_subscribers=int(row["rewound_subscribers"]),
+        claimed_pending_events=int(row["claimed_pending_events"]),
+        claim_passes=int(row["claim_passes"]),
+        pending_count_after=cast(int | None, row["pending_count_after"]),
+        summary=_control_plane_summary_from_payload(row["summary"]),
+        required_actions=list(cast(list[str], row["required_actions"])),
+        remaining_gaps=list(cast(list[str], row["remaining_gaps"])),
+    )
+
+
+def _control_plane_replay_backplane_from_payload(
+    payload: object,
+) -> GQLControlPlaneReplayBackplane:
+    row = cast(dict[str, Any], payload)
+    return GQLControlPlaneReplayBackplane(
+        generated_at=str(row["generated_at"]),
+        status=str(row["status"]),
+        event_backplane=str(row["event_backplane"]),
+        stream_name=str(row["stream_name"]),
+        consumer_group=str(row["consumer_group"]),
+        replay_maxlen=int(row["replay_maxlen"]),
+        claim_limit=int(row["claim_limit"]),
+        max_claim_passes=int(row["max_claim_passes"]),
+        attached=bool(row["attached"]),
+        pending_count=int(row["pending_count"]),
+        oldest_event_id=cast(str | None, row["oldest_event_id"]),
+        latest_event_id=cast(str | None, row["latest_event_id"]),
+        consumer_counts=_named_count_buckets_from_payload(row["consumer_counts"]),
+        consumer_count=int(row["consumer_count"]),
+        has_pending_backlog=bool(row["has_pending_backlog"]),
+        proof_refs=list(cast(list[str], row["proof_refs"])),
+        proof_artifacts=_proof_artifacts_from_payload(row["proof_artifacts"]),
+        proof_ready=bool(row["proof_ready"]),
+        pending_recovery_ready=bool(row["pending_recovery_ready"]),
+        required_actions=list(cast(list[str], row["required_actions"])),
+        remaining_gaps=list(cast(list[str], row["remaining_gaps"])),
+    )
+
+
+def _control_plane_recovery_readiness_from_payload(
+    payload: object,
+) -> GQLControlPlaneRecoveryReadiness:
+    row = cast(dict[str, Any], payload)
+    return GQLControlPlaneRecoveryReadiness(
+        generated_at=str(row["generated_at"]),
+        status=str(row["status"]),
+        active_within_seconds=int(row["active_within_seconds"]),
+        stale_subscribers=int(row["stale_subscribers"]),
+        ack_pending_subscribers=int(row["ack_pending_subscribers"]),
+        pending_count=int(row["pending_count"]),
+        consumer_count=int(row["consumer_count"]),
+        automation_enabled=bool(row["automation_enabled"]),
+        automation_healthy=bool(row["automation_healthy"]),
+        replay_attached=bool(row["replay_attached"]),
+        proof_refs=list(cast(list[str], row["proof_refs"])),
+        proof_artifacts=_proof_artifacts_from_payload(row["proof_artifacts"]),
+        proof_ready=bool(row["proof_ready"]),
+        required_actions=list(cast(list[str], row["required_actions"])),
+        remaining_gaps=list(cast(list[str], row["remaining_gaps"])),
+    )
+
+
 def _build_observability_field_contract_summary(
     snapshot: object,
 ) -> GQLObservabilityFieldContractSummary:
@@ -820,9 +1171,9 @@ def _build_governance_evidence_check(snapshot: object) -> GQLGovernanceEvidenceC
     )
 
 
-def _build_enterprise_rollout_evidence(snapshot: object) -> GQLEnterpriseRolloutEvidence:
+def _build_rollout_evidence(snapshot: object) -> GQLRolloutEvidence:
     typed_snapshot: Any = snapshot
-    return GQLEnterpriseRolloutEvidence(
+    return GQLRolloutEvidence(
         generated_at=str(typed_snapshot.generated_at),
         status=str(typed_snapshot.status),
         total_check_count=int(typed_snapshot.total_check_count),
@@ -862,6 +1213,9 @@ def _build_playback_gate_governance(snapshot: object) -> GQLPlaybackGateGovernan
             typed_snapshot.windows_soak_profile_coverage_complete
         ),
         windows_soak_profile_coverage=list(typed_snapshot.windows_soak_profile_coverage),
+        windows_soak_pressure_cause_buckets=dict(
+            typed_snapshot.windows_soak_pressure_cause_buckets
+        ),
         policy_validation_status=str(typed_snapshot.policy_validation_status),
         policy_ready=bool(typed_snapshot.policy_ready),
         required_actions=list(typed_snapshot.required_actions),
@@ -1053,6 +1407,83 @@ def _build_vfs_runtime_telemetry(snapshot: object) -> GQLVfsRuntimeTelemetry:
     )
 
 
+def _build_serving_session(snapshot: object) -> GQLServingSession:
+    typed_snapshot = cast(Any, snapshot)
+    return GQLServingSession(
+        session_id=typed_snapshot.session_id,
+        category=typed_snapshot.category,
+        resource=typed_snapshot.resource,
+        started_at=typed_snapshot.started_at,
+        last_activity_at=typed_snapshot.last_activity_at,
+        bytes_served=int(typed_snapshot.bytes_served),
+    )
+
+
+def _build_serving_handle(snapshot: object) -> GQLServingHandle:
+    typed_snapshot = cast(Any, snapshot)
+    return GQLServingHandle(
+        handle_id=typed_snapshot.handle_id,
+        session_id=typed_snapshot.session_id,
+        category=typed_snapshot.category,
+        path=typed_snapshot.path,
+        path_id=typed_snapshot.path_id,
+        created_at=typed_snapshot.created_at,
+        last_activity_at=typed_snapshot.last_activity_at,
+        bytes_served=int(typed_snapshot.bytes_served),
+        read_offset=int(typed_snapshot.read_offset),
+    )
+
+
+def _build_serving_path(snapshot: object) -> GQLServingPath:
+    typed_snapshot = cast(Any, snapshot)
+    return GQLServingPath(
+        path_id=typed_snapshot.path_id,
+        category=typed_snapshot.category,
+        path=typed_snapshot.path,
+        created_at=typed_snapshot.created_at,
+        last_activity_at=typed_snapshot.last_activity_at,
+        size_bytes=typed_snapshot.size_bytes,
+        active_handle_count=int(typed_snapshot.active_handle_count),
+    )
+
+
+def _build_serving_governance(snapshot: object) -> GQLServingGovernance:
+    typed_snapshot = cast(Any, snapshot)
+    return GQLServingGovernance(
+        active_sessions=int(typed_snapshot.active_sessions),
+        active_handles=int(typed_snapshot.active_handles),
+        tracked_paths=int(typed_snapshot.tracked_paths),
+        active_local_sessions=int(typed_snapshot.active_local_sessions),
+        active_remote_sessions=int(typed_snapshot.active_remote_sessions),
+        active_local_handles=int(typed_snapshot.active_local_handles),
+        hls_manifest_invalid=int(typed_snapshot.hls_manifest_invalid),
+        hls_route_failures_total=int(typed_snapshot.hls_route_failures_total),
+        hls_route_failures_upstream_failed=int(typed_snapshot.hls_route_failures_upstream_failed),
+        direct_playback_refresh_trigger_tasks_active=int(
+            typed_snapshot.direct_playback_refresh_trigger_tasks_active
+        ),
+        hls_failed_lease_refresh_trigger_tasks_active=int(
+            typed_snapshot.hls_failed_lease_refresh_trigger_tasks_active
+        ),
+        hls_restricted_fallback_refresh_trigger_tasks_active=int(
+            typed_snapshot.hls_restricted_fallback_refresh_trigger_tasks_active
+        ),
+        stream_refresh_dispatch_mode=typed_snapshot.stream_refresh_dispatch_mode,
+        stream_refresh_queue_enabled=bool(typed_snapshot.stream_refresh_queue_enabled),
+        stream_refresh_queue_ready=bool(typed_snapshot.stream_refresh_queue_ready),
+    )
+
+
+def _build_serving_status(snapshot: object) -> GQLServingStatus:
+    typed_snapshot = cast(Any, snapshot)
+    return GQLServingStatus(
+        sessions=[_build_serving_session(row) for row in list(typed_snapshot.sessions)],
+        handles=[_build_serving_handle(row) for row in list(typed_snapshot.handles)],
+        paths=[_build_serving_path(row) for row in list(typed_snapshot.paths)],
+        governance=_build_serving_governance(typed_snapshot.governance),
+    )
+
+
 def _build_vfs_rollout_ledger_entry(snapshot: object) -> GQLVfsRolloutLedgerEntry:
     typed_snapshot: Any = snapshot
     return GQLVfsRolloutLedgerEntry(
@@ -1097,11 +1528,16 @@ def _build_vfs_rollout_control(snapshot: object) -> GQLVfsRolloutControl:
         canary_decision=str(typed_snapshot.canary_decision),
         merge_gate=str(typed_snapshot.merge_gate),
         reasons=list(typed_snapshot.reasons),
+        allowed_actions=list(getattr(typed_snapshot, "allowed_actions", []) or []),
         history=[
             _build_vfs_rollout_ledger_entry(entry)
             for entry in list(getattr(typed_snapshot, "history", []) or [])
         ],
     )
+
+
+def _vfs_rollout_control_from_payload(payload: object) -> GQLVfsRolloutControl:
+    return _build_vfs_rollout_control(_namespace_from_payload(payload))
 
 
 def _build_plugin_runtime_overview(snapshot: object) -> GQLPluginRuntimeOverview:
@@ -1369,9 +1805,80 @@ def _build_plugin_event_status(row: object) -> GQLPluginEventStatus:
         publisher=typed_row.publisher,
         publishable_events=list(typed_row.publishable_events),
         hook_subscriptions=list(typed_row.hook_subscriptions),
+        queued_hook_subscriptions=list(typed_row.queued_hook_subscriptions),
         publishable_event_count=int(typed_row.publishable_event_count),
         hook_subscription_count=int(typed_row.hook_subscription_count),
+        queued_hook_subscription_count=int(typed_row.queued_hook_subscription_count),
         wiring_status=str(typed_row.wiring_status),
+        hook_dispatch_mode=str(typed_row.hook_dispatch_mode),
+        queued_dispatch_enabled=bool(typed_row.queued_dispatch_enabled),
+        queue_health_status=str(typed_row.queue_health_status),
+        queue_delivery_observed=bool(typed_row.queue_delivery_observed),
+        queue_observation_count=int(typed_row.queue_observation_count),
+        latest_queue_lag_seconds=typed_row.latest_queue_lag_seconds,
+        max_queue_lag_seconds=typed_row.max_queue_lag_seconds,
+        successful_deliveries=int(typed_row.successful_deliveries),
+        timeout_deliveries=int(typed_row.timeout_deliveries),
+        failed_deliveries=int(typed_row.failed_deliveries),
+        retried_deliveries=int(typed_row.retried_deliveries),
+        required_actions=list(typed_row.required_actions),
+        remaining_gaps=list(typed_row.remaining_gaps),
+    )
+
+
+def _build_ranked_named_count_buckets(counts: dict[str, int]) -> list[GQLNamedCountBucket]:
+    return [
+        GQLNamedCountBucket(key=key, count=count)
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _count_plugin_event_rows_by_key(
+    rows: list[object],
+    selector: Any,
+) -> list[GQLNamedCountBucket]:
+    counts: dict[str, int] = {}
+
+    for row in rows:
+        key = selector(cast(Any, row))
+        if not key:
+            continue
+        counts[str(key)] = counts.get(str(key), 0) + 1
+
+    return _build_ranked_named_count_buckets(counts)
+
+
+def _build_plugin_events_page(
+    rows: list[object],
+    *,
+    limit: int,
+    offset: int,
+) -> GQLPluginEventsPage:
+    bounded_limit = max(1, min(limit, 200))
+    bounded_offset = max(0, offset)
+    total_count = len(rows)
+    page_rows = rows[bounded_offset : bounded_offset + bounded_limit]
+    publishable_event_total = sum(
+        int(cast(Any, row).publishable_event_count) for row in rows
+    )
+    hook_subscription_total = sum(
+        int(cast(Any, row).hook_subscription_count) for row in rows
+    )
+
+    return GQLPluginEventsPage(
+        rows=[_build_plugin_event_status(row) for row in page_rows],
+        total_count=total_count,
+        limit=bounded_limit,
+        offset=bounded_offset,
+        has_previous_page=bounded_offset > 0,
+        has_next_page=bounded_offset + bounded_limit < total_count,
+        publishable_event_total=publishable_event_total,
+        hook_subscription_total=hook_subscription_total,
+        publisher_counts=_count_plugin_event_rows_by_key(rows, lambda row: row.publisher),
+        wiring_status_counts=_count_plugin_event_rows_by_key(
+            rows,
+            lambda row: row.wiring_status,
+        ),
     )
 
 
@@ -1507,6 +2014,118 @@ def _build_downloader_execution_trend_summary(
     )
 
 
+def _build_access_policy_decision(snapshot: object) -> GQLAccessPolicyDecision:
+    typed_snapshot: Any = snapshot
+    return GQLAccessPolicyDecision(
+        name=str(typed_snapshot.name),
+        allowed=bool(typed_snapshot.allowed),
+        reason=str(typed_snapshot.reason),
+        required_permissions=list(typed_snapshot.required_permissions),
+        matched_permissions=list(typed_snapshot.matched_permissions),
+        missing_permissions=list(typed_snapshot.missing_permissions),
+        constrained_permissions=list(typed_snapshot.constrained_permissions),
+        constraint_failures=list(typed_snapshot.constraint_failures),
+        target_tenant_id=str(typed_snapshot.target_tenant_id),
+        tenant_scope=str(typed_snapshot.tenant_scope),
+    )
+
+
+def _build_access_policy_context(snapshot: object) -> GQLAccessPolicyContext:
+    typed_snapshot: Any = snapshot
+    return GQLAccessPolicyContext(
+        authentication_mode=str(typed_snapshot.authentication_mode),
+        actor_id=str(typed_snapshot.actor_id),
+        actor_type=str(typed_snapshot.actor_type),
+        tenant_id=str(typed_snapshot.tenant_id),
+        authorization_tenant_scope=str(typed_snapshot.authorization_tenant_scope),
+        authorized_tenant_ids=list(typed_snapshot.authorized_tenant_ids),
+        oidc_claims_present=bool(typed_snapshot.oidc_claims_present),
+        oidc_token_validated=bool(typed_snapshot.oidc_token_validated),
+        oidc_allow_api_key_fallback=bool(typed_snapshot.oidc_allow_api_key_fallback),
+        oidc_rollout_stage=str(typed_snapshot.oidc_rollout_stage),
+        oidc_rollout_evidence_refs=list(typed_snapshot.oidc_rollout_evidence_refs),
+        oidc_subject_mapping_ready=bool(typed_snapshot.oidc_subject_mapping_ready),
+        oidc_rollout_status=str(typed_snapshot.oidc_rollout_status),
+        oidc_configuration_complete=bool(typed_snapshot.oidc_configuration_complete),
+        access_policy_version=str(typed_snapshot.access_policy_version),
+        quota_policy_version=typed_snapshot.quota_policy_version,
+        permissions_model=str(typed_snapshot.permissions_model),
+        policy_source=str(typed_snapshot.policy_source),
+        role_grants=dict(typed_snapshot.role_grants),
+        permission_constraints=dict(typed_snapshot.permission_constraints),
+        audit_mode=str(typed_snapshot.audit_mode),
+        policy_alerting_enabled=bool(typed_snapshot.policy_alerting_enabled),
+        repeated_denial_warning_threshold=int(typed_snapshot.repeated_denial_warning_threshold),
+        repeated_denial_critical_threshold=int(typed_snapshot.repeated_denial_critical_threshold),
+        decisions=[_build_access_policy_decision(row) for row in list(typed_snapshot.decisions)],
+        warnings=list(typed_snapshot.warnings),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
+def _build_access_policy_audit_alert(snapshot: object) -> GQLAccessPolicyAuditAlert:
+    typed_snapshot: Any = snapshot
+    return GQLAccessPolicyAuditAlert(
+        code=str(typed_snapshot.code),
+        severity=str(typed_snapshot.severity),
+        count=int(typed_snapshot.count),
+        message=str(typed_snapshot.message),
+    )
+
+
+def _build_access_policy_audit_entry(snapshot: object) -> GQLAccessPolicyAuditEntry:
+    typed_snapshot: Any = snapshot
+    return GQLAccessPolicyAuditEntry(
+        occurred_at=str(typed_snapshot.occurred_at),
+        path=str(typed_snapshot.path),
+        method=str(typed_snapshot.method),
+        resource_scope=str(typed_snapshot.resource_scope),
+        actor_id=str(typed_snapshot.actor_id),
+        actor_type=str(typed_snapshot.actor_type),
+        tenant_id=str(typed_snapshot.tenant_id),
+        target_tenant_id=str(typed_snapshot.target_tenant_id),
+        required_permissions=list(typed_snapshot.required_permissions),
+        matched_permissions=list(typed_snapshot.matched_permissions),
+        missing_permissions=list(typed_snapshot.missing_permissions),
+        constrained_permissions=list(typed_snapshot.constrained_permissions),
+        constraint_failures=list(typed_snapshot.constraint_failures),
+        allowed=bool(typed_snapshot.allowed),
+        reason=str(typed_snapshot.reason),
+        tenant_scope=str(typed_snapshot.tenant_scope),
+        authentication_mode=str(typed_snapshot.authentication_mode),
+        access_policy_version=str(typed_snapshot.access_policy_version),
+        access_policy_source=str(typed_snapshot.access_policy_source),
+        oidc_issuer=typed_snapshot.oidc_issuer,
+        oidc_subject=typed_snapshot.oidc_subject,
+        summary=str(typed_snapshot.summary),
+    )
+
+
+def _build_access_policy_audit(snapshot: object) -> GQLAccessPolicyAudit:
+    typed_snapshot: Any = snapshot
+    return GQLAccessPolicyAudit(
+        total_matches=int(typed_snapshot.total_matches),
+        entries=list(typed_snapshot.entries),
+        records=[_build_access_policy_audit_entry(row) for row in list(typed_snapshot.records)],
+        alerts=[_build_access_policy_audit_alert(row) for row in list(typed_snapshot.alerts)],
+    )
+
+
+def _build_tenant_quota_policy(snapshot: object) -> GQLTenantQuotaPolicy:
+    typed_snapshot: Any = snapshot
+    return GQLTenantQuotaPolicy(
+        tenant_id=str(typed_snapshot.tenant_id),
+        enabled=bool(typed_snapshot.enabled),
+        policy_version=str(typed_snapshot.policy_version),
+        api_requests_per_minute=typed_snapshot.api_requests_per_minute,
+        worker_enqueues_per_minute=typed_snapshot.worker_enqueues_per_minute,
+        playback_refreshes_per_minute=typed_snapshot.playback_refreshes_per_minute,
+        provider_refreshes_per_minute=typed_snapshot.provider_refreshes_per_minute,
+        enforcement_points=list(typed_snapshot.enforcement_points),
+        remaining_gaps=list(typed_snapshot.remaining_gaps),
+    )
+
+
 def _build_downloader_provider_summary(snapshot: object) -> GQLDownloaderProviderSummary:
     typed_snapshot: Any = snapshot
     return GQLDownloaderProviderSummary(
@@ -1639,9 +2258,9 @@ def _hydrate_plugin_governance(snapshot: object) -> GQLPluginGovernance:
             for row in cast(list[object], typed_snapshot.get("plugins", ()))
         ],
     )
-def _build_enterprise_operations_slice(snapshot: object) -> GQLEnterpriseOperationsSlice:
+def _build_operations_slice(snapshot: object) -> GQLOperationsSlice:
     typed_snapshot: Any = snapshot
-    return GQLEnterpriseOperationsSlice(
+    return GQLOperationsSlice(
         name=str(typed_snapshot.name),
         status=str(typed_snapshot.status),
         evidence=list(typed_snapshot.evidence),
@@ -1650,37 +2269,43 @@ def _build_enterprise_operations_slice(snapshot: object) -> GQLEnterpriseOperati
     )
 
 
-def _build_enterprise_operations_governance(
+def _build_operations_governance(
     snapshot: object,
-) -> GQLEnterpriseOperationsGovernance:
+) -> GQLOperationsGovernance:
     typed_snapshot: Any = snapshot
-    return GQLEnterpriseOperationsGovernance(
+    return GQLOperationsGovernance(
         generated_at=str(typed_snapshot.generated_at),
-        playback_gate=_build_enterprise_operations_slice(typed_snapshot.playback_gate),
-        operational_evidence=_build_enterprise_operations_slice(
+        playback_gate=_build_operations_slice(typed_snapshot.playback_gate),
+        operational_evidence=_build_operations_slice(
             typed_snapshot.operational_evidence
         ),
-        identity_authz=_build_enterprise_operations_slice(typed_snapshot.identity_authz),
-        tenant_boundary=_build_enterprise_operations_slice(typed_snapshot.tenant_boundary),
-        vfs_data_plane=_build_enterprise_operations_slice(typed_snapshot.vfs_data_plane),
-        distributed_control_plane=_build_enterprise_operations_slice(
+        identity_authz=_build_operations_slice(typed_snapshot.identity_authz),
+        tenant_boundary=_build_operations_slice(typed_snapshot.tenant_boundary),
+        vfs_data_plane=_build_operations_slice(typed_snapshot.vfs_data_plane),
+        distributed_control_plane=_build_operations_slice(
             typed_snapshot.distributed_control_plane
         ),
-        runtime_lifecycle=_build_enterprise_operations_slice(typed_snapshot.runtime_lifecycle),
-        sre_program=_build_enterprise_operations_slice(typed_snapshot.sre_program),
-        operator_log_pipeline=_build_enterprise_operations_slice(
+        runtime_lifecycle=_build_operations_slice(typed_snapshot.runtime_lifecycle),
+        sre_program=_build_operations_slice(typed_snapshot.sre_program),
+        operator_log_pipeline=_build_operations_slice(
             typed_snapshot.operator_log_pipeline
         ),
-        plugin_runtime_isolation=_build_enterprise_operations_slice(
+        plugin_runtime_isolation=_build_operations_slice(
             typed_snapshot.plugin_runtime_isolation
         ),
-        heavy_stage_workload_isolation=_build_enterprise_operations_slice(
+        heavy_stage_workload_isolation=_build_operations_slice(
             typed_snapshot.heavy_stage_workload_isolation
         ),
-        release_metadata_performance=_build_enterprise_operations_slice(
+        release_metadata_performance=_build_operations_slice(
             typed_snapshot.release_metadata_performance
         ),
     )
+
+
+def _operations_governance_from_payload(
+    payload: object,
+) -> GQLOperationsGovernance:
+    return _build_operations_governance(_namespace_from_payload(payload))
 
 
 def _build_vfs_catalog_governance(snapshot: object) -> GQLVfsCatalogGovernance:
@@ -2288,6 +2913,168 @@ def _build_metadata_reindex_history_point(point: object) -> GQLMetadataReindexHi
     )
 
 
+def _worker_queue_status_from_payload(payload: object) -> GQLWorkerQueueStatus:
+    row = cast(dict[str, Any], payload)
+    return GQLWorkerQueueStatus(
+        queue_name=str(row["queue_name"]),
+        arq_enabled=bool(row["arq_enabled"]),
+        observed_at=str(row["observed_at"]),
+        total_jobs=int(row["total_jobs"]),
+        ready_jobs=int(row["ready_jobs"]),
+        deferred_jobs=int(row["deferred_jobs"]),
+        in_progress_jobs=int(row["in_progress_jobs"]),
+        retry_jobs=int(row["retry_jobs"]),
+        result_jobs=int(row["result_jobs"]),
+        dead_letter_jobs=int(row["dead_letter_jobs"]),
+        alert_level=str(row["alert_level"]),
+        alerts=[
+            GQLQueueAlert(
+                code=str(alert["code"]),
+                severity=str(alert["severity"]),
+                message=str(alert["message"]),
+            )
+            for alert in cast(list[dict[str, Any]], row["alerts"])
+        ],
+        oldest_ready_age_seconds=cast(float | None, row["oldest_ready_age_seconds"]),
+        next_scheduled_in_seconds=cast(float | None, row["next_scheduled_in_seconds"]),
+        dead_letter_oldest_age_seconds=cast(
+            float | None, row["dead_letter_oldest_age_seconds"]
+        ),
+        dead_letter_reason_counts=cast(JSON, dict(row["dead_letter_reason_counts"])),
+    )
+
+
+def _worker_queue_history_points_from_payload(
+    payload: object,
+) -> list[GQLWorkerQueueHistoryPoint]:
+    rows = cast(list[dict[str, Any]], payload)
+    return [
+        GQLWorkerQueueHistoryPoint(
+            observed_at=str(row["observed_at"]),
+            total_jobs=int(row["total_jobs"]),
+            ready_jobs=int(row["ready_jobs"]),
+            deferred_jobs=int(row["deferred_jobs"]),
+            in_progress_jobs=int(row["in_progress_jobs"]),
+            retry_jobs=int(row["retry_jobs"]),
+            dead_letter_jobs=int(row["dead_letter_jobs"]),
+            oldest_ready_age_seconds=cast(float | None, row["oldest_ready_age_seconds"]),
+            next_scheduled_in_seconds=cast(float | None, row["next_scheduled_in_seconds"]),
+            alert_level=str(row["alert_level"]),
+            dead_letter_oldest_age_seconds=cast(
+                float | None, row["dead_letter_oldest_age_seconds"]
+            ),
+            dead_letter_reason_counts=cast(JSON, dict(row["dead_letter_reason_counts"])),
+        )
+        for row in rows
+    ]
+
+
+def _metadata_reindex_status_from_payload(payload: object) -> GQLMetadataReindexStatus:
+    row = cast(dict[str, Any], payload)
+    return GQLMetadataReindexStatus(
+        queue_name=str(row["queue_name"]),
+        schedule_offset_minutes=int(row["schedule_offset_minutes"]),
+        has_history=bool(row["has_history"]),
+        observed_at=str(row["observed_at"]),
+        processed=int(row["processed"]),
+        queued=int(row["queued"]),
+        reconciled=int(row["reconciled"]),
+        skipped_active=int(row["skipped_active"]),
+        failed=int(row["failed"]),
+        repair_attempted=int(row["repair_attempted"]),
+        repair_enriched=int(row["repair_enriched"]),
+        repair_skipped_no_tmdb_id=int(row["repair_skipped_no_tmdb_id"]),
+        repair_failed=int(row["repair_failed"]),
+        repair_requeued=int(row["repair_requeued"]),
+        repair_skipped_active=int(row["repair_skipped_active"]),
+        outcome=str(row["outcome"]),
+        run_failed=bool(row["run_failed"]),
+        last_error=cast(str | None, row["last_error"]),
+    )
+
+
+def _metadata_reindex_history_points_from_payload(
+    payload: object,
+) -> list[GQLMetadataReindexHistoryPoint]:
+    rows = cast(list[dict[str, Any]], payload)
+    return [
+        GQLMetadataReindexHistoryPoint(
+            observed_at=str(row["observed_at"]),
+            processed=int(row["processed"]),
+            queued=int(row["queued"]),
+            reconciled=int(row["reconciled"]),
+            skipped_active=int(row["skipped_active"]),
+            failed=int(row["failed"]),
+            repair_attempted=int(row["repair_attempted"]),
+            repair_enriched=int(row["repair_enriched"]),
+            repair_skipped_no_tmdb_id=int(row["repair_skipped_no_tmdb_id"]),
+            repair_failed=int(row["repair_failed"]),
+            repair_requeued=int(row["repair_requeued"]),
+            repair_skipped_active=int(row["repair_skipped_active"]),
+            outcome=str(row["outcome"]),
+            run_failed=bool(row["run_failed"]),
+            last_error=cast(str | None, row["last_error"]),
+        )
+        for row in rows
+    ]
+
+
+def _build_item_workflow_drill_status(point: object | None, *, queue_name: str) -> GQLItemWorkflowDrillStatus:
+    typed_point: Any | None = point
+    return GQLItemWorkflowDrillStatus(
+        queue_name=queue_name,
+        has_history=typed_point is not None,
+        observed_at="" if typed_point is None else str(typed_point.observed_at),
+        examined_checkpoints=0 if typed_point is None else int(typed_point.examined_checkpoints),
+        replayed_checkpoints=0 if typed_point is None else int(typed_point.replayed_checkpoints),
+        compensated_checkpoints=(
+            0 if typed_point is None else int(typed_point.compensated_checkpoints)
+        ),
+        finalize_requeues=0 if typed_point is None else int(typed_point.finalize_requeues),
+        parse_requeues=0 if typed_point is None else int(typed_point.parse_requeues),
+        scrape_requeues=0 if typed_point is None else int(typed_point.scrape_requeues),
+        index_requeues=0 if typed_point is None else int(typed_point.index_requeues),
+        skipped_active=0 if typed_point is None else int(typed_point.skipped_active),
+        unrecoverable=0 if typed_point is None else int(typed_point.unrecoverable),
+        failed=0 if typed_point is None else int(typed_point.failed),
+        candidate_status_counts=cast(
+            JSON,
+            {} if typed_point is None else dict(typed_point.candidate_status_counts),
+        ),
+        compensation_stage_counts=cast(
+            JSON,
+            {} if typed_point is None else dict(typed_point.compensation_stage_counts),
+        ),
+        outcome="ok" if typed_point is None else str(typed_point.outcome),
+        run_failed=False if typed_point is None else bool(typed_point.run_failed),
+        last_error=None if typed_point is None else typed_point.last_error,
+    )
+
+
+def _build_plugin_stream_control_result(payload: object) -> GQLPluginStreamControlResult:
+    typed_payload: Any = payload
+    return GQLPluginStreamControlResult(
+        plugin_name=str(typed_payload.plugin_name),
+        action=GQLPluginStreamControlAction(str(typed_payload.action)),
+        item_identifier=typed_payload.item_identifier,
+        accepted=bool(typed_payload.accepted),
+        outcome=str(typed_payload.outcome),
+        detail=typed_payload.detail,
+        controller_attached=cast(bool | None, typed_payload.controller_attached),
+        retry_after_seconds=cast(float | None, typed_payload.retry_after_seconds),
+        metadata=cast(JSON, dict(typed_payload.metadata)),
+    )
+
+
+def _build_api_key_rotation_result(payload: object) -> GQLApiKeyRotationResult:
+    typed_payload: Any = payload
+    return GQLApiKeyRotationResult(
+        key=str(typed_payload.key),
+        api_key_id=str(typed_payload.api_key_id),
+        warning=str(typed_payload.warning),
+    )
+
+
 def _build_playback_attachment(attachment: object) -> GQLPlaybackAttachment:
     typed_attachment: Any = attachment
     return GQLPlaybackAttachment(
@@ -2376,6 +3163,7 @@ def _build_active_stream(active_stream: object | None) -> GQLActiveStream | None
 
 def _build_media_entry(entry: object) -> GQLMediaEntry:
     typed_entry: Any = entry
+    lifecycle = getattr(typed_entry, "lifecycle", None)
     return GQLMediaEntry(
         entry_type=str(typed_entry.entry_type),
         kind=str(typed_entry.kind),
@@ -2384,6 +3172,7 @@ def _build_media_entry(entry: object) -> GQLMediaEntry:
         local_path=typed_entry.local_path,
         download_url=typed_entry.download_url,
         unrestricted_url=typed_entry.unrestricted_url,
+        source_attachment_id=getattr(typed_entry, "source_attachment_id", None),
         provider=typed_entry.provider,
         provider_download_id=typed_entry.provider_download_id,
         provider_file_id=typed_entry.provider_file_id,
@@ -2398,6 +3187,29 @@ def _build_media_entry(entry: object) -> GQLMediaEntry:
         active_for_direct=bool(typed_entry.active_for_direct),
         active_for_hls=bool(typed_entry.active_for_hls),
         is_active_stream=bool(typed_entry.is_active_stream),
+        lifecycle=(
+            GQLMediaEntryLifecycle(
+                owner_kind=str(lifecycle.owner_kind),
+                owner_id=lifecycle.owner_id,
+                active_roles=list(lifecycle.active_roles),
+                source_key=lifecycle.source_key,
+                source_attachment_id=lifecycle.source_attachment_id,
+                provider_family=str(lifecycle.provider_family),
+                locator_source=str(lifecycle.locator_source),
+                match_basis=lifecycle.match_basis,
+                restricted_fallback=bool(lifecycle.restricted_fallback),
+                refresh_state=lifecycle.refresh_state,
+                expires_at=lifecycle.expires_at,
+                last_refreshed_at=lifecycle.last_refreshed_at,
+                last_refresh_error=lifecycle.last_refresh_error,
+                effective_refresh_state=str(lifecycle.effective_refresh_state),
+                ready_for_direct=bool(lifecycle.ready_for_direct),
+                ready_for_hls=bool(lifecycle.ready_for_hls),
+                ready_for_playback=bool(lifecycle.ready_for_playback),
+            )
+            if lifecycle is not None
+            else None
+        ),
     )
 
 
@@ -2428,6 +3240,77 @@ def _build_media_item_summary(record: MediaItemSummaryRecord) -> GQLMediaItem:
         episode_number=(specialization.episode_number if specialization is not None else None),
         poster_path=record.poster_path,
         aired_at=record.aired_at,
+    )
+
+
+def _build_media_item_summary_page(page: MediaItemsPage) -> GQLMediaItemSummaryPage:
+    return GQLMediaItemSummaryPage(
+        items=[_build_media_item_summary(record) for record in page.items],
+        page=page.page,
+        limit=page.limit,
+        total_count=page.total_items,
+        total_pages=page.total_pages,
+        has_previous_page=page.page > 1,
+        has_next_page=page.page < page.total_pages,
+    )
+
+
+def _normalize_consumer_media_kind(media_kind: str | None) -> list[str] | None:
+    if media_kind is None:
+        return None
+    normalized = media_kind.strip().casefold()
+    if normalized in {"movie", "show", "season", "episode"}:
+        return [normalized]
+    raise ValueError("mediaKind must be one of movie, show, season, or episode")
+
+
+def _normalize_consumer_summary_sort(sort: str | None) -> list[str] | None:
+    if sort is None:
+        return None
+    normalized = sort.strip().casefold()
+    mapping = {
+        "recent": "date_desc",
+        "year": "date_desc",
+        "title": "title_asc",
+        "state": "state_asc",
+    }
+    directive = mapping.get(normalized)
+    if directive is None:
+        raise ValueError("sort must be one of recent, title, year, or state")
+    return [directive]
+
+
+def _collect_consumer_visible_item_ids(
+    snapshot: VfsCatalogSnapshot,
+    *,
+    tenant_id: str | None,
+) -> set[str]:
+    item_ids: set[str] = set()
+
+    for entry in snapshot.entries:
+        if entry.kind != "file" or entry.file is None:
+            continue
+
+        entry_tenant_id = (entry.correlation.tenant_id or "").strip() or None
+        if tenant_id is not None and entry_tenant_id is not None and entry_tenant_id != tenant_id:
+            continue
+
+        item_id = entry.file.item_id or entry.correlation.item_id
+        if item_id:
+            item_ids.add(str(item_id))
+
+    return item_ids
+
+
+def _empty_media_item_summary_page(*, page: int, limit: int) -> GQLMediaItemSummaryPage:
+    return GQLMediaItemSummaryPage(
+        items=[],
+        total_count=0,
+        page=page,
+        limit=limit,
+        total_pages=1,
+        has_previous_page=page > 1,
+        has_next_page=False,
     )
 
 
@@ -2477,6 +3360,175 @@ def _build_recovery_plan(plan: RecoveryPlanRecord) -> GQLRecoveryPlan:
     )
 
 
+def _media_item_playback_ready(record: MediaItemSummaryRecord) -> bool:
+    resolved_playback = record.resolved_playback
+    if resolved_playback is not None and (resolved_playback.direct_ready or resolved_playback.hls_ready):
+        return True
+
+    active_stream = record.active_stream
+    if active_stream is not None and (active_stream.direct_ready or active_stream.hls_ready):
+        return True
+
+    return any(
+        bool(entry.lifecycle and entry.lifecycle.ready_for_playback)
+        for entry in (record.media_entries or [])
+    )
+
+
+def _request_lifecycle_cta(*, state: str, in_cooldown: bool = False) -> str:
+    if state == "discoverable":
+        return "request"
+    if state in {"ready", "partial_ready"}:
+        return "watch"
+    if state == "failed":
+        return "retry_later" if in_cooldown else "retry"
+    return "view_status"
+
+
+def _build_detail_request_lifecycle(
+    record: MediaItemSummaryRecord,
+    *,
+    checkpoint: WorkflowCheckpointRecord | None,
+    recovery_plan: RecoveryPlanRecord | None,
+) -> GQLRequestLifecycle:
+    return _build_library_item_request_lifecycle(
+        state=record.state,
+        request=record.request,
+        playback_ready=_media_item_playback_ready(record),
+        checkpoint=checkpoint,
+        recovery_plan=recovery_plan,
+    )
+
+
+def _build_library_item_request_lifecycle(
+    *,
+    state: str | None,
+    request: ItemRequestSummaryRecord | None,
+    playback_ready: bool,
+    checkpoint: WorkflowCheckpointRecord | None,
+    recovery_plan: RecoveryPlanRecord | None,
+) -> GQLRequestLifecycle:
+    normalized_state = (state or "").strip().casefold()
+    partial_requested = bool(request is not None and request.is_partial)
+
+    if playback_ready:
+        lifecycle_state = (
+            "partial_ready"
+            if partial_requested or normalized_state == "partially_completed"
+            else "ready"
+        )
+    elif normalized_state == "failed" or (
+        checkpoint is not None and checkpoint.status.value == "failed"
+    ):
+        lifecycle_state = "failed"
+    elif normalized_state == "requested" and checkpoint is None:
+        lifecycle_state = "requested"
+    else:
+        lifecycle_state = "processing"
+
+    if lifecycle_state == "ready":
+        status_detail = "Playback is ready."
+    elif lifecycle_state == "partial_ready":
+        status_detail = "Part of the requested scope is already playable."
+    elif lifecycle_state == "failed":
+        status_detail = (
+            checkpoint.last_error
+            if checkpoint is not None and checkpoint.last_error
+            else (
+                recovery_plan.reason
+                if recovery_plan is not None and recovery_plan.reason
+                else "Request needs attention before playback can recover."
+            )
+        )
+    elif checkpoint is not None and checkpoint.stage_name:
+        status_value = checkpoint.status.value.replace("_", " ")
+        status_detail = f"{checkpoint.stage_name} is {status_value}."
+    elif normalized_state == "requested":
+        status_detail = "Request is queued."
+    elif normalized_state:
+        status_detail = f"Item is {normalized_state.replace('_', ' ')}."
+    else:
+        status_detail = "Request is processing."
+
+    return GQLRequestLifecycle(
+        requestable=False,
+        requested=True,
+        state=lifecycle_state,
+        playback_ready=playback_ready,
+        cta=_request_lifecycle_cta(
+            state=lifecycle_state,
+            in_cooldown=bool(recovery_plan.is_in_cooldown) if recovery_plan is not None else False,
+        ),
+        status_detail=status_detail,
+    )
+
+
+def _build_request_search_compact_lifecycle(
+    record: RequestSearchCandidateRecord,
+) -> GQLRequestLifecycle:
+    requested = bool(record.is_requested)
+    playback_ready = (record.requested_state or "").strip().casefold() in {
+        "downloaded",
+        "completed",
+        "partially_completed",
+    }
+
+    if not requested:
+        state = "discoverable"
+    elif playback_ready:
+        state = (
+            "partial_ready"
+            if (record.requested_state or "").strip().casefold() == "partially_completed"
+            else "ready"
+        )
+    elif record.requested_state == "requested" and record.lifecycle is None:
+        state = "requested"
+    elif (record.requested_state or "").strip().casefold() == "failed" or (
+        record.lifecycle is not None and (record.lifecycle.stage_status or "").strip().casefold() == "failed"
+    ):
+        state = "failed"
+    else:
+        state = "processing"
+
+    if state == "discoverable":
+        status_detail = "Title can be requested."
+    elif state == "ready":
+        status_detail = "Playback is ready."
+    elif state == "partial_ready":
+        status_detail = "Part of the requested scope is already playable."
+    elif state == "failed":
+        status_detail = (
+            record.lifecycle.last_error
+            if record.lifecycle is not None and record.lifecycle.last_error
+            else (
+                record.lifecycle.recovery_reason
+                if record.lifecycle is not None and record.lifecycle.recovery_reason
+                else "Request needs attention before playback can recover."
+            )
+        )
+    elif record.lifecycle is not None and record.lifecycle.stage_name is not None:
+        stage_status = (
+            record.lifecycle.stage_status.replace("_", " ")
+            if record.lifecycle.stage_status is not None
+            else "processing"
+        )
+        status_detail = f"{record.lifecycle.stage_name} is {stage_status}."
+    else:
+        status_detail = "Request is queued."
+
+    return GQLRequestLifecycle(
+        requestable=not requested,
+        requested=requested,
+        state=state,
+        playback_ready=playback_ready,
+        cta=_request_lifecycle_cta(
+            state=state,
+            in_cooldown=bool(record.lifecycle.in_cooldown) if record.lifecycle is not None else False,
+        ),
+        status_detail=status_detail,
+    )
+
+
 async def _build_media_item_detail(
     info: Info[GraphQLContext, object],
     record: MediaItemSummaryRecord,
@@ -2488,6 +3540,9 @@ async def _build_media_item_detail(
         )
     ]
     recovery_plan = await info.context.media_service.get_recovery_plan(media_item_id=record.id)
+    workflow_checkpoint = await info.context.media_service.get_workflow_checkpoint(
+        media_item_id=record.id
+    )
     selected_stream = next(
         (candidate for candidate in stream_candidates if candidate.selected), None
     )
@@ -2517,8 +3572,14 @@ async def _build_media_item_detail(
         episode_number=(specialization.episode_number if specialization is not None else None),
         created_at=record.created_at or "",
         updated_at=record.updated_at or "",
+        request=_build_item_request_summary(record.request),
         stream_candidates=stream_candidates,
         selected_stream=selected_stream,
+        request_lifecycle=_build_detail_request_lifecycle(
+            record,
+            checkpoint=workflow_checkpoint,
+            recovery_plan=recovery_plan,
+        ),
         recovery_plan=(
             _build_recovery_plan(recovery_plan)
             if recovery_plan is not None
@@ -2537,6 +3598,511 @@ async def _build_media_item_detail(
         resolved_playback=_build_resolved_playback(record.resolved_playback),
         active_stream=_build_active_stream(record.active_stream),
         media_entries=[_build_media_entry(entry) for entry in record.media_entries or []],
+    )
+
+
+async def _build_consumer_playback_item(
+    info: Info[GraphQLContext, object],
+    record: MediaItemSummaryRecord,
+) -> GQLConsumerPlaybackItem:
+    auth_context = get_auth_context(info.context.request)
+    activity_snapshot = await info.context.media_service.get_consumer_playback_activity(
+        tenant_id=auth_context.tenant_id,
+        actor_id=auth_context.actor_id,
+        actor_type=auth_context.actor_type,
+        item_limit=1,
+        device_limit=1,
+        focus_item_id=record.id,
+    )
+    return GQLConsumerPlaybackItem(
+        summary=_build_media_item_summary(record),
+        detail=await _build_media_item_detail(info, record),
+        activity=(
+            await _build_consumer_playback_activity_item(info, activity_snapshot.items[0])
+            if activity_snapshot.items
+            else None
+        ),
+    )
+
+
+async def _build_consumer_playback_activity_item(
+    info: Info[GraphQLContext, object],
+    item: ConsumerPlaybackActivityItemRecord,
+) -> GQLConsumerPlaybackActivityItem:
+    recovery_plan, workflow_checkpoint = await asyncio.gather(
+        info.context.media_service.get_recovery_plan(media_item_id=item.item_id),
+        info.context.media_service.get_workflow_checkpoint(media_item_id=item.item_id),
+    )
+    return GQLConsumerPlaybackActivityItem(
+        item_id=strawberry.ID(item.item_id),
+        title=item.title,
+        subtitle=item.subtitle,
+        poster_path=item.poster_path,
+        state=item.state,
+        request=_build_item_request_summary(item.request),
+        request_lifecycle=_build_library_item_request_lifecycle(
+            state=item.state,
+            request=item.request,
+            playback_ready=item.playback_ready,
+            checkpoint=workflow_checkpoint,
+            recovery_plan=recovery_plan,
+        ),
+        last_activity_at=item.last_activity_at,
+        last_viewed_at=item.last_viewed_at,
+        last_launched_at=item.last_launched_at,
+        view_count=item.view_count,
+        launch_count=item.launch_count,
+        session_count=item.session_count,
+        active_session_count=item.active_session_count,
+        last_session_key=item.last_session_key,
+        resume_position_seconds=item.resume_position_seconds,
+        duration_seconds=item.duration_seconds,
+        progress_percent=item.progress_percent,
+        completed=item.completed,
+        last_target=item.last_target,
+    )
+
+
+async def _build_consumer_playback_activity(
+    info: Info[GraphQLContext, object],
+    snapshot: ConsumerPlaybackActivityRecord,
+) -> GQLConsumerPlaybackActivity:
+    return GQLConsumerPlaybackActivity(
+        generated_at=snapshot.generated_at,
+        total_item_count=snapshot.total_item_count,
+        total_view_count=snapshot.total_view_count,
+        total_launch_count=snapshot.total_launch_count,
+        total_session_count=snapshot.total_session_count,
+        active_session_count=snapshot.active_session_count,
+        items=list(
+            await asyncio.gather(
+                *[
+                    _build_consumer_playback_activity_item(info, item)
+                    for item in snapshot.items
+                ]
+            )
+        ),
+        devices=[
+            GQLConsumerPlaybackDevice(
+                device_key=device.device_key,
+                device_label=device.device_label,
+                last_seen_at=device.last_seen_at,
+                last_activity_at=device.last_activity_at,
+                last_viewed_at=device.last_viewed_at,
+                last_launched_at=device.last_launched_at,
+                launch_count=device.launch_count,
+                view_count=device.view_count,
+                session_count=device.session_count,
+                active_session_count=device.active_session_count,
+                last_session_key=device.last_session_key,
+                resume_position_seconds=device.resume_position_seconds,
+                duration_seconds=device.duration_seconds,
+                progress_percent=device.progress_percent,
+                completed_session_count=device.completed_session_count,
+                last_target=device.last_target,
+            )
+            for device in snapshot.devices
+        ],
+        recent_sessions=[
+            GQLConsumerPlaybackSession(
+                session_key=session.session_key,
+                item_id=strawberry.ID(session.item_id),
+                device_key=session.device_key,
+                device_label=session.device_label,
+                started_at=session.started_at,
+                last_seen_at=session.last_seen_at,
+                last_target=session.last_target,
+                active=session.active,
+                resume_position_seconds=session.resume_position_seconds,
+                duration_seconds=session.duration_seconds,
+                progress_percent=session.progress_percent,
+                completed=session.completed,
+            )
+            for session in snapshot.recent_sessions
+        ],
+    )
+
+
+def _consumer_profile_status_label(*, authenticated: bool) -> str:
+    return "Signed in" if authenticated else "Preview mode"
+
+
+def _consumer_profile_plan_label(value: str | None, *, authenticated: bool) -> str:
+    normalized = (value or "").strip().casefold()
+    if normalized in {"pro", "professional"}:
+        return "Pro"
+    if normalized in {"scale", "business", "growth"}:
+        return "Scale"
+    if normalized == "community":
+        return "Community"
+    return "Preview" if not authenticated else "Unknown"
+
+
+def _build_consumer_profile_library(
+    projection: StatsProjection,
+) -> GQLConsumerProfileLibrary:
+    return GQLConsumerProfileLibrary(
+        total_items=projection.total_items,
+        total_movies=projection.movies,
+        total_shows=projection.shows,
+        total_episodes=projection.episodes,
+        completed_items=projection.completed_items,
+        incomplete_items=projection.incomplete_items,
+        failed_items=projection.failed_items,
+        state_breakdown=json.dumps(projection.states),
+        activity=json.dumps(
+            [{"date": day, "count": count} for day, count in projection.activity.items()]
+        ),
+    )
+
+
+def _append_unique_nonempty(target: list[str], candidate: object | None) -> None:
+    if not isinstance(candidate, str):
+        return
+    value = candidate.strip()
+    if not value or value in target:
+        return
+    target.append(value)
+
+
+def _consumer_profile_provider_labels(detail: object | None) -> list[str]:
+    labels: list[str] = []
+    if detail is None:
+        return labels
+
+    typed_detail: Any = detail
+    resolved_playback = getattr(typed_detail, "resolved_playback", None)
+    if resolved_playback is not None:
+        _append_unique_nonempty(labels, getattr(getattr(resolved_playback, "direct", None), "provider", None))
+        _append_unique_nonempty(labels, getattr(getattr(resolved_playback, "hls", None), "provider", None))
+
+    active_stream = getattr(typed_detail, "active_stream", None)
+    if active_stream is not None:
+        _append_unique_nonempty(labels, getattr(getattr(active_stream, "direct_owner", None), "provider", None))
+        _append_unique_nonempty(labels, getattr(getattr(active_stream, "hls_owner", None), "provider", None))
+
+    for entry in list(getattr(typed_detail, "media_entries", ()) or ()):
+        typed_entry: Any = entry
+        _append_unique_nonempty(labels, getattr(typed_entry, "provider", None))
+
+    return labels
+
+
+def _consumer_profile_effective_refresh_state(states: list[str]) -> str | None:
+    if not states:
+        return None
+    priority = {
+        "failed": 0,
+        "blocked": 1,
+        "denied": 2,
+        "error": 3,
+        "stale": 4,
+        "refreshing": 5,
+        "ready": 6,
+    }
+
+    def _priority(value: str) -> tuple[int, str]:
+        normalized = value.strip().casefold()
+        return (priority.get(normalized, 99), normalized)
+
+    return min(states, key=_priority)
+
+
+def _build_consumer_profile_availability_item(
+    activity_item: ConsumerPlaybackActivityItemRecord,
+    detail: object | None,
+) -> GQLConsumerProfileAvailabilityItem:
+    typed_detail: Any = detail
+    direct_ready = False
+    hls_ready = False
+    lifecycle_playback_ready = False
+    missing_local_file = False
+    restricted_fallback = False
+    refresh_errors: list[str] = []
+    refresh_states: list[str] = []
+
+    resolved_playback = getattr(typed_detail, "resolved_playback", None) if detail is not None else None
+    if resolved_playback is not None:
+        direct_ready = direct_ready or bool(getattr(resolved_playback, "direct_ready", False))
+        hls_ready = hls_ready or bool(getattr(resolved_playback, "hls_ready", False))
+        missing_local_file = missing_local_file or bool(
+            getattr(resolved_playback, "missing_local_file", False)
+        )
+
+    active_stream = getattr(typed_detail, "active_stream", None) if detail is not None else None
+    if active_stream is not None:
+        direct_ready = direct_ready or bool(getattr(active_stream, "direct_ready", False))
+        hls_ready = hls_ready or bool(getattr(active_stream, "hls_ready", False))
+        missing_local_file = missing_local_file or bool(
+            getattr(active_stream, "missing_local_file", False)
+        )
+
+    for entry in list(getattr(typed_detail, "media_entries", ()) or ()) if detail is not None else []:
+        typed_entry: Any = entry
+        lifecycle = getattr(typed_entry, "lifecycle", None)
+        if lifecycle is not None:
+            direct_ready = direct_ready or bool(getattr(lifecycle, "ready_for_direct", False))
+            hls_ready = hls_ready or bool(getattr(lifecycle, "ready_for_hls", False))
+            lifecycle_playback_ready = lifecycle_playback_ready or bool(
+                getattr(lifecycle, "ready_for_playback", False)
+            )
+            restricted_fallback = restricted_fallback or bool(
+                getattr(lifecycle, "restricted_fallback", False)
+            )
+            refresh_state = getattr(lifecycle, "effective_refresh_state", None)
+            if isinstance(refresh_state, str) and refresh_state.strip():
+                refresh_states.append(refresh_state)
+            refresh_error = getattr(lifecycle, "last_refresh_error", None)
+            if isinstance(refresh_error, str) and refresh_error.strip():
+                refresh_errors.append(refresh_error.strip())
+        entry_refresh_state = getattr(typed_entry, "refresh_state", None)
+        if isinstance(entry_refresh_state, str) and entry_refresh_state.strip():
+            refresh_states.append(entry_refresh_state)
+        entry_refresh_error = getattr(typed_entry, "last_refresh_error", None)
+        if isinstance(entry_refresh_error, str) and entry_refresh_error.strip():
+            refresh_errors.append(entry_refresh_error.strip())
+
+    playback_ready = direct_ready or hls_ready or lifecycle_playback_ready
+    normalized_refresh_states = [state.strip().casefold() for state in refresh_states if state.strip()]
+    refresh_blocked = (not playback_ready) and (
+        bool(refresh_errors)
+        or any(
+            state in {"failed", "blocked", "denied", "error"}
+            for state in normalized_refresh_states
+        )
+    )
+
+    provider_labels = _consumer_profile_provider_labels(detail)
+    provider_limited = (not playback_ready) and (not refresh_blocked) and (
+        missing_local_file or restricted_fallback or bool(provider_labels)
+    )
+
+    posture_key = "pending"
+    posture_label = "Pending"
+    detail_text = "Playback posture is still being resolved."
+    if playback_ready:
+        posture_key = "playback-ready"
+        posture_label = "Playback ready"
+        if direct_ready and hls_ready:
+            detail_text = "Direct and HLS playback are ready."
+        elif direct_ready:
+            detail_text = "Direct playback is ready."
+        else:
+            detail_text = "HLS playback is ready."
+    elif refresh_blocked:
+        posture_key = "refresh-blocked"
+        posture_label = "Refresh blocked"
+        detail_text = (
+            refresh_errors[0]
+            if refresh_errors
+            else "Refresh needs attention before playback can recover."
+        )
+    elif provider_limited:
+        posture_key = "provider-limited"
+        posture_label = "Provider limited"
+        if missing_local_file:
+            detail_text = "Playback is waiting on a provider-backed file."
+        elif provider_labels:
+            detail_text = f"Availability is currently limited by {provider_labels[0]}."
+        else:
+            detail_text = "Availability is limited by the current source posture."
+
+    return GQLConsumerProfileAvailabilityItem(
+        item_id=strawberry.ID(activity_item.item_id),
+        title=activity_item.title,
+        subtitle=activity_item.subtitle,
+        poster_path=activity_item.poster_path,
+        state=(activity_item.state or getattr(typed_detail, "state", None)),
+        posture_key=posture_key,
+        posture_label=posture_label,
+        detail=detail_text,
+        direct_ready=direct_ready,
+        hls_ready=hls_ready,
+        missing_local_file=missing_local_file,
+        effective_refresh_state=_consumer_profile_effective_refresh_state(refresh_states),
+        provider_labels=provider_labels,
+        last_activity_at=activity_item.last_activity_at,
+        last_viewed_at=activity_item.last_viewed_at,
+        last_launched_at=activity_item.last_launched_at,
+    )
+
+
+async def _build_consumer_profile_availability(
+    *,
+    media_service: Any,
+    tenant_id: str | None,
+    playback: ConsumerPlaybackActivityRecord,
+) -> tuple[GQLConsumerProfileAvailabilitySummary, list[GQLConsumerProfileAvailabilityItem]]:
+    recent_items = list(playback.items)
+    if not recent_items:
+        return (
+            GQLConsumerProfileAvailabilitySummary(
+                tracked_item_count=0,
+                playback_ready_count=0,
+                refresh_blocked_count=0,
+                provider_limited_count=0,
+                pending_count=0,
+            ),
+            [],
+        )
+
+    detail_results = await asyncio.gather(
+        *[
+            media_service.get_item_detail(
+                item.item_id,
+                media_type="item",
+                extended=True,
+                tenant_id=tenant_id,
+            )
+            for item in recent_items
+        ],
+        return_exceptions=True,
+    )
+    availability_items = [
+        _build_consumer_profile_availability_item(
+            item,
+            None if isinstance(detail_result, Exception) else detail_result,
+        )
+        for item, detail_result in zip(recent_items, detail_results, strict=False)
+    ]
+    return (
+        GQLConsumerProfileAvailabilitySummary(
+            tracked_item_count=len(availability_items),
+            playback_ready_count=sum(
+                1 for item in availability_items if item.posture_key == "playback-ready"
+            ),
+            refresh_blocked_count=sum(
+                1 for item in availability_items if item.posture_key == "refresh-blocked"
+            ),
+            provider_limited_count=sum(
+                1 for item in availability_items if item.posture_key == "provider-limited"
+            ),
+            pending_count=sum(1 for item in availability_items if item.posture_key == "pending"),
+        ),
+        availability_items,
+    )
+
+
+async def _build_consumer_profile(
+    *,
+    info: Info[GraphQLContext, object],
+    auth_context: Any,
+    stats: StatsProjection,
+    playback: ConsumerPlaybackActivityRecord,
+    availability_summary: GQLConsumerProfileAvailabilitySummary,
+    availability_items: list[GQLConsumerProfileAvailabilityItem],
+) -> GQLConsumerProfile:
+    authenticated = auth_context.source_label != "anonymous"
+    playback_projection = await _build_consumer_playback_activity(info, playback)
+    resume_item_count = sum(
+        1
+        for item in playback.items
+        if item.resume_position_seconds is not None and not item.completed
+    )
+    completed_item_count = sum(1 for item in playback.items if item.completed)
+    posture_notes = [
+        (
+            f"Authentication mode {auth_context.authentication_mode} is mapped to "
+            f"{auth_context.actor_type} actor {auth_context.actor_id}."
+            if authenticated
+            else "Anonymous preview is using the current Director fallback identity."
+        ),
+        (
+            f"Quota policy {auth_context.quota_policy_version} is active for this workspace."
+            if auth_context.quota_policy_version
+            else "Quota policy detail is not currently available."
+        ),
+        (
+            f"{stats.total_items} tracked items, {stats.completed_items} completed, "
+            f"{stats.failed_items} failed."
+        ),
+        (
+            f"{playback.active_session_count} active sessions across "
+            f"{len(playback.devices)} recent devices."
+        ),
+        (
+            f"Recent availability window: {availability_summary.playback_ready_count} ready, "
+            f"{availability_summary.refresh_blocked_count} blocked, "
+            f"{availability_summary.provider_limited_count} provider-limited."
+        ),
+    ]
+
+    return GQLConsumerProfile(
+        generated_at=playback.generated_at,
+        authenticated=authenticated,
+        identity=GQLConsumerProfileIdentity(
+            display_name=auth_context.actor_display_name
+            or ("Guest" if not authenticated else auth_context.actor_id),
+            email=auth_context.actor_email,
+            status_label=_consumer_profile_status_label(authenticated=authenticated),
+            source_label=auth_context.source_label,
+            actor_id=(auth_context.actor_id if authenticated else None),
+            actor_type=(auth_context.actor_type if authenticated else None),
+            authentication_mode=(
+                auth_context.authentication_mode if authenticated else None
+            ),
+        ),
+        workspace=GQLConsumerProfileWorkspace(
+            id=(auth_context.tenant_id if authenticated else None),
+            name=auth_context.tenant_display_name
+            or ("Consumer preview" if not authenticated else auth_context.tenant_id),
+            plan_label=_consumer_profile_plan_label(
+                auth_context.tenant_plan,
+                authenticated=authenticated,
+            ),
+            access_policy_version=auth_context.access_policy_version,
+            quota_policy_version=auth_context.quota_policy_version,
+            quota_enabled=(auth_context.quota_policy_version is not None),
+        ),
+        library=_build_consumer_profile_library(stats),
+        playback_summary=GQLConsumerProfilePlaybackSummary(
+            active_session_count=playback.active_session_count,
+            resume_item_count=resume_item_count,
+            completed_item_count=completed_item_count,
+            stalled_item_count=stats.failed_items,
+            recent_device_count=len(playback.devices),
+            recent_session_count=len(playback.recent_sessions),
+        ),
+        availability_summary=availability_summary,
+        availability_items=availability_items,
+        playback=playback_projection,
+        posture_notes=posture_notes,
+    )
+
+
+async def _build_media_items_page(
+    info: Info[GraphQLContext, object],
+    page: object,
+    *,
+    offset: int,
+) -> GQLMediaItemsPage:
+    records = cast(list[MediaItemSummaryRecord], getattr(page, "items"))
+    total_items = int(getattr(page, "total_items"))
+    limit = int(getattr(page, "limit"))
+    return GQLMediaItemsPage(
+        items=[await _build_media_item_detail(info, record) for record in records],
+        total_count=total_items,
+        limit=limit,
+        offset=offset,
+        has_previous_page=offset > 0,
+        has_next_page=offset + len(records) < total_items,
+    )
+
+
+def _build_media_item_summary_page(page: object) -> GQLMediaItemSummaryPage:
+    records = cast(list[MediaItemSummaryRecord], getattr(page, "items"))
+    total_items = int(getattr(page, "total_items"))
+    limit = int(getattr(page, "limit"))
+    current_page = int(getattr(page, "page"))
+    total_pages = int(getattr(page, "total_pages"))
+    return GQLMediaItemSummaryPage(
+        items=[_build_media_item_summary(record) for record in records],
+        total_count=total_items,
+        page=current_page,
+        limit=limit,
+        total_pages=total_pages,
+        has_previous_page=current_page > 1,
+        has_next_page=current_page < total_pages,
     )
 
 
@@ -2742,6 +4308,50 @@ class CoreQueryResolver:
 
         page = await info.context.media_service.search_items(limit=limit, page=1, extended=False)
         return [_build_media_item_summary(record) for record in page.items]
+
+    @strawberry.field(
+        description="Paginated summary page for browse and in-library search surfaces"
+    )
+    async def library_items_page(
+        self,
+        info: Info[GraphQLContext, object],
+        query: str | None = None,
+        state: str | None = None,
+        item_type: str | None = None,
+        sort: str | None = None,
+        limit: int = 24,
+        page: int = 1,
+    ) -> GQLMediaItemSummaryPage:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be within range [1, 100]")
+        if page < 1:
+            raise ValueError("page must be greater than or equal to 1")
+
+        auth_context = get_auth_context(info.context.request)
+        normalized_item_types = _normalize_consumer_media_kind(item_type)
+        normalized_sort = (sort or ("relevance" if query and query.strip() else "recent")).strip().casefold()
+        sort_directives = {
+            "recent": ["date_desc"],
+            "title": ["title_asc"],
+            "year": ["year_desc"],
+            "state": ["state_asc"],
+            "relevance": ["relevance"],
+        }.get(normalized_sort)
+        if sort_directives is None:
+            raise ValueError("sort must be one of recent, title, year, state, or relevance")
+
+        result = await info.context.media_service.search_items(
+            limit=limit,
+            page=page,
+            item_types=normalized_item_types,
+            states=[state] if state is not None else None,
+            sort=sort_directives,
+            search=query,
+            extended=False,
+            tenant_id=auth_context.tenant_id,
+        )
+        return _build_media_item_summary_page(result)
+
 
     @strawberry.field(description="Fetch one media item by internal identifier")
     async def item(
@@ -3223,36 +4833,36 @@ class CoreQueryResolver:
     @strawberry.field(
         description="Retained rollout evidence checks across playback, VFS, identity, plugin runtime, observability, and control-plane domains"
     )
-    async def enterprise_rollout_evidence(
+    async def rollout_evidence(
         self,
         info: Info[GraphQLContext, object],
-    ) -> GQLEnterpriseRolloutEvidence:
-        return _build_enterprise_rollout_evidence(
-            build_enterprise_rollout_evidence_posture(info.context.resources)
+    ) -> GQLRolloutEvidence:
+        return _build_rollout_evidence(
+            build_rollout_evidence_posture(info.context.resources)
         )
 
     @strawberry.field(
         description="Status buckets across retained rollout-evidence checks"
     )
-    async def enterprise_rollout_status_counts(
+    async def rollout_status_counts(
         self,
         info: Info[GraphQLContext, object],
     ) -> list[GQLGovernanceStatusCount]:
         return [
             _build_governance_status_count(row)
-            for row in build_enterprise_rollout_status_counts(info.context.resources)
+            for row in build_rollout_status_counts(info.context.resources)
         ]
 
     @strawberry.field(
         description="Retained rollout artifact inventory for Director/operator evidence views"
     )
-    async def enterprise_rollout_artifact_inventory(
+    async def rollout_artifact_inventory(
         self,
         info: Info[GraphQLContext, object],
         check_key: str | None = None,
         recorded: bool | None = None,
     ) -> list[GQLGovernanceArtifactInventoryItem]:
-        rows = build_enterprise_rollout_artifact_inventory(info.context.resources)
+        rows = build_rollout_artifact_inventory(info.context.resources)
         filtered = [
             row
             for row in rows
@@ -3264,14 +4874,14 @@ class CoreQueryResolver:
     @strawberry.field(
         description="Flattened rollout-governance action feed for Director/operator consoles"
     )
-    async def enterprise_rollout_actions(
+    async def rollout_actions(
         self,
         info: Info[GraphQLContext, object],
         domain: str | None = None,
         severity: str | None = None,
         status: str | None = None,
     ) -> list[GQLOperatorActionItem]:
-        rows = build_enterprise_rollout_action_items(info.context.resources)
+        rows = build_rollout_action_items(info.context.resources)
         filtered = [
             row
             for row in rows
@@ -3284,14 +4894,14 @@ class CoreQueryResolver:
     @strawberry.field(
         description="Flattened rollout-governance gap feed for Director/operator consoles"
     )
-    async def enterprise_rollout_gaps(
+    async def rollout_gaps(
         self,
         info: Info[GraphQLContext, object],
         domain: str | None = None,
         severity: str | None = None,
         status: str | None = None,
     ) -> list[GQLOperatorGapItem]:
-        rows = build_enterprise_rollout_gap_items(info.context.resources)
+        rows = build_rollout_gap_items(info.context.resources)
         filtered = [
             row
             for row in rows
@@ -3334,6 +4944,50 @@ class CoreQueryResolver:
         )
 
     @strawberry.field(
+        description="Current serving-session and path status for GraphQL-first observability screens"
+    )
+    async def serving_status(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLServingStatus:
+        stream_routes = _stream_route_module()
+        snapshot = await stream_routes.get_stream_status(
+            request=info.context.request,
+            db=info.context.resources.db,
+            resources=info.context.resources,
+        )
+        return _build_serving_status(snapshot)
+
+    @strawberry.field(
+        description="Known stream/event-bus topics for GraphQL-first observability screens"
+    )
+    async def stream_event_types(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> list[str]:
+        stream_routes = _stream_route_module()
+        response = await stream_routes.get_event_types(
+            event_bus=info.context.resources.event_bus,
+        )
+        return list(response.event_types)
+
+    @strawberry.field(
+        description="Bounded in-memory historical logs for GraphQL-first observability screens"
+    )
+    async def observability_log_history(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 80,
+    ) -> list[str]:
+        if limit < 1 or limit > 250:
+            raise ValueError("limit must be within range [1, 250]")
+
+        history = info.context.resources.log_stream.history()
+        if not history:
+            return []
+        return list(history[-limit:])
+
+    @strawberry.field(
         description="Persisted VFS rollout-control state and bounded operator history for canary promotion"
     )
     async def vfs_rollout_control(
@@ -3342,12 +4996,26 @@ class CoreQueryResolver:
         history_limit: int = 20,
     ) -> GQLVfsRolloutControl:
         compat_routes = _compat_route_module()
-        snapshot = compat_routes._vfs_rollout_control_response()
         bounded_limit = max(1, min(history_limit, 100))
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:vfs_rollout_control",
+            version=version,
+            history_limit=bounded_limit,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _vfs_rollout_control_from_payload(cached)
+        snapshot = compat_routes._vfs_rollout_control_response()
         payload = snapshot.model_dump()
         payload["history"] = list(snapshot.history[:bounded_limit])
         filtered_snapshot = SimpleNamespace(**payload)
-        return _build_vfs_rollout_control(filtered_snapshot)
+        result = _build_vfs_rollout_control(filtered_snapshot)
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(
         description="Builtin plugin registration and config-validation posture for GraphQL-first clients"
@@ -3359,7 +5027,21 @@ class CoreQueryResolver:
         capability_kind: str | None = None,
         include_disabled: bool = True,
     ) -> GQLPluginIntegrationReadiness:
-        snapshot = build_plugin_integration_readiness_posture(info.context.resources)
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:plugin_integration_readiness",
+            version=version,
+            status=status,
+            capability_kind=capability_kind,
+            include_disabled=include_disabled,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _plugin_integration_readiness_from_payload(cached)
+        snapshot = await build_plugin_integration_readiness_posture(info.context.resources)
         filtered_plugins = [
             plugin
             for plugin in snapshot.plugins
@@ -3386,7 +5068,9 @@ class CoreQueryResolver:
                 )
             ),
         )
-        return _build_plugin_integration_readiness(filtered_snapshot)
+        result = _build_plugin_integration_readiness(filtered_snapshot)
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(
         description="Downloader orchestration posture for GraphQL-first operator and Director clients"
@@ -3461,6 +5145,7 @@ class CoreQueryResolver:
         provider: str | None = None,
         failure_kind: str | None = None,
         reason_code: str | None = None,
+        status_code: int | None = None,
         limit: int = 50,
     ) -> list[GQLDownloaderProviderSummary]:
         rows = await build_downloader_provider_summaries(
@@ -3473,6 +5158,10 @@ class CoreQueryResolver:
             if (provider is None or row.provider == provider)
             and (failure_kind is None or row.failure_kind_counts.get(failure_kind, 0) > 0)
             and (reason_code is None or row.reason_code_counts.get(reason_code, 0) > 0)
+            and (
+                status_code is None
+                or row.status_code_counts.get(str(status_code), 0) > 0
+            )
         ]
         return [_build_downloader_provider_summary(row) for row in filtered]
 
@@ -3704,12 +5393,31 @@ class CoreQueryResolver:
         publisher: str | None = None,
         wiring_status: str | None = None,
     ) -> list[GQLPluginEventStatus]:
-        rows = build_plugin_event_status_posture(info.context.resources)
+        rows = await build_plugin_event_status_posture(info.context.resources)
         if publisher is not None:
             rows = [row for row in rows if row.publisher == publisher]
         if wiring_status is not None:
             rows = [row for row in rows if row.wiring_status == wiring_status]
         return [_build_plugin_event_status(row) for row in rows]
+
+    @strawberry.field(
+        description="Paged plugin event inventory with filtered summary rollups for Director workbenches"
+    )
+    async def plugin_events_page(
+        self,
+        info: Info[GraphQLContext, object],
+        publisher: str | None = None,
+        wiring_status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> GQLPluginEventsPage:
+        rows = await build_plugin_event_status_posture(info.context.resources)
+        if publisher is not None:
+            rows = [row for row in rows if row.publisher == publisher]
+        if wiring_status is not None:
+            rows = [row for row in rows if row.wiring_status == wiring_status]
+        rows = sorted(rows, key=lambda row: row.name)
+        return _build_plugin_events_page(rows, limit=limit, offset=offset)
 
     @strawberry.field(
         description="Aggregated plugin runtime health, wiring, and retained proof posture for Director operator screens"
@@ -3980,6 +5688,72 @@ class CoreQueryResolver:
         )
 
     @strawberry.field(
+        description="Current actor access-policy posture for graph control-plane clients"
+    )
+    async def access_policy_context(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLAccessPolicyContext:
+        compat_routes = _compat_route_module()
+        response = await compat_routes.get_auth_policy_context(info.context.request)
+        return _build_access_policy_context(response)
+
+    @strawberry.field(
+        description="Bounded access-policy audit search for graph control-plane clients"
+    )
+    async def access_policy_audit(
+        self,
+        info: Info[GraphQLContext, object],
+        limit: int = 20,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+        target_tenant_id: str | None = None,
+        permission: str | None = None,
+        allowed: bool | None = None,
+        reason: str | None = None,
+        path_prefix: str | None = None,
+    ) -> GQLAccessPolicyAudit:
+        await require_graphql_permissions(
+            info,
+            "settings:write",
+            resource_scope="access_policy",
+        )
+        compat_routes = _compat_route_module()
+        response = await compat_routes.get_auth_policy_audit(
+            info.context.request,
+            limit=max(1, min(limit, 100)),
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+            target_tenant_id=target_tenant_id,
+            permission=permission,
+            allowed=allowed,
+            reason=reason,
+            path_prefix=path_prefix,
+        )
+        return _build_access_policy_audit(response)
+
+    @strawberry.field(
+        description="Current tenant quota policy and request-intake visibility"
+    )
+    async def tenant_quota_policy(
+        self,
+        info: Info[GraphQLContext, object],
+        tenant_id: str | None = None,
+    ) -> GQLTenantQuotaPolicy:
+        await require_graphql_permissions(
+            info,
+            "tenant:quota.read",
+            resource_scope="tenant_quota",
+            target_tenant_id=tenant_id,
+        )
+        compat_routes = _compat_route_module()
+        response = await compat_routes.get_tenant_quota_policy(
+            info.context.request,
+            tenant_id=tenant_id,
+        )
+        return _build_tenant_quota_policy(response)
+
+    @strawberry.field(
         description="Persisted plugin-governance overrides for graph operator workflows"
     )
     async def plugin_governance_overrides(
@@ -4014,12 +5788,26 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         active_within_seconds: int = 120,
     ) -> GQLControlPlaneSummary:
-        return _build_control_plane_summary(
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:summary",
+            version=version,
+            active_within_seconds=active_within_seconds,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _control_plane_summary_from_payload(cached)
+        result = _build_control_plane_summary(
             await build_control_plane_summary_posture(
                 info.context.resources,
                 active_within_seconds=active_within_seconds,
             )
         )
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(description="Status buckets across control-plane subscriber states")
     async def control_plane_status_counts(
@@ -4027,11 +5815,29 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         active_within_seconds: int = 120,
     ) -> list[GQLNamedCountBucket]:
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:status_counts",
+            version=version,
+            active_within_seconds=active_within_seconds,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _named_count_buckets_from_payload(cached)
         rows = await build_control_plane_status_counts(
             info.context.resources,
             active_within_seconds=active_within_seconds,
         )
-        return _build_named_count_buckets({row.key: row.count for row in rows})
+        result = _build_named_count_buckets({row.key: row.count for row in rows})
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(row) for row in result],
+        )
+        return result
 
     @strawberry.field(
         description="Durable replay/control-plane subscriber ledger rows for GraphQL-first operator consoles"
@@ -4049,6 +5855,27 @@ class CoreQueryResolver:
         fenced: bool | None = None,
         limit: int = 100,
     ) -> list[GQLControlPlaneSubscriber]:
+        bounded_limit = max(1, min(limit, 500))
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:subscribers",
+            version=version,
+            active_within_seconds=active_within_seconds,
+            status=status,
+            tenant_id=tenant_id,
+            consumer_group=consumer_group,
+            consumer_name=consumer_name,
+            node_id=node_id,
+            ack_pending=ack_pending,
+            fenced=fenced,
+            limit=bounded_limit,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _control_plane_subscribers_from_payload(cached)
         rows = [
             _build_control_plane_subscriber(row)
             for row in await build_control_plane_subscribers_posture(
@@ -4067,7 +5894,13 @@ class CoreQueryResolver:
             and (ack_pending is None or row.ack_pending == ack_pending)
             and (fenced is None or row.fenced == fenced)
         ]
-        return filtered[: max(1, min(limit, 500))]
+        result = filtered[:bounded_limit]
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(row) for row in result],
+        )
+        return result
 
     @strawberry.field(description="Grouped control-plane summary per consumer")
     async def control_plane_consumer_summaries(
@@ -4076,13 +5909,32 @@ class CoreQueryResolver:
         active_within_seconds: int = 120,
         consumer_name: str | None = None,
     ) -> list[GQLControlPlaneConsumerSummary]:
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:consumer_summaries",
+            version=version,
+            active_within_seconds=active_within_seconds,
+            consumer_name=consumer_name,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _control_plane_consumer_summaries_from_payload(cached)
         rows = await build_control_plane_consumer_summaries(
             info.context.resources,
             active_within_seconds=active_within_seconds,
         )
         if consumer_name is not None:
             rows = [row for row in rows if row.consumer_name == consumer_name]
-        return [_build_control_plane_consumer_summary(row) for row in rows]
+        result = [_build_control_plane_consumer_summary(row) for row in rows]
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(row) for row in result],
+        )
+        return result
 
     @strawberry.field(description="Subscriber counts grouped by owning node")
     async def control_plane_node_counts(
@@ -4090,11 +5942,29 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         active_within_seconds: int = 120,
     ) -> list[GQLNamedCountBucket]:
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:node_counts",
+            version=version,
+            active_within_seconds=active_within_seconds,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _named_count_buckets_from_payload(cached)
         rows = await build_control_plane_node_counts(
             info.context.resources,
             active_within_seconds=active_within_seconds,
         )
-        return _build_named_count_buckets({row.key: row.count for row in rows})
+        result = _build_named_count_buckets({row.key: row.count for row in rows})
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(row) for row in result],
+        )
+        return result
 
     @strawberry.field(description="Subscriber counts grouped by tenant")
     async def control_plane_tenant_counts(
@@ -4102,11 +5972,29 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         active_within_seconds: int = 120,
     ) -> list[GQLNamedCountBucket]:
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:tenant_counts",
+            version=version,
+            active_within_seconds=active_within_seconds,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _named_count_buckets_from_payload(cached)
         rows = await build_control_plane_tenant_counts(
             info.context.resources,
             active_within_seconds=active_within_seconds,
         )
-        return _build_named_count_buckets({row.key: row.count for row in rows})
+        result = _build_named_count_buckets({row.key: row.count for row in rows})
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(row) for row in result],
+        )
+        return result
 
     @strawberry.field(description="Aggregated ownership summary across control-plane subscribers")
     async def control_plane_ownership_summary(
@@ -4114,12 +6002,26 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         active_within_seconds: int = 120,
     ) -> GQLControlPlaneOwnershipSummary:
-        return _build_control_plane_ownership_summary(
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:ownership_summary",
+            version=version,
+            active_within_seconds=active_within_seconds,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _control_plane_ownership_summary_from_payload(cached)
+        result = _build_control_plane_ownership_summary(
             await build_control_plane_ownership_summary(
                 info.context.resources,
                 active_within_seconds=active_within_seconds,
             )
         )
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(
         description="GraphQL-first recovery readiness rollup for control-plane evidence and automation"
@@ -4129,12 +6031,26 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         active_within_seconds: int = 120,
     ) -> GQLControlPlaneRecoveryReadiness:
-        return _build_control_plane_recovery_readiness(
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:recovery_readiness",
+            version=version,
+            active_within_seconds=active_within_seconds,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _control_plane_recovery_readiness_from_payload(cached)
+        result = _build_control_plane_recovery_readiness(
             await build_control_plane_recovery_readiness_posture(
                 info.context.resources,
                 active_within_seconds=active_within_seconds,
             )
         )
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(
         description="Background replay/control-plane recovery automation posture"
@@ -4143,9 +6059,22 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLControlPlaneAutomation:
-        return _build_control_plane_automation(
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:automation",
+            version=version,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _control_plane_automation_from_payload(cached)
+        result = _build_control_plane_automation(
             await build_control_plane_automation_posture(info.context.resources)
         )
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(
         description="Replay-backplane readiness and pending-delivery posture for live Redis consumer-group proof"
@@ -4154,17 +6083,47 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLControlPlaneReplayBackplane:
-        return _build_control_plane_replay_backplane(
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:replay_backplane",
+            version=version,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _control_plane_replay_backplane_from_payload(cached)
+        result = _build_control_plane_replay_backplane(
             await build_control_plane_replay_backplane_posture(info.context.resources)
         )
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(description="Replay consumer counts grouped by consumer name")
     async def control_plane_replay_consumer_counts(
         self,
         info: Info[GraphQLContext, object],
     ) -> list[GQLNamedCountBucket]:
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:replay_consumer_counts",
+            version=version,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _named_count_buckets_from_payload(cached)
         rows = await build_control_plane_replay_consumer_counts(info.context.resources)
-        return _build_named_count_buckets({row.key: row.count for row in rows})
+        result = _build_named_count_buckets({row.key: row.count for row in rows})
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(row) for row in result],
+        )
+        return result
 
     @strawberry.field(description="Flattened control-plane action feed")
     async def control_plane_actions(
@@ -4207,20 +6166,33 @@ class CoreQueryResolver:
         return [_build_operator_gap_item(row) for row in filtered]
 
     @strawberry.field(
-        description="Machine-readable enterprise operations posture across current governance slices"
+        description="Machine-readable operations posture across current governance slices"
     )
-    async def enterprise_operations_governance(
+    async def operations_governance(
         self,
         info: Info[GraphQLContext, object],
-    ) -> GQLEnterpriseOperationsGovernance:
+    ) -> GQLOperationsGovernance:
         compat_routes = _compat_route_module()
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:control_plane:operations_governance",
+            version=version,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _operations_governance_from_payload(cached)
         plugins = await compat_routes.get_plugins(info.context.request)
-        return _build_enterprise_operations_governance(
-            await compat_routes._enterprise_operations_governance(
+        result = _build_operations_governance(
+            await compat_routes._operations_governance(
                 request=info.context.request,
                 plugins=plugins,
             )
         )
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(description="Current runtime lifecycle graph and bounded transition history")
     async def runtime_lifecycle(
@@ -4234,11 +6206,25 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLWorkerQueueStatus:
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_WORKER_SUPPORT_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:worker_support:queue_status",
+            version=version,
+            queue_name=_queue_name(info),
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _worker_queue_status_from_payload(cached)
         snapshot = await QueueStatusReader(
             _queue_redis(info),
             queue_name=_queue_name(info),
         ).snapshot()
-        return _build_worker_queue_status(info, snapshot)
+        result = _build_worker_queue_status(info, snapshot)
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(description="Bounded operator queue history with optional replay-oriented filters")
     async def worker_queue_history(
@@ -4253,6 +6239,22 @@ class CoreQueryResolver:
         bounded_min_dead_letter_jobs = max(0, min(min_dead_letter_jobs, 10_000))
         if alert_level is not None and alert_level not in {"ok", "warning", "critical"}:
             raise ValueError("alert_level must be one of: ok, warning, critical")
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_WORKER_SUPPORT_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:worker_support:queue_history",
+            version=version,
+            queue_name=_queue_name(info),
+            limit=bounded_limit,
+            alert_level=alert_level,
+            min_dead_letter_jobs=bounded_min_dead_letter_jobs,
+            reason_code=reason_code,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _worker_queue_history_points_from_payload(cached)
         history = await QueueStatusReader(
             _queue_redis(info),
             queue_name=_queue_name(info),
@@ -4272,6 +6274,11 @@ class CoreQueryResolver:
                 for item in points
                 if cast(dict[str, int], item.dead_letter_reason_counts).get(reason_code, 0) > 0
             ]
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(item) for item in points],
+        )
         return points
 
     @strawberry.field(description="Latest metadata reindex/reconciliation run summary")
@@ -4279,11 +6286,26 @@ class CoreQueryResolver:
         self,
         info: Info[GraphQLContext, object],
     ) -> GQLMetadataReindexStatus:
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_WORKER_SUPPORT_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:worker_support:metadata_reindex_status",
+            version=version,
+            queue_name=_queue_name(info),
+            schedule_offset_minutes=info.context.resources.settings.indexer.schedule_offset_minutes,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, dict):
+            return _metadata_reindex_status_from_payload(cached)
         latest = await MetadataReindexStatusStore(
             _queue_redis(info),
             queue_name=_queue_name(info),
         ).latest()
-        return _build_metadata_reindex_status(info, latest)
+        result = _build_metadata_reindex_status(info, latest)
+        await _write_cached_graphql_payload(info, key=cache_key, payload=asdict(result))
+        return result
 
     @strawberry.field(description="Bounded metadata reindex/reconciliation history")
     async def worker_metadata_reindex_history(
@@ -4292,16 +6314,171 @@ class CoreQueryResolver:
         limit: int = 20,
     ) -> list[GQLMetadataReindexHistoryPoint]:
         bounded_limit = max(1, min(limit, 100))
+        version = await _read_graphql_cache_version(
+            info,
+            key=_GRAPHQL_WORKER_SUPPORT_CACHE_VERSION_KEY,
+        )
+        cache_key = _versioned_graphql_cache_key(
+            "graphql:worker_support:metadata_reindex_history",
+            version=version,
+            queue_name=_queue_name(info),
+            limit=bounded_limit,
+        )
+        cached = await _read_cached_graphql_payload(info, key=cache_key)
+        if isinstance(cached, list):
+            return _metadata_reindex_history_points_from_payload(cached)
         history = await MetadataReindexStatusStore(
             _queue_redis(info),
             queue_name=_queue_name(info),
         ).history(limit=bounded_limit)
-        return [_build_metadata_reindex_history_point(item) for item in history]
+        result = [_build_metadata_reindex_history_point(item) for item in history]
+        await _write_cached_graphql_payload(
+            info,
+            key=cache_key,
+            payload=[asdict(item) for item in result],
+        )
+        return result
 
     @strawberry.field(description="Intentional GraphQL library stats projection")
     async def library_stats(self, info: Info[GraphQLContext, object]) -> GQLLibraryStats:
         projection = await info.context.media_service.get_stats()
         return _build_library_stats(projection)
+
+    @strawberry.field(
+        description="Paginated requested-and-mounted browse page for consumer surfaces"
+    )
+    async def consumer_available_items_page(
+        self,
+        info: Info[GraphQLContext, object],
+        query: str | None = None,
+        state: str | None = None,
+        item_type: str | None = None,
+        sort: str | None = None,
+        limit: int = 24,
+        page: int = 1,
+    ) -> GQLMediaItemSummaryPage:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be within range [1, 100]")
+        if page < 1:
+            raise ValueError("page must be greater than or equal to 1")
+
+        auth_context = get_auth_context(info.context.request)
+        snapshot = await _resolve_vfs_snapshot(info, generation_id=None)
+        if snapshot is None:
+            return _empty_media_item_summary_page(page=page, limit=limit)
+
+        visible_item_ids = _collect_consumer_visible_item_ids(
+            snapshot,
+            tenant_id=auth_context.tenant_id,
+        )
+        if not visible_item_ids:
+            return _empty_media_item_summary_page(page=page, limit=limit)
+
+        normalized_item_types = _normalize_consumer_media_kind(item_type)
+        normalized_sort = (sort or ("relevance" if query and query.strip() else "recent")).strip().casefold()
+        sort_directives = {
+            "recent": ["date_desc"],
+            "title": ["title_asc"],
+            "year": ["year_desc"],
+            "state": ["state_asc"],
+            "relevance": ["relevance"],
+        }.get(normalized_sort)
+        if sort_directives is None:
+            raise ValueError("sort must be one of recent, title, year, state, or relevance")
+
+        result = await info.context.media_service.search_items(
+            limit=limit,
+            page=page,
+            item_types=normalized_item_types,
+            states=[state] if state is not None else None,
+            sort=sort_directives,
+            search=query,
+            extended=False,
+            tenant_id=auth_context.tenant_id,
+            allowed_item_ids=visible_item_ids,
+        )
+        return _build_media_item_summary_page(result)
+
+    @strawberry.field(
+        description="Dedicated consumer playback/detail projection for item detail and watch surfaces"
+    )
+    async def consumer_playback_item(
+        self,
+        info: Info[GraphQLContext, object],
+        item_id: strawberry.ID,
+    ) -> GQLConsumerPlaybackItem | None:
+        auth_context = get_auth_context(info.context.request)
+        snapshot = await _resolve_vfs_snapshot(info, generation_id=None)
+        if snapshot is not None:
+            visible_item_ids = _collect_consumer_visible_item_ids(
+                snapshot,
+                tenant_id=auth_context.tenant_id,
+            )
+            if str(item_id) not in visible_item_ids:
+                return None
+
+        record = await info.context.media_service.get_item_detail(
+            str(item_id),
+            media_type="item",
+            extended=True,
+            tenant_id=auth_context.tenant_id,
+        )
+        if record is None:
+            return None
+        return await _build_consumer_playback_item(info, record)
+
+    @strawberry.field(
+        description="Shared consumer playback activity for continue-watching and account surfaces"
+    )
+    async def consumer_playback_activity(
+        self,
+        info: Info[GraphQLContext, object],
+        item_limit: int = 12,
+        device_limit: int = 6,
+    ) -> GQLConsumerPlaybackActivity:
+        auth_context = get_auth_context(info.context.request)
+        snapshot = await info.context.media_service.get_consumer_playback_activity(
+            tenant_id=auth_context.tenant_id,
+            actor_id=auth_context.actor_id,
+            actor_type=auth_context.actor_type,
+            item_limit=item_limit,
+            device_limit=device_limit,
+        )
+        return await _build_consumer_playback_activity(info, snapshot)
+
+    @strawberry.field(
+        description="Dedicated consumer profile projection for account surfaces"
+    )
+    async def consumer_profile(
+        self,
+        info: Info[GraphQLContext, object],
+        item_limit: int = 12,
+        device_limit: int = 6,
+    ) -> GQLConsumerProfile:
+        auth_context = get_auth_context(info.context.request)
+        stats, playback = await asyncio.gather(
+            info.context.media_service.get_stats(),
+            info.context.media_service.get_consumer_playback_activity(
+                tenant_id=auth_context.tenant_id,
+                actor_id=auth_context.actor_id,
+                actor_type=auth_context.actor_type,
+                item_limit=item_limit,
+                device_limit=device_limit,
+            ),
+        )
+        availability_summary, availability_items = await _build_consumer_profile_availability(
+            media_service=info.context.media_service,
+            tenant_id=auth_context.tenant_id,
+            playback=playback,
+        )
+        return await _build_consumer_profile(
+            info=info,
+            auth_context=auth_context,
+            stats=stats,
+            playback=playback,
+            availability_summary=availability_summary,
+            availability_items=availability_items,
+        )
 
     @strawberry.field(description="Fetch one rich media item detail by internal identifier")
     async def media_item(
@@ -4309,33 +6486,301 @@ class CoreQueryResolver:
         info: Info[GraphQLContext, object],
         id: strawberry.ID,
     ) -> GQLMediaItemDetail | None:
+        auth_context = get_auth_context(info.context.request)
         record = await info.context.media_service.get_item_detail(
             str(id),
             media_type="item",
             extended=True,
+            tenant_id=auth_context.tenant_id,
         )
         if record is None:
             return None
         return await _build_media_item_detail(info, record)
 
-    @strawberry.field(description="List rich media item details with optional state filtering")
+    @strawberry.field(description="List rich media item details with native playback recovery filtering")
     async def media_items(
         self,
         info: Info[GraphQLContext, object],
         state: str | None = None,
+        query: str | None = None,
+        provider: str | None = None,
+        attachment_state: str | None = None,
+        stream: str | None = None,
+        has_errors: bool | None = None,
+        sort: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[GQLMediaItemDetail]:
-        bounded_limit = max(1, min(limit, 100))
-        bounded_offset = max(0, offset)
-        page = await info.context.media_service.search_items(
-            limit=min(100, bounded_limit + bounded_offset),
-            page=1,
+        page = await info.context.media_service.search_item_details(
+            limit=limit,
+            offset=offset,
             states=[state] if state is not None else None,
-            extended=True,
+            query=query,
+            provider=provider,
+            attachment_state=attachment_state,
+            stream=stream,
+            has_errors=bool(has_errors),
+            sort=sort,
         )
-        selected_records = page.items[bounded_offset : bounded_offset + bounded_limit]
-        return [await _build_media_item_detail(info, record) for record in selected_records]
+        return [await _build_media_item_detail(info, record) for record in page.items]
+
+
+    @strawberry.field(
+        description="Search TMDB-backed movie and show titles that can be requested from the consumer surface"
+    )
+    async def request_search(
+        self,
+        info: Info[GraphQLContext, object],
+        query: str,
+        media_type: str | None = None,
+        limit: int = 12,
+    ) -> list[RequestSearchCandidate]:
+        if limit < 1 or limit > 40:
+            raise ValueError("limit must be within range [1, 40]")
+
+        auth_context = get_auth_context(info.context.request)
+        results = await info.context.media_service.search_request_candidates(
+            query=query,
+            media_type=media_type,
+            limit=limit,
+            tenant_id=auth_context.tenant_id,
+        )
+        return [_build_request_search_candidate(result) for result in results]
+
+    @strawberry.field(
+        description="Return one request candidate by external reference for dedicated requester detail screens"
+    )
+    async def request_candidate(
+        self,
+        info: Info[GraphQLContext, object],
+        external_ref: str,
+        media_type: str,
+    ) -> RequestSearchCandidate | None:
+        auth_context = get_auth_context(info.context.request)
+        candidate = await info.context.media_service.get_request_candidate(
+            external_ref=external_ref,
+            media_type=media_type,
+            tenant_id=auth_context.tenant_id,
+        )
+        if candidate is None:
+            return None
+        return _build_request_search_candidate(candidate)
+
+    @strawberry.field(
+        description="Return one paginated requester-history window ordered by the latest persisted request activity"
+    )
+    async def request_history_page(
+        self,
+        info: Info[GraphQLContext, object],
+        media_type: str | None = None,
+        limit: int = 6,
+        offset: int = 0,
+    ) -> RequestSearchPage:
+        if limit < 1 or limit > 24:
+            raise ValueError("limit must be within range [1, 24]")
+        if offset < 0 or offset > 240:
+            raise ValueError("offset must be within range [0, 240]")
+
+        auth_context = get_auth_context(info.context.request)
+        page = await info.context.media_service.get_request_history_page(
+            media_type=media_type,
+            limit=limit,
+            offset=offset,
+            tenant_id=auth_context.tenant_id,
+        )
+        return _build_request_search_page(page)
+
+    @strawberry.field(
+        description="Return one paginated backend-ranked request-search window for consumer discovery"
+    )
+    async def request_search_page(
+        self,
+        info: Info[GraphQLContext, object],
+        query: str,
+        media_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> RequestSearchPage:
+        if limit < 1 or limit > 40:
+            raise ValueError("limit must be within range [1, 40]")
+        if offset < 0 or offset > 240:
+            raise ValueError("offset must be within range [0, 240]")
+
+        auth_context = get_auth_context(info.context.request)
+        page = await info.context.media_service.search_request_candidates_page(
+            query=query,
+            media_type=media_type,
+            limit=limit,
+            offset=offset,
+            tenant_id=auth_context.tenant_id,
+        )
+        return _build_request_search_page(page)
+
+    @strawberry.field(
+        description="Return backend-owned zero-query discovery rails for consumer search"
+    )
+    async def request_discovery(
+        self,
+        info: Info[GraphQLContext, object],
+        rail_ids: list[str] | None = None,
+        limit_per_rail: int = 8,
+    ) -> list[RequestDiscoveryRail]:
+        if limit_per_rail < 1 or limit_per_rail > 12:
+            raise ValueError("limitPerRail must be within range [1, 12]")
+
+        auth_context = get_auth_context(info.context.request)
+        rails = await info.context.media_service.discover_request_candidates(
+            limit_per_rail=limit_per_rail,
+            rail_ids=rail_ids,
+            tenant_id=auth_context.tenant_id,
+        )
+        return [_build_request_discovery_rail(record) for record in rails]
+
+    @strawberry.field(
+        description="Return backend-owned editorial discovery families for consumer search"
+    )
+    async def request_editorial_families(
+        self,
+        info: Info[GraphQLContext, object],
+        family_ids: list[str] | None = None,
+        limit_per_family: int = 8,
+    ) -> list[RequestEditorialFamily]:
+        if limit_per_family < 1 or limit_per_family > 12:
+            raise ValueError("limitPerFamily must be within range [1, 12]")
+
+        auth_context = get_auth_context(info.context.request)
+        families = await info.context.media_service.discover_request_editorial_families(
+            limit_per_family=limit_per_family,
+            family_ids=family_ids,
+            tenant_id=auth_context.tenant_id,
+        )
+        return [_build_request_editorial_family(record) for record in families]
+
+    @strawberry.field(
+        description="Return backend-owned release-window families for consumer search"
+    )
+    async def request_release_windows(
+        self,
+        info: Info[GraphQLContext, object],
+        window_ids: list[str] | None = None,
+        limit_per_window: int = 8,
+    ) -> list[RequestReleaseWindow]:
+        if limit_per_window < 1 or limit_per_window > 12:
+            raise ValueError("limitPerWindow must be within range [1, 12]")
+
+        auth_context = get_auth_context(info.context.request)
+        windows = await info.context.media_service.discover_request_release_windows(
+            limit_per_window=limit_per_window,
+            window_ids=window_ids,
+            tenant_id=auth_context.tenant_id,
+        )
+        return [_build_request_release_window(record) for record in windows]
+
+    @strawberry.field(
+        description="Return grouped discovery follow-ups for people, studios, companies, collections, and franchises"
+    )
+    async def request_discovery_projections(
+        self,
+        info: Info[GraphQLContext, object],
+        media_type: str | None = None,
+        genre: str | None = None,
+        release_year: int | None = None,
+        original_language: str | None = None,
+        company: str | None = None,
+        network: str | None = None,
+        sort: str | None = None,
+        limit_per_group: int = 6,
+    ) -> list[RequestDiscoveryProjectionGroup]:
+        if limit_per_group < 1 or limit_per_group > 8:
+            raise ValueError("limitPerGroup must be within range [1, 8]")
+        if release_year is not None and (release_year < 1900 or release_year > 2100):
+            raise ValueError("releaseYear must be within range [1900, 2100]")
+
+        auth_context = get_auth_context(info.context.request)
+        groups = await info.context.media_service.discover_request_projection_groups(
+            media_type=media_type,
+            genre=genre,
+            release_year=release_year,
+            original_language=original_language,
+            company=company,
+            network=network,
+            sort=sort,
+            limit_per_group=limit_per_group,
+            tenant_id=auth_context.tenant_id,
+        )
+        return [_build_request_discovery_projection_group(record) for record in groups]
+
+    @strawberry.field(
+        description="Return one backend-owned discover page with additive filters and facet metadata"
+    )
+    async def request_discovery_page(
+        self,
+        info: Info[GraphQLContext, object],
+        media_type: str | None = None,
+        genre: str | None = None,
+        release_year: int | None = None,
+        original_language: str | None = None,
+        company: str | None = None,
+        network: str | None = None,
+        sort: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> RequestDiscoveryPage:
+        if limit < 1 or limit > 40:
+            raise ValueError("limit must be within range [1, 40]")
+        if offset < 0 or offset > 240:
+            raise ValueError("offset must be within range [0, 240]")
+        if release_year is not None and (release_year < 1900 or release_year > 2100):
+            raise ValueError("releaseYear must be within range [1900, 2100]")
+
+        auth_context = get_auth_context(info.context.request)
+        page = await info.context.media_service.discover_request_candidates_page(
+            media_type=media_type,
+            genre=genre,
+            release_year=release_year,
+            original_language=original_language,
+            company=company,
+            network=network,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+            tenant_id=auth_context.tenant_id,
+        )
+        return _build_request_discovery_page(page)
+
+    @strawberry.field(
+        description="Paginated rich media item details with total-count metadata for playback recovery"
+    )
+    async def media_items_page(
+        self,
+        info: Info[GraphQLContext, object],
+        state: str | None = None,
+        query: str | None = None,
+        provider: str | None = None,
+        attachment_state: str | None = None,
+        stream: str | None = None,
+        has_errors: bool | None = None,
+        sort: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> GQLMediaItemsPage:
+        bounded_offset = max(0, offset)
+        page = await info.context.media_service.search_item_details(
+            limit=limit,
+            offset=bounded_offset,
+            states=[state] if state is not None else None,
+            query=query,
+            provider=provider,
+            attachment_state=attachment_state,
+            stream=stream,
+            has_errors=bool(has_errors),
+            sort=sort,
+        )
+        return await _build_media_items_page(
+            info,
+            page,
+            offset=bounded_offset,
+        )
 
 
 @strawberry.type
@@ -4348,10 +6793,24 @@ class CoreMutationResolver:
         info: Info[GraphQLContext, object],
         input: RequestItemInput,
     ) -> RequestItemResult:
+        requested_episodes = _requested_episode_scope_input_to_map(input.requested_episodes)
+        requested_seasons = (
+            sorted(
+                {
+                    *(input.requested_seasons or []),
+                    *(
+                        int(season_number)
+                        for season_number in (requested_episodes or {}).keys()
+                    ),
+                }
+            )
+            or None
+        )
         result = await info.context.media_service.request_item_with_enrichment(
             input.external_ref,
             media_type=input.media_type,
-            requested_seasons=input.requested_seasons,
+            requested_seasons=requested_seasons,
+            requested_episodes=requested_episodes,
         )
         return RequestItemResult(
             item_id=strawberry.ID(result.item.id),
@@ -4359,6 +6818,38 @@ class CoreMutationResolver:
             has_poster=result.enrichment.has_poster,
             has_imdb_id=result.enrichment.has_imdb_id,
             warnings=list(result.enrichment.warnings),
+        )
+
+    @strawberry.mutation(
+        description="Record one consumer watch or launch event against the shared playback activity ledger"
+    )
+    async def record_consumer_playback_activity(
+        self,
+        info: Info[GraphQLContext, object],
+        input: RecordConsumerPlaybackActivityInput,
+    ) -> GQLRecordConsumerPlaybackActivityResult:
+        auth_context = get_auth_context(info.context.request)
+        occurred_at = datetime.now(UTC)
+        await info.context.media_service.record_consumer_playback_activity(
+            item_id=str(input.item_id),
+            tenant_id=auth_context.tenant_id,
+            actor_id=auth_context.actor_id,
+            actor_type=auth_context.actor_type,
+            activity_kind=input.activity_type.value,
+            target=input.target,
+            device_key=input.device_key or "request-device",
+            device_label=input.device_label or "Current device",
+            session_key=input.session_key,
+            position_seconds=input.position_seconds,
+            duration_seconds=input.duration_seconds,
+            completed=input.completed,
+            occurred_at=occurred_at,
+        )
+        return GQLRecordConsumerPlaybackActivityResult(
+            item_id=str(input.item_id),
+            activity_type=input.activity_type.value,
+            success=True,
+            occurred_at=occurred_at.isoformat(),
         )
 
     @strawberry.mutation(description="Apply a lifecycle transition to a media item")
@@ -4733,6 +7224,68 @@ class CoreMutationResolver:
                 "environment_class": input.environment_class,
             },
         )
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
+        return _build_vfs_rollout_control(compat_routes._vfs_rollout_control_response())
+
+    @strawberry.mutation(
+        description="Execute one validated VFS rollout action with REST-parity audit and permission checks"
+    )
+    async def execute_vfs_rollout_action(
+        self,
+        info: Info[GraphQLContext, object],
+        input: ExecuteVfsRolloutActionInput,
+    ) -> GQLVfsRolloutControl:
+        await require_graphql_permissions(
+            info,
+            "backend:admin",
+            resource_scope="operations",
+        )
+        compat_routes = _compat_route_module()
+        auth_context = compat_routes.get_auth_context(info.context.request)
+        playback_gate_governance = compat_routes.playback_gate_governance_snapshot()
+        runtime_governance = compat_routes.vfs_runtime_governance_snapshot(
+            playback_gate_governance=playback_gate_governance,
+        )
+        try:
+            next_state = compat_routes.execute_vfs_rollout_action(
+                compat_routes.managed_windows_vfs_state_payload(),
+                action=cast(
+                    Literal["promote", "hold", "clear_hold", "rollback", "clear_rollback"],
+                    input.action,
+                ),
+                actor_id=compat_routes._actor_key(auth_context),
+                canary_decision=cast(
+                    str,
+                    runtime_governance["vfs_runtime_rollout_canary_decision"],
+                ),
+                merge_gate=cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"]),
+                reason=input.reason,
+                target_environment_class=input.target_environment_class,
+                expected_canary_decision=input.expected_canary_decision,
+                expected_merge_gate=input.expected_merge_gate,
+            )
+            compat_routes.replace_managed_windows_vfs_state(next_state)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        audit_action(
+            info.context.request,
+            action="operations.vfs_rollout.execute_action",
+            target="operations.vfs_rollout",
+            details={
+                "requested_action": input.action,
+                "reason": input.reason,
+                "target_environment_class": input.target_environment_class,
+                "expected_canary_decision": input.expected_canary_decision,
+                "expected_merge_gate": input.expected_merge_gate,
+            },
+        )
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
         return _build_vfs_rollout_control(compat_routes._vfs_rollout_control_response())
 
     @strawberry.mutation(
@@ -4756,6 +7309,10 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
         return _build_control_plane_remediation(response)
 
     @strawberry.mutation(
@@ -4779,6 +7336,10 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
         return _build_control_plane_ack_recovery(response)
 
     @strawberry.mutation(
@@ -4807,6 +7368,10 @@ class CoreMutationResolver:
             )
         except Exception as exc:
             _raise_graphql_compat_error(exc)
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
         return _build_control_plane_pending_recovery(response)
 
     @strawberry.mutation(
@@ -4850,6 +7415,10 @@ class CoreMutationResolver:
             _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
             reason="access_policy_mutation",
         )
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
         return _build_access_policy_revision(response)
 
     @strawberry.mutation(
@@ -4884,6 +7453,10 @@ class CoreMutationResolver:
             info,
             _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
             reason="access_policy_mutation",
+        )
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
         )
         return _build_access_policy_revision(response)
 
@@ -4920,6 +7493,10 @@ class CoreMutationResolver:
             _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
             reason="access_policy_mutation",
         )
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
         return _build_access_policy_revision(response)
 
     @strawberry.mutation(
@@ -4947,6 +7524,10 @@ class CoreMutationResolver:
             info,
             _GRAPHQL_ACCESS_POLICY_REVISIONS_CACHE_KEY,
             reason="access_policy_mutation",
+        )
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
         )
         return _build_access_policy_revision(response)
 
@@ -4984,7 +7565,118 @@ class CoreMutationResolver:
             _GRAPHQL_PLUGIN_GOVERNANCE_OVERRIDES_CACHE_KEY,
             reason="plugin_governance_mutation",
         )
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_CONTROL_PLANE_CACHE_VERSION_KEY,
+        )
         return _build_plugin_governance_override(response)
+
+    @strawberry.mutation(
+        description="Run one item-workflow drill through the shared worker operator flow"
+    )
+    async def run_item_workflow_drill(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLItemWorkflowDrillStatus:
+        await require_graphql_permissions(
+            info,
+            "backend:admin",
+            resource_scope="operations",
+        )
+        compat_routes = _compat_route_module()
+        try:
+            response = await compat_routes.run_worker_item_workflow_drill(info.context.request)
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        await _bump_graphql_cache_version(
+            info,
+            key=_GRAPHQL_WORKER_SUPPORT_CACHE_VERSION_KEY,
+        )
+        return _build_item_workflow_drill_status(
+            response,
+            queue_name=str(response.queue_name),
+        )
+
+    @strawberry.mutation(
+        description="Execute one stream-control action through a registered plugin"
+    )
+    async def execute_plugin_stream_control(
+        self,
+        info: Info[GraphQLContext, object],
+        input: PluginStreamControlInput,
+    ) -> GQLPluginStreamControlResult:
+        await require_graphql_permissions(
+            info,
+            "backend:admin",
+            resource_scope="operations",
+        )
+        compat_routes = _compat_route_module()
+        try:
+            response = await compat_routes.execute_plugin_stream_control(
+                info.context.request,
+                compat_routes.PluginStreamControlRequest(
+                    plugin_name=input.plugin_name,
+                    action=input.action.value,
+                    item_identifier=input.item_identifier,
+                    prefer_queued=input.prefer_queued,
+                    metadata=dict(cast(dict[str, object], input.metadata)),
+                ),
+            )
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_plugin_stream_control_result(response)
+
+    @strawberry.mutation(description="Rotate the live backend API key")
+    async def generate_api_key(
+        self,
+        info: Info[GraphQLContext, object],
+    ) -> GQLApiKeyRotationResult:
+        await require_graphql_permissions(
+            info,
+            "security:apikey.rotate",
+            resource_scope="settings",
+        )
+        compat_routes = _compat_route_module()
+        try:
+            response = await compat_routes.generate_apikey(info.context.request)
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_api_key_rotation_result(response)
+
+    @strawberry.mutation(
+        description="Persist one tenant-scoped quota policy through the shared settings store"
+    )
+    async def write_tenant_quota_policy(
+        self,
+        info: Info[GraphQLContext, object],
+        input: TenantQuotaPolicyWriteInput,
+    ) -> GQLTenantQuotaPolicy:
+        await require_graphql_permissions(
+            info,
+            "tenant:quota.write",
+            resource_scope="tenant_quota",
+            target_tenant_id=input.tenant_id,
+        )
+        try:
+            await persist_tenant_quota_policy(
+                request=info.context.request,
+                db=info.context.resources.db,
+                tenant_id=input.tenant_id,
+                enabled=input.enabled,
+                policy_version=input.policy_version,
+                api_requests_per_minute=input.api_requests_per_minute,
+                worker_enqueues_per_minute=input.worker_enqueues_per_minute,
+                playback_refreshes_per_minute=input.playback_refreshes_per_minute,
+                provider_refreshes_per_minute=input.provider_refreshes_per_minute,
+            )
+            compat_routes = _compat_route_module()
+            response = await compat_routes.get_tenant_quota_policy(
+                info.context.request,
+                tenant_id=input.tenant_id,
+            )
+        except Exception as exc:
+            _raise_graphql_compat_error(exc)
+        return _build_tenant_quota_policy(response)
 
     @strawberry.mutation(description="Update one compatibility settings path")
     async def update_setting(
@@ -5013,6 +7705,289 @@ def _ensure_item_action_matched(result: ItemActionResult, item_id: str) -> None:
     if item_id not in result.ids:
         raise ValueError(f"unknown item_id={item_id}")
 
+
+
+
+def _build_request_search_lifecycle(
+    record: RequestSearchLifecycleRecord | None,
+) -> RequestSearchLifecycle | None:
+    if record is None:
+        return None
+
+    return RequestSearchLifecycle(
+        stage_name=record.stage_name,
+        stage_status=record.stage_status,
+        provider=record.provider,
+        provider_download_id=record.provider_download_id,
+        last_error=record.last_error,
+        updated_at=record.updated_at,
+        recovery_reason=record.recovery_reason,
+        retry_at=record.retry_at,
+        recovery_attempt_count=record.recovery_attempt_count,
+        in_cooldown=record.in_cooldown,
+    )
+
+
+def _build_request_search_candidate(record: RequestSearchCandidateRecord) -> RequestSearchCandidate:
+    return RequestSearchCandidate(
+        external_ref=record.external_ref,
+        title=record.title,
+        media_type=record.media_type,
+        media_kind=_media_kind(record.media_type),
+        tmdb_id=_to_optional_int(record.tmdb_id),
+        tvdb_id=_to_optional_int(record.tvdb_id),
+        imdb_id=record.imdb_id,
+        poster_path=record.poster_path,
+        overview=record.overview,
+        year=record.year,
+        is_requested=record.is_requested,
+        requested_item_id=(
+            strawberry.ID(record.requested_item_id)
+            if record.requested_item_id is not None
+            else None
+        ),
+        requested_state=record.requested_state,
+        requested_seasons=(list(record.requested_seasons) if record.requested_seasons is not None else None),
+        requested_episodes=_build_requested_episode_scopes(record.requested_episodes),
+        request_source=record.request_source,
+        request_count=record.request_count,
+        first_requested_at=record.first_requested_at,
+        last_requested_at=record.last_requested_at,
+        request_lifecycle=_build_request_search_compact_lifecycle(record),
+        lifecycle=_build_request_search_lifecycle(record.lifecycle),
+        ranking_signals=list(getattr(record, "ranking_signals", ()) or ()),
+        season_summary=_build_request_candidate_season_summary(
+            getattr(record, "season_summary", None)
+        ),
+        season_preview=[
+            _build_request_candidate_season_preview(item)
+            for item in getattr(record, "season_preview", ()) or ()
+        ],
+    )
+
+
+def _build_request_candidate_season_summary(
+    record: RequestCandidateSeasonSummaryRecord | None,
+) -> RequestCandidateSeasonSummary | None:
+    if record is None:
+        return None
+
+    return RequestCandidateSeasonSummary(
+        total_seasons=record.total_seasons,
+        released_seasons=record.released_seasons,
+        requested_seasons=record.requested_seasons,
+        partial_seasons=record.partial_seasons,
+        local_seasons=record.local_seasons,
+        unreleased_seasons=record.unreleased_seasons,
+        next_air_date=record.next_air_date,
+    )
+
+
+def _build_request_candidate_season_preview(
+    record: RequestCandidateSeasonRecord,
+) -> RequestCandidateSeasonPreview:
+    return RequestCandidateSeasonPreview(
+        season_number=record.season_number,
+        title=record.title,
+        episode_count=record.episode_count,
+        air_date=record.air_date,
+        is_released=record.is_released,
+        has_local_coverage=record.has_local_coverage,
+        is_requested=record.is_requested,
+        requested_episode_count=record.requested_episode_count,
+        requested_all_episodes=record.requested_all_episodes,
+        status=record.status,
+    )
+
+
+def _build_request_discovery_rail(record: RequestDiscoveryRailRecord) -> RequestDiscoveryRail:
+    return RequestDiscoveryRail(
+        rail_id=record.rail_id,
+        title=record.title,
+        description=record.description,
+        query=record.query,
+        media_type=record.media_type,
+        media_kind=_media_kind(record.media_type),
+        items=[_build_request_search_candidate(item) for item in record.items],
+    )
+
+
+def _build_request_editorial_family(
+    record: RequestEditorialFamilyRecord,
+) -> RequestEditorialFamily:
+    return RequestEditorialFamily(
+        family_id=record.family_id,
+        title=record.title,
+        description=record.description,
+        family=record.family,
+        media_type=record.media_type,
+        media_kind=_media_kind(record.media_type),
+        items=[_build_request_search_candidate(item) for item in record.items],
+    )
+
+
+def _build_request_release_window(
+    record: RequestReleaseWindowRecord,
+) -> RequestReleaseWindow:
+    return RequestReleaseWindow(
+        window_id=record.window_id,
+        title=record.title,
+        description=record.description,
+        window=record.window,
+        media_type=record.media_type,
+        media_kind=_media_kind(record.media_type),
+        items=[_build_request_search_candidate(item) for item in record.items],
+    )
+
+
+def _build_request_discovery_projection_action(
+    record: RequestDiscoveryProjectionActionRecord,
+) -> RequestDiscoveryProjectionAction:
+    return RequestDiscoveryProjectionAction(
+        kind=record.kind,
+        value=record.value,
+        media_type=record.media_type,
+    )
+
+
+def _build_request_discovery_projection_item(
+    record: RequestDiscoveryProjectionItemRecord,
+) -> RequestDiscoveryProjectionItem:
+    return RequestDiscoveryProjectionItem(
+        projection_id=record.projection_id,
+        label=record.label,
+        projection_type=record.projection_type,
+        match_count=record.match_count,
+        image_path=record.image_path,
+        sample_titles=list(record.sample_titles),
+        local_match_count=int(getattr(record, "local_match_count", 0) or 0),
+        requested_match_count=int(getattr(record, "requested_match_count", 0) or 0),
+        active_match_count=int(getattr(record, "active_match_count", 0) or 0),
+        completed_match_count=int(getattr(record, "completed_match_count", 0) or 0),
+        preview_signals=list(getattr(record, "preview_signals", ()) or ()),
+        action=_build_request_discovery_projection_action(record.action),
+    )
+
+
+def _build_request_discovery_projection_group(
+    record: RequestDiscoveryProjectionGroupRecord,
+) -> RequestDiscoveryProjectionGroup:
+    return RequestDiscoveryProjectionGroup(
+        group_id=record.group_id,
+        title=record.title,
+        description=record.description,
+        projection_type=record.projection_type,
+        items=[_build_request_discovery_projection_item(item) for item in record.items],
+    )
+
+
+def _build_request_discovery_facet_bucket(
+    record: RequestDiscoveryFacetBucketRecord,
+) -> RequestDiscoveryFacetBucket:
+    return RequestDiscoveryFacetBucket(
+        value=record.value,
+        label=record.label,
+        count=record.count,
+        selected=record.selected,
+    )
+
+
+def _build_request_discovery_sort_option(
+    record: RequestDiscoverySortOptionRecord,
+) -> RequestDiscoverySortOption:
+    return RequestDiscoverySortOption(
+        value=record.value,
+        label=record.label,
+        selected=record.selected,
+    )
+
+
+def _build_request_discovery_facets(
+    record: RequestDiscoveryFacetSetRecord,
+) -> RequestDiscoveryFacets:
+    return RequestDiscoveryFacets(
+        genres=[_build_request_discovery_facet_bucket(item) for item in record.genres],
+        release_years=[
+            _build_request_discovery_facet_bucket(item)
+            for item in record.release_years
+        ],
+        languages=[_build_request_discovery_facet_bucket(item) for item in record.languages],
+        companies=[_build_request_discovery_facet_bucket(item) for item in record.companies],
+        networks=[_build_request_discovery_facet_bucket(item) for item in record.networks],
+        sorts=[_build_request_discovery_sort_option(item) for item in record.sorts],
+    )
+
+
+def _build_request_discovery_page(record: RequestDiscoveryPageRecord) -> RequestDiscoveryPage:
+    return RequestDiscoveryPage(
+        items=[_build_request_search_candidate(item) for item in record.items],
+        offset=record.offset,
+        limit=record.limit,
+        total_count=record.total_count,
+        has_previous_page=record.has_previous_page,
+        has_next_page=record.has_next_page,
+        result_window_complete=record.result_window_complete,
+        facets=_build_request_discovery_facets(record.facets),
+    )
+
+
+def _build_request_search_page(record: RequestSearchPageRecord) -> RequestSearchPage:
+    return RequestSearchPage(
+        items=[_build_request_search_candidate(item) for item in record.items],
+        offset=record.offset,
+        limit=record.limit,
+        total_count=record.total_count,
+        has_previous_page=record.has_previous_page,
+        has_next_page=record.has_next_page,
+        result_window_complete=record.result_window_complete,
+    )
+
+
+def _build_requested_episode_scopes(
+    requested_episodes: dict[str, list[int]] | None,
+) -> list[RequestedEpisodeScope] | None:
+    if not requested_episodes:
+        return None
+    scopes: list[RequestedEpisodeScope] = []
+    for season_key in sorted(requested_episodes, key=lambda value: int(value)):
+        scopes.append(
+            RequestedEpisodeScope(
+                season_number=int(season_key),
+                episode_numbers=list(requested_episodes[season_key]),
+            )
+        )
+    return scopes
+
+
+def _build_item_request_summary(
+    request: ItemRequestSummaryRecord | None,
+) -> GQLItemRequestSummary | None:
+    if request is None:
+        return None
+    return GQLItemRequestSummary(
+        is_partial=request.is_partial,
+        requested_seasons=(list(request.requested_seasons) if request.requested_seasons else None),
+        requested_episodes=_build_requested_episode_scopes(request.requested_episodes),
+        request_source=request.request_source,
+    )
+
+
+def _requested_episode_scope_input_to_map(
+    scopes: list[RequestedEpisodeScopeInput] | None,
+) -> dict[str, list[int]] | None:
+    if not scopes:
+        return None
+
+    normalized: dict[str, list[int]] = {}
+    for scope in scopes:
+        season_number = int(scope.season_number)
+        if season_number < 1:
+            raise ValueError("season_number must be positive")
+        episode_numbers = sorted({int(number) for number in scope.episode_numbers if int(number) > 0})
+        if not episode_numbers:
+            raise ValueError("episode_numbers must contain at least one positive value")
+        normalized[str(season_number)] = episode_numbers
+    return normalized or None
 
 @strawberry.type
 class CoreSubscriptionResolver:

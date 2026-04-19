@@ -79,6 +79,22 @@ def _strip_compatibility_runtime_keys(value: Any) -> Any:
     return value
 
 
+def _compat_optional_block(current: BaseModel, default: BaseModel) -> dict[str, Any] | None:
+    """Return one cleaned compatibility block when it differs from defaults."""
+
+    current_payload = cast(
+        dict[str, Any],
+        _strip_compatibility_runtime_keys(_compat_dump(current)),
+    )
+    default_payload = cast(
+        dict[str, Any],
+        _strip_compatibility_runtime_keys(_compat_dump(default)),
+    )
+    if current_payload == default_payload:
+        return None
+    return current_payload
+
+
 def _build_default_ranking_settings() -> dict[str, object]:
     """Return the compatibility-default ranking block used when no explicit ranking exists."""
 
@@ -604,7 +620,7 @@ class LoggingSettings(CompatibilityModel):
 
 
 class OidcSettings(CompatibilityModel):
-    """OIDC/SSO token-validation settings for enterprise deployments."""
+    """OIDC/SSO token-validation settings for managed deployments."""
 
     enabled: bool = False
     rollout_stage: Literal["disabled", "shadow", "enforced"] = "disabled"
@@ -707,6 +723,10 @@ class LogShipperSettings(CompatibilityModel):
 class PluginRuntimeSettings(CompatibilityModel):
     """Operator-managed runtime isolation policy for non-builtin plugins."""
 
+    hook_dispatch_mode: Literal["in_process", "queued"] = "in_process"
+    queued_hook_events: list[str] = Field(default_factory=list)
+    queued_hook_fallback_enabled: bool = True
+    hook_timeout_seconds: float = Field(default=5.0, gt=0)
     enforcement_mode: Literal[
         "report_only", "deny_non_builtin", "isolated_runtime_required"
     ] = "report_only"
@@ -789,7 +809,7 @@ class HeavyStageIsolationSettings(CompatibilityModel):
         queued_refresh_ready: bool,
         queued_refresh_proof_refs: list[str],
     ) -> bool:
-        """Return whether enterprise heavy-stage exit gates are fully satisfied."""
+        """Return whether heavy-stage exit gates are fully satisfied."""
 
         return (
             arq_enabled
@@ -816,6 +836,7 @@ class OrchestrationSettings(CompatibilityModel):
         default_factory=lambda: ["realdebrid", "alldebrid", "debridlink", "stremthru"]
     )
     downloader_provider_attempt_limit: int = Field(default=4, ge=1)
+    downloader_provider_parallelism: int = Field(default=2, ge=1, le=8)
     downloader_failover_on_rate_limit: bool = True
     downloader_failover_on_provider_error: bool = True
 
@@ -1182,6 +1203,30 @@ class Settings(BaseSettings):
     def _stream_model(self) -> StreamSettings:
         return _coerce_model(self.stream, StreamSettings)
 
+    def _oidc_model(self) -> OidcSettings:
+        return _coerce_model(self.oidc, OidcSettings)
+
+    def _access_policy_model(self) -> AccessPolicySettings:
+        return _coerce_model(self.access_policy, AccessPolicySettings)
+
+    def _tenant_quotas_model(self) -> TenantQuotaSettings:
+        return _coerce_model(self.tenant_quotas, TenantQuotaSettings)
+
+    def _control_plane_model(self) -> ControlPlaneSettings:
+        return _coerce_model(self.control_plane, ControlPlaneSettings)
+
+    def _log_shipper_model(self) -> LogShipperSettings:
+        return _coerce_model(self.log_shipper, LogShipperSettings)
+
+    def _plugin_runtime_model(self) -> PluginRuntimeSettings:
+        return _coerce_model(self.plugin_runtime, PluginRuntimeSettings)
+
+    def _observability_model(self) -> ObservabilityConvergenceSettings:
+        return _coerce_model(self.observability, ObservabilityConvergenceSettings)
+
+    def _orchestration_model(self) -> OrchestrationSettings:
+        return _coerce_model(self.orchestration, OrchestrationSettings)
+
     def to_compatibility_dict(self) -> dict[str, Any]:
         """Return the exact legacy `settings.json` compatibility shape."""
 
@@ -1214,6 +1259,44 @@ class Settings(BaseSettings):
             "logging": self._compat_logging_payload(),
             "stream": stream,
         }
+        optional_blocks = {
+            "oidc": _compat_optional_block(self._oidc_model(), OidcSettings()),
+            "access_policy": _compat_optional_block(
+                self._access_policy_model(),
+                AccessPolicySettings(),
+            ),
+            "tenant_quotas": _compat_optional_block(
+                self._tenant_quotas_model(),
+                TenantQuotaSettings(),
+            ),
+            "control_plane": _compat_optional_block(
+                self._control_plane_model(),
+                ControlPlaneSettings(),
+            ),
+            "log_shipper": _compat_optional_block(
+                self._log_shipper_model(),
+                LogShipperSettings(),
+            ),
+            "plugin_runtime": _compat_optional_block(
+                self._plugin_runtime_model(),
+                PluginRuntimeSettings(),
+            ),
+            "observability": _compat_optional_block(
+                self._observability_model(),
+                ObservabilityConvergenceSettings(),
+            ),
+            "orchestration": _compat_optional_block(
+                self._orchestration_model(),
+                OrchestrationSettings(),
+            ),
+        }
+        payload.update(
+            {
+                key: value
+                for key, value in optional_blocks.items()
+                if value is not None
+            }
+        )
         return cast(dict[str, Any], _strip_compatibility_runtime_keys(payload))
 
     @classmethod
@@ -1252,6 +1335,14 @@ class Settings(BaseSettings):
             FILMU_PY_POST_PROCESSING=payload.get("post_processing", {}),
             FILMU_PY_LOGGING=payload.get("logging", {}),
             FILMU_PY_STREAM=payload.get("stream", {}),
+            FILMU_PY_OIDC=payload.get("oidc", {}),
+            FILMU_PY_ACCESS_POLICY=payload.get("access_policy", {}),
+            FILMU_PY_TENANT_QUOTAS=payload.get("tenant_quotas", {}),
+            FILMU_PY_CONTROL_PLANE=payload.get("control_plane", {}),
+            FILMU_PY_LOG_SHIPPER=payload.get("log_shipper", {}),
+            FILMU_PY_PLUGIN_RUNTIME=payload.get("plugin_runtime", {}),
+            FILMU_PY_OBSERVABILITY=payload.get("observability", {}),
+            FILMU_PY_ORCHESTRATION=payload.get("orchestration", {}),
             FILMU_PY_POSTGRES_DSN=database_host,
             FILMU_PY_REALDEBRID_API_TOKEN=(
                 cast(dict[str, Any], downloaders.get("real_debrid", {})).get("api_key") or None

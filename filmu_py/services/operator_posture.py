@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
+from filmu_py.core.plugin_hook_queue_status import (
+    PluginHookQueueHistoryPoint,
+    PluginHookQueueStatusStore,
+)
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.plugins.builtin.listrr import resolve_listrr_settings
 from filmu_py.plugins.builtin.plex import resolve_plex_settings
@@ -44,7 +48,7 @@ class ControlPlaneSummarySnapshot:
 @dataclass(slots=True)
 class PluginIntegrationReadinessPluginSnapshot:
     name: str
-    capability_kind: Literal["scraper", "content_service", "event_hook"]
+    capability_kind: str
     status: Literal["ready", "partial", "blocked"]
     registered: bool
     enabled: bool
@@ -62,6 +66,10 @@ class PluginIntegrationReadinessPluginSnapshot:
     contract_validated: bool
     soak_validated: bool
     proof_gap_count: int
+    verification_status: Literal["verified", "partial", "missing"]
+    verification_check_count: int
+    verified_check_count: int
+    missing_verification_checks: list[str]
     required_actions: list[str]
     remaining_gaps: list[str]
 
@@ -167,9 +175,24 @@ class PluginEventStatusSnapshot:
     publisher: str | None
     publishable_events: list[str]
     hook_subscriptions: list[str]
+    queued_hook_subscriptions: list[str]
     publishable_event_count: int
     hook_subscription_count: int
+    queued_hook_subscription_count: int
     wiring_status: str
+    hook_dispatch_mode: str
+    queued_dispatch_enabled: bool
+    queue_health_status: str
+    queue_delivery_observed: bool
+    queue_observation_count: int
+    latest_queue_lag_seconds: float | None
+    max_queue_lag_seconds: float | None
+    successful_deliveries: int
+    timeout_deliveries: int
+    failed_deliveries: int
+    retried_deliveries: int
+    required_actions: list[str]
+    remaining_gaps: list[str]
 
 
 @dataclass(slots=True)
@@ -628,6 +651,24 @@ def plugin_settings_payload(resources: AppResources) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], resources.settings.to_compatibility_dict())
 
 
+def _mapping_at(payload: Mapping[str, Any], *path: str) -> Mapping[str, Any] | None:
+    current: object = payload
+    for segment in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(segment)
+    return cast(Mapping[str, Any], current) if isinstance(current, Mapping) else None
+
+
+def _proof_ref_list(payload: Mapping[str, Any] | None, key: str) -> list[str]:
+    if payload is None:
+        return []
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
 def empty_control_plane_summary() -> ControlPlaneSummarySnapshot:
     """Return a normalized empty control-plane summary when no service is attached."""
 
@@ -793,7 +834,7 @@ async def build_control_plane_summary_posture(
 def _plugin_integration_row(
     *,
     name: str,
-    capability_kind: Literal["scraper", "content_service", "event_hook"],
+    capability_kind: str,
     registered: bool,
     enabled: bool,
     endpoint: str | None,
@@ -802,6 +843,7 @@ def _plugin_integration_row(
     configured_values: Mapping[str, Any],
     contract_proof_refs: list[str],
     soak_proof_refs: list[str],
+    event_row: PluginEventStatusSnapshot | None = None,
 ) -> PluginIntegrationReadinessPluginSnapshot:
     missing_settings = [
         setting_name
@@ -836,8 +878,33 @@ def _plugin_integration_row(
     contract_validated = bool(contract_proofs)
     soak_validated = bool(soak_proofs)
     ready = registered and configured and contract_validated and soak_validated
+    verification_checks = {
+        "registered": registered,
+        "configured": configured,
+        "contract_proof": contract_validated,
+        "soak_proof": soak_validated,
+    }
+    if (
+        capability_kind == "event_hook"
+        and event_row is not None
+        and event_row.queued_dispatch_enabled
+        and event_row.queued_hook_subscription_count > 0
+    ):
+        verification_checks["queued_delivery"] = event_row.queue_delivery_observed
     status: Literal["ready", "partial", "blocked"] = (
         "ready" if ready else "partial" if enabled or registered else "blocked"
+    )
+    verified_check_count = sum(1 for verified in verification_checks.values() if verified)
+    verification_check_count = len(verification_checks)
+    missing_verification_checks = [
+        check_name for check_name, verified in verification_checks.items() if not verified
+    ]
+    verification_status: Literal["verified", "partial", "missing"] = (
+        "verified"
+        if verified_check_count == verification_check_count
+        else "partial"
+        if verified_check_count > 0
+        else "missing"
     )
     required_actions: list[str] = []
     remaining_gaps: list[str] = []
@@ -857,6 +924,18 @@ def _plugin_integration_row(
     if enabled and not soak_validated:
         required_actions.append(f"record_{name}_plugin_soak_evidence")
         remaining_gaps.append(f"{name} has no retained soak evidence")
+    if (
+        enabled
+        and capability_kind == "event_hook"
+        and event_row is not None
+        and event_row.queued_dispatch_enabled
+        and event_row.queued_hook_subscription_count > 0
+        and not event_row.queue_delivery_observed
+    ):
+        required_actions.append(f"record_{name}_queued_hook_delivery")
+        remaining_gaps.append(
+            f"{name} has queued hook dispatch enabled but no retained queued delivery history"
+        )
     if not enabled:
         required_actions.append(f"enable_{name}_integration")
         remaining_gaps.append(f"{name} integration is not enabled in runtime settings")
@@ -880,15 +959,19 @@ def _plugin_integration_row(
         contract_validated=contract_validated,
         soak_validated=soak_validated,
         proof_gap_count=int(not contract_validated) + int(not soak_validated),
+        verification_status=verification_status,
+        verification_check_count=verification_check_count,
+        verified_check_count=verified_check_count,
+        missing_verification_checks=missing_verification_checks,
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
     )
 
 
-def build_plugin_integration_readiness_posture(
+async def build_plugin_integration_readiness_posture(
     resources: AppResources,
 ) -> PluginIntegrationReadinessSnapshot:
-    """Return readiness and config-validation posture for builtin enterprise plugins."""
+    """Return readiness and proof posture for the supported runtime integrations."""
 
     plugin_registry = resources.plugin_registry
     payload = plugin_settings_payload(resources)
@@ -908,6 +991,22 @@ def build_plugin_integration_readiness_posture(
         if plugin_registry is not None
         else set()
     )
+    notification_names = (
+        {
+            str(getattr(plugin, "plugin_name", type(plugin).__name__)).strip()
+            for plugin in plugin_registry.get_notifications()
+        }
+        if plugin_registry is not None
+        else set()
+    )
+    downloader_names = (
+        {
+            str(getattr(plugin, "plugin_name", type(plugin).__name__)).strip()
+            for plugin in plugin_registry.get_downloaders()
+        }
+        if plugin_registry is not None
+        else set()
+    )
     event_hook_names = (
         {
             str(getattr(plugin, "plugin_name", type(plugin).__name__)).strip()
@@ -916,6 +1015,15 @@ def build_plugin_integration_readiness_posture(
         if plugin_registry is not None
         else set()
     )
+    downloaders_settings = _mapping_at(payload, "downloaders")
+    notifications_settings = _mapping_at(payload, "notifications")
+    metadata_settings = _mapping_at(payload, "metadata")
+    tmdb_settings = _mapping_at(payload, "metadata", "tmdb")
+    tvdb_settings = _mapping_at(payload, "metadata", "tvdb")
+    realdebrid_settings = _mapping_at(payload, "downloaders", "real_debrid")
+    alldebrid_settings = _mapping_at(payload, "downloaders", "all_debrid")
+    debridlink_settings = _mapping_at(payload, "downloaders", "debrid_link")
+    stremthru_settings = _mapping_at(payload, "downloaders", "stremthru")
 
     seerr_source = (
         "content.seerr"
@@ -947,6 +1055,9 @@ def build_plugin_integration_readiness_posture(
     )
     plex_settings = resolve_plex_settings(dict(payload))
 
+    event_rows = await build_plugin_event_status_posture(resources)
+    event_by_name = {row.name: row for row in event_rows}
+
     rows = [
         _plugin_integration_row(
             name="comet",
@@ -961,6 +1072,7 @@ def build_plugin_integration_readiness_posture(
             },
             contract_proof_refs=list(resources.settings.scraping.comet.contract_proof_refs),
             soak_proof_refs=list(resources.settings.scraping.comet.soak_proof_refs),
+            event_row=event_by_name.get("comet"),
         ),
         _plugin_integration_row(
             name="seerr",
@@ -976,6 +1088,7 @@ def build_plugin_integration_readiness_posture(
             },
             contract_proof_refs=list(cast(list[str], seerr_settings.get("contract_proof_refs", []))),
             soak_proof_refs=list(cast(list[str], seerr_settings.get("soak_proof_refs", []))),
+            event_row=event_by_name.get("seerr"),
         ),
         _plugin_integration_row(
             name="listrr",
@@ -991,6 +1104,7 @@ def build_plugin_integration_readiness_posture(
             },
             contract_proof_refs=list(cast(list[str], listrr_settings.get("contract_proof_refs", []))),
             soak_proof_refs=list(cast(list[str], listrr_settings.get("soak_proof_refs", []))),
+            event_row=event_by_name.get("listrr"),
         ),
         _plugin_integration_row(
             name="plex",
@@ -1006,6 +1120,169 @@ def build_plugin_integration_readiness_posture(
             },
             contract_proof_refs=list(cast(list[str], plex_settings.get("contract_proof_refs", []))),
             soak_proof_refs=list(cast(list[str], plex_settings.get("soak_proof_refs", []))),
+            event_row=event_by_name.get("plex"),
+        ),
+        _plugin_integration_row(
+            name="notifications",
+            capability_kind="notification",
+            registered="notifications" in notification_names,
+            enabled=bool(
+                resources.settings.notifications.enabled
+                and (
+                    resources.settings.notifications.discord_webhook_url
+                    or resources.settings.notifications.webhook_url
+                    or next(
+                        (
+                            candidate
+                            for candidate in resources.settings.notifications.service_urls
+                            if str(candidate).strip()
+                        ),
+                        None,
+                    )
+                )
+            ),
+            endpoint=(
+                resources.settings.notifications.discord_webhook_url
+                or resources.settings.notifications.webhook_url
+                or next(
+                    (
+                        candidate
+                        for candidate in resources.settings.notifications.service_urls
+                        if str(candidate).strip()
+                    ),
+                    None,
+                )
+            ),
+            config_source="notifications" if notifications_settings is not None else None,
+            required_settings=["delivery_target"],
+            configured_values={
+                "delivery_target": (
+                    resources.settings.notifications.discord_webhook_url
+                    or resources.settings.notifications.webhook_url
+                    or next(
+                        (
+                            candidate
+                            for candidate in resources.settings.notifications.service_urls
+                            if str(candidate).strip()
+                        ),
+                        "",
+                    )
+                ),
+            },
+            contract_proof_refs=_proof_ref_list(notifications_settings, "contract_proof_refs"),
+            soak_proof_refs=_proof_ref_list(notifications_settings, "soak_proof_refs"),
+            event_row=event_by_name.get("notifications"),
+        ),
+        _plugin_integration_row(
+            name="tmdb",
+            capability_kind="metadata_provider",
+            registered=True,
+            enabled=bool(resources.settings.tmdb_api_key.strip()),
+            endpoint="https://api.themoviedb.org/3",
+            config_source="tmdb_api_key",
+            required_settings=["api_key"],
+            configured_values={
+                "api_key": resources.settings.tmdb_api_key,
+            },
+            contract_proof_refs=(
+                _proof_ref_list(tmdb_settings, "contract_proof_refs")
+                or _proof_ref_list(metadata_settings, "tmdb_contract_proof_refs")
+            ),
+            soak_proof_refs=(
+                _proof_ref_list(tmdb_settings, "soak_proof_refs")
+                or _proof_ref_list(metadata_settings, "tmdb_soak_proof_refs")
+            ),
+        ),
+        _plugin_integration_row(
+            name="tvdb",
+            capability_kind="metadata_provider",
+            registered=resources.media_service is not None,
+            enabled=bool(tvdb_settings and tvdb_settings.get("enabled", False)),
+            endpoint="https://api4.thetvdb.com/v4",
+            config_source="metadata.tvdb",
+            required_settings=[],
+            configured_values={},
+            contract_proof_refs=(
+                _proof_ref_list(tvdb_settings, "contract_proof_refs")
+                or _proof_ref_list(metadata_settings, "tvdb_contract_proof_refs")
+            ),
+            soak_proof_refs=(
+                _proof_ref_list(tvdb_settings, "soak_proof_refs")
+                or _proof_ref_list(metadata_settings, "tvdb_soak_proof_refs")
+            ),
+        ),
+        _plugin_integration_row(
+            name="realdebrid",
+            capability_kind="downloader",
+            registered=True,
+            enabled=bool(
+                resources.settings.downloaders.real_debrid.enabled
+                and resources.settings.downloaders.real_debrid.api_key.strip()
+            ),
+            endpoint="https://api.real-debrid.com/rest/1.0",
+            config_source="downloaders.real_debrid",
+            required_settings=["api_key"],
+            configured_values={
+                "api_key": resources.settings.downloaders.real_debrid.api_key,
+            },
+            contract_proof_refs=_proof_ref_list(realdebrid_settings, "contract_proof_refs"),
+            soak_proof_refs=_proof_ref_list(realdebrid_settings, "soak_proof_refs"),
+        ),
+        _plugin_integration_row(
+            name="alldebrid",
+            capability_kind="downloader",
+            registered=True,
+            enabled=bool(
+                resources.settings.downloaders.all_debrid.enabled
+                and resources.settings.downloaders.all_debrid.api_key.strip()
+            ),
+            endpoint="https://api.alldebrid.com",
+            config_source="downloaders.all_debrid",
+            required_settings=["api_key"],
+            configured_values={
+                "api_key": resources.settings.downloaders.all_debrid.api_key,
+            },
+            contract_proof_refs=_proof_ref_list(alldebrid_settings, "contract_proof_refs"),
+            soak_proof_refs=_proof_ref_list(alldebrid_settings, "soak_proof_refs"),
+        ),
+        _plugin_integration_row(
+            name="debridlink",
+            capability_kind="downloader",
+            registered=True,
+            enabled=bool(
+                resources.settings.downloaders.debrid_link.enabled
+                and resources.settings.downloaders.debrid_link.api_key.strip()
+            ),
+            endpoint="https://debrid-link.com/api/v2",
+            config_source="downloaders.debrid_link",
+            required_settings=["api_key"],
+            configured_values={
+                "api_key": resources.settings.downloaders.debrid_link.api_key,
+            },
+            contract_proof_refs=_proof_ref_list(debridlink_settings, "contract_proof_refs"),
+            soak_proof_refs=_proof_ref_list(debridlink_settings, "soak_proof_refs"),
+        ),
+        _plugin_integration_row(
+            name="stremthru",
+            capability_kind="downloader",
+            registered="stremthru" in downloader_names,
+            enabled=bool(
+                resources.settings.downloaders.stremthru.enabled
+                and resources.settings.downloaders.stremthru.url.strip()
+                and resources.settings.downloaders.stremthru.token.strip()
+            ),
+            endpoint=resources.settings.downloaders.stremthru.url,
+            config_source=(
+                "downloaders.stremthru" if downloaders_settings is not None else None
+            ),
+            required_settings=["url", "token"],
+            configured_values={
+                "url": resources.settings.downloaders.stremthru.url,
+                "token": resources.settings.downloaders.stremthru.token,
+            },
+            contract_proof_refs=_proof_ref_list(stremthru_settings, "contract_proof_refs"),
+            soak_proof_refs=_proof_ref_list(stremthru_settings, "soak_proof_refs"),
+            event_row=event_by_name.get("stremthru"),
         ),
     ]
     required_actions = sorted({action for row in rows for action in row.required_actions})
@@ -1191,10 +1468,30 @@ def build_downloader_orchestration_posture(
     )
 
 
-def build_plugin_event_status_posture(
+async def _plugin_hook_history_by_name(
+    resources: AppResources,
+    *,
+    limit: int = 200,
+) -> dict[str, list[PluginHookQueueHistoryPoint]]:
+    """Return recent queued plugin-hook history grouped by plugin name."""
+
+    redis = resources.arq_redis
+    if redis is None:
+        return {}
+    history = await PluginHookQueueStatusStore(
+        redis,
+        queue_name=resources.arq_queue_name,
+    ).history(limit=limit)
+    grouped: dict[str, list[PluginHookQueueHistoryPoint]] = {}
+    for point in history:
+        grouped.setdefault(point.plugin_name, []).append(point)
+    return grouped
+
+
+async def build_plugin_event_status_posture(
     resources: AppResources,
 ) -> list[PluginEventStatusSnapshot]:
-    """Return declared publishable events and hook subscriptions per plugin."""
+    """Return declared publishable events, queued delivery health, and subscriptions."""
 
     plugin_registry = resources.plugin_registry
     if plugin_registry is None:
@@ -1202,11 +1499,19 @@ def build_plugin_event_status_posture(
 
     publishable_by_plugin = plugin_registry.publishable_events_by_plugin()
     subscriptions_by_plugin = plugin_registry.hook_subscriptions_by_plugin()
+    plugin_runtime = resources.settings.plugin_runtime
+    queued_events = frozenset(plugin_runtime.queued_hook_events)
+    hook_history_by_name = await _plugin_hook_history_by_name(resources)
     rows: list[PluginEventStatusSnapshot] = []
     for plugin_name in sorted(plugin_registry.all_plugin_names()):
         manifest = plugin_registry.manifest(plugin_name)
         publishable_events = list(publishable_by_plugin.get(plugin_name, ()))
         hook_subscriptions = list(subscriptions_by_plugin.get(plugin_name, ()))
+        queued_hook_subscriptions = [
+            event_name for event_name in hook_subscriptions if event_name in queued_events
+        ]
+        history = hook_history_by_name.get(plugin_name, [])
+        latest = history[0] if history else None
         wiring_status = (
             "bidirectional"
             if publishable_events and hook_subscriptions
@@ -1216,15 +1521,77 @@ def build_plugin_event_status_posture(
             if hook_subscriptions
             else "idle"
         )
+        queued_dispatch_enabled = bool(
+            plugin_runtime.hook_dispatch_mode == "queued" and queued_hook_subscriptions
+        )
+        queue_delivery_observed = bool(history)
+        successful_deliveries = sum(
+            1
+            for point in history
+            if point.successful_hooks > 0 and point.timeout_hooks == 0 and point.failed_hooks == 0
+        )
+        timeout_deliveries = sum(1 for point in history if point.timeout_hooks > 0)
+        failed_deliveries = sum(
+            1 for point in history if point.failed_hooks > 0 or point.matched_hooks <= 0
+        )
+        retried_deliveries = sum(1 for point in history if point.attempt > 1)
+        required_actions: list[str] = []
+        remaining_gaps: list[str] = []
+        queue_health_status = "inactive"
+        if plugin_runtime.hook_dispatch_mode == "queued" and hook_subscriptions:
+            if not queued_hook_subscriptions:
+                queue_health_status = "not_configured"
+                required_actions.append(f"configure_{plugin_name}_queued_hook_events")
+                remaining_gaps.append(
+                    f"{plugin_name} subscribes to hook events but none are configured for queued dispatch"
+                )
+            elif not queue_delivery_observed:
+                queue_health_status = "pending_proof"
+                required_actions.append(f"record_{plugin_name}_queued_hook_delivery")
+                remaining_gaps.append(
+                    f"{plugin_name} has queued hook dispatch configured but no retained delivery history"
+                )
+            elif latest is not None and (latest.failed_hooks > 0 or latest.matched_hooks <= 0):
+                queue_health_status = "blocked"
+                required_actions.append(f"stabilize_{plugin_name}_queued_hook_delivery")
+                remaining_gaps.append(
+                    f"{plugin_name} has failed queued hook deliveries in retained history"
+                )
+            elif latest is not None and (latest.timeout_hooks > 0 or latest.attempt > 1):
+                queue_health_status = "degraded"
+                required_actions.append(f"stabilize_{plugin_name}_queued_hook_delivery")
+                remaining_gaps.append(
+                    f"{plugin_name} queued hook deliveries require retries or time out"
+                )
+            else:
+                queue_health_status = "ready"
+
         rows.append(
             PluginEventStatusSnapshot(
                 name=plugin_name,
                 publisher=manifest.publisher if manifest is not None else None,
                 publishable_events=publishable_events,
                 hook_subscriptions=hook_subscriptions,
+                queued_hook_subscriptions=queued_hook_subscriptions,
                 publishable_event_count=len(publishable_events),
                 hook_subscription_count=len(hook_subscriptions),
+                queued_hook_subscription_count=len(queued_hook_subscriptions),
                 wiring_status=wiring_status,
+                hook_dispatch_mode=plugin_runtime.hook_dispatch_mode,
+                queued_dispatch_enabled=queued_dispatch_enabled,
+                queue_health_status=queue_health_status,
+                queue_delivery_observed=queue_delivery_observed,
+                queue_observation_count=len(history),
+                latest_queue_lag_seconds=latest.queue_lag_seconds if latest is not None else None,
+                max_queue_lag_seconds=(
+                    max(point.queue_lag_seconds for point in history) if history else None
+                ),
+                successful_deliveries=successful_deliveries,
+                timeout_deliveries=timeout_deliveries,
+                failed_deliveries=failed_deliveries,
+                retried_deliveries=retried_deliveries,
+                required_actions=required_actions,
+                remaining_gaps=remaining_gaps,
             )
         )
     return rows

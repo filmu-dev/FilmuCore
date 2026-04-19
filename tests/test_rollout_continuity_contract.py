@@ -8,14 +8,23 @@ def test_operator_log_pipeline_rollout_tracks_green_streak() -> None:
         encoding='utf-8'
     )
 
+    assert 'schema_version' in script
+    assert 'artifact_kind' in script
+    assert 'captured_at' in script
+    assert 'expires_at' in script
     assert 'green_streak' in script
+    assert 'minimum_green_streak' in script
     assert 'history_record_count' in script
     assert 'contract_path' in script
+    assert 'failure_reasons' in script
+    assert 'required_actions' in script
+    assert 'alert_budget_status' in script
+    assert 'active_alerts_by_severity' in script
 
 
 
-def test_enterprise_rollout_continuity_requires_program_summary_and_operator_streak() -> None:
-    script = (REPO_ROOT / 'scripts' / 'check_enterprise_rollout_continuity.ps1').read_text(
+def test_rollout_continuity_requires_program_summary_and_operator_streak() -> None:
+    script = (REPO_ROOT / 'scripts' / 'check_rollout_continuity.ps1').read_text(
         encoding='utf-8'
     )
 
@@ -42,12 +51,16 @@ def test_rollout_contract_manifests_exist_and_define_expected_keys() -> None:
     assert 'freshness_window_hours' in windows_text
     assert 'required_fields' in windows_text
     assert 'required_fields' in operator_text
+    assert 'schema_version' in operator_text
+    assert 'artifact_kind' in operator_text
+    assert 'freshness_window_hours' in operator_text
+    assert 'required_log_fields' in operator_text
     assert 'minimum_green_streak' in operator_text
 
 
-def test_enterprise_rollout_workflow_uses_github_hosted_pr_gate_and_self_hosted_managed_gate() -> None:
+def test_rollout_workflow_uses_github_hosted_pr_gate_and_self_hosted_managed_gate() -> None:
     workflow = (
-        REPO_ROOT / '.github' / 'workflows' / 'enterprise-rollout-continuity.yml'
+        REPO_ROOT / '.github' / 'workflows' / 'rollout-continuity.yml'
     ).read_text(encoding='utf-8')
 
     assert "if: github.event_name == 'pull_request'" in workflow

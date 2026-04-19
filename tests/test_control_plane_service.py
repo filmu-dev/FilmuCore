@@ -8,19 +8,16 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from filmu_py.db.base import Base
 from filmu_py.db.models import ControlPlaneSubscriberORM
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.services.control_plane import ControlPlaneService
+from tests.db_seed import build_test_database_runtime
 
 pytest.importorskip("aiosqlite")
 
 
 async def _build_runtime(tmp_path: Path) -> DatabaseRuntime:
-    runtime = DatabaseRuntime(f"sqlite+aiosqlite:///{tmp_path / 'control-plane.db'}")
-    async with runtime.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    return runtime
+    return await build_test_database_runtime(tmp_path, filename="control-plane.db")
 
 
 @pytest.mark.asyncio

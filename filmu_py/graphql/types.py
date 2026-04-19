@@ -46,6 +46,27 @@ class GQLActiveStreamRole(StrEnum):
     HLS = "hls"
 
 
+@strawberry.enum
+class GQLPluginStreamControlAction(StrEnum):
+    """Selectable stream-control actions exposed through GraphQL mutations."""
+
+    SERVING_STATUS_SNAPSHOT = "serving_status_snapshot"
+    TRIGGER_DIRECT_PLAYBACK_REFRESH = "trigger_direct_playback_refresh"
+    TRIGGER_HLS_FAILED_LEASE_REFRESH = "trigger_hls_failed_lease_refresh"
+    TRIGGER_HLS_RESTRICTED_FALLBACK_REFRESH = "trigger_hls_restricted_fallback_refresh"
+    MARK_SELECTED_HLS_MEDIA_ENTRY_STALE = "mark_selected_hls_media_entry_stale"
+
+
+@strawberry.enum
+class GQLConsumerPlaybackActivityType(StrEnum):
+    """Allowed consumer playback activity event kinds."""
+
+    VIEW = "view"
+    LAUNCH = "launch"
+    PROGRESS = "progress"
+    COMPLETE = "complete"
+
+
 @strawberry.type
 class GQLHealthCheck:
     """Structured health status for GraphQL clients."""
@@ -74,6 +95,233 @@ class GQLMediaItem:
     episode_number: int | None = strawberry.field(name="episodeNumber", default=None)
     poster_path: str | None = strawberry.field(name="posterPath", default=None)
     aired_at: str | None = strawberry.field(name="airedAt", default=None)
+
+
+@strawberry.type
+class GQLConsumerPlaybackActivityItem:
+    """Shared consumer activity row grouped by item."""
+
+    item_id: strawberry.ID = strawberry.field(name="itemId")
+    title: str
+    subtitle: str | None = None
+    poster_path: str | None = strawberry.field(name="posterPath", default=None)
+    state: str | None = None
+    request: GQLItemRequestSummary | None = None
+    request_lifecycle: GQLRequestLifecycle = strawberry.field(name="requestLifecycle")
+    last_activity_at: str | None = strawberry.field(name="lastActivityAt", default=None)
+    last_viewed_at: str | None = strawberry.field(name="lastViewedAt", default=None)
+    last_launched_at: str | None = strawberry.field(name="lastLaunchedAt", default=None)
+    view_count: int = strawberry.field(name="viewCount", default=0)
+    launch_count: int = strawberry.field(name="launchCount", default=0)
+    session_count: int = strawberry.field(name="sessionCount", default=0)
+    active_session_count: int = strawberry.field(name="activeSessionCount", default=0)
+    last_session_key: str | None = strawberry.field(name="lastSessionKey", default=None)
+    resume_position_seconds: int | None = strawberry.field(
+        name="resumePositionSeconds",
+        default=None,
+    )
+    duration_seconds: int | None = strawberry.field(name="durationSeconds", default=None)
+    progress_percent: float | None = strawberry.field(name="progressPercent", default=None)
+    completed: bool = False
+    last_target: str | None = strawberry.field(name="lastTarget", default=None)
+
+
+@strawberry.type
+class GQLConsumerPlaybackDevice:
+    """Recent consumer device rollup derived from shared activity events."""
+
+    device_key: str = strawberry.field(name="deviceKey")
+    device_label: str = strawberry.field(name="deviceLabel")
+    last_seen_at: str = strawberry.field(name="lastSeenAt")
+    last_activity_at: str | None = strawberry.field(name="lastActivityAt", default=None)
+    last_viewed_at: str | None = strawberry.field(name="lastViewedAt", default=None)
+    last_launched_at: str | None = strawberry.field(name="lastLaunchedAt", default=None)
+    launch_count: int = strawberry.field(name="launchCount", default=0)
+    view_count: int = strawberry.field(name="viewCount", default=0)
+    session_count: int = strawberry.field(name="sessionCount", default=0)
+    active_session_count: int = strawberry.field(name="activeSessionCount", default=0)
+    last_session_key: str | None = strawberry.field(name="lastSessionKey", default=None)
+    resume_position_seconds: int | None = strawberry.field(
+        name="resumePositionSeconds",
+        default=None,
+    )
+    duration_seconds: int | None = strawberry.field(name="durationSeconds", default=None)
+    progress_percent: float | None = strawberry.field(name="progressPercent", default=None)
+    completed_session_count: int = strawberry.field(name="completedSessionCount", default=0)
+    last_target: str | None = strawberry.field(name="lastTarget", default=None)
+
+
+@strawberry.type
+class GQLConsumerPlaybackSession:
+    """Shared playback session posture derived from retained activity events."""
+
+    session_key: str = strawberry.field(name="sessionKey")
+    item_id: strawberry.ID = strawberry.field(name="itemId")
+    device_key: str = strawberry.field(name="deviceKey")
+    device_label: str = strawberry.field(name="deviceLabel")
+    started_at: str = strawberry.field(name="startedAt")
+    last_seen_at: str = strawberry.field(name="lastSeenAt")
+    last_target: str | None = strawberry.field(name="lastTarget", default=None)
+    active: bool
+    resume_position_seconds: int | None = strawberry.field(
+        name="resumePositionSeconds",
+        default=None,
+    )
+    duration_seconds: int | None = strawberry.field(name="durationSeconds", default=None)
+    progress_percent: float | None = strawberry.field(name="progressPercent", default=None)
+    completed: bool = False
+
+
+@strawberry.type
+class GQLConsumerPlaybackActivity:
+    """Shared playback activity snapshot for continue-watching, watch, and account surfaces."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    total_item_count: int = strawberry.field(name="totalItemCount")
+    total_view_count: int = strawberry.field(name="totalViewCount")
+    total_launch_count: int = strawberry.field(name="totalLaunchCount")
+    total_session_count: int = strawberry.field(name="totalSessionCount")
+    active_session_count: int = strawberry.field(name="activeSessionCount")
+    items: list[GQLConsumerPlaybackActivityItem]
+    devices: list[GQLConsumerPlaybackDevice]
+    recent_sessions: list[GQLConsumerPlaybackSession] = strawberry.field(
+        name="recentSessions"
+    )
+
+
+@strawberry.type
+class GQLConsumerProfileIdentity:
+    """Dedicated identity slice for consumer account surfaces."""
+
+    display_name: str = strawberry.field(name="displayName")
+    email: str | None = None
+    status_label: str = strawberry.field(name="statusLabel")
+    source_label: str = strawberry.field(name="sourceLabel")
+    actor_id: str | None = strawberry.field(name="actorId", default=None)
+    actor_type: str | None = strawberry.field(name="actorType", default=None)
+    authentication_mode: str | None = strawberry.field(
+        name="authenticationMode",
+        default=None,
+    )
+
+
+@strawberry.type
+class GQLConsumerProfileWorkspace:
+    """Workspace summary attached to the current consumer profile."""
+
+    id: str | None = None
+    name: str
+    plan_label: str = strawberry.field(name="planLabel")
+    access_policy_version: str | None = strawberry.field(
+        name="accessPolicyVersion",
+        default=None,
+    )
+    quota_policy_version: str | None = strawberry.field(
+        name="quotaPolicyVersion",
+        default=None,
+    )
+    quota_enabled: bool | None = strawberry.field(name="quotaEnabled", default=None)
+
+
+@strawberry.type
+class GQLConsumerProfileLibrary:
+    """Library rollup included in the consumer profile projection."""
+
+    total_items: int = strawberry.field(name="totalItems")
+    total_movies: int = strawberry.field(name="totalMovies")
+    total_shows: int = strawberry.field(name="totalShows")
+    total_episodes: int = strawberry.field(name="totalEpisodes")
+    completed_items: int = strawberry.field(name="completedItems")
+    incomplete_items: int = strawberry.field(name="incompleteItems")
+    failed_items: int = strawberry.field(name="failedItems")
+    state_breakdown: str | None = strawberry.field(name="stateBreakdown", default=None)
+    activity: str | None = None
+
+
+@strawberry.type
+class GQLConsumerProfilePlaybackSummary:
+    """Compact playback posture used by the consumer account route."""
+
+    active_session_count: int = strawberry.field(name="activeSessionCount")
+    resume_item_count: int = strawberry.field(name="resumeItemCount")
+    completed_item_count: int = strawberry.field(name="completedItemCount")
+    stalled_item_count: int = strawberry.field(name="stalledItemCount")
+    recent_device_count: int = strawberry.field(name="recentDeviceCount")
+    recent_session_count: int = strawberry.field(name="recentSessionCount")
+
+
+@strawberry.type
+class GQLConsumerProfileAvailabilitySummary:
+    """Bounded recent-title availability posture for the account profile."""
+
+    tracked_item_count: int = strawberry.field(name="trackedItemCount")
+    playback_ready_count: int = strawberry.field(name="playbackReadyCount")
+    refresh_blocked_count: int = strawberry.field(name="refreshBlockedCount")
+    provider_limited_count: int = strawberry.field(name="providerLimitedCount")
+    pending_count: int = strawberry.field(name="pendingCount")
+
+
+@strawberry.type
+class GQLConsumerProfileAvailabilityItem:
+    """Recent-title availability posture row for the account profile."""
+
+    item_id: strawberry.ID = strawberry.field(name="itemId")
+    title: str
+    subtitle: str | None = None
+    poster_path: str | None = strawberry.field(name="posterPath", default=None)
+    state: str | None = None
+    posture_key: str = strawberry.field(name="postureKey")
+    posture_label: str = strawberry.field(name="postureLabel")
+    detail: str
+    direct_ready: bool = strawberry.field(name="directReady")
+    hls_ready: bool = strawberry.field(name="hlsReady")
+    missing_local_file: bool = strawberry.field(name="missingLocalFile")
+    effective_refresh_state: str | None = strawberry.field(
+        name="effectiveRefreshState",
+        default=None,
+    )
+    provider_labels: list[str] = strawberry.field(
+        name="providerLabels",
+        default_factory=list,
+    )
+    last_activity_at: str | None = strawberry.field(name="lastActivityAt", default=None)
+    last_viewed_at: str | None = strawberry.field(name="lastViewedAt", default=None)
+    last_launched_at: str | None = strawberry.field(name="lastLaunchedAt", default=None)
+
+
+@strawberry.type
+class GQLConsumerProfile:
+    """Single-read consumer profile projection for account surfaces."""
+
+    generated_at: str = strawberry.field(name="generatedAt")
+    authenticated: bool
+    identity: GQLConsumerProfileIdentity
+    workspace: GQLConsumerProfileWorkspace
+    library: GQLConsumerProfileLibrary
+    playback_summary: GQLConsumerProfilePlaybackSummary = strawberry.field(
+        name="playbackSummary"
+    )
+    availability_summary: GQLConsumerProfileAvailabilitySummary = strawberry.field(
+        name="availabilitySummary"
+    )
+    availability_items: list[GQLConsumerProfileAvailabilityItem] = strawberry.field(
+        name="availabilityItems"
+    )
+    playback: GQLConsumerPlaybackActivity
+    posture_notes: list[str] = strawberry.field(name="postureNotes")
+
+
+@strawberry.type
+class GQLMediaItemSummaryPage:
+    """Paginated media-item summary page for consumer browse surfaces."""
+
+    items: list[GQLMediaItem]
+    page: int
+    limit: int
+    total_count: int = strawberry.field(name="totalCount")
+    total_pages: int = strawberry.field(name="totalPages")
+    has_previous_page: bool = strawberry.field(name="hasPreviousPage")
+    has_next_page: bool = strawberry.field(name="hasNextPage")
 
 
 @strawberry.type
@@ -239,8 +487,8 @@ class GQLGovernanceEvidenceCheck:
 
 
 @strawberry.type
-class GQLEnterpriseRolloutEvidence:
-    """Aggregated retained rollout evidence across enterprise governance domains."""
+class GQLRolloutEvidence:
+    """Aggregated retained rollout evidence across governance domains."""
 
     generated_at: str = strawberry.field(name="generatedAt")
     status: str
@@ -323,6 +571,9 @@ class GQLPlaybackGateGovernance:
     )
     windows_soak_profile_coverage: list[str] = strawberry.field(
         name="windowsSoakProfileCoverage"
+    )
+    windows_soak_pressure_cause_buckets: JSON = strawberry.field(
+        name="windowsSoakPressureCauseBuckets"
     )
     policy_validation_status: str = strawberry.field(name="policyValidationStatus")
     policy_ready: bool = strawberry.field(name="policyReady")
@@ -432,6 +683,85 @@ class GQLVfsRuntimeTelemetry:
 
 
 @strawberry.type
+class GQLServingSession:
+    """One active Python serving session exposed to GraphQL-first observability views."""
+
+    session_id: str = strawberry.field(name="sessionId")
+    category: str
+    resource: str
+    started_at: str = strawberry.field(name="startedAt")
+    last_activity_at: str = strawberry.field(name="lastActivityAt")
+    bytes_served: int = strawberry.field(name="bytesServed")
+
+
+@strawberry.type
+class GQLServingHandle:
+    """One active serving handle exposed to GraphQL-first observability views."""
+
+    handle_id: str = strawberry.field(name="handleId")
+    session_id: str = strawberry.field(name="sessionId")
+    category: str
+    path: str
+    path_id: str = strawberry.field(name="pathId")
+    created_at: str = strawberry.field(name="createdAt")
+    last_activity_at: str = strawberry.field(name="lastActivityAt")
+    bytes_served: int = strawberry.field(name="bytesServed")
+    read_offset: int = strawberry.field(name="readOffset")
+
+
+@strawberry.type
+class GQLServingPath:
+    """One active serving path exposed to GraphQL-first observability views."""
+
+    path_id: str = strawberry.field(name="pathId")
+    category: str
+    path: str
+    created_at: str = strawberry.field(name="createdAt")
+    last_activity_at: str = strawberry.field(name="lastActivityAt")
+    size_bytes: int | None = strawberry.field(name="sizeBytes", default=None)
+    active_handle_count: int = strawberry.field(name="activeHandleCount")
+
+
+@strawberry.type
+class GQLServingGovernance:
+    """Serving-governance counters retained for Director observability screens."""
+
+    active_sessions: int = strawberry.field(name="activeSessions")
+    active_handles: int = strawberry.field(name="activeHandles")
+    tracked_paths: int = strawberry.field(name="trackedPaths")
+    active_local_sessions: int = strawberry.field(name="activeLocalSessions")
+    active_remote_sessions: int = strawberry.field(name="activeRemoteSessions")
+    active_local_handles: int = strawberry.field(name="activeLocalHandles")
+    hls_manifest_invalid: int = strawberry.field(name="hlsManifestInvalid")
+    hls_route_failures_total: int = strawberry.field(name="hlsRouteFailuresTotal")
+    hls_route_failures_upstream_failed: int = strawberry.field(
+        name="hlsRouteFailuresUpstreamFailed"
+    )
+    direct_playback_refresh_trigger_tasks_active: int = strawberry.field(
+        name="directPlaybackRefreshTasksActive"
+    )
+    hls_failed_lease_refresh_trigger_tasks_active: int = strawberry.field(
+        name="failedLeaseRefreshTasksActive"
+    )
+    hls_restricted_fallback_refresh_trigger_tasks_active: int = strawberry.field(
+        name="restrictedFallbackRefreshTasksActive"
+    )
+    stream_refresh_dispatch_mode: str = strawberry.field(name="streamRefreshDispatchMode")
+    stream_refresh_queue_enabled: bool = strawberry.field(name="streamRefreshQueueEnabled")
+    stream_refresh_queue_ready: bool = strawberry.field(name="streamRefreshQueueReady")
+
+
+@strawberry.type
+class GQLServingStatus:
+    """Current serving-session state for GraphQL-first observability clients."""
+
+    sessions: list[GQLServingSession]
+    handles: list[GQLServingHandle]
+    paths: list[GQLServingPath]
+    governance: GQLServingGovernance
+
+
+@strawberry.type
 class GQLVfsRolloutLedgerEntry:
     """One retained operator history row for VFS rollout control."""
 
@@ -482,6 +812,7 @@ class GQLVfsRolloutControl:
     canary_decision: str = strawberry.field(name="canaryDecision")
     merge_gate: str = strawberry.field(name="mergeGate")
     reasons: list[str]
+    allowed_actions: list[str] = strawberry.field(name="allowedActions")
     history: list[GQLVfsRolloutLedgerEntry]
 
 
@@ -527,6 +858,162 @@ class GQLAccessPolicyRevisionList:
 
     active_version: str | None = strawberry.field(name="activeVersion", default=None)
     revisions: list[GQLAccessPolicyRevision]
+
+
+@strawberry.type
+class GQLAccessPolicyDecision:
+    """One operator-visible authorization policy probe for the current actor."""
+
+    name: str
+    allowed: bool
+    reason: str
+    required_permissions: list[str] = strawberry.field(name="requiredPermissions")
+    matched_permissions: list[str] = strawberry.field(name="matchedPermissions")
+    missing_permissions: list[str] = strawberry.field(name="missingPermissions")
+    constrained_permissions: list[str] = strawberry.field(name="constrainedPermissions")
+    constraint_failures: list[str] = strawberry.field(name="constraintFailures")
+    target_tenant_id: str = strawberry.field(name="targetTenantId")
+    tenant_scope: str = strawberry.field(name="tenantScope")
+
+
+@strawberry.type
+class GQLAccessPolicyContext:
+    """Current actor access-policy posture for GraphQL-first operator views."""
+
+    authentication_mode: str = strawberry.field(name="authenticationMode")
+    actor_id: str = strawberry.field(name="actorId")
+    actor_type: str = strawberry.field(name="actorType")
+    tenant_id: str = strawberry.field(name="tenantId")
+    authorization_tenant_scope: str = strawberry.field(name="authorizationTenantScope")
+    authorized_tenant_ids: list[str] = strawberry.field(name="authorizedTenantIds")
+    oidc_claims_present: bool = strawberry.field(name="oidcClaimsPresent")
+    oidc_token_validated: bool = strawberry.field(name="oidcTokenValidated")
+    oidc_allow_api_key_fallback: bool = strawberry.field(name="oidcAllowApiKeyFallback")
+    oidc_rollout_stage: str = strawberry.field(name="oidcRolloutStage")
+    oidc_rollout_evidence_refs: list[str] = strawberry.field(name="oidcRolloutEvidenceRefs")
+    oidc_subject_mapping_ready: bool = strawberry.field(name="oidcSubjectMappingReady")
+    oidc_rollout_status: str = strawberry.field(name="oidcRolloutStatus")
+    oidc_configuration_complete: bool = strawberry.field(name="oidcConfigurationComplete")
+    access_policy_version: str = strawberry.field(name="accessPolicyVersion")
+    quota_policy_version: str | None = strawberry.field(name="quotaPolicyVersion", default=None)
+    permissions_model: str = strawberry.field(name="permissionsModel")
+    policy_source: str = strawberry.field(name="policySource")
+    role_grants: JSON = strawberry.field(name="roleGrants", default_factory=dict)
+    permission_constraints: JSON = strawberry.field(
+        name="permissionConstraints",
+        default_factory=dict,
+    )
+    audit_mode: str = strawberry.field(name="auditMode")
+    policy_alerting_enabled: bool = strawberry.field(name="policyAlertingEnabled")
+    repeated_denial_warning_threshold: int = strawberry.field(
+        name="repeatedDenialWarningThreshold"
+    )
+    repeated_denial_critical_threshold: int = strawberry.field(
+        name="repeatedDenialCriticalThreshold"
+    )
+    decisions: list[GQLAccessPolicyDecision]
+    warnings: list[str]
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLAccessPolicyAuditAlert:
+    """Repeated-denial or policy-drift candidate surfaced from audit search."""
+
+    code: str
+    severity: str
+    count: int
+    message: str
+
+
+@strawberry.type
+class GQLAccessPolicyAuditEntry:
+    """One structured authorization decision returned by audit search."""
+
+    occurred_at: str = strawberry.field(name="occurredAt")
+    path: str
+    method: str
+    resource_scope: str = strawberry.field(name="resourceScope")
+    actor_id: str = strawberry.field(name="actorId")
+    actor_type: str = strawberry.field(name="actorType")
+    tenant_id: str = strawberry.field(name="tenantId")
+    target_tenant_id: str = strawberry.field(name="targetTenantId")
+    required_permissions: list[str] = strawberry.field(name="requiredPermissions")
+    matched_permissions: list[str] = strawberry.field(name="matchedPermissions")
+    missing_permissions: list[str] = strawberry.field(name="missingPermissions")
+    constrained_permissions: list[str] = strawberry.field(name="constrainedPermissions")
+    constraint_failures: list[str] = strawberry.field(name="constraintFailures")
+    allowed: bool
+    reason: str
+    tenant_scope: str = strawberry.field(name="tenantScope")
+    authentication_mode: str = strawberry.field(name="authenticationMode")
+    access_policy_version: str = strawberry.field(name="accessPolicyVersion")
+    access_policy_source: str = strawberry.field(name="accessPolicySource")
+    oidc_issuer: str | None = strawberry.field(name="oidcIssuer", default=None)
+    oidc_subject: str | None = strawberry.field(name="oidcSubject", default=None)
+    summary: str
+
+
+@strawberry.type
+class GQLAccessPolicyAudit:
+    """Bounded audit-search response for access-policy governance actions."""
+
+    total_matches: int = strawberry.field(name="totalMatches")
+    entries: list[str]
+    records: list[GQLAccessPolicyAuditEntry]
+    alerts: list[GQLAccessPolicyAuditAlert]
+
+
+@strawberry.type
+class GQLTenantQuotaPolicy:
+    """Current tenant quota policy and request-intake visibility."""
+
+    tenant_id: str = strawberry.field(name="tenantId")
+    enabled: bool
+    policy_version: str = strawberry.field(name="policyVersion")
+    api_requests_per_minute: int | None = strawberry.field(
+        name="apiRequestsPerMinute",
+        default=None,
+    )
+    worker_enqueues_per_minute: int | None = strawberry.field(
+        name="workerEnqueuesPerMinute",
+        default=None,
+    )
+    playback_refreshes_per_minute: int | None = strawberry.field(
+        name="playbackRefreshesPerMinute",
+        default=None,
+    )
+    provider_refreshes_per_minute: int | None = strawberry.field(
+        name="providerRefreshesPerMinute",
+        default=None,
+    )
+    enforcement_points: list[str] = strawberry.field(name="enforcementPoints")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.input
+class TenantQuotaPolicyWriteInput:
+    """GraphQL input for one tenant-scoped quota policy write."""
+
+    tenant_id: str = strawberry.field(name="tenantId")
+    enabled: bool
+    policy_version: str = strawberry.field(name="policyVersion")
+    api_requests_per_minute: int | None = strawberry.field(
+        name="apiRequestsPerMinute",
+        default=None,
+    )
+    worker_enqueues_per_minute: int | None = strawberry.field(
+        name="workerEnqueuesPerMinute",
+        default=None,
+    )
+    playback_refreshes_per_minute: int | None = strawberry.field(
+        name="playbackRefreshesPerMinute",
+        default=None,
+    )
+    provider_refreshes_per_minute: int | None = strawberry.field(
+        name="providerRefreshesPerMinute",
+        default=None,
+    )
 
 
 @strawberry.input
@@ -836,6 +1323,10 @@ class GQLPluginIntegrationReadinessPlugin:
     contract_validated: bool = strawberry.field(name="contractValidated")
     soak_validated: bool = strawberry.field(name="soakValidated")
     proof_gap_count: int = strawberry.field(name="proofGapCount")
+    verification_status: str = strawberry.field(name="verificationStatus")
+    verification_check_count: int = strawberry.field(name="verificationCheckCount")
+    verified_check_count: int = strawberry.field(name="verifiedCheckCount")
+    missing_verification_checks: list[str] = strawberry.field(name="missingVerificationChecks")
     required_actions: list[str] = strawberry.field(name="requiredActions")
     remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
 
@@ -852,6 +1343,8 @@ class GQLPluginIntegrationReadinessSummary:
     ready_plugins: int = strawberry.field(name="readyPlugins")
     missing_contract_proof_plugins: int = strawberry.field(name="missingContractProofPlugins")
     missing_soak_proof_plugins: int = strawberry.field(name="missingSoakProofPlugins")
+    verified_plugins: int = strawberry.field(name="verifiedPlugins")
+    missing_verification_plugins: int = strawberry.field(name="missingVerificationPlugins")
 
 
 @strawberry.type
@@ -882,9 +1375,48 @@ class GQLPluginEventStatus:
     publisher: str | None = None
     publishable_events: list[str] = strawberry.field(name="publishableEvents")
     hook_subscriptions: list[str] = strawberry.field(name="hookSubscriptions")
+    queued_hook_subscriptions: list[str] = strawberry.field(name="queuedHookSubscriptions")
     publishable_event_count: int = strawberry.field(name="publishableEventCount")
     hook_subscription_count: int = strawberry.field(name="hookSubscriptionCount")
+    queued_hook_subscription_count: int = strawberry.field(name="queuedHookSubscriptionCount")
     wiring_status: str = strawberry.field(name="wiringStatus")
+    hook_dispatch_mode: str = strawberry.field(name="hookDispatchMode")
+    queued_dispatch_enabled: bool = strawberry.field(name="queuedDispatchEnabled")
+    queue_health_status: str = strawberry.field(name="queueHealthStatus")
+    queue_delivery_observed: bool = strawberry.field(name="queueDeliveryObserved")
+    queue_observation_count: int = strawberry.field(name="queueObservationCount")
+    latest_queue_lag_seconds: float | None = strawberry.field(
+        name="latestQueueLagSeconds",
+        default=None,
+    )
+    max_queue_lag_seconds: float | None = strawberry.field(
+        name="maxQueueLagSeconds",
+        default=None,
+    )
+    successful_deliveries: int = strawberry.field(name="successfulDeliveries")
+    timeout_deliveries: int = strawberry.field(name="timeoutDeliveries")
+    failed_deliveries: int = strawberry.field(name="failedDeliveries")
+    retried_deliveries: int = strawberry.field(name="retriedDeliveries")
+    required_actions: list[str] = strawberry.field(name="requiredActions")
+    remaining_gaps: list[str] = strawberry.field(name="remainingGaps")
+
+
+@strawberry.type
+class GQLPluginEventsPage:
+    """Paged declared plugin event inventory with filtered summary metadata."""
+
+    rows: list[GQLPluginEventStatus]
+    total_count: int = strawberry.field(name="totalCount")
+    limit: int
+    offset: int
+    has_previous_page: bool = strawberry.field(name="hasPreviousPage")
+    has_next_page: bool = strawberry.field(name="hasNextPage")
+    publishable_event_total: int = strawberry.field(name="publishableEventTotal")
+    hook_subscription_total: int = strawberry.field(name="hookSubscriptionTotal")
+    publisher_counts: list[GQLNamedCountBucket] = strawberry.field(name="publisherCounts")
+    wiring_status_counts: list[GQLNamedCountBucket] = strawberry.field(
+        name="wiringStatusCounts"
+    )
 
 
 @strawberry.type
@@ -1234,8 +1766,8 @@ class GQLPluginRuntimePublisherSummary:
 
 
 @strawberry.type
-class GQLEnterpriseOperationsSlice:
-    """One enterprise-operations roadmap slice posture row."""
+class GQLOperationsSlice:
+    """One operations roadmap slice posture row."""
 
     name: str
     status: str
@@ -1245,28 +1777,28 @@ class GQLEnterpriseOperationsSlice:
 
 
 @strawberry.type
-class GQLEnterpriseOperationsGovernance:
-    """Machine-readable enterprise operations posture for Director consoles."""
+class GQLOperationsGovernance:
+    """Machine-readable operations posture for Director consoles."""
 
     generated_at: str = strawberry.field(name="generatedAt")
-    playback_gate: GQLEnterpriseOperationsSlice = strawberry.field(name="playbackGate")
-    operational_evidence: GQLEnterpriseOperationsSlice = strawberry.field(name="operationalEvidence")
-    identity_authz: GQLEnterpriseOperationsSlice = strawberry.field(name="identityAuthz")
-    tenant_boundary: GQLEnterpriseOperationsSlice = strawberry.field(name="tenantBoundary")
-    vfs_data_plane: GQLEnterpriseOperationsSlice = strawberry.field(name="vfsDataPlane")
-    distributed_control_plane: GQLEnterpriseOperationsSlice = strawberry.field(
+    playback_gate: GQLOperationsSlice = strawberry.field(name="playbackGate")
+    operational_evidence: GQLOperationsSlice = strawberry.field(name="operationalEvidence")
+    identity_authz: GQLOperationsSlice = strawberry.field(name="identityAuthz")
+    tenant_boundary: GQLOperationsSlice = strawberry.field(name="tenantBoundary")
+    vfs_data_plane: GQLOperationsSlice = strawberry.field(name="vfsDataPlane")
+    distributed_control_plane: GQLOperationsSlice = strawberry.field(
         name="distributedControlPlane"
     )
-    runtime_lifecycle: GQLEnterpriseOperationsSlice = strawberry.field(name="runtimeLifecycle")
-    sre_program: GQLEnterpriseOperationsSlice = strawberry.field(name="sreProgram")
-    operator_log_pipeline: GQLEnterpriseOperationsSlice = strawberry.field(name="operatorLogPipeline")
-    plugin_runtime_isolation: GQLEnterpriseOperationsSlice = strawberry.field(
+    runtime_lifecycle: GQLOperationsSlice = strawberry.field(name="runtimeLifecycle")
+    sre_program: GQLOperationsSlice = strawberry.field(name="sreProgram")
+    operator_log_pipeline: GQLOperationsSlice = strawberry.field(name="operatorLogPipeline")
+    plugin_runtime_isolation: GQLOperationsSlice = strawberry.field(
         name="pluginRuntimeIsolation"
     )
-    heavy_stage_workload_isolation: GQLEnterpriseOperationsSlice = strawberry.field(
+    heavy_stage_workload_isolation: GQLOperationsSlice = strawberry.field(
         name="heavyStageWorkloadIsolation"
     )
-    release_metadata_performance: GQLEnterpriseOperationsSlice = strawberry.field(
+    release_metadata_performance: GQLOperationsSlice = strawberry.field(
         name="releaseMetadataPerformance"
     )
 
@@ -1730,6 +2262,65 @@ class GQLMetadataReindexHistoryPoint:
 
 
 @strawberry.type
+class GQLItemWorkflowDrillStatus:
+    """Latest item-workflow drill summary for GraphQL operator mutations."""
+
+    queue_name: str = strawberry.field(name="queueName")
+    has_history: bool = strawberry.field(name="hasHistory")
+    observed_at: str = strawberry.field(name="observedAt")
+    examined_checkpoints: int = strawberry.field(name="examinedCheckpoints")
+    replayed_checkpoints: int = strawberry.field(name="replayedCheckpoints")
+    compensated_checkpoints: int = strawberry.field(name="compensatedCheckpoints")
+    finalize_requeues: int = strawberry.field(name="finalizeRequeues")
+    parse_requeues: int = strawberry.field(name="parseRequeues")
+    scrape_requeues: int = strawberry.field(name="scrapeRequeues")
+    index_requeues: int = strawberry.field(name="indexRequeues")
+    skipped_active: int = strawberry.field(name="skippedActive")
+    unrecoverable: int
+    failed: int
+    candidate_status_counts: JSON = strawberry.field(name="candidateStatusCounts")
+    compensation_stage_counts: JSON = strawberry.field(name="compensationStageCounts")
+    outcome: str
+    run_failed: bool = strawberry.field(name="runFailed")
+    last_error: str | None = strawberry.field(name="lastError", default=None)
+
+
+@strawberry.type
+class GQLPluginStreamControlResult:
+    """Normalized result for one stream-control action."""
+
+    plugin_name: str = strawberry.field(name="pluginName")
+    action: GQLPluginStreamControlAction
+    item_identifier: str | None = strawberry.field(name="itemIdentifier", default=None)
+    accepted: bool
+    outcome: str
+    detail: str | None = None
+    controller_attached: bool | None = strawberry.field(name="controllerAttached", default=None)
+    retry_after_seconds: float | None = strawberry.field(name="retryAfterSeconds", default=None)
+    metadata: JSON = strawberry.field(default_factory=dict)
+
+
+@strawberry.type
+class GQLApiKeyRotationResult:
+    """Returned payload for one API key rotation."""
+
+    key: str
+    api_key_id: str = strawberry.field(name="apiKeyId")
+    warning: str
+
+
+@strawberry.input
+class PluginStreamControlInput:
+    """GraphQL input for one stream-control action."""
+
+    plugin_name: str = strawberry.field(name="pluginName")
+    action: GQLPluginStreamControlAction
+    item_identifier: str | None = strawberry.field(name="itemIdentifier", default=None)
+    prefer_queued: bool | None = strawberry.field(name="preferQueued", default=None)
+    metadata: JSON = strawberry.field(default_factory=dict)
+
+
+@strawberry.type
 class GQLLibraryStats:
     """Intentional GraphQL stats type above the compatibility REST contract."""
 
@@ -1853,6 +2444,29 @@ class GQLActiveStream:
 
 
 @strawberry.type
+class GQLMediaEntryLifecycle:
+    """Expanded lifecycle view for one item-detail media-entry row."""
+
+    owner_kind: str = strawberry.field(name="ownerKind")
+    owner_id: str | None = strawberry.field(name="ownerId", default=None)
+    active_roles: list[str] = strawberry.field(name="activeRoles")
+    source_key: str | None = strawberry.field(name="sourceKey", default=None)
+    source_attachment_id: str | None = strawberry.field(name="sourceAttachmentId", default=None)
+    provider_family: str = strawberry.field(name="providerFamily")
+    locator_source: str = strawberry.field(name="locatorSource")
+    match_basis: str | None = strawberry.field(name="matchBasis", default=None)
+    restricted_fallback: bool = strawberry.field(name="restrictedFallback")
+    refresh_state: str | None = strawberry.field(name="refreshState", default=None)
+    expires_at: str | None = strawberry.field(name="expiresAt", default=None)
+    last_refreshed_at: str | None = strawberry.field(name="lastRefreshedAt", default=None)
+    last_refresh_error: str | None = strawberry.field(name="lastRefreshError", default=None)
+    effective_refresh_state: str = strawberry.field(name="effectiveRefreshState")
+    ready_for_direct: bool = strawberry.field(name="readyForDirect")
+    ready_for_hls: bool = strawberry.field(name="readyForHls")
+    ready_for_playback: bool = strawberry.field(name="readyForPlayback")
+
+
+@strawberry.type
 class GQLMediaEntry:
     """Mounted/playback-facing media-entry projection for graph item detail."""
 
@@ -1863,6 +2477,7 @@ class GQLMediaEntry:
     local_path: str | None = strawberry.field(name="localPath", default=None)
     download_url: str | None = strawberry.field(name="downloadUrl", default=None)
     unrestricted_url: str | None = strawberry.field(name="unrestrictedUrl", default=None)
+    source_attachment_id: str | None = strawberry.field(name="sourceAttachmentId", default=None)
     provider: str | None = None
     provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
     provider_file_id: str | None = strawberry.field(name="providerFileId", default=None)
@@ -1877,6 +2492,7 @@ class GQLMediaEntry:
     active_for_direct: bool = strawberry.field(name="activeForDirect")
     active_for_hls: bool = strawberry.field(name="activeForHls")
     is_active_stream: bool = strawberry.field(name="isActiveStream")
+    lifecycle: GQLMediaEntryLifecycle | None = None
 
 
 @strawberry.type
@@ -1899,10 +2515,12 @@ class GQLMediaItemDetail:
     episode_number: int | None = strawberry.field(name="episodeNumber", default=None)
     created_at: str = strawberry.field(name="createdAt")
     updated_at: str = strawberry.field(name="updatedAt")
+    request: GQLItemRequestSummary | None = None
     stream_candidates: list[GQLStreamCandidate] = strawberry.field(name="streamCandidates")
     selected_stream: GQLStreamCandidate | None = strawberry.field(
         name="selectedStream", default=None
     )
+    request_lifecycle: GQLRequestLifecycle = strawberry.field(name="requestLifecycle")
     recovery_plan: GQLRecoveryPlan = strawberry.field(name="recoveryPlan")
     playback_attachments: list[GQLPlaybackAttachment] = strawberry.field(
         name="playbackAttachments", default_factory=list
@@ -1912,6 +2530,40 @@ class GQLMediaItemDetail:
     )
     active_stream: GQLActiveStream | None = strawberry.field(name="activeStream", default=None)
     media_entries: list[GQLMediaEntry] = strawberry.field(name="mediaEntries", default_factory=list)
+
+
+@strawberry.type
+class GQLConsumerPlaybackItem:
+    """Dedicated consumer playback/detail projection for item detail and watch surfaces."""
+
+    summary: GQLMediaItem
+    detail: GQLMediaItemDetail
+    activity: GQLConsumerPlaybackActivityItem | None = None
+
+
+@strawberry.type
+class GQLMediaItemsPage:
+    """Paginated GraphQL playback recovery projection with page metadata."""
+
+    items: list[GQLMediaItemDetail]
+    total_count: int = strawberry.field(name="totalCount")
+    limit: int
+    offset: int
+    has_previous_page: bool = strawberry.field(name="hasPreviousPage")
+    has_next_page: bool = strawberry.field(name="hasNextPage")
+
+
+@strawberry.type
+class GQLMediaItemSummaryPage:
+    """Paginated summary page for browse and search surfaces."""
+
+    items: list[GQLMediaItem]
+    total_count: int = strawberry.field(name="totalCount")
+    page: int
+    limit: int
+    total_pages: int = strawberry.field(name="totalPages")
+    has_previous_page: bool = strawberry.field(name="hasPreviousPage")
+    has_next_page: bool = strawberry.field(name="hasNextPage")
 
 
 @strawberry.type
@@ -1994,6 +2646,16 @@ class GQLPlaybackRefreshTriggerResult:
 
 
 @strawberry.type
+class GQLRecordConsumerPlaybackActivityResult:
+    """Mutation result for recording one shared consumer activity event."""
+
+    item_id: str = strawberry.field(name="itemId")
+    activity_type: str = strawberry.field(name="activityType")
+    success: bool
+    occurred_at: str = strawberry.field(name="occurredAt")
+
+
+@strawberry.type
 class GQLMarkSelectedHlsMediaEntryStaleResult:
     """GraphQL mutation result for marking the selected HLS media entry stale."""
 
@@ -2039,6 +2701,26 @@ class PersistVfsRolloutControlInput:
         default=None,
     )
     notes: str | None = None
+
+
+@strawberry.input
+class ExecuteVfsRolloutActionInput:
+    """Validated GraphQL mutation input for VFS rollout actions."""
+
+    action: str
+    reason: str | None = None
+    target_environment_class: str | None = strawberry.field(
+        name="targetEnvironmentClass",
+        default=None,
+    )
+    expected_canary_decision: str | None = strawberry.field(
+        name="expectedCanaryDecision",
+        default=None,
+    )
+    expected_merge_gate: str | None = strawberry.field(
+        name="expectedMergeGate",
+        default=None,
+    )
 
 
 @strawberry.type
@@ -2089,6 +2771,7 @@ class LogEntry:
 
     timestamp: str
     level: str
+    message: str
     event: str
     worker_id: str | None = strawberry.field(name="worker_id", default=None)
     item_id: str | None = strawberry.field(name="item_id", default=None)
@@ -2105,6 +2788,266 @@ class NotificationEvent:
     title: str | None = None
     message: str | None = None
     timestamp: str
+
+
+@strawberry.type
+class RequestedEpisodeScope:
+    """One season-scoped episode selection used by consumer request flows."""
+
+    season_number: int = strawberry.field(name="seasonNumber")
+    episode_numbers: list[int] = strawberry.field(name="episodeNumbers")
+
+
+@strawberry.input
+class RequestedEpisodeScopeInput:
+    """One season-scoped episode selection supplied to request mutations."""
+
+    season_number: int = strawberry.field(name="seasonNumber")
+    episode_numbers: list[int] = strawberry.field(name="episodeNumbers")
+
+
+@strawberry.type
+class GQLRequestLifecycle:
+    """Compact frontend-facing request lifecycle for Director detail and discovery surfaces."""
+
+    requestable: bool
+    requested: bool
+    state: str
+    playback_ready: bool = strawberry.field(name="playbackReady")
+    cta: str
+    status_detail: str = strawberry.field(name="statusDetail")
+
+
+@strawberry.type
+class GQLItemRequestSummary:
+    """Persisted request scope summary exposed on item detail."""
+
+    is_partial: bool = strawberry.field(name="isPartial")
+    requested_seasons: list[int] | None = strawberry.field(name="requestedSeasons", default=None)
+    requested_episodes: list[RequestedEpisodeScope] | None = strawberry.field(
+        name="requestedEpisodes",
+        default=None,
+    )
+    request_source: str = strawberry.field(name="requestSource")
+
+
+@strawberry.type
+class RequestSearchLifecycle:
+    """Live intake lifecycle detail for one request-search result."""
+
+    stage_name: str | None = strawberry.field(name="stageName", default=None)
+    stage_status: str | None = strawberry.field(name="stageStatus", default=None)
+    provider: str | None = strawberry.field(default=None)
+    provider_download_id: str | None = strawberry.field(name="providerDownloadId", default=None)
+    last_error: str | None = strawberry.field(name="lastError", default=None)
+    updated_at: str | None = strawberry.field(name="updatedAt", default=None)
+    recovery_reason: str | None = strawberry.field(name="recoveryReason", default=None)
+    retry_at: str | None = strawberry.field(name="retryAt", default=None)
+    recovery_attempt_count: int = strawberry.field(name="recoveryAttemptCount", default=0)
+    in_cooldown: bool = strawberry.field(name="inCooldown", default=False)
+
+
+@strawberry.type
+class RequestCandidateSeasonSummary:
+    """Aggregated show-season request posture for focused requester detail screens."""
+
+    total_seasons: int = strawberry.field(name="totalSeasons")
+    released_seasons: int = strawberry.field(name="releasedSeasons")
+    requested_seasons: int = strawberry.field(name="requestedSeasons")
+    partial_seasons: int = strawberry.field(name="partialSeasons")
+    local_seasons: int = strawberry.field(name="localSeasons")
+    unreleased_seasons: int = strawberry.field(name="unreleasedSeasons")
+    next_air_date: str | None = strawberry.field(name="nextAirDate", default=None)
+
+
+@strawberry.type
+class RequestCandidateSeasonPreview:
+    """One additive show-season preview row for the dedicated requester detail route."""
+
+    season_number: int = strawberry.field(name="seasonNumber")
+    title: str | None = None
+    episode_count: int | None = strawberry.field(name="episodeCount", default=None)
+    air_date: str | None = strawberry.field(name="airDate", default=None)
+    is_released: bool = strawberry.field(name="isReleased", default=True)
+    has_local_coverage: bool = strawberry.field(name="hasLocalCoverage", default=False)
+    is_requested: bool = strawberry.field(name="isRequested", default=False)
+    requested_episode_count: int = strawberry.field(name="requestedEpisodeCount", default=0)
+    requested_all_episodes: bool = strawberry.field(name="requestedAllEpisodes", default=False)
+    status: str
+
+
+@strawberry.type
+class RequestSearchCandidate:
+    """One external request-search hit exposed through GraphQL."""
+
+    external_ref: str = strawberry.field(name="externalRef")
+    title: str
+    media_type: str = strawberry.field(name="mediaType")
+    media_kind: MediaKind = strawberry.field(name="mediaKind")
+    tmdb_id: int | None = strawberry.field(name="tmdbId", default=None)
+    tvdb_id: int | None = strawberry.field(name="tvdbId", default=None)
+    imdb_id: str | None = strawberry.field(name="imdbId", default=None)
+    poster_path: str | None = strawberry.field(name="posterPath", default=None)
+    overview: str
+    year: int | None = None
+    is_requested: bool = strawberry.field(name="isRequested")
+    requested_item_id: strawberry.ID | None = strawberry.field(name="requestedItemId", default=None)
+    requested_state: str | None = strawberry.field(name="requestedState", default=None)
+    requested_seasons: list[int] | None = strawberry.field(name="requestedSeasons", default=None)
+    requested_episodes: list[RequestedEpisodeScope] | None = strawberry.field(
+        name="requestedEpisodes",
+        default=None,
+    )
+    request_source: str | None = strawberry.field(name="requestSource", default=None)
+    request_count: int = strawberry.field(name="requestCount", default=0)
+    first_requested_at: str | None = strawberry.field(name="firstRequestedAt", default=None)
+    last_requested_at: str | None = strawberry.field(name="lastRequestedAt", default=None)
+    request_lifecycle: GQLRequestLifecycle = strawberry.field(name="requestLifecycle")
+    lifecycle: RequestSearchLifecycle | None = strawberry.field(default=None)
+    ranking_signals: list[str] = strawberry.field(name="rankingSignals", default_factory=list)
+    season_summary: RequestCandidateSeasonSummary | None = strawberry.field(
+        name="seasonSummary",
+        default=None,
+    )
+    season_preview: list[RequestCandidateSeasonPreview] = strawberry.field(
+        name="seasonPreview",
+        default_factory=list,
+    )
+
+
+@strawberry.type
+class RequestDiscoveryFacetBucket:
+    """One additive discover facet bucket computed by the backend."""
+
+    value: str
+    label: str
+    count: int
+    selected: bool = False
+
+
+@strawberry.type
+class RequestDiscoverySortOption:
+    """One supported backend discover sort option."""
+
+    value: str
+    label: str
+    selected: bool = False
+
+
+@strawberry.type
+class RequestDiscoveryFacets:
+    """Facet metadata emitted alongside one discover page."""
+
+    genres: list[RequestDiscoveryFacetBucket]
+    release_years: list[RequestDiscoveryFacetBucket] = strawberry.field(name="releaseYears")
+    languages: list[RequestDiscoveryFacetBucket]
+    companies: list[RequestDiscoveryFacetBucket]
+    networks: list[RequestDiscoveryFacetBucket]
+    sorts: list[RequestDiscoverySortOption]
+
+
+@strawberry.type
+class RequestDiscoveryRail:
+    """One backend-owned discovery rail for zero-query consumer search."""
+
+    rail_id: str = strawberry.field(name="railId")
+    title: str
+    description: str
+    query: str
+    media_type: str = strawberry.field(name="mediaType")
+    media_kind: MediaKind = strawberry.field(name="mediaKind")
+    items: list[RequestSearchCandidate]
+
+
+@strawberry.type
+class RequestEditorialFamily:
+    """One backend-owned editorial discovery family for consumer search."""
+
+    family_id: str = strawberry.field(name="familyId")
+    title: str
+    description: str
+    family: str
+    media_type: str = strawberry.field(name="mediaType")
+    media_kind: MediaKind = strawberry.field(name="mediaKind")
+    items: list[RequestSearchCandidate]
+
+
+@strawberry.type
+class RequestReleaseWindow:
+    """One backend-owned release-window family for consumer search."""
+
+    window_id: str = strawberry.field(name="windowId")
+    title: str
+    description: str
+    window: str
+    media_type: str = strawberry.field(name="mediaType")
+    media_kind: MediaKind = strawberry.field(name="mediaKind")
+    items: list[RequestSearchCandidate]
+
+
+@strawberry.type
+class RequestDiscoveryProjectionAction:
+    """One follow-up discovery action emitted from the current backend window."""
+
+    kind: str
+    value: str
+    media_type: str | None = strawberry.field(name="mediaType", default=None)
+
+
+@strawberry.type
+class RequestDiscoveryProjectionItem:
+    """One grouped discovery pivot derived from the current backend window."""
+
+    projection_id: str = strawberry.field(name="projectionId")
+    label: str
+    projection_type: str = strawberry.field(name="projectionType")
+    match_count: int = strawberry.field(name="matchCount")
+    image_path: str | None = strawberry.field(name="imagePath", default=None)
+    sample_titles: list[str] = strawberry.field(name="sampleTitles")
+    local_match_count: int = strawberry.field(name="localMatchCount", default=0)
+    requested_match_count: int = strawberry.field(name="requestedMatchCount", default=0)
+    active_match_count: int = strawberry.field(name="activeMatchCount", default=0)
+    completed_match_count: int = strawberry.field(name="completedMatchCount", default=0)
+    preview_signals: list[str] = strawberry.field(name="previewSignals", default_factory=list)
+    action: RequestDiscoveryProjectionAction
+
+
+@strawberry.type
+class RequestDiscoveryProjectionGroup:
+    """One grouped discovery-projection section for people, companies, and franchises."""
+
+    group_id: str = strawberry.field(name="groupId")
+    title: str
+    description: str
+    projection_type: str = strawberry.field(name="projectionType")
+    items: list[RequestDiscoveryProjectionItem]
+
+
+@strawberry.type
+class RequestSearchPage:
+    """One paginated backend-ranked request-search response."""
+
+    items: list[RequestSearchCandidate]
+    offset: int
+    limit: int
+    total_count: int = strawberry.field(name="totalCount")
+    has_previous_page: bool = strawberry.field(name="hasPreviousPage")
+    has_next_page: bool = strawberry.field(name="hasNextPage")
+    result_window_complete: bool = strawberry.field(name="resultWindowComplete")
+
+
+@strawberry.type
+class RequestDiscoveryPage:
+    """One paginated backend-owned discovery page with additive facets."""
+
+    items: list[RequestSearchCandidate]
+    offset: int
+    limit: int
+    total_count: int = strawberry.field(name="totalCount")
+    has_previous_page: bool = strawberry.field(name="hasPreviousPage")
+    has_next_page: bool = strawberry.field(name="hasNextPage")
+    result_window_complete: bool = strawberry.field(name="resultWindowComplete")
+    facets: RequestDiscoveryFacets
 
 
 @strawberry.type
@@ -2125,6 +3068,25 @@ class RequestItemInput:
     external_ref: str = strawberry.field(name="externalRef")
     media_type: str = strawberry.field(name="mediaType")
     requested_seasons: list[int] | None = strawberry.field(name="requestedSeasons", default=None)
+    requested_episodes: list[RequestedEpisodeScopeInput] | None = strawberry.field(
+        name="requestedEpisodes",
+        default=None,
+    )
+
+
+@strawberry.input
+class RecordConsumerPlaybackActivityInput:
+    """Record one consumer watch or launch event against the shared activity ledger."""
+
+    item_id: strawberry.ID = strawberry.field(name="itemId")
+    activity_type: GQLConsumerPlaybackActivityType = strawberry.field(name="activityType")
+    target: str | None = None
+    session_key: str | None = strawberry.field(name="sessionKey", default=None)
+    position_seconds: int | None = strawberry.field(name="positionSeconds", default=None)
+    duration_seconds: int | None = strawberry.field(name="durationSeconds", default=None)
+    completed: bool = False
+    device_key: str | None = strawberry.field(name="deviceKey", default=None)
+    device_label: str | None = strawberry.field(name="deviceLabel", default=None)
 
 
 @strawberry.input

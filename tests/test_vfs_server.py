@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -23,7 +24,7 @@ from filmu_py.services.vfs_catalog import (
     VfsCatalogSnapshot,
     VfsCatalogStats,
 )
-from filmu_py.services.vfs_server import FilmuVfsCatalogGrpcServicer
+from filmu_py.services.vfs_server import FilmuVfsCatalogGrpcServicer, _file_entry_to_proto
 from filmuvfs.catalog.v1 import catalog_pb2
 
 
@@ -99,6 +100,12 @@ class _FakeProviderClient:
             download_url=refreshed_url,
             restricted_url=link,
         )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PROTO_FIXTURE = (
+    REPO_ROOT / "rust" / "filmuvfs" / "tests" / "fixtures" / "python_fresh_file_entry.hex"
+)
 
 
 def _catalog_file_entry(*, url: str, restricted_url: str, provider_file_id: str) -> VfsCatalogEntry:
@@ -556,3 +563,40 @@ def test_refresh_catalog_entry_retries_until_refreshed_url_validates() -> None:
     assert response.new_url == "https://cdn.example.com/fresh-live"
     assert len(provider_client.calls) == 2
     assert probe_mock.await_count == 2
+
+
+def test_file_entry_proto_fixture_matches_python_fresh_url_serialization() -> None:
+    payload = VfsCatalogFileEntry(
+        item_id="item-1",
+        item_title="Example Movie",
+        item_external_ref="tmdb:1",
+        media_entry_id="media-entry-1",
+        source_attachment_id="attachment-1",
+        media_type="movie",
+        transport="remote-direct",
+        locator="https://edge.example.com/current-movie",
+        local_path=None,
+        restricted_url="https://api.example.com/restricted/current-movie",
+        unrestricted_url="https://edge.example.com/current-movie",
+        original_filename="Example Movie.mkv",
+        size_bytes=1024,
+        lease_state="ready",
+        expires_at=None,
+        last_refreshed_at=None,
+        last_refresh_error=None,
+        provider="realdebrid",
+        provider_download_id="download-1",
+        provider_file_id="provider-file-movie-1",
+        provider_file_path="Movies/Example Movie.mkv",
+        active_roles=("direct",),
+        source_key="persisted",
+        query_strategy="by-media-entry-id",
+        provider_family="debrid",
+        locator_source="unrestricted-url",
+        match_basis="provider-file-id",
+        restricted_fallback=False,
+    )
+
+    encoded = _file_entry_to_proto(payload).SerializeToString().hex()
+
+    assert PROTO_FIXTURE.read_text(encoding="utf-8").strip() == encoded

@@ -18,6 +18,7 @@ from filmu_py.api.deps import get_auth_context, require_permissions
 from filmu_py.audit import audit_action
 from filmu_py.authz import evaluate_permissions, permission_constraints_from_mapping
 from filmu_py.config import set_runtime_settings
+from filmu_py.core.item_workflow_drill_status import ItemWorkflowDrillStatusStore
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
 from filmu_py.core.replay import ReplayConsumerFencedError
@@ -35,6 +36,8 @@ from filmu_py.services.operator_posture import (
 from filmu_py.services.operator_posture import (
     build_control_plane_automation_posture,
     build_control_plane_summary_posture,
+    build_downloader_orchestration_posture,
+    build_plugin_event_status_posture,
     build_plugin_integration_readiness_posture,
     normalize_control_plane_summary,
 )
@@ -42,8 +45,11 @@ from filmu_py.services.settings_service import save_settings
 from filmu_py.services.vfs_catalog import summarize_vfs_catalog_snapshot
 from filmu_py.services.vfs_rollout_control import (
     build_vfs_rollout_control_state,
+    derive_vfs_rollout_allowed_actions,
+    execute_vfs_rollout_action,
     format_rollout_timestamp,
 )
+from filmu_py.workers import tasks as worker_tasks
 from filmu_py.workers.stage_observability import (
     worker_blocker_snapshot as _stage_worker_blocker_snapshot,
 )
@@ -72,9 +78,14 @@ from ..models import (
     ControlPlaneSummaryResponse,
     DownloaderOrchestrationResponse,
     DownloaderProviderCandidateResponse,
-    EnterpriseOperationsGovernanceResponse,
-    EnterpriseOperationsSliceResponse,
+    OperationsGovernanceResponse,
+    OperationsSliceResponse,
+    ExecuteVfsRolloutActionRequest,
     HealthResponse,
+    ItemWorkflowDrillHistoryPointResponse,
+    ItemWorkflowDrillHistoryResponse,
+    ItemWorkflowDrillHistorySummaryResponse,
+    ItemWorkflowDrillStatusResponse,
     ItemParentIdsResponse,
     LogsResponse,
     MessageResponse,
@@ -90,6 +101,7 @@ from ..models import (
     PluginGovernanceOverrideWriteRequest,
     PluginGovernanceResponse,
     PluginGovernanceSummaryResponse,
+    ProofArtifactResponse,
     PluginIntegrationReadinessPluginResponse,
     PluginIntegrationReadinessResponse,
     PluginStreamControlRequest,
@@ -118,9 +130,11 @@ from ..models import (
     VfsRolloutHistoryEntryResponse,
 )
 from .runtime_governance import (
+    managed_windows_vfs_state_payload,
     managed_windows_vfs_state_snapshot,
     persist_managed_windows_vfs_state,
     playback_gate_governance_snapshot,
+    replace_managed_windows_vfs_state,
     vfs_runtime_governance_snapshot,
 )
 
@@ -578,6 +592,9 @@ def _playback_gate_evidence_response() -> PlaybackGateEvidenceResponse:
         windows_soak_profiles=list(
             cast(list[str], governance["playback_gate_windows_soak_profile_coverage"])
         ),
+        windows_soak_pressure_cause_buckets=dict(
+            cast(dict[str, int], governance["playback_gate_windows_soak_pressure_cause_buckets"])
+        ),
         required_actions=list(dict.fromkeys(required_actions)),
         remaining_gaps=list(dict.fromkeys(remaining_gaps)),
     )
@@ -595,6 +612,8 @@ def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
         str(state.environment_class).strip()
         or cast(str, runtime_governance["vfs_runtime_rollout_environment_class"])
     )
+    canary_decision = cast(str, runtime_governance["vfs_runtime_rollout_canary_decision"])
+    merge_gate = cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"])
     return VfsRolloutControlResponse(
         generated_at=datetime.now(UTC).isoformat(),
         environment_class=environment_class,
@@ -614,9 +633,16 @@ def _vfs_rollout_control_response() -> VfsRolloutControlResponse:
         updated_by=state.updated_by,
         rollout_readiness=cast(str, runtime_governance["vfs_runtime_rollout_readiness"]),
         next_action=cast(str, runtime_governance["vfs_runtime_rollout_next_action"]),
-        canary_decision=cast(str, runtime_governance["vfs_runtime_rollout_canary_decision"]),
-        merge_gate=cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"]),
+        canary_decision=canary_decision,
+        merge_gate=merge_gate,
         reasons=list(cast(list[str], runtime_governance["vfs_runtime_rollout_reasons"])),
+        allowed_actions=list(
+            derive_vfs_rollout_allowed_actions(
+                managed_windows_vfs_state_snapshot(),
+                canary_decision=canary_decision,
+                merge_gate=merge_gate,
+            )
+        ),
         history=[_vfs_rollout_history_entry_response(record) for record in state.history],
     )
 
@@ -636,13 +662,27 @@ def _observability_convergence_response(request: Request) -> ObservabilityConver
         log_shipper_type=snapshot.log_shipper_type,
         log_shipper_target_configured=snapshot.log_shipper_target_configured,
         log_shipper_healthcheck_configured=snapshot.log_shipper_healthcheck_configured,
+        log_field_mapping_version=snapshot.log_field_mapping_version,
         search_backend=snapshot.search_backend,
         environment_shipping_enabled=snapshot.environment_shipping_enabled,
+        environment_rollout_ready=snapshot.environment_rollout_ready,
         alerting_enabled=snapshot.alerting_enabled,
+        alert_rollout_ready=snapshot.alert_rollout_ready,
         rust_trace_correlation_enabled=snapshot.rust_trace_correlation_enabled,
         correlation_contract_complete=snapshot.correlation_contract_complete,
         proof_refs=list(snapshot.proof_refs),
+        proof_ref_count=snapshot.proof_ref_count,
         required_correlation_fields=list(snapshot.required_correlation_fields),
+        trace_context_headers=list(snapshot.trace_context_headers),
+        correlation_headers=list(snapshot.correlation_headers),
+        shared_cross_process_headers=list(snapshot.shared_cross_process_headers),
+        expected_correlation_fields=list(snapshot.expected_correlation_fields),
+        expected_correlation_fields_ready=snapshot.expected_correlation_fields_ready,
+        missing_expected_correlation_fields=list(snapshot.missing_expected_correlation_fields),
+        grpc_bind_address=snapshot.grpc_bind_address,
+        grpc_service_name=snapshot.grpc_service_name,
+        otlp_endpoint=snapshot.otlp_endpoint,
+        log_shipper_target=snapshot.log_shipper_target,
         required_actions=list(snapshot.required_actions),
         remaining_gaps=list(snapshot.remaining_gaps),
     )
@@ -651,139 +691,46 @@ def _observability_convergence_response(request: Request) -> ObservabilityConver
 def _downloader_orchestration_response(request: Request) -> DownloaderOrchestrationResponse:
     """Return the current downloader orchestration posture and known breadth gaps."""
 
-    resources = request.app.state.resources
-    settings = resources.settings
-    provider_priority = {
-        name: index
-        for index, name in enumerate(settings.orchestration.downloader_provider_priority, start=1)
-    }
-    providers: list[DownloaderProviderCandidateResponse] = []
-    builtin_candidates: list[DownloaderProviderCandidateResponse] = []
-    provider_entries = (
-        ("realdebrid", settings.downloaders.real_debrid),
-        ("alldebrid", settings.downloaders.all_debrid),
-        ("debridlink", settings.downloaders.debrid_link),
-    )
-    for priority, (name, config) in enumerate(provider_entries, start=1):
-        configured = bool(config.api_key.strip())
-        enabled = bool(config.enabled and configured)
-        candidate = DownloaderProviderCandidateResponse(
-            name=name,
-            source="builtin",
-            enabled=enabled,
-            configured=configured,
-            selected=False,
-            priority=provider_priority.get(name, priority),
-            capabilities=["magnet_add", "file_select", "status_poll", "download_links"],
-        )
-        builtin_candidates.append(candidate)
-        providers.append(candidate)
-
-    plugin_registry = resources.plugin_registry
-    plugin_downloaders_registered = 0
-    if plugin_registry is not None:
-        for plugin in plugin_registry.get_downloaders():
-            plugin_downloaders_registered += 1
-            plugin_name = str(getattr(plugin, "plugin_name", type(plugin).__name__))
-            configured = True
-            enabled = True
-            if plugin_name == "stremthru":
-                stremthru = settings.downloaders.stremthru
-                configured = bool(stremthru.enabled and stremthru.token.strip() and stremthru.url.strip())
-                enabled = configured
-            providers.append(
-                DownloaderProviderCandidateResponse(
-                    name=plugin_name,
-                    source="plugin",
-                    enabled=enabled,
-                    configured=configured,
-                    selected=False,
-                    priority=provider_priority.get(plugin_name),
-                    capabilities=["magnet_add", "status_poll", "download_links"],
-                )
-            )
-
-    enabled_candidates = sorted(
-        [candidate for candidate in providers if candidate.enabled],
-        key=lambda candidate: (
-            candidate.priority if candidate.priority is not None else 10_000,
-            candidate.name,
-        ),
-    )
-    selected_provider = enabled_candidates[0].name if enabled_candidates else None
-    if selected_provider is not None:
-        providers = [
-            candidate.model_copy(update={"selected": candidate.name == selected_provider})
-            for candidate in providers
-        ]
-
-    plugin_policy_ready = any(
-        candidate.source == "plugin" and candidate.enabled for candidate in providers
-    )
-
-    multi_provider_enabled = sum(1 for candidate in builtin_candidates if candidate.enabled) > 1
-    worker_plugin_dispatch_ready = plugin_policy_ready
-    fanout_ready = bool(
-        settings.orchestration.downloader_selection_mode == "ordered_failover"
-        and len(enabled_candidates) > 1
-        and (plugin_downloaders_registered == 0 or plugin_policy_ready)
-    )
-    multi_container_ready = True
-    ordered_failover_ready = settings.orchestration.downloader_selection_mode == "ordered_failover"
-
-    required_actions: list[str] = []
-    remaining_gaps: list[str] = []
-    if selected_provider is None:
-        required_actions.append("configure_at_least_one_builtin_downloader_provider")
-        remaining_gaps.append("debrid worker execution has no configured builtin downloader provider")
-    if multi_provider_enabled:
-        if ordered_failover_ready and not fanout_ready:
-            required_actions.append("promote_ordered_failover_into_policy_driven_fanout")
-            remaining_gaps.append(
-                "multiple builtin downloaders now support ordered failover, but not policy-driven fan-out"
-            )
-        elif not ordered_failover_ready:
-            required_actions.append("replace_fixed_priority_builtin_selection_with_policy_driven_fanout")
-            remaining_gaps.append(
-                "multiple builtin downloaders are enabled but debrid_item still selects by fixed priority"
-            )
-    if plugin_downloaders_registered > 0 and not worker_plugin_dispatch_ready:
-        required_actions.append("wire_registered_downloader_plugins_into_debrid_worker")
-        remaining_gaps.append(
-            "registered downloader plugins are visible in the registry but not yet dispatched by debrid_item"
-        )
-
+    snapshot = build_downloader_orchestration_posture(request.app.state.resources)
     return DownloaderOrchestrationResponse(
-        generated_at=datetime.now(UTC).isoformat(),
-        selection_mode=(
-            "ordered_failover_policy_fanout"
-            if ordered_failover_ready and worker_plugin_dispatch_ready and fanout_ready
-            else "ordered_failover_with_plugin_policy"
-            if ordered_failover_ready and worker_plugin_dispatch_ready
-            else "ordered_failover"
-            if ordered_failover_ready
-            else "fixed_priority_builtin_then_plugin_policy"
-            if worker_plugin_dispatch_ready
-            else "fixed_priority_builtin_only"
-        ),
-        selected_provider=selected_provider,
-        multi_provider_enabled=multi_provider_enabled,
-        plugin_downloaders_registered=plugin_downloaders_registered,
-        worker_plugin_dispatch_ready=worker_plugin_dispatch_ready,
-        fanout_ready=fanout_ready,
-        multi_container_ready=multi_container_ready,
-        providers=providers,
-        required_actions=required_actions,
-        remaining_gaps=remaining_gaps,
+        generated_at=snapshot.generated_at,
+        selection_mode=snapshot.selection_mode,
+        selected_provider=snapshot.selected_provider,
+        selected_provider_source=snapshot.selected_provider_source,
+        enabled_provider_count=snapshot.enabled_provider_count,
+        configured_provider_count=snapshot.configured_provider_count,
+        builtin_enabled_provider_count=snapshot.builtin_enabled_provider_count,
+        plugin_enabled_provider_count=snapshot.plugin_enabled_provider_count,
+        multi_provider_enabled=snapshot.multi_provider_enabled,
+        plugin_downloaders_registered=snapshot.plugin_downloaders_registered,
+        worker_plugin_dispatch_ready=snapshot.worker_plugin_dispatch_ready,
+        ordered_failover_ready=snapshot.ordered_failover_ready,
+        fanout_ready=snapshot.fanout_ready,
+        multi_container_ready=snapshot.multi_container_ready,
+        provider_priority_order=list(snapshot.provider_priority_order),
+        providers=[
+            DownloaderProviderCandidateResponse(
+                name=row.name,
+                source=cast(Literal["builtin", "plugin"], row.source),
+                enabled=row.enabled,
+                configured=row.configured,
+                selected=row.selected,
+                priority=row.priority,
+                capabilities=list(row.capabilities),
+            )
+            for row in snapshot.providers
+        ],
+        required_actions=list(snapshot.required_actions),
+        remaining_gaps=list(snapshot.remaining_gaps),
     )
 
 
-def _plugin_integration_readiness_response(
+async def _plugin_integration_readiness_response(
     request: Request,
 ) -> PluginIntegrationReadinessResponse:
-    """Return readiness and config-validation posture for builtin enterprise plugins."""
+    """Return readiness and proof posture for the supported runtime integrations."""
 
-    snapshot = build_plugin_integration_readiness_posture(request.app.state.resources)
+    snapshot = await build_plugin_integration_readiness_posture(request.app.state.resources)
     return _plugin_integration_readiness_response_from_snapshot(snapshot)
 
 
@@ -802,9 +749,38 @@ def _plugin_integration_readiness_response_from_snapshot(
                 enabled=row.enabled,
                 configured=row.configured,
                 ready=row.ready,
+                endpoint=row.endpoint,
+                endpoint_configured=row.endpoint_configured,
                 config_source=row.config_source,
                 required_settings=list(row.required_settings),
                 missing_settings=list(row.missing_settings),
+                contract_proof_refs=list(row.contract_proof_refs),
+                soak_proof_refs=list(row.soak_proof_refs),
+                contract_proofs=[
+                    ProofArtifactResponse(
+                        ref=proof.ref,
+                        category=proof.category,
+                        label=proof.label,
+                        recorded=proof.recorded,
+                    )
+                    for proof in row.contract_proofs
+                ],
+                soak_proofs=[
+                    ProofArtifactResponse(
+                        ref=proof.ref,
+                        category=proof.category,
+                        label=proof.label,
+                        recorded=proof.recorded,
+                    )
+                    for proof in row.soak_proofs
+                ],
+                contract_validated=row.contract_validated,
+                soak_validated=row.soak_validated,
+                proof_gap_count=row.proof_gap_count,
+                verification_status=row.verification_status,
+                verification_check_count=row.verification_check_count,
+                verified_check_count=row.verified_check_count,
+                missing_verification_checks=list(row.missing_verification_checks),
                 required_actions=list(row.required_actions),
                 remaining_gaps=list(row.remaining_gaps),
             )
@@ -1100,6 +1076,99 @@ def _summarize_metadata_reindex_history(
         max_failed=max((item.failed for item in history), default=0),
         latest_run_failed=history[0].run_failed if history else False,
         latest_error=history[0].last_error if history else None,
+    )
+
+
+def _item_workflow_drill_status_response(
+    *,
+    queue_name: str,
+    point: object | None,
+) -> ItemWorkflowDrillStatusResponse:
+    """Return the latest item-workflow drill status response."""
+
+    if point is None:
+        return ItemWorkflowDrillStatusResponse(
+            queue_name=queue_name,
+            has_history=False,
+            observed_at="",
+            examined_checkpoints=0,
+            replayed_checkpoints=0,
+            compensated_checkpoints=0,
+            finalize_requeues=0,
+            parse_requeues=0,
+            scrape_requeues=0,
+            index_requeues=0,
+            skipped_active=0,
+            unrecoverable=0,
+            failed=0,
+            candidate_status_counts={},
+            compensation_stage_counts={},
+            outcome="ok",
+            run_failed=False,
+            last_error=None,
+        )
+    return ItemWorkflowDrillStatusResponse(
+        queue_name=queue_name,
+        has_history=True,
+        observed_at=str(getattr(point, "observed_at", "")),
+        examined_checkpoints=int(getattr(point, "examined_checkpoints", 0)),
+        replayed_checkpoints=int(getattr(point, "replayed_checkpoints", 0)),
+        compensated_checkpoints=int(getattr(point, "compensated_checkpoints", 0)),
+        finalize_requeues=int(getattr(point, "finalize_requeues", 0)),
+        parse_requeues=int(getattr(point, "parse_requeues", 0)),
+        scrape_requeues=int(getattr(point, "scrape_requeues", 0)),
+        index_requeues=int(getattr(point, "index_requeues", 0)),
+        skipped_active=int(getattr(point, "skipped_active", 0)),
+        unrecoverable=int(getattr(point, "unrecoverable", 0)),
+        failed=int(getattr(point, "failed", 0)),
+        candidate_status_counts=dict(getattr(point, "candidate_status_counts", {})),
+        compensation_stage_counts=dict(getattr(point, "compensation_stage_counts", {})),
+        outcome=cast(Literal["ok", "warning", "critical"], getattr(point, "outcome", "ok")),
+        run_failed=bool(getattr(point, "run_failed", False)),
+        last_error=cast(str | None, getattr(point, "last_error", None)),
+    )
+
+
+def _summarize_item_workflow_drill_history(
+    history: list[ItemWorkflowDrillHistoryPointResponse],
+) -> ItemWorkflowDrillHistorySummaryResponse:
+    """Return operator rollups for one bounded item-workflow drill history response."""
+
+    aggregate_candidate_status_counts: dict[str, int] = {}
+    aggregate_compensation_stage_counts: dict[str, int] = {}
+    for item in history:
+        for status, count in item.candidate_status_counts.items():
+            aggregate_candidate_status_counts[status] = (
+                aggregate_candidate_status_counts.get(status, 0) + count
+            )
+        for stage_name, count in item.compensation_stage_counts.items():
+            aggregate_compensation_stage_counts[stage_name] = (
+                aggregate_compensation_stage_counts.get(stage_name, 0) + count
+            )
+    latest_outcome = history[0].outcome if history else "ok"
+    return ItemWorkflowDrillHistorySummaryResponse(
+        points=len(history),
+        latest_outcome=latest_outcome,
+        critical_points=sum(1 for item in history if item.outcome == "critical"),
+        warning_points=sum(1 for item in history if item.outcome == "warning"),
+        total_examined_checkpoints=sum(item.examined_checkpoints for item in history),
+        total_replayed_checkpoints=sum(item.replayed_checkpoints for item in history),
+        total_compensated_checkpoints=sum(item.compensated_checkpoints for item in history),
+        total_finalize_requeues=sum(item.finalize_requeues for item in history),
+        total_parse_requeues=sum(item.parse_requeues for item in history),
+        total_scrape_requeues=sum(item.scrape_requeues for item in history),
+        total_index_requeues=sum(item.index_requeues for item in history),
+        total_skipped_active=sum(item.skipped_active for item in history),
+        total_unrecoverable=sum(item.unrecoverable for item in history),
+        total_failed=sum(item.failed for item in history),
+        max_examined_checkpoints=max((item.examined_checkpoints for item in history), default=0),
+        max_failed=max((item.failed for item in history), default=0),
+        latest_run_failed=history[0].run_failed if history else False,
+        latest_error=history[0].last_error if history else None,
+        aggregate_candidate_status_counts=dict(sorted(aggregate_candidate_status_counts.items())),
+        aggregate_compensation_stage_counts=dict(
+            sorted(aggregate_compensation_stage_counts.items())
+        ),
     )
 
 
@@ -1436,7 +1505,7 @@ def _vfs_data_plane_evidence(
     *,
     runtime_governance: dict[str, int | float | str | list[str]] | None = None,
 ) -> list[str]:
-    """Return bounded VFS runtime evidence for enterprise-governance posture."""
+    """Return bounded VFS runtime evidence for operations-governance posture."""
 
     resources = request.app.state.resources
     if runtime_governance is None:
@@ -1590,12 +1659,12 @@ def _vfs_data_plane_evidence(
     return evidence
 
 
-async def _enterprise_operations_governance(
+async def _operations_governance(
     *,
     request: Request,
     plugins: list[PluginCapabilityStatusResponse],
-) -> EnterpriseOperationsGovernanceResponse:
-    """Return machine-readable posture for the current enterprise roadmap slices."""
+) -> OperationsGovernanceResponse:
+    """Return machine-readable posture for the current roadmap slices."""
 
     resources = request.app.state.resources
     settings = resources.settings
@@ -1811,9 +1880,9 @@ async def _enterprise_operations_governance(
     else:
         operational_evidence_status = "ready"
 
-    return EnterpriseOperationsGovernanceResponse(
+    return OperationsGovernanceResponse(
         generated_at=datetime.now(UTC).isoformat(),
-        playback_gate=EnterpriseOperationsSliceResponse(
+        playback_gate=OperationsSliceResponse(
             name="Playback Gate Promotion / Merge Policy Proof",
             status=(
                 "blocked"
@@ -1826,7 +1895,7 @@ async def _enterprise_operations_governance(
                 )
             ),
             evidence=[
-                "proof:playback:gate:enterprise package entrypoint exists",
+                "proof:playback:gate:strict package entrypoint exists",
                 "playback gate workflow writes github-main-policy-expected.json",
                 "check_github_main_policy.ps1 can validate and now persist live policy artifacts with gh admin auth",
                 (
@@ -1884,7 +1953,7 @@ async def _enterprise_operations_governance(
                 "playback/provider/windows proof promotion remains evidence-backed rather than assumption-backed",
             ],
         ),
-        operational_evidence=EnterpriseOperationsSliceResponse(
+        operational_evidence=OperationsSliceResponse(
             name="Operational Evidence / Blocker Pressure",
             status=operational_evidence_status,
             evidence=[
@@ -1955,8 +2024,8 @@ async def _enterprise_operations_governance(
             required_actions=operational_evidence_required_actions,
             remaining_gaps=operational_evidence_remaining_gaps,
         ),
-        identity_authz=EnterpriseOperationsSliceResponse(
-            name="Enterprise Identity / OIDC / ABAC",
+        identity_authz=OperationsSliceResponse(
+            name="Identity / OIDC / ABAC",
             status=(
                 "ready"
                 if (
@@ -2019,7 +2088,7 @@ async def _enterprise_operations_governance(
                 ),
             ],
         ),
-        tenant_boundary=EnterpriseOperationsSliceResponse(
+        tenant_boundary=OperationsSliceResponse(
             name="Tenant Boundary / Quotas / Attribution",
             status="partial",
             evidence=[
@@ -2037,8 +2106,8 @@ async def _enterprise_operations_governance(
                 "VFS runtime metrics are not fully tenant-attributed",
             ],
         ),
-        vfs_data_plane=EnterpriseOperationsSliceResponse(
-            name="FilmuVFS Enterprise Data Plane",
+        vfs_data_plane=OperationsSliceResponse(
+            name="FilmuVFS Data Plane",
             status=vfs_data_plane_status,
             evidence=_vfs_data_plane_evidence(
                 request,
@@ -2047,7 +2116,7 @@ async def _enterprise_operations_governance(
             required_actions=vfs_required_actions,
             remaining_gaps=vfs_remaining_gaps,
         ),
-        distributed_control_plane=EnterpriseOperationsSliceResponse(
+        distributed_control_plane=OperationsSliceResponse(
             name="Distributed Control Plane",
             status=(
                 "partial"
@@ -2079,7 +2148,7 @@ async def _enterprise_operations_governance(
                 "node coordination and failover promotion are not fully automated",
             ],
         ),
-        runtime_lifecycle=EnterpriseOperationsSliceResponse(
+        runtime_lifecycle=OperationsSliceResponse(
             name="Formal Runtime Lifecycle Graph",
             status=(
                 "ready"
@@ -2114,7 +2183,7 @@ async def _enterprise_operations_governance(
                 ]
             ),
         ),
-        sre_program=EnterpriseOperationsSliceResponse(
+        sre_program=OperationsSliceResponse(
             name="SRE / Production Operations Program",
             status="partial",
             evidence=[
@@ -2134,7 +2203,7 @@ async def _enterprise_operations_governance(
                 "capacity review is policy-defined but not scheduled by automation",
             ],
         ),
-        operator_log_pipeline=EnterpriseOperationsSliceResponse(
+        operator_log_pipeline=OperationsSliceResponse(
             name="Durable Operator Log Pipeline",
             status=(
                 "ready"
@@ -2201,7 +2270,7 @@ async def _enterprise_operations_governance(
                 ]
             ),
         ),
-        plugin_runtime_isolation=EnterpriseOperationsSliceResponse(
+        plugin_runtime_isolation=OperationsSliceResponse(
             name="Plugin Trust / Runtime Isolation",
             status="ready" if plugin_governance_summary.runtime_isolation_ready else "partial",
             evidence=[
@@ -2252,7 +2321,7 @@ async def _enterprise_operations_governance(
             ),
             remaining_gaps=plugin_governance_summary.remaining_gaps,
         ),
-        heavy_stage_workload_isolation=EnterpriseOperationsSliceResponse(
+        heavy_stage_workload_isolation=OperationsSliceResponse(
             name="Heavy-Stage Workload Isolation",
             status=(
                 "ready"
@@ -2345,7 +2414,7 @@ async def _enterprise_operations_governance(
                     if not heavy_stage_policy.process_isolation_required()
                     else "heavy-stage process workers are not forced onto spawn context"
                     if "spawn_context_not_required" in heavy_stage_policy_violations
-                    else "heavy-stage worker ceiling exceeds the enterprise policy cap"
+                    else "heavy-stage worker ceiling exceeds the configured policy cap"
                     if "worker_ceiling_exceeded" in heavy_stage_policy_violations
                     else "heavy-stage worker recycle limits are not configured"
                     if "process_recycle_unbounded" in heavy_stage_policy_violations
@@ -2353,7 +2422,7 @@ async def _enterprise_operations_governance(
                 ]
             ),
         ),
-        release_metadata_performance=EnterpriseOperationsSliceResponse(
+        release_metadata_performance=OperationsSliceResponse(
             name="Release Engineering / Metadata Governance / Performance Discipline",
             status="partial",
             evidence=[
@@ -3157,6 +3226,103 @@ async def get_worker_metadata_reindex_history(
     )
 
 
+@router.get(
+    "/workers/item-workflow-drill",
+    operation_id="default.worker_item_workflow_drill",
+    response_model=ItemWorkflowDrillStatusResponse,
+)
+async def get_worker_item_workflow_drill_status(request: Request) -> ItemWorkflowDrillStatusResponse:
+    """Return the latest item-workflow replay/compensation drill summary."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    latest = await ItemWorkflowDrillStatusStore(redis, queue_name=queue_name).latest()
+    return _item_workflow_drill_status_response(queue_name=queue_name, point=latest)
+
+
+@router.get(
+    "/workers/item-workflow-drill/history",
+    operation_id="default.worker_item_workflow_drill_history",
+    response_model=ItemWorkflowDrillHistoryResponse,
+)
+async def get_worker_item_workflow_drill_history(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> ItemWorkflowDrillHistoryResponse:
+    """Return bounded item-workflow replay/compensation drill history."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    redis = resources.arq_redis or resources.redis
+    history = await ItemWorkflowDrillStatusStore(redis, queue_name=queue_name).history(limit=limit)
+    history_points = [
+        ItemWorkflowDrillHistoryPointResponse(
+            observed_at=item.observed_at,
+            examined_checkpoints=item.examined_checkpoints,
+            replayed_checkpoints=item.replayed_checkpoints,
+            compensated_checkpoints=item.compensated_checkpoints,
+            finalize_requeues=item.finalize_requeues,
+            parse_requeues=item.parse_requeues,
+            scrape_requeues=item.scrape_requeues,
+            index_requeues=item.index_requeues,
+            skipped_active=item.skipped_active,
+            unrecoverable=item.unrecoverable,
+            failed=item.failed,
+            candidate_status_counts=dict(item.candidate_status_counts),
+            compensation_stage_counts=dict(item.compensation_stage_counts),
+            outcome=item.outcome,
+            run_failed=item.run_failed,
+            last_error=item.last_error,
+        )
+        for item in history
+    ]
+    return ItemWorkflowDrillHistoryResponse(
+        queue_name=queue_name,
+        summary=_summarize_item_workflow_drill_history(history_points),
+        history=history_points,
+    )
+
+
+@router.post(
+    "/workers/item-workflow-drill/run",
+    operation_id="default.worker_item_workflow_drill_run",
+    response_model=ItemWorkflowDrillStatusResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def run_worker_item_workflow_drill(request: Request) -> ItemWorkflowDrillStatusResponse:
+    """Run one item-workflow replay/compensation drill over durable checkpoints."""
+
+    resources = request.app.state.resources
+    queue_name = resources.arq_queue_name or resources.settings.arq_queue_name
+    queue_redis = resources.arq_redis or resources.redis
+    if not hasattr(queue_redis, "enqueue_job"):
+        raise HTTPException(status_code=503, detail="arq_not_enabled")
+    await worker_tasks.run_item_workflow_drill(
+        {
+            "settings": resources.settings,
+            "queue_name": queue_name,
+            "media_service": resources.media_service,
+            "arq_redis": queue_redis,
+            "redis": queue_redis,
+        }
+    )
+    latest = await ItemWorkflowDrillStatusStore(queue_redis, queue_name=queue_name).latest()
+    audit_action(
+        request,
+        action="workers.item_workflow_drill.run",
+        target="workers.item_workflow_drill",
+        details={
+            "queue_name": queue_name,
+            "replayed_checkpoints": int(getattr(latest, "replayed_checkpoints", 0)),
+            "compensated_checkpoints": int(getattr(latest, "compensated_checkpoints", 0)),
+            "failed": int(getattr(latest, "failed", 0)),
+            "unrecoverable": int(getattr(latest, "unrecoverable", 0)),
+        },
+    )
+    return _item_workflow_drill_status_response(queue_name=queue_name, point=latest)
+
+
 @router.get("/services", operation_id="default.services", response_model=dict[str, dict[str, bool]])
 async def get_services(request: Request) -> dict[str, dict[str, bool]]:
     """Return a real provider enablement map for dashboard compatibility."""
@@ -3393,16 +3559,16 @@ async def write_plugin_governance_override(
 
 @router.get(
     "/operations/governance",
-    operation_id="default.enterprise_operations_governance",
-    response_model=EnterpriseOperationsGovernanceResponse,
+    operation_id="default.operations_governance",
+    response_model=OperationsGovernanceResponse,
 )
-async def get_enterprise_operations_governance(
+async def get_operations_governance(
     request: Request,
-) -> EnterpriseOperationsGovernanceResponse:
-    """Return enterprise operations posture across the active roadmap slices."""
+) -> OperationsGovernanceResponse:
+    """Return operations posture across the active roadmap slices."""
 
     plugins = await get_plugins(request)
-    return await _enterprise_operations_governance(request=request, plugins=plugins)
+    return await _operations_governance(request=request, plugins=plugins)
 
 
 @router.get(
@@ -3474,6 +3640,54 @@ async def write_vfs_rollout_control(
     return _vfs_rollout_control_response()
 
 
+@router.post(
+    "/operations/vfs-rollout/actions",
+    operation_id="default.execute_vfs_rollout_action",
+    response_model=VfsRolloutControlResponse,
+    dependencies=[Depends(require_permissions("backend:admin"))],
+)
+async def execute_vfs_rollout_action_route(
+    request: Request,
+    payload: ExecuteVfsRolloutActionRequest,
+) -> VfsRolloutControlResponse:
+    """Execute one validated VFS rollout action against the live rollout posture."""
+
+    auth_context = get_auth_context(request)
+    playback_gate_governance = playback_gate_governance_snapshot()
+    runtime_governance = vfs_runtime_governance_snapshot(
+        playback_gate_governance=playback_gate_governance,
+    )
+    raw_state = managed_windows_vfs_state_payload()
+    try:
+        next_state = execute_vfs_rollout_action(
+            raw_state,
+            action=payload.action,
+            actor_id=_actor_key(auth_context),
+            canary_decision=cast(str, runtime_governance["vfs_runtime_rollout_canary_decision"]),
+            merge_gate=cast(str, runtime_governance["vfs_runtime_rollout_merge_gate"]),
+            reason=payload.reason,
+            target_environment_class=payload.target_environment_class,
+            expected_canary_decision=payload.expected_canary_decision,
+            expected_merge_gate=payload.expected_merge_gate,
+        )
+        replace_managed_windows_vfs_state(next_state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_action(
+        request,
+        action="operations.vfs_rollout.execute_action",
+        target="operations.vfs_rollout",
+        details={
+            "requested_action": payload.action,
+            "reason": payload.reason,
+            "target_environment_class": payload.target_environment_class,
+            "expected_canary_decision": payload.expected_canary_decision,
+            "expected_merge_gate": payload.expected_merge_gate,
+        },
+    )
+    return _vfs_rollout_control_response()
+
+
 @router.get(
     "/operations/observability/convergence",
     operation_id="default.observability_convergence",
@@ -3509,9 +3723,9 @@ async def get_downloader_orchestration(
 async def get_plugin_integration_readiness(
     request: Request,
 ) -> PluginIntegrationReadinessResponse:
-    """Return builtin enterprise plugin registration and config-validation posture."""
+    """Return runtime integration registration, readiness, and proof posture."""
 
-    return _plugin_integration_readiness_response(request)
+    return await _plugin_integration_readiness_response(request)
 
 
 @router.get(
@@ -3559,25 +3773,33 @@ async def get_control_plane_subscribers(
 async def get_plugin_events(request: Request) -> list[PluginEventStatusResponse]:
     """Return declared publishable events and hook subscriptions per plugin."""
 
-    resources = request.app.state.resources
-    plugin_registry = resources.plugin_registry
-    if plugin_registry is None:
-        return []
-
-    publishable_by_plugin = plugin_registry.publishable_events_by_plugin()
-    subscriptions_by_plugin = plugin_registry.hook_subscriptions_by_plugin()
+    rows = await build_plugin_event_status_posture(request.app.state.resources)
     return [
         PluginEventStatusResponse(
-            name=plugin_name,
-            publisher=(
-                plugin_registry.manifest(plugin_name).publisher
-                if plugin_registry.manifest(plugin_name) is not None
-                else None
-            ),
-            publishable_events=list(publishable_by_plugin.get(plugin_name, ())),
-            hook_subscriptions=list(subscriptions_by_plugin.get(plugin_name, ())),
+            name=row.name,
+            publisher=row.publisher,
+            publishable_events=list(row.publishable_events),
+            hook_subscriptions=list(row.hook_subscriptions),
+            queued_hook_subscriptions=list(row.queued_hook_subscriptions),
+            publishable_event_count=row.publishable_event_count,
+            hook_subscription_count=row.hook_subscription_count,
+            queued_hook_subscription_count=row.queued_hook_subscription_count,
+            wiring_status=row.wiring_status,
+            hook_dispatch_mode=row.hook_dispatch_mode,
+            queued_dispatch_enabled=row.queued_dispatch_enabled,
+            queue_health_status=row.queue_health_status,
+            queue_delivery_observed=row.queue_delivery_observed,
+            queue_observation_count=row.queue_observation_count,
+            latest_queue_lag_seconds=row.latest_queue_lag_seconds,
+            max_queue_lag_seconds=row.max_queue_lag_seconds,
+            successful_deliveries=row.successful_deliveries,
+            timeout_deliveries=row.timeout_deliveries,
+            failed_deliveries=row.failed_deliveries,
+            retried_deliveries=row.retried_deliveries,
+            required_actions=list(row.required_actions),
+            remaining_gaps=list(row.remaining_gaps),
         )
-        for plugin_name in sorted(plugin_registry.all_plugin_names())
+        for row in rows
     ]
 
 

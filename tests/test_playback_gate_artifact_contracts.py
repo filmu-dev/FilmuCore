@@ -63,6 +63,34 @@ def test_windows_soak_and_native_media_contract_manifests_define_freshness() -> 
     assert "required_fields" in media_text
 
 
+def test_backup_restore_contract_manifest_exists_and_defines_parity_fields() -> None:
+    contract = REPO_ROOT / "ops" / "rollout" / "backup-restore-rehearsal.contract.json"
+
+    assert contract.is_file()
+
+    text = contract.read_text(encoding="utf-8")
+    assert "schema_version" in text
+    assert "artifact_kind" in text
+    assert "freshness_window_hours" in text
+    assert "migration_revision" in text
+    assert "required_tables" in text
+    assert "required_fields" in text
+
+
+def test_operator_log_pipeline_contract_manifest_exists_and_defines_rollout_fields() -> None:
+    contract = REPO_ROOT / "ops" / "rollout" / "operator-log-pipeline.contract.json"
+
+    assert contract.is_file()
+
+    text = contract.read_text(encoding="utf-8")
+    assert "schema_version" in text
+    assert "artifact_kind" in text
+    assert "freshness_window_hours" in text
+    assert "required_log_fields" in text
+    assert "minimum_green_streak" in text
+    assert "required_fields" in text
+
+
 def test_github_main_policy_script_emits_normalized_artifact_fields() -> None:
     script = (REPO_ROOT / "scripts" / "check_github_main_policy.ps1").read_text(
         encoding="utf-8"
@@ -148,6 +176,7 @@ def test_windows_soak_program_and_trend_scripts_emit_normalized_artifact_fields(
     assert "expires_at" in soak_trends
     assert "failure_reasons" in soak_trends
     assert "required_actions" in soak_trends
+    assert "pressure_cause_buckets" in soak_trends
     assert "critical_fairness_denial_runs" in soak_trends
     assert "critical_cancellation_churn_runs" in soak_trends
 
@@ -164,6 +193,42 @@ def test_windows_native_media_proof_script_emits_contract_and_coverage_fields() 
     assert "expires_at" in script
     assert "required_topology" in script
     assert "coverage_complete" in script
+    assert "failure_reasons" in script
+    assert "required_actions" in script
+
+
+def test_operator_log_pipeline_script_emits_normalized_rollout_and_alert_fields() -> None:
+    script = (REPO_ROOT / "scripts" / "check_operator_log_pipeline_rollout.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ContractPath" in script
+    assert "schema_version" in script
+    assert "artifact_kind" in script
+    assert "captured_at" in script
+    assert "expires_at" in script
+    assert "required_log_fields" in script
+    assert "active_alerts_by_severity" in script
+    assert "alert_budget_status" in script
+    assert "minimum_green_streak" in script
+    assert "failure_reasons" in script
+    assert "required_actions" in script
+
+
+def test_backup_restore_proof_script_emits_normalized_rehearsal_fields() -> None:
+    script = (REPO_ROOT / "scripts" / "run_backup_restore_proof.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ContractPath" in script
+    assert "schema_version" in script
+    assert "artifact_kind" in script
+    assert "captured_at" in script
+    assert "expires_at" in script
+    assert "source_snapshot" in script
+    assert "restore_snapshot" in script
+    assert "snapshot_parity" in script
+    assert "migration_rehearsal" in script
     assert "failure_reasons" in script
     assert "required_actions" in script
 

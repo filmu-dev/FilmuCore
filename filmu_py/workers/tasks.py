@@ -6,6 +6,7 @@ import asyncio
 import functools
 import json
 import logging
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -24,12 +25,15 @@ from sqlalchemy import select
 from filmu_py.config import Settings, TenantQuotaLimitSettings, get_settings, set_runtime_settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.item_workflow_drill_status import ItemWorkflowDrillStatusStore
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
+from filmu_py.core.plugin_hook_queue_status import PluginHookQueueStatusStore
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.db.models import MediaItemORM, StreamORM
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.plugins.builtins import register_builtin_plugins
 from filmu_py.plugins.context import HostPluginDatasource, PluginContextProvider
+from filmu_py.plugins.hooks import PluginHookWorkerExecutor
 from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
 from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
@@ -42,9 +46,13 @@ from filmu_py.services.media import (
     RecoveryTargetStage,
     ScrapeCandidateRecord,
     SelectedStreamCandidateRecord,
+    WorkflowDrillCandidateRecord,
+    WorkflowCheckpointStatus,
+    WorkflowResumeStage,
     _build_recovery_plan_record,
     _evaluate_show_completion,
     _parse_calendar_datetime,
+    parse_stage_rejection_reason,
 )
 from filmu_py.services.media_server import MediaServerNotifier
 from filmu_py.services.playback import PlaybackSourceService
@@ -57,13 +65,12 @@ from filmu_py.workers import stage_scope as _stage_scope
 from filmu_py.workers.downloader_orchestration import (
     build_dead_letter_metadata,
     build_rank_no_winner_diagnostics,
-    execute_debrid_download,
+    execute_debrid_download_fanout,
     rank_failure_cooldown_seconds,
     resolve_download_clients,
     resolve_downloader_api_key,
     resolve_enabled_downloader,
     selection_failure_reason,
-    should_failover_downloader,
 )
 from filmu_py.workers.downloader_orchestration import (
     build_provider_client as _build_provider_client,
@@ -933,6 +940,14 @@ async def is_scrape_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
     return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
 
 
+async def is_finalize_item_job_active(redis: ArqRedis, *, item_id: str) -> bool:
+    """Return whether the finalize-item stage job is already queued or running."""
+
+    status = await Job(finalize_item_job_id(item_id), redis=redis).status()
+    _stage_observability.record_job_status("finalize_item", status)
+    return status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}
+
+
 def _selected_stream(streams: list[StreamORM]) -> StreamORM | None:
     for stream in streams:
         if stream.selected:
@@ -1747,6 +1762,23 @@ async def rank_streams(
         for stream in streams:
             if not stream.parsed_title:
                 continue
+            parse_rejection_reason = parse_stage_rejection_reason(
+                stream.parsed_title if isinstance(stream.parsed_title, dict) else {}
+            )
+            if parse_rejection_reason is not None:
+                ranked_results.append(
+                    RankedStreamCandidateRecord(
+                        item_id=item_id,
+                        stream_id=stream.id,
+                        rank_score=0,
+                        lev_ratio=0.0,
+                        fetch=False,
+                        passed=False,
+                        rejection_reason=parse_rejection_reason,
+                        stream=stream,
+                    )
+                )
+                continue
             if anime_only and not _is_dubbed_candidate(stream):
                 ranked_results.append(
                     RankedStreamCandidateRecord(
@@ -2088,11 +2120,7 @@ async def retry_library(ctx: dict[str, object]) -> int:
             elif recovery_plan.target_stage is RecoveryTargetStage.FINALIZE:
                 # Recover orphaned DOWNLOADED items: worker crashed after debrid completed
                 # but before finalize_item was enqueued. Re-enqueue finalize to complete them.
-                finalize_status = await Job(
-                    finalize_item_job_id(item.id), redis=arq_redis
-                ).status()
-                _stage_observability.record_job_status("finalize_item", finalize_status)
-                if finalize_status in {JobStatus.deferred, JobStatus.queued, JobStatus.in_progress}:
+                if await is_finalize_item_job_active(arq_redis, item_id=item.id):
                     logger.info(
                         "retry_library skipped already-queued item",
                         extra={**log_context, "stage": "finalize_item"},
@@ -2121,6 +2149,380 @@ async def retry_library(ctx: dict[str, object]) -> int:
             )
             raise
         raise Retry(defer=RECOVERY_RETRY_POLICY.next_delay_seconds(attempt)) from exc
+
+
+def _drill_missing_seasons(payload: dict[str, object]) -> list[int] | None:
+    """Return normalized missing-season scope captured in checkpoint compensation payloads."""
+
+    raw = payload.get("missing_seasons")
+    if not isinstance(raw, list):
+        return None
+    seasons: list[int] = []
+    seen: set[int] = set()
+    for value in raw:
+        if isinstance(value, bool):
+            continue
+        try:
+            season_number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if season_number <= 0 or season_number in seen:
+            continue
+        seen.add(season_number)
+        seasons.append(season_number)
+    return seasons or None
+
+
+def _drill_missing_episodes(payload: dict[str, object]) -> dict[str, list[int]] | None:
+    """Return normalized missing-episode scope captured in checkpoint compensation payloads."""
+
+    raw = payload.get("missing_episodes")
+    if not isinstance(raw, dict):
+        return None
+    normalized: dict[str, list[int]] = {}
+    for raw_season, raw_episodes in raw.items():
+        season_key = str(raw_season).strip()
+        if not season_key or not isinstance(raw_episodes, list):
+            continue
+        episodes: list[int] = []
+        seen: set[int] = set()
+        for value in raw_episodes:
+            if isinstance(value, bool):
+                continue
+            try:
+                episode_number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if episode_number <= 0 or episode_number in seen:
+                continue
+            seen.add(episode_number)
+            episodes.append(episode_number)
+        if episodes:
+            normalized[season_key] = episodes
+    return _stage_scope.normalize_requested_episode_scope(normalized)
+
+
+async def _enqueue_workflow_drill_target_stage(
+    *,
+    redis: ArqRedis,
+    candidate: WorkflowDrillCandidateRecord,
+    queue_name: str,
+    target_stage: RecoveryTargetStage | None = None,
+) -> tuple[str, bool]:
+    """Re-enqueue one workflow drill target stage when no active job blocks it."""
+
+    item_id = candidate.media_item_id
+    tenant_id = candidate.tenant_id
+    compensation_payload = candidate.checkpoint.compensation_payload
+    resolved_target_stage = target_stage or candidate.recovery_plan.target_stage
+
+    if resolved_target_stage is RecoveryTargetStage.INDEX:
+        if await is_index_item_job_active(redis, item_id=item_id):
+            return "skipped_active", False
+        enqueued = await enqueue_index_item(
+            redis,
+            item_id=item_id,
+            queue_name=queue_name,
+            tenant_id=tenant_id,
+            missing_seasons=_drill_missing_seasons(compensation_payload),
+            missing_episodes=_drill_missing_episodes(compensation_payload),
+        )
+        return "index", enqueued
+
+    if resolved_target_stage is RecoveryTargetStage.SCRAPE:
+        if await is_scrape_item_job_active(redis, item_id=item_id):
+            return "skipped_active", False
+        enqueued = await enqueue_scrape_item(
+            redis,
+            item_id=item_id,
+            queue_name=queue_name,
+            tenant_id=tenant_id,
+            missing_seasons=_drill_missing_seasons(compensation_payload),
+            missing_episodes=_drill_missing_episodes(compensation_payload),
+        )
+        return "scrape", enqueued
+
+    if resolved_target_stage is RecoveryTargetStage.PARSE:
+        if await is_process_scraped_item_job_active(redis, item_id=item_id):
+            return "skipped_active", False
+        enqueued = await enqueue_parse_scrape_results(
+            redis,
+            item_id=item_id,
+            queue_name=queue_name,
+            tenant_id=tenant_id,
+        )
+        return "parse", enqueued
+
+    if resolved_target_stage is RecoveryTargetStage.FINALIZE:
+        if await is_finalize_item_job_active(redis, item_id=item_id):
+            return "skipped_active", False
+        enqueued = await enqueue_finalize_item(
+            redis,
+            item_id=item_id,
+            queue_name=queue_name,
+            tenant_id=tenant_id,
+        )
+        return "finalize", enqueued
+
+    return "unrecoverable", False
+
+
+def _serialize_item_workflow_drill_point(point: object) -> dict[str, object]:
+    """Return one JSON-safe mapping for item-workflow drill worker results."""
+
+    return {
+        "observed_at": getattr(point, "observed_at", ""),
+        "examined_checkpoints": int(getattr(point, "examined_checkpoints", 0)),
+        "replayed_checkpoints": int(getattr(point, "replayed_checkpoints", 0)),
+        "compensated_checkpoints": int(getattr(point, "compensated_checkpoints", 0)),
+        "finalize_requeues": int(getattr(point, "finalize_requeues", 0)),
+        "parse_requeues": int(getattr(point, "parse_requeues", 0)),
+        "scrape_requeues": int(getattr(point, "scrape_requeues", 0)),
+        "index_requeues": int(getattr(point, "index_requeues", 0)),
+        "skipped_active": int(getattr(point, "skipped_active", 0)),
+        "unrecoverable": int(getattr(point, "unrecoverable", 0)),
+        "failed": int(getattr(point, "failed", 0)),
+        "candidate_status_counts": dict(getattr(point, "candidate_status_counts", {})),
+        "compensation_stage_counts": dict(getattr(point, "compensation_stage_counts", {})),
+        "outcome": str(getattr(point, "outcome", "ok")),
+        "run_failed": bool(getattr(point, "run_failed", False)),
+        "last_error": getattr(point, "last_error", None),
+    }
+
+
+@timed_stage("run_item_workflow_drill")
+async def run_item_workflow_drill(ctx: dict[str, object]) -> dict[str, object]:
+    """Replay recoverable checkpoints and compensation targets through the real queue path."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(
+        ctx=mutable_ctx,
+        stage="run_item_workflow_drill",
+        item_id="item-workflow-drill",
+    )
+    media_service = _resolve_media_service(mutable_ctx)
+    settings = await _resolve_runtime_settings(mutable_ctx)
+    queue_name = str(mutable_ctx.get("queue_name", _queue_name(settings)))
+    redis = await _resolve_arq_redis(mutable_ctx)
+    store = ItemWorkflowDrillStatusStore(redis, queue_name=queue_name)
+
+    examined_checkpoints = 0
+    replayed_checkpoints = 0
+    compensated_checkpoints = 0
+    finalize_requeues = 0
+    parse_requeues = 0
+    scrape_requeues = 0
+    index_requeues = 0
+    skipped_active = 0
+    unrecoverable = 0
+    failed = 0
+    last_error: str | None = None
+    candidate_status_counts: Counter[str] = Counter()
+    compensation_stage_counts: Counter[str] = Counter()
+
+    try:
+        candidates = await media_service.list_workflow_drill_candidates()
+        for candidate in candidates:
+            checkpoint = candidate.checkpoint
+            examined_checkpoints += 1
+            candidate_status_counts[checkpoint.status.value] += 1
+            try:
+                replay_candidate = checkpoint.status in {
+                    WorkflowCheckpointStatus.PENDING,
+                    WorkflowCheckpointStatus.RUNNING,
+                } and checkpoint.resume_stage is WorkflowResumeStage.FINALIZE
+                action, enqueued = await _enqueue_workflow_drill_target_stage(
+                    redis=redis,
+                    candidate=candidate,
+                    queue_name=queue_name,
+                    target_stage=(
+                        RecoveryTargetStage.FINALIZE if replay_candidate else None
+                    ),
+                )
+                if action == "skipped_active":
+                    skipped_active += 1
+                    continue
+                if action == "unrecoverable":
+                    unrecoverable += 1
+                    continue
+                if not enqueued:
+                    failed += 1
+                    last_error = f"failed to enqueue drill target {action} for {candidate.media_item_id}"
+                    continue
+
+                if replay_candidate:
+                    replayed_checkpoints += 1
+                else:
+                    compensated_checkpoints += 1
+                    compensation_stage_counts[action] += 1
+
+                if action == "finalize":
+                    finalize_requeues += 1
+                elif action == "parse":
+                    parse_requeues += 1
+                elif action == "scrape":
+                    scrape_requeues += 1
+                elif action == "index":
+                    index_requeues += 1
+            except Exception as exc:
+                failed += 1
+                last_error = str(exc)
+                logger.warning(
+                    "item workflow drill candidate failed",
+                    extra={
+                        "item_id": candidate.media_item_id,
+                        "stage_name": checkpoint.stage_name,
+                        "resume_stage": checkpoint.resume_stage.value,
+                        "error": str(exc),
+                    },
+                )
+
+        point = await store.record_run(
+            examined_checkpoints=examined_checkpoints,
+            replayed_checkpoints=replayed_checkpoints,
+            compensated_checkpoints=compensated_checkpoints,
+            finalize_requeues=finalize_requeues,
+            parse_requeues=parse_requeues,
+            scrape_requeues=scrape_requeues,
+            index_requeues=index_requeues,
+            skipped_active=skipped_active,
+            unrecoverable=unrecoverable,
+            failed=failed,
+            candidate_status_counts=dict(candidate_status_counts),
+            compensation_stage_counts=dict(compensation_stage_counts),
+            last_error=last_error,
+        )
+        return _serialize_item_workflow_drill_point(point)
+    except Exception as exc:
+        await store.record_run(
+            examined_checkpoints=examined_checkpoints,
+            replayed_checkpoints=replayed_checkpoints,
+            compensated_checkpoints=compensated_checkpoints,
+            finalize_requeues=finalize_requeues,
+            parse_requeues=parse_requeues,
+            scrape_requeues=scrape_requeues,
+            index_requeues=index_requeues,
+            skipped_active=skipped_active,
+            unrecoverable=unrecoverable,
+            failed=failed,
+            candidate_status_counts=dict(candidate_status_counts),
+            compensation_stage_counts=dict(compensation_stage_counts),
+            run_failed=True,
+            last_error=str(exc),
+        )
+        attempt = task_try_count(mutable_ctx)
+        if RECOVERY_RETRY_POLICY.should_dead_letter(attempt):
+            await route_dead_letter(
+                ctx=mutable_ctx,
+                task_name="run_item_workflow_drill",
+                item_id="item-workflow-drill",
+                reason=str(exc),
+            )
+            raise
+        raise Retry(defer=RECOVERY_RETRY_POLICY.next_delay_seconds(attempt)) from exc
+
+
+@timed_stage("dispatch_plugin_hook_event")
+async def dispatch_plugin_hook_event(
+    ctx: dict[str, object],
+    plugin_name: str,
+    event_type: str,
+    payload: dict[str, object],
+    queued_at_seconds: float | None = None,
+) -> dict[str, object]:
+    """Dispatch one queued plugin-hook delivery to matching registered hook workers."""
+
+    mutable_ctx = cast(dict[str, Any], ctx)
+    bind_worker_contextvars(
+        ctx=mutable_ctx,
+        stage="dispatch_plugin_hook_event",
+        item_id=cast(str, payload.get("item_id", plugin_name)),
+    )
+    plugin_registry = await _resolve_plugin_registry(mutable_ctx)
+    matching_hooks = [
+        hook
+        for hook in plugin_registry.get_event_hooks()
+        if hook.plugin_name == plugin_name and event_type in hook.subscribed_events
+    ]
+    settings = await _resolve_runtime_settings(mutable_ctx)
+    attempt = task_try_count(mutable_ctx)
+    queue_name = str(mutable_ctx.get("queue_name", _queue_name(settings)))
+    queue_status_store: PluginHookQueueStatusStore | None = None
+    try:
+        queue_status_store = PluginHookQueueStatusStore(
+            await _resolve_arq_redis(mutable_ctx),
+            queue_name=queue_name,
+        )
+    except Exception:
+        queue_status_store = None
+    if not matching_hooks:
+        logger.info(
+            "queued plugin hook delivery skipped",
+            extra={"plugin_name": plugin_name, "event_type": event_type, "reason": "hook_missing"},
+        )
+        if queue_status_store is not None:
+            await queue_status_store.record_delivery(
+                plugin_name=plugin_name,
+                event_type=event_type,
+                queued_at_seconds=queued_at_seconds,
+                execution_duration_seconds=0.0,
+                matched_hooks=0,
+                successful_hooks=0,
+                timeout_hooks=0,
+                failed_hooks=0,
+                attempt=attempt,
+                last_error="hook_missing",
+            )
+        return {
+            "plugin_name": plugin_name,
+            "event_type": event_type,
+            "handled": False,
+            "matched_hooks": 0,
+            "attempt": attempt,
+        }
+
+    executor = PluginHookWorkerExecutor(
+        timeout_seconds=settings.plugin_runtime.hook_timeout_seconds
+    )
+    invocation_results = await executor.dispatch_and_wait(
+        event_type,
+        cast(dict[str, Any], payload),
+        matching_hooks,
+    )
+    successful_hooks = sum(1 for result in invocation_results if result.outcome == "success")
+    timeout_hooks = sum(1 for result in invocation_results if result.outcome == "timeout")
+    failed_hooks = sum(1 for result in invocation_results if result.outcome == "error")
+    execution_duration_seconds = max(
+        (result.duration_seconds for result in invocation_results),
+        default=0.0,
+    )
+    last_error = next(
+        (result.error for result in invocation_results if result.error is not None),
+        None,
+    )
+    if queue_status_store is not None:
+        await queue_status_store.record_delivery(
+            plugin_name=plugin_name,
+            event_type=event_type,
+            queued_at_seconds=queued_at_seconds,
+            execution_duration_seconds=execution_duration_seconds,
+            matched_hooks=len(matching_hooks),
+            successful_hooks=successful_hooks,
+            timeout_hooks=timeout_hooks,
+            failed_hooks=failed_hooks,
+            attempt=attempt,
+            last_error=last_error,
+        )
+    return {
+        "plugin_name": plugin_name,
+        "event_type": event_type,
+        "handled": successful_hooks > 0 and timeout_hooks == 0 and failed_hooks == 0,
+        "matched_hooks": len(matching_hooks),
+        "successful_hooks": successful_hooks,
+        "timeout_hooks": timeout_hooks,
+        "failed_hooks": failed_hooks,
+        "attempt": attempt,
+    }
 
 
 @timed_stage("publish_outbox_events")
@@ -2486,6 +2888,38 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             return item_id
 
         item_request_id = await media_service.get_latest_item_request_id(media_item_id=item_id)
+        existing_checkpoint = await media_service.get_workflow_checkpoint(media_item_id=item_id)
+        if (
+            existing_checkpoint is not None
+            and existing_checkpoint.resume_stage is WorkflowResumeStage.FINALIZE
+            and existing_checkpoint.status
+            in {WorkflowCheckpointStatus.PENDING, WorkflowCheckpointStatus.RUNNING}
+        ):
+            provider = existing_checkpoint.provider
+            selected_stream_id = existing_checkpoint.selected_stream_id
+            logger.info(
+                "debrid stage resumed from persisted finalize checkpoint",
+                extra={
+                    "item_id": item_id,
+                    "item_request_id": item_request_id,
+                    "provider": provider,
+                    "selected_stream_id": selected_stream_id,
+                    "provider_download_id": existing_checkpoint.provider_download_id,
+                },
+            )
+            await _maybe_enqueue_next_stage(
+                mutable_ctx,
+                enqueuer=lambda redis, item_id, queue_name, tenant_id: enqueue_finalize_item(
+                    redis,
+                    item_id=item_id,
+                    queue_name=queue_name,
+                    tenant_id=tenant_id,
+                ),
+                item_id=item_id,
+                stage_name="finalize_item",
+                job_id=finalize_item_job_id(item_id),
+            )
+            return item_id
         streams = await media_service.get_stream_candidates(
             media_item_id=item_id,
             exclude_blacklisted=True,
@@ -2494,6 +2928,22 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         if selected_stream is None:
             raise ValueError("selected_stream_missing")
         selected_stream_id = selected_stream.id
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.DEBRID,
+            status=WorkflowCheckpointStatus.RUNNING,
+            item_request_id=item_request_id,
+            selected_stream_id=selected_stream_id,
+            checkpoint_payload={
+                "infohash": selected_stream.infohash,
+                "selected_stream_title": selected_stream.raw_title,
+            },
+            compensation_payload={
+                "next_stage": "finalize_item",
+            },
+        )
 
         provider_candidates = resolve_download_clients(
             settings=settings,
@@ -2506,139 +2956,59 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
         if not provider_candidates:
             raise ValueError("no_enabled_downloader")
 
-        provider = provider_candidates[0][0]
-        provider_torrent_id: str | None = None
-        refreshed_info: TorrentInfo | None = None
-        download_urls: list[str] = []
-        last_provider_error: Exception | None = None
-        for index, (candidate_provider, client) in enumerate(provider_candidates):
-            provider = candidate_provider
-            remaining_candidates = len(provider_candidates) - index - 1
-            try:
-                provider_torrent_id, refreshed_info, download_urls = await execute_debrid_download(
-                    client=client,
-                    provider=provider,
-                    infohash=selected_stream.infohash,
-                    settings=settings,
-                    item_id=item_id,
-                    item_request_id=item_request_id,
-                    stage_logger=_worker_stage_logger(),
-                )
-                break
-            except DebridRateLimitError as exc:
-                _stage_observability.record_debrid_rate_limited(
-                    provider=provider or exc.provider,
-                    retry_after_seconds=exc.retry_after_seconds,
-                )
-                _worker_stage_logger().warning(
-                    "debrid_item.rate_limited",
-                    item_id=item_id,
-                    item_request_id=item_request_id,
-                    provider=provider or exc.provider,
-                    retry_after=exc.retry_after_seconds,
-                    remaining_candidates=remaining_candidates,
-                )
-                last_provider_error = exc
-                if should_failover_downloader(
-                    settings,
-                    remaining_candidates=remaining_candidates,
-                    error_kind="rate_limit",
-                ):
-                    continue
-                raise
-            except TimeoutError as exc:
-                logger.warning(
-                    "debrid provider candidate timed out",
-                    extra={
-                        "item_id": item_id,
-                        "item_request_id": item_request_id,
-                        "provider": provider,
-                        "selected_stream_id": selected_stream_id,
-                        "error": str(exc),
-                        "remaining_candidates": remaining_candidates,
-                    },
-                )
-                last_provider_error = exc
-                if should_failover_downloader(
-                    settings,
-                    remaining_candidates=remaining_candidates,
-                    error_kind="provider_error",
-                ):
-                    continue
-                raise
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429:
-                    retry_after_seconds = _retry_after_seconds_from_http_status_error(exc)
-                    _stage_observability.record_debrid_rate_limited(
-                        provider=provider or "unknown",
-                        retry_after_seconds=retry_after_seconds,
-                    )
-                    _worker_stage_logger().warning(
-                        "debrid_item.rate_limited",
-                        item_id=item_id,
-                        item_request_id=item_request_id,
-                        provider=provider or "unknown",
-                        retry_after=retry_after_seconds,
-                        remaining_candidates=remaining_candidates,
-                    )
-                    last_provider_error = exc
-                    if should_failover_downloader(
-                        settings,
-                        remaining_candidates=remaining_candidates,
-                        error_kind="rate_limit",
-                    ):
-                        continue
-                    raise
-                logger.warning(
-                    "debrid provider candidate failed",
-                    extra={
-                        "item_id": item_id,
-                        "item_request_id": item_request_id,
-                        "provider": provider,
-                        "selected_stream_id": selected_stream_id,
-                        "error": str(exc),
-                        "remaining_candidates": remaining_candidates,
-                    },
-                )
-                last_provider_error = exc
-                if should_failover_downloader(
-                    settings,
-                    remaining_candidates=remaining_candidates,
-                    error_kind="provider_error",
-                ):
-                    continue
-                raise
-            except Exception as exc:
-                logger.warning(
-                    "debrid provider candidate failed",
-                    extra={
-                        "item_id": item_id,
-                        "item_request_id": item_request_id,
-                        "provider": provider,
-                        "selected_stream_id": selected_stream_id,
-                        "error": str(exc),
-                        "remaining_candidates": remaining_candidates,
-                    },
-                )
-                last_provider_error = exc
-                if should_failover_downloader(
-                    settings,
-                    remaining_candidates=remaining_candidates,
-                    error_kind="provider_error",
-                ):
-                    continue
-                raise
-
-        if provider_torrent_id is None or refreshed_info is None:
-            if last_provider_error is not None:
-                raise last_provider_error
-            raise ValueError("downloader_candidates_exhausted")
-        await media_service.persist_debrid_download_entries(
+        execution = await execute_debrid_download_fanout(
+            provider_candidates=provider_candidates,
+            infohash=selected_stream.infohash,
+            settings=settings,
+            item_id=item_id,
+            item_request_id=item_request_id,
+            selected_stream_parsed_title=(
+                selected_stream.parsed_title
+                if isinstance(selected_stream.parsed_title, dict)
+                else None
+            ),
+            stage_logger=_worker_stage_logger(),
+        )
+        provider = execution.provider
+        provider_torrent_id = execution.provider_torrent_id
+        refreshed_info = execution.torrent_info
+        download_urls = list(execution.download_urls)
+        persisted_entries = await media_service.persist_debrid_download_entries(
             media_item_id=item_id,
             provider=provider,
             provider_download_id=provider_torrent_id,
             torrent_info=refreshed_info,
             download_urls=download_urls,
+        )
+        await media_service.persist_workflow_checkpoint(
+            media_item_id=item_id,
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.FINALIZE,
+            status=WorkflowCheckpointStatus.PENDING,
+            item_request_id=item_request_id,
+            selected_stream_id=selected_stream_id,
+            provider=provider,
+            provider_download_id=provider_torrent_id,
+            checkpoint_payload={
+                "download_url_count": len(download_urls),
+                "persisted_media_entry_count": len(persisted_entries),
+                "fanout_parallelism": execution.fanout_parallelism,
+                "attempted_providers": list(execution.attempted_providers),
+                "successful_providers": list(execution.successful_providers),
+                "failed_providers": list(execution.failed_providers),
+                "provider_failure_types": [
+                    {"provider": provider_name, "error_type": error_type}
+                    for provider_name, error_type in execution.provider_failure_types
+                ],
+                "selected_provider_priority": execution.provider_priority,
+                "selected_container_root": execution.container_root,
+                "matched_file_ids": list(execution.matched_file_ids),
+                "selected_file_ids": list(execution.selected_file_ids),
+            },
+            compensation_payload={
+                "selected_stream_id": selected_stream_id,
+                "provider_download_id": provider_torrent_id,
+            },
         )
         logger.info(
             "debrid stage completed",
@@ -2668,6 +3038,19 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             provider=provider or exc.provider,
             retry_after_seconds=exc.retry_after_seconds,
         )
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.DEBRID,
+            status=WorkflowCheckpointStatus.FAILED,
+            item_request_id=item_request_id,
+            selected_stream_id=selected_stream_id,
+            provider=provider or exc.provider,
+            checkpoint_payload={},
+            compensation_payload={"retry_after_seconds": exc.retry_after_seconds or 0},
+            last_error=str(exc),
+        )
         _worker_stage_logger().warning(
             "debrid_item.rate_limited",
             item_id=item_id,
@@ -2693,6 +3076,19 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
     except TimeoutError as exc:
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.DEBRID,
+            status=WorkflowCheckpointStatus.FAILED,
+            item_request_id=item_request_id,
+            selected_stream_id=selected_stream_id,
+            provider=provider,
+            checkpoint_payload={},
+            compensation_payload={"retry_stage": "scrape_item"},
+            last_error=str(exc),
+        )
         logger.warning(
             "debrid stage timed out",
             extra={
@@ -2741,6 +3137,19 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
     except httpx.HTTPStatusError as exc:
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.DEBRID,
+            status=WorkflowCheckpointStatus.FAILED,
+            item_request_id=item_request_id,
+            selected_stream_id=selected_stream_id,
+            provider=provider,
+            checkpoint_payload={},
+            compensation_payload={"status_code": exc.response.status_code},
+            last_error=str(exc),
+        )
         if exc.response.status_code == 429:
             retry_after_seconds = _retry_after_seconds_from_http_status_error(exc)
             _stage_observability.record_debrid_rate_limited(
@@ -2804,6 +3213,19 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             raise
         raise Retry(defer=DEBRID_RETRY_POLICY.next_delay_seconds(attempt)) from exc
     except Exception as exc:
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.DEBRID,
+            status=WorkflowCheckpointStatus.FAILED,
+            item_request_id=item_request_id,
+            selected_stream_id=selected_stream_id,
+            provider=provider,
+            checkpoint_payload={},
+            compensation_payload={},
+            last_error=str(exc),
+        )
         logger.warning(
             "debrid stage failed",
             extra={
@@ -2857,6 +3279,16 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
             tenant_id=getattr(item, "tenant_id", None),
         )
         if item.state is ItemState.COMPLETED:
+            await _persist_workflow_checkpoint_best_effort(
+                media_service,
+                media_item_id=item_id,
+                stage_name="finalize_item",
+                resume_stage=WorkflowResumeStage.NONE,
+                status=WorkflowCheckpointStatus.COMPLETED,
+                item_request_id=None,
+                checkpoint_payload={"resulting_state": ItemState.COMPLETED.value},
+                compensation_payload={},
+            )
             return item_id
         if item.state not in (
             ItemState.DOWNLOADED,
@@ -2865,6 +3297,7 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
         ):
             return item_id
 
+        existing_checkpoint = await media_service.get_workflow_checkpoint(media_item_id=item_id)
         if item.state in (ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING):
             logger.debug(
                 "finalize_item re-entered from holding state",
@@ -2872,6 +3305,29 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
             )
 
         item_request_id = await media_service.get_latest_item_request_id(media_item_id=item_id)
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="finalize_item",
+            resume_stage=WorkflowResumeStage.FINALIZE,
+            status=WorkflowCheckpointStatus.RUNNING,
+            item_request_id=item_request_id,
+            selected_stream_id=(
+                existing_checkpoint.selected_stream_id if existing_checkpoint is not None else None
+            ),
+            provider=(existing_checkpoint.provider if existing_checkpoint is not None else None),
+            provider_download_id=(
+                existing_checkpoint.provider_download_id
+                if existing_checkpoint is not None
+                else None
+            ),
+            checkpoint_payload=(
+                existing_checkpoint.checkpoint_payload if existing_checkpoint is not None else {}
+            ),
+            compensation_payload=(
+                existing_checkpoint.compensation_payload if existing_checkpoint is not None else {}
+            ),
+        )
         logger.info(
             "finalize stage starting",
             extra={"item_id": item_id, "item_request_id": item_request_id},
@@ -3011,8 +3467,41 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
                 "completion_status": completion_result or event.value,
             },
         )
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="finalize_item",
+            resume_stage=WorkflowResumeStage.NONE,
+            status=WorkflowCheckpointStatus.COMPLETED,
+            item_request_id=item_request_id,
+            selected_stream_id=(
+                existing_checkpoint.selected_stream_id if existing_checkpoint is not None else None
+            ),
+            provider=(existing_checkpoint.provider if existing_checkpoint is not None else None),
+            provider_download_id=(
+                existing_checkpoint.provider_download_id
+                if existing_checkpoint is not None
+                else None
+            ),
+            checkpoint_payload={
+                "completion_status": completion_result or {"resulting_state": event.value},
+                "resulting_state": event.value,
+            },
+            compensation_payload={},
+        )
         return item_id
     except Exception as exc:
+        await _persist_workflow_checkpoint_best_effort(
+            media_service,
+            media_item_id=item_id,
+            stage_name="finalize_item",
+            resume_stage=WorkflowResumeStage.FINALIZE,
+            status=WorkflowCheckpointStatus.FAILED,
+            item_request_id=item_request_id,
+            checkpoint_payload={},
+            compensation_payload={},
+            last_error=str(exc),
+        )
         logger.warning(
             "finalize stage failed",
             extra={"item_id": item_id, "item_request_id": item_request_id, "error": str(exc)},
@@ -3141,6 +3630,24 @@ def _resolve_media_service(ctx: dict[str, Any]) -> MediaService:
     resolved = MediaService(db=db, event_bus=event_bus, rate_limiter=_resolve_limiter(ctx))
     ctx["media_service"] = resolved
     return resolved
+
+
+async def _persist_workflow_checkpoint_best_effort(
+    media_service: MediaService,
+    **kwargs: Any,
+) -> None:
+    """Persist one workflow checkpoint without masking the original worker failure."""
+
+    try:
+        await media_service.persist_workflow_checkpoint(**kwargs)
+    except Exception:
+        logger.exception(
+            "failed to persist workflow checkpoint",
+            extra={
+                "item_id": kwargs.get("media_item_id"),
+                "stage_name": kwargs.get("stage_name"),
+            },
+        )
 
 
 async def _resolve_playback_service(ctx: dict[str, Any]) -> PlaybackSourceService:
@@ -3698,10 +4205,12 @@ def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
             refresh_direct_playback_link,
             refresh_selected_hls_failed_lease,
             refresh_selected_hls_restricted_fallback,
+            dispatch_plugin_hook_event,
             backfill_imdb_ids,
             poll_content_services,
             recover_incomplete_library,
             retry_library,
+            run_item_workflow_drill,
             poll_unreleased_items,
             poll_ongoing_shows,
             scheduled_metadata_reindex_reconciliation,
@@ -3766,6 +4275,15 @@ def build_worker_settings(settings: Settings | None = None) -> dict[str, Any]:
                 second=0,
                 unique=True,
                 job_id="scheduled-metadata-reindex-reconciliation",
+            ),
+            cron(
+                run_item_workflow_drill,
+                name="run_item_workflow_drill",
+                hour={0, 6, 12, 18},
+                minute={20},
+                second=45,
+                unique=True,
+                job_id="run-item-workflow-drill",
             ),
         ],
         "queue_name": queue_name,

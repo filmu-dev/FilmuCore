@@ -68,7 +68,7 @@ function Get-JsonEnvValue {
         return $raw | ConvertFrom-Json -Depth 12
     }
     catch {
-        throw ("[enterprise-rollout-evidence] {0} is not valid JSON: {1}" -f $Name, $_.Exception.Message)
+        throw ("[rollout-evidence] {0} is not valid JSON: {1}" -f $Name, $_.Exception.Message)
     }
 }
 
@@ -101,7 +101,7 @@ function New-Hs256Jwt {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $headerJson = [ordered]@{
         alg = 'HS256'
-        kid = 'local-enterprise-rollout'
+        kid = 'local-rollout'
         typ = 'JWT'
     } | ConvertTo-Json -Compress
     $payloadJson = [ordered]@{
@@ -140,17 +140,17 @@ function Get-BackendHeaders {
     $oidc = Get-JsonEnvValue -Name 'FILMU_PY_OIDC' -DotEnv $DotEnv
     if ($null -eq $oidc -or -not [bool] $oidc.enabled -or [bool] $oidc.allow_api_key_fallback) {
         if ([string]::IsNullOrWhiteSpace($ResolvedApiKey)) {
-            throw "[enterprise-rollout-evidence] FILMU_PY_API_KEY is required to capture backend governance endpoints."
+            throw "[rollout-evidence] FILMU_PY_API_KEY is required to capture backend governance endpoints."
         }
         return @{ 'x-api-key' = $ResolvedApiKey }
     }
 
     $allowedAlgorithms = @($oidc.allowed_algorithms)
     if ('HS256' -notin $allowedAlgorithms) {
-        throw '[enterprise-rollout-evidence] Local OIDC evidence capture requires HS256 in FILMU_PY_OIDC.allowed_algorithms.'
+        throw '[rollout-evidence] Local OIDC evidence capture requires HS256 in FILMU_PY_OIDC.allowed_algorithms.'
     }
     if ([string]::IsNullOrWhiteSpace([string] $oidc.issuer) -or [string]::IsNullOrWhiteSpace([string] $oidc.audience)) {
-        throw '[enterprise-rollout-evidence] FILMU_PY_OIDC issuer and audience must be configured for bearer-token capture.'
+        throw '[rollout-evidence] FILMU_PY_OIDC issuer and audience must be configured for bearer-token capture.'
     }
 
     $jwksKeys = @()
@@ -159,7 +159,7 @@ function Get-BackendHeaders {
     }
     $octKey = $jwksKeys | Where-Object { $_.kty -eq 'oct' -and -not [string]::IsNullOrWhiteSpace([string] $_.k) } | Select-Object -First 1
     if ($null -eq $octKey) {
-        throw '[enterprise-rollout-evidence] Local OIDC evidence capture requires one oct key in FILMU_PY_OIDC.jwks_json.keys.'
+        throw '[rollout-evidence] Local OIDC evidence capture requires one oct key in FILMU_PY_OIDC.jwks_json.keys.'
     }
 
     $rawKeyBytes = ConvertFrom-Base64Url -Value ([string] $octKey.k)
@@ -167,7 +167,7 @@ function Get-BackendHeaders {
         -Issuer ([string] $oidc.issuer) `
         -Audience ([string] $oidc.audience) `
         -SymmetricKeyBytes $rawKeyBytes `
-        -Subject 'ops://enterprise-rollout-capture'
+        -Subject 'ops://rollout-capture'
     return @{ authorization = ('Bearer {0}' -f $jwt) }
 }
 
@@ -296,7 +296,7 @@ $PlaybackArtifactsRoot = [System.IO.Path]::GetFullPath($PlaybackArtifactsRoot)
 New-Item -ItemType Directory -Force -Path $PlaybackArtifactsRoot | Out-Null
 
 if ([string]::IsNullOrWhiteSpace($ArtifactDir)) {
-    $ArtifactDir = Join-Path $RepoRoot 'artifacts\operations\enterprise-rollout'
+    $ArtifactDir = Join-Path $RepoRoot 'artifacts\operations\rollout'
 }
 $ArtifactDir = [System.IO.Path]::GetFullPath($ArtifactDir)
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
@@ -543,11 +543,11 @@ if ($AsJson) {
     $summary | ConvertTo-Json -Depth 12
 }
 else {
-    Write-Host ("[enterprise-rollout-evidence] status: {0}" -f $summary.status)
-    Write-Host ("[enterprise-rollout-evidence] summary: {0}" -f $OutputPath)
+    Write-Host ("[rollout-evidence] status: {0}" -f $summary.status)
+    Write-Host ("[rollout-evidence] summary: {0}" -f $OutputPath)
     foreach ($check in $checks) {
         $label = if ($check.passed) { 'PASS' } else { 'FAIL' }
-        Write-Host ("[enterprise-rollout-evidence] {0} {1} observed={2} expected={3}" -f $label, $check.name, $check.observed, $check.expected)
+        Write-Host ("[rollout-evidence] {0} {1} observed={2} expected={3}" -f $label, $check.name, $check.observed, $check.expected)
     }
 }
 

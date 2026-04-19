@@ -232,7 +232,7 @@ for ($index = 1; $index -le $RepeatCount; $index++) {
     if (($MaxRunDurationSeconds -gt 0) -and -not $DryRun -and ($null -ne $durationSeconds)) {
         $runPassed = $runPassed -and ([double] $durationSeconds -le $MaxRunDurationSeconds)
     }
-    # Zero is an active enterprise threshold: the gate passes 0 to require no reconnect incidents.
+    # Zero is an active strict threshold: the gate passes 0 to require no reconnect incidents.
     if (($MaxReconnectIncidentCount -ge 0) -and -not $DryRun) {
         $runPassed = $runPassed -and (
             ($null -ne $reconnectIncidentCount) -and
@@ -293,7 +293,7 @@ $summary = [ordered]@{
     backend_container_name = $BackendContainerName
     reuse_existing_item = [bool] $ReuseExistingItem
     require_completed_state = [bool] $RequireCompletedState
-    enterprise_policy = [ordered]@{
+    strict_policy = [ordered]@{
         require_completed_state = [bool] $RequireCompletedState
         proof_stale_direct_refresh = [bool] $ProofStaleDirectRefresh
         require_preferred_client_playback = [bool] $RequirePreferredClientPlayback

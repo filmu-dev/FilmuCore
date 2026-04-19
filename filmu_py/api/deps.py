@@ -36,12 +36,28 @@ logger = structlog.get_logger("filmu.auth")
 
 _ACTOR_ID_HEADER = "x-actor-id"
 _ACTOR_TYPE_HEADER = "x-actor-type"
+_ACTOR_DISPLAY_NAME_HEADER = "x-actor-display-name"
+_ACTOR_EMAIL_HEADER = "x-actor-email"
 _TENANT_ID_HEADER = "x-tenant-id"
+_TENANT_DISPLAY_NAME_HEADER = "x-tenant-display-name"
+_TENANT_PLAN_HEADER = "x-tenant-plan"
 _AUTHORIZED_TENANTS_HEADER = "x-actor-authorized-tenants"
 _ACTOR_ROLES_HEADER = "x-actor-roles"
 _ACTOR_SCOPES_HEADER = "x-actor-scopes"
+_AUTH_SOURCE_HEADER = "x-auth-source"
 _OIDC_ISSUER_HEADER = "x-auth-issuer"
 _OIDC_SUBJECT_HEADER = "x-auth-subject"
+_ACTOR_ID_QUERY = "actor_id"
+_ACTOR_TYPE_QUERY = "actor_type"
+_ACTOR_DISPLAY_NAME_QUERY = "actor_display_name"
+_ACTOR_EMAIL_QUERY = "actor_email"
+_TENANT_ID_QUERY = "tenant_id"
+_TENANT_DISPLAY_NAME_QUERY = "tenant_display_name"
+_TENANT_PLAN_QUERY = "tenant_plan"
+_AUTHORIZED_TENANTS_QUERY = "actor_authorized_tenants"
+_ACTOR_ROLES_QUERY = "actor_roles"
+_ACTOR_SCOPES_QUERY = "actor_scopes"
+_AUTH_SOURCE_QUERY = "auth_source"
 _DEFAULT_ACTOR_TYPE = "service"
 _DEFAULT_TENANT_ID = "global"
 _DEFAULT_ROLES: tuple[str, ...] = ()
@@ -53,10 +69,15 @@ class AuthContext:
     """Resolved request authentication and operator identity context."""
 
     authentication_mode: str
+    source_label: str
     api_key_id: str
     actor_id: str
     actor_type: str
+    actor_display_name: str | None
+    actor_email: str | None
     tenant_id: str
+    tenant_display_name: str | None
+    tenant_plan: str | None
     authorized_tenant_ids: tuple[str, ...]
     authorization_tenant_scope: str
     roles: tuple[str, ...]
@@ -84,6 +105,24 @@ def _normalize_optional_header(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _request_supports_query_auth_metadata(request: Request) -> bool:
+    return bool(getattr(request, "scope", {}).get("type") == "websocket")
+
+
+def _request_auth_metadata(
+    request: Request,
+    *,
+    header_name: str,
+    query_name: str,
+) -> str | None:
+    header_value = _normalize_optional_header(request.headers.get(header_name))
+    if header_value is not None:
+        return header_value
+    if _request_supports_query_auth_metadata(request):
+        return _normalize_optional_header(request.query_params.get(query_name))
+    return None
 
 
 def _split_header_values(raw: str | None, *, fallback: tuple[str, ...]) -> tuple[str, ...]:
@@ -245,34 +284,78 @@ def _build_auth_context(
     actor_type_claim = oidc_claims.get(settings.oidc.actor_type_claim)
     tenant_id_claim = oidc_claims.get(settings.oidc.tenant_id_claim)
     actor_id = (
-        request.headers.get(_ACTOR_ID_HEADER)
+        _request_auth_metadata(
+            request,
+            header_name=_ACTOR_ID_HEADER,
+            query_name=_ACTOR_ID_QUERY,
+        )
         or (actor_id_claim if isinstance(actor_id_claim, str) and actor_id_claim else None)
         or f"api-key:{api_key_id}"
     )
     actor_type = (
-        request.headers.get(_ACTOR_TYPE_HEADER)
+        _request_auth_metadata(
+            request,
+            header_name=_ACTOR_TYPE_HEADER,
+            query_name=_ACTOR_TYPE_QUERY,
+        )
         or (actor_type_claim if isinstance(actor_type_claim, str) and actor_type_claim else None)
         or _DEFAULT_ACTOR_TYPE
     )
     tenant_id = (
-        request.headers.get(_TENANT_ID_HEADER)
+        _request_auth_metadata(
+            request,
+            header_name=_TENANT_ID_HEADER,
+            query_name=_TENANT_ID_QUERY,
+        )
         or (tenant_id_claim if isinstance(tenant_id_claim, str) and tenant_id_claim else None)
         or _DEFAULT_TENANT_ID
     )
+    actor_display_name = _request_auth_metadata(
+        request,
+        header_name=_ACTOR_DISPLAY_NAME_HEADER,
+        query_name=_ACTOR_DISPLAY_NAME_QUERY,
+    )
+    actor_email = _request_auth_metadata(
+        request,
+        header_name=_ACTOR_EMAIL_HEADER,
+        query_name=_ACTOR_EMAIL_QUERY,
+    )
+    tenant_display_name = _request_auth_metadata(
+        request,
+        header_name=_TENANT_DISPLAY_NAME_HEADER,
+        query_name=_TENANT_DISPLAY_NAME_QUERY,
+    )
+    tenant_plan = _request_auth_metadata(
+        request,
+        header_name=_TENANT_PLAN_HEADER,
+        query_name=_TENANT_PLAN_QUERY,
+    )
     authorized_tenant_ids = _split_header_values(
-        request.headers.get(_AUTHORIZED_TENANTS_HEADER),
+        _request_auth_metadata(
+            request,
+            header_name=_AUTHORIZED_TENANTS_HEADER,
+            query_name=_AUTHORIZED_TENANTS_QUERY,
+        ),
         fallback=_claim_values(oidc_claims, settings.oidc.authorized_tenants_claim) or (tenant_id,),
     )
     roles = _merge_values(
         _split_header_values(
-            request.headers.get(_ACTOR_ROLES_HEADER),
+            _request_auth_metadata(
+                request,
+                header_name=_ACTOR_ROLES_HEADER,
+                query_name=_ACTOR_ROLES_QUERY,
+            ),
             fallback=_claim_values(oidc_claims, settings.oidc.roles_claim) or _DEFAULT_ROLES,
         ),
         _principal_policy_values(policy.principal_roles, actor_id=actor_id),
     )
     scopes = _merge_values(
         _split_header_values(
-            request.headers.get(_ACTOR_SCOPES_HEADER),
+            _request_auth_metadata(
+                request,
+                header_name=_ACTOR_SCOPES_HEADER,
+                query_name=_ACTOR_SCOPES_QUERY,
+            ),
             fallback=_claim_values(oidc_claims, settings.oidc.scopes_claim) or _DEFAULT_SCOPES,
         ),
         _principal_policy_values(policy.principal_scopes, actor_id=actor_id),
@@ -291,10 +374,22 @@ def _build_auth_context(
     )
     return AuthContext(
         authentication_mode=authentication_mode,
+        source_label=(
+            _request_auth_metadata(
+                request,
+                header_name=_AUTH_SOURCE_HEADER,
+                query_name=_AUTH_SOURCE_QUERY,
+            )
+            or authentication_mode
+        ),
         api_key_id=api_key_id,
         actor_id=actor_id,
         actor_type=actor_type,
+        actor_display_name=actor_display_name,
+        actor_email=actor_email,
         tenant_id=tenant_id,
+        tenant_display_name=tenant_display_name,
+        tenant_plan=tenant_plan,
         authorized_tenant_ids=authorized_tenant_ids,
         authorization_tenant_scope=describe_tenant_scope(
             actor_tenant_id=tenant_id,
