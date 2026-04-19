@@ -4057,6 +4057,37 @@ def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> 
     assert body["remaining_gaps"] == []
 
 
+def test_observability_convergence_route_requires_non_blank_alert_proof_refs() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_LOGGING": {"structured": True},
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "opensearch://logs-filmu",
+                "healthcheck_url": "http://vector.internal:8686/health",
+                "field_mapping_version": "filmu-ecs-v1",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "proof_refs": ["", "   "],
+            },
+        }
+    )
+
+    response = client.get("/api/v1/operations/observability/convergence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["alerting_enabled"] is True
+    assert body["alert_rollout_ready"] is False
+
+
 def test_downloader_orchestration_route_surfaces_ordered_failover_and_plugin_gap() -> None:
     plugin_registry = PluginRegistry()
     harness = TestPluginContext(settings={"plugins": {}})

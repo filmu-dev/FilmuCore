@@ -141,6 +141,15 @@ def test_check_branch_hygiene_treats_branch_reuse_as_advisory_in_local_source_mo
     assert "Create a fresh single-use remote review branch from the current local source branch" in script
 
 
+def test_check_branch_hygiene_uses_base_branch_in_no_ahead_commit_guidance() -> None:
+    script = (REPO_ROOT / "scripts" / "check_branch_hygiene.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "local '$BaseBranch'" in script
+    assert "local 'main' to a dedicated remote review branch" not in script
+
+
 def test_push_review_branch_blocks_direct_main_target_and_uses_local_source_of_truth() -> None:
     script = (REPO_ROOT / "scripts" / "push_review_branch.ps1").read_text(
         encoding="utf-8"

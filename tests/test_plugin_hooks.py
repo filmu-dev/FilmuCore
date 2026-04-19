@@ -30,10 +30,13 @@ async def _next_envelope(iterator: Any) -> Any:
 @dataclass
 class _QueueStub:
     first_result: object | None = field(default_factory=object)
+    exception: Exception | None = None
     calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = field(default_factory=list)
 
     async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> object | None:
         self.calls.append((function, args, kwargs))
+        if self.exception is not None:
+            raise self.exception
         return self.first_result
 
 
@@ -300,7 +303,7 @@ async def test_event_bus_publish_queues_selected_plugin_hook_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_event_bus_queued_plugin_hook_dispatch_falls_back_in_process_when_enqueue_fails() -> None:
+async def test_event_bus_queued_plugin_hook_dispatch_dedupe_does_not_fall_back_in_process() -> None:
     event_bus = EventBus()
     registry = PluginRegistry()
     registry.register_manifest(
@@ -323,6 +326,42 @@ async def test_event_bus_queued_plugin_hook_dispatch_falls_back_in_process_when_
     )
     dispatcher = QueuedPluginHookDispatcher(
         arq_redis=_QueueStub(first_result=None),
+        queue_name="filmu-py",
+        queued_events=frozenset({"hook-plugin.ready"}),
+        fallback_executor=PluginHookWorkerExecutor(),
+    )
+    event_bus.attach_plugin_runtime(registry, hook_executor=dispatcher)
+
+    await event_bus.publish("hook-plugin.ready", {"item_id": "item-2"})
+    await asyncio.sleep(0.05)
+
+    assert hook.handled == []
+
+
+@pytest.mark.asyncio
+async def test_event_bus_queued_plugin_hook_dispatch_falls_back_in_process_when_enqueue_fails() -> None:
+    event_bus = EventBus()
+    registry = PluginRegistry()
+    registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "hook-plugin",
+                "version": "1.0.0",
+                "api_version": "1",
+                "entry_module": "plugin.py",
+                "event_hook": "ExampleHook",
+                "publishable_events": ["hook-plugin.ready"],
+            }
+        )
+    )
+    hook = _RecordingHook(subscribed_events=frozenset({"hook-plugin.ready"}))
+    registry.register_capability(
+        plugin_name="hook-plugin",
+        kind=PluginCapabilityKind.EVENT_HOOK,
+        implementation=hook,
+    )
+    dispatcher = QueuedPluginHookDispatcher(
+        arq_redis=_QueueStub(exception=RuntimeError("queue down")),
         queue_name="filmu-py",
         queued_events=frozenset({"hook-plugin.ready"}),
         fallback_executor=PluginHookWorkerExecutor(),

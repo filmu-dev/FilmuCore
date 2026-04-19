@@ -167,7 +167,7 @@ if ($behindBy -gt 0) {
     }
 }
 if ($aheadBy -eq 0) {
-    $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from local 'main' to a dedicated remote review branch instead, and do not create a local branch copy.")
+    $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from local '$BaseBranch' to a dedicated remote review branch instead, and do not create a local branch copy.")
 }
 if ($null -ne $closedReuse) {
     $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }

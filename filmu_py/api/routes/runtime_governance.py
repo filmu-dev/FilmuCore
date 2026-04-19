@@ -870,7 +870,7 @@ def _windows_provider_media_gate_snapshot() -> dict[str, int | str | list[str]]:
 
 def _windows_soak_profile_gate_snapshot(
     windows_soak_summary: dict[str, object] | None,
-) -> dict[str, int | str | list[str]]:
+) -> dict[str, int | str | list[str] | dict[str, int]]:
     """Return bounded native Windows soak-profile coverage posture."""
 
     if windows_soak_summary is None:

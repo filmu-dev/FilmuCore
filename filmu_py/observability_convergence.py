@@ -298,6 +298,7 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
             ),
         ),
     ]
+    proof_artifacts = [ref for ref in observability_policy.proof_refs if str(ref).strip()]
     return ObservabilityConvergenceSnapshot(
         generated_at=datetime.now(UTC).isoformat(),
         status=status,
@@ -336,9 +337,7 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
             and observability_policy.environment_shipping_enabled
             and observability_policy.search_backend != "none"
         ),
-        alert_rollout_ready=bool(
-            observability_policy.alerting_enabled and observability_policy.proof_refs
-        ),
+        alert_rollout_ready=bool(observability_policy.alerting_enabled and proof_artifacts),
         pipeline_stages=pipeline_stages,
     )
 

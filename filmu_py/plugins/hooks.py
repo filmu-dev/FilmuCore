@@ -211,7 +211,7 @@ class QueuedPluginHookDispatcher:
         for hook in matching_hooks:
             plugin_name = hook.plugin_name
             try:
-                enqueued = await self.arq_redis.enqueue_job(
+                await self.arq_redis.enqueue_job(
                     "dispatch_plugin_hook_event",
                     plugin_name,
                     event_type,
@@ -233,8 +233,7 @@ class QueuedPluginHookDispatcher:
                     },
                     exc_info=True,
                 )
-                enqueued = None
-            if enqueued is None and self.fallback_enabled:
-                fallback_hooks.append(hook)
+                if self.fallback_enabled:
+                    fallback_hooks.append(hook)
         if fallback_hooks:
             await self.fallback_executor.dispatch(event_type, payload, fallback_hooks)

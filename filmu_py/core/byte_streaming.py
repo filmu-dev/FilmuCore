@@ -1129,7 +1129,7 @@ def _classify_generated_playlist_failure_kind(playlist_path: Path) -> str:
         return "incomplete_output"
     try:
         referenced = referenced_local_hls_files(playlist_path)
-    except HTTPException:
+    except (HTTPException, OSError, UnicodeError):
         return "manifest_invalid"
     return "incomplete_output" if not all(path.is_file() for path in referenced) else "unknown"
 

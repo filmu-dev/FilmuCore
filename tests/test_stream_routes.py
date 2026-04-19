@@ -267,6 +267,21 @@ def _build_playback_attachment(
     )
 
 
+def test_classify_generated_playlist_failure_kind_handles_manifest_read_errors(tmp_path: Path) -> None:
+    playlist = tmp_path / "playlist.m3u8"
+    playlist.write_text("#EXTM3U\nsegment.ts\n", encoding="utf-8")
+    original = byte_streaming.referenced_local_hls_files
+
+    def raise_unicode_error(_: Path) -> list[Path]:
+        raise UnicodeError("bad playlist")
+
+    byte_streaming.referenced_local_hls_files = raise_unicode_error
+    try:
+        assert byte_streaming._classify_generated_playlist_failure_kind(playlist) == "manifest_invalid"
+    finally:
+        byte_streaming.referenced_local_hls_files = original
+
+
 def _build_media_entry(
     *,
     media_entry_id: str | None = None,
