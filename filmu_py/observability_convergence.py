@@ -51,12 +51,14 @@ class ObservabilityConvergenceSnapshot:
     log_shipper_type: str
     log_shipper_target_configured: bool
     log_shipper_healthcheck_configured: bool
+    log_field_mapping_version: str
     search_backend: str
     environment_shipping_enabled: bool
     alerting_enabled: bool
     rust_trace_correlation_enabled: bool
     correlation_contract_complete: bool
     proof_refs: list[str]
+    proof_ref_count: int
     required_correlation_fields: list[str]
     required_actions: list[str]
     remaining_gaps: list[str]
@@ -70,6 +72,8 @@ class ObservabilityConvergenceSnapshot:
     grpc_service_name: str
     otlp_endpoint: str | None
     log_shipper_target: str | None
+    environment_rollout_ready: bool
+    alert_rollout_ready: bool
     pipeline_stages: list[ObservabilityPipelineStageSnapshot]
 
 
@@ -294,6 +298,7 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
             ),
         ),
     ]
+    proof_artifacts = [ref for ref in observability_policy.proof_refs if str(ref).strip()]
     return ObservabilityConvergenceSnapshot(
         generated_at=datetime.now(UTC).isoformat(),
         status=status,
@@ -305,12 +310,14 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
         log_shipper_type=settings.log_shipper.type,
         log_shipper_target_configured=bool(settings.log_shipper.target),
         log_shipper_healthcheck_configured=bool(settings.log_shipper.healthcheck_url),
+        log_field_mapping_version=settings.log_shipper.field_mapping_version,
         search_backend=observability_policy.search_backend,
         environment_shipping_enabled=observability_policy.environment_shipping_enabled,
         alerting_enabled=observability_policy.alerting_enabled,
         rust_trace_correlation_enabled=observability_policy.rust_trace_correlation_enabled,
         correlation_contract_complete=correlation_contract_complete,
         proof_refs=list(observability_policy.proof_refs),
+        proof_ref_count=len([ref for ref in observability_policy.proof_refs if str(ref).strip()]),
         required_correlation_fields=list(observability_policy.required_correlation_fields),
         required_actions=required_actions,
         remaining_gaps=remaining_gaps,
@@ -324,6 +331,13 @@ def build_observability_convergence_snapshot(settings: Settings) -> Observabilit
         grpc_service_name=GRPC_SERVICE_NAME,
         otlp_endpoint=settings.otel_exporter_otlp_endpoint,
         log_shipper_target=settings.log_shipper.target,
+        environment_rollout_ready=bool(
+            settings.log_shipper.enabled
+            and bool(settings.log_shipper.target)
+            and observability_policy.environment_shipping_enabled
+            and observability_policy.search_backend != "none"
+        ),
+        alert_rollout_ready=bool(observability_policy.alerting_enabled and proof_artifacts),
         pipeline_stages=pipeline_stages,
     )
 

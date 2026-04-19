@@ -33,7 +33,15 @@ class AuthContextLike(Protocol):
         raise NotImplementedError
 
     @property
+    def actor_display_name(self) -> str | None:
+        raise NotImplementedError
+
+    @property
     def tenant_id(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def tenant_display_name(self) -> str | None:
         raise NotImplementedError
 
     @property
@@ -89,11 +97,14 @@ class SecurityIdentityService:
                 tenant = TenantORM(
                     id=auth_context.tenant_id,
                     slug=auth_context.tenant_id.lower(),
-                    display_name=_display_name_for(auth_context.tenant_id),
+                    display_name=auth_context.tenant_display_name
+                    or _display_name_for(auth_context.tenant_id),
                     kind="system" if auth_context.tenant_id == "global" else "tenant",
                     status="active",
                 )
                 session.add(tenant)
+            elif auth_context.tenant_display_name:
+                tenant.display_name = auth_context.tenant_display_name
             tenant_status = tenant.status
 
             principal = (
@@ -107,7 +118,8 @@ class SecurityIdentityService:
                     principal_key=auth_context.actor_id,
                     principal_type=auth_context.actor_type,
                     authentication_mode=auth_context.authentication_mode,
-                    display_name=_display_name_for(auth_context.actor_id),
+                    display_name=auth_context.actor_display_name
+                    or _display_name_for(auth_context.actor_id),
                     roles=list(auth_context.roles),
                     scopes=list(auth_context.scopes),
                     status="active",
@@ -119,6 +131,11 @@ class SecurityIdentityService:
                 principal.tenant_id = tenant.id
                 principal.principal_type = auth_context.actor_type
                 principal.authentication_mode = auth_context.authentication_mode
+                principal.display_name = (
+                    auth_context.actor_display_name
+                    or principal.display_name
+                    or _display_name_for(auth_context.actor_id)
+                )
                 principal.roles = list(auth_context.roles)
                 principal.scopes = list(auth_context.scopes)
                 principal.status = "active"
@@ -178,11 +195,14 @@ class SecurityIdentityService:
                 tenant = TenantORM(
                     id=auth_context.tenant_id,
                     slug=auth_context.tenant_id.lower(),
-                    display_name=_display_name_for(auth_context.tenant_id),
+                    display_name=auth_context.tenant_display_name
+                    or _display_name_for(auth_context.tenant_id),
                     kind="system" if auth_context.tenant_id == "global" else "tenant",
                     status="active",
                 )
                 session.add(tenant)
+            elif auth_context.tenant_display_name:
+                tenant.display_name = auth_context.tenant_display_name
             tenant_status = tenant.status
 
             principal = (
@@ -248,6 +268,8 @@ class _BootstrapAuthContext:
     tenant_id: str
     roles: tuple[str, ...]
     scopes: tuple[str, ...]
+    actor_display_name: str | None = None
+    tenant_display_name: str | None = None
 
 
 def _display_name_for(value: str) -> str:

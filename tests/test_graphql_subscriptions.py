@@ -24,6 +24,12 @@ from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.graphql import GraphQLPluginRegistry, build_schema, create_graphql_router
 from filmu_py.graphql.deps import GraphQLContext
 from filmu_py.resources import AppResources
+from filmu_py.services.media import (
+    ItemRequestSummaryRecord,
+    MediaItemSummaryRecord,
+    ResolvedPlaybackAttachmentRecord,
+    ResolvedPlaybackSnapshotRecord,
+)
 
 
 class DummyRedis:
@@ -53,7 +59,32 @@ class FakeMediaService:
     """Placeholder media service for subscription tests that do not hit item queries."""
 
     def __init__(self) -> None:
-        self._noop = None
+        self.detail: MediaItemSummaryRecord | None = None
+
+    async def get_item_detail(
+        self,
+        item_identifier: str,
+        *,
+        media_type: str,
+        extended: bool = False,
+        tenant_id: str | None = None,
+    ) -> MediaItemSummaryRecord | None:
+        _ = (media_type, extended, tenant_id)
+        if self.detail is None or self.detail.id != item_identifier:
+            return None
+        return self.detail
+
+    async def get_stream_candidates(self, *, media_item_id: str) -> list[object]:
+        _ = media_item_id
+        return []
+
+    async def get_recovery_plan(self, *, media_item_id: str) -> None:
+        _ = media_item_id
+        return None
+
+    async def get_workflow_checkpoint(self, *, media_item_id: str) -> None:
+        _ = media_item_id
+        return None
 
 
 def _build_settings() -> Settings:
@@ -86,11 +117,14 @@ def _build_resources(
 
 
 def _build_context(resources: AppResources) -> GraphQLContext:
+    app = FastAPI()
+    app.state.resources = resources
     request = Request(
         {
             "type": "http",
             "method": "POST",
             "path": "/graphql",
+            "app": app,
             "headers": [],
             "query_string": b"",
         }
@@ -150,6 +184,22 @@ async def _collect_subscription_event(
         return cast(dict[str, Any], result.data)
 
 
+async def _collect_query_data(
+    *,
+    query: str,
+    resources: AppResources,
+    variables: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    schema = build_schema(resources.graphql_plugin_registry)
+    result = await schema.execute(
+        query,
+        variable_values=variables,
+        context_value=_build_context(resources),
+    )
+    assert result.errors is None
+    return cast(dict[str, Any], result.data)
+
+
 async def _publish_once(coro: Any) -> AsyncGenerator[None, None]:
     await asyncio.sleep(0)
     await coro
@@ -196,6 +246,7 @@ async def test_log_stream_subscription_receives_log_events() -> None:
     _, resources = _build_resources()
     payload = {
         "level": "ERROR",
+        "message": "boom",
         "event": "worker.failed",
         "timestamp": "2026-03-20T23:01:00+00:00",
         "worker_id": "worker-1",
@@ -219,7 +270,7 @@ async def test_log_stream_subscription_receives_log_events() -> None:
         yield None
 
     data = await _collect_subscription_event(
-        query="subscription { logStream { level event timestamp worker_id item_id stage extra } }",
+        query="subscription { logStream { level message event timestamp worker_id item_id stage extra } }",
         resources=resources,
         publish=publish(),
     )
@@ -260,7 +311,7 @@ async def test_log_stream_subscription_filters_by_level_and_item_id() -> None:
         yield None
 
     data = await _collect_subscription_event(
-        query='subscription { logStream(level: "ERROR", itemId: "item-1") { level event timestamp worker_id item_id stage extra } }',
+        query='subscription { logStream(level: "ERROR", itemId: "item-1") { level message event timestamp worker_id item_id stage extra } }',
         resources=resources,
         publish=publish(),
     )
@@ -268,6 +319,7 @@ async def test_log_stream_subscription_filters_by_level_and_item_id() -> None:
     assert data == {
         "logStream": {
             "level": "ERROR",
+            "message": "chosen",
             "event": "error.match",
             "timestamp": "2026-03-20T23:01:02+00:00",
             "worker_id": "worker-1",
@@ -324,3 +376,82 @@ def test_graphql_schema_includes_subscription_type() -> None:
     assert "logStream" in schema_sdl
     assert "notifications" in schema_sdl
     assert list(router.protocols) == [GRAPHQL_TRANSPORT_WS_PROTOCOL, GRAPHQL_WS_PROTOCOL]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("item_state", "playback_ready", "expected_lifecycle_state"),
+    [
+        ("downloaded", True, "ready"),
+        ("failed", False, "failed"),
+    ],
+)
+async def test_item_state_subscription_stays_consistent_with_media_item_request_lifecycle(
+    item_state: str,
+    playback_ready: bool,
+    expected_lifecycle_state: str,
+) -> None:
+    _, resources = _build_resources()
+    detail = MediaItemSummaryRecord(
+        id="item-1",
+        type="movie",
+        title="Ready Movie" if playback_ready else "Failed Movie",
+        state=item_state,
+        external_ref="tmdb:1",
+        created_at="2026-04-19T10:00:00+00:00",
+        updated_at="2026-04-19T10:05:00+00:00",
+        request=ItemRequestSummaryRecord(
+            is_partial=False,
+            requested_seasons=None,
+            requested_episodes=None,
+            request_source="director",
+        ),
+        resolved_playback=(
+            ResolvedPlaybackSnapshotRecord(
+                direct=ResolvedPlaybackAttachmentRecord(
+                    kind="remote-direct",
+                    locator="https://edge.example.com/current-ready-movie",
+                    source_key="persisted",
+                    unrestricted_url="https://edge.example.com/current-ready-movie",
+                ),
+                hls=None,
+                direct_ready=True,
+                hls_ready=False,
+                missing_local_file=False,
+            )
+            if playback_ready
+            else None
+        ),
+    )
+    cast(FakeMediaService, resources.media_service).detail = detail
+    payload = {
+        "item_id": "item-1",
+        "from_state": "requested",
+        "to_state": item_state,
+        "timestamp": "2026-04-20T09:00:00+00:00",
+    }
+
+    event = await _collect_subscription_event(
+        query=(
+            "subscription { "
+            "itemStateChanged { item_id from_state to_state timestamp } "
+            "}"
+        ),
+        resources=resources,
+        publish=_publish_once(resources.event_bus.publish("item.state.changed", payload)),
+    )
+    detail_data = await _collect_query_data(
+        query=(
+            "query MediaItem($id: ID!) { "
+            "mediaItem(id: $id) { "
+            "requestLifecycle { state playbackReady cta } "
+            "} "
+            "}"
+        ),
+        resources=resources,
+        variables={"id": "item-1"},
+    )
+
+    assert event == {"itemStateChanged": payload}
+    assert detail_data["mediaItem"]["requestLifecycle"]["state"] == expected_lifecycle_state
+    assert detail_data["mediaItem"]["requestLifecycle"]["playbackReady"] is playback_ready

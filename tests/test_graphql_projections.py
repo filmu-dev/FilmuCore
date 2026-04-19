@@ -17,12 +17,16 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import AnyUrl, SecretStr
 
+from filmu_py.api.models import (
+    EventTypesResponse,
+)
 from filmu_py.api.routes import default as default_routes
 from filmu_py.api.routes import runtime_governance
 from filmu_py.config import Settings
 from filmu_py.core import byte_streaming
 from filmu_py.core.cache import CACHE_HITS_TOTAL, CACHE_INVALIDATIONS_TOTAL, CacheManager
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.plugin_hook_queue_status import PluginHookQueueStatusStore
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.core.runtime_lifecycle import (
     RuntimeLifecycleHealth,
@@ -40,16 +44,34 @@ from filmu_py.resources import AppResources
 from filmu_py.services import governance_posture
 from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services.media import (
+    ActiveStreamDetailRecord,
     CalendarProjectionRecord,
     CalendarReleaseDataRecord,
+    ConsumerPlaybackActivityItemRecord,
+    ConsumerPlaybackActivityRecord,
+    ConsumerPlaybackDeviceRecord,
+    ConsumerPlaybackSessionRecord,
+    EnrichmentResult,
+    ItemRequestSummaryRecord,
+    MediaEntryDetailRecord,
     MediaItemRecord,
     MediaItemSpecializationRecord,
     MediaItemSummaryRecord,
     ParentIdsRecord,
+    PlaybackAttachmentDetailRecord,
     RecoveryMechanism,
     RecoveryPlanRecord,
     RecoveryTargetStage,
+    RequestCandidateSeasonRecord,
+    RequestCandidateSeasonSummaryRecord,
+    RequestItemServiceResult,
+    RequestSearchCandidateRecord,
+    RequestSearchLifecycleRecord,
+    RequestSearchPageRecord,
+    ResolvedPlaybackAttachmentRecord,
+    ResolvedPlaybackSnapshotRecord,
     StatsProjection,
+    WorkflowCheckpointRecord,
 )
 from filmu_py.services.playback import (
     DirectPlaybackRefreshControlPlaneTriggerResult,
@@ -193,7 +215,25 @@ class FailingAuthorizationAuditService:
         raise RuntimeError("audit store unavailable")
 
 
+class DummyDatabaseSession:
+    async def __aenter__(self) -> DummyDatabaseSession:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+    async def execute(self, statement: Any) -> None:
+        _ = statement
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+
 class DummyDatabaseRuntime:
+    def session(self) -> DummyDatabaseSession:
+        return DummyDatabaseSession()
+
     async def dispose(self) -> None:
         return None
 
@@ -224,9 +264,40 @@ class FakeMediaService:
         )
     )
     detail: MediaItemSummaryRecord | None = None
+    detail_by_item_id: dict[str, MediaItemSummaryRecord | Any | None] = field(default_factory=dict)
     stream_candidates: list[StreamORM] = field(default_factory=list)
     item_records: list[MediaItemRecord] = field(default_factory=list)
     recovery_plan: RecoveryPlanRecord | None = None
+    workflow_checkpoint: WorkflowCheckpointRecord | None = None
+    detail_page: object | None = None
+    search_item_calls: list[dict[str, Any]] = field(default_factory=list)
+    search_item_detail_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_search_results: list[Any] = field(default_factory=list)
+    request_search_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_candidate_result: Any | None = None
+    request_candidate_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_history_page_result: Any | None = None
+    request_history_page_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_search_page_result: Any | None = None
+    request_search_page_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_discovery_results: list[Any] = field(default_factory=list)
+    request_discovery_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_editorial_family_results: list[Any] = field(default_factory=list)
+    request_editorial_family_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_release_window_results: list[Any] = field(default_factory=list)
+    request_release_window_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_projection_group_results: list[Any] = field(default_factory=list)
+    request_projection_group_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_discovery_page_result: Any | None = None
+    request_discovery_page_calls: list[dict[str, Any]] = field(default_factory=list)
+    detail_calls: list[dict[str, Any]] = field(default_factory=list)
+    consumer_playback_activity: ConsumerPlaybackActivityRecord = field(
+        default_factory=lambda: ConsumerPlaybackActivityRecord(
+            generated_at="2026-04-19T12:00:00+00:00"
+        )
+    )
+    consumer_playback_activity_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_item_calls: list[dict[str, Any]] = field(default_factory=list)
 
     async def get_calendar(
         self,
@@ -246,9 +317,44 @@ class FakeMediaService:
         *,
         media_type: str,
         extended: bool = False,
+        tenant_id: str | None = None,
     ) -> MediaItemSummaryRecord | None:
-        _ = (item_identifier, media_type, extended)
-        return self.detail
+        self.detail_calls.append(
+            {
+                "item_identifier": item_identifier,
+                "media_type": media_type,
+                "extended": extended,
+                "tenant_id": tenant_id,
+            }
+        )
+        return cast(
+            MediaItemSummaryRecord | None,
+            self.detail_by_item_id.get(item_identifier, self.detail),
+        )
+
+    async def get_consumer_playback_activity(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        actor_type: str,
+        item_limit: int = 12,
+        device_limit: int = 6,
+        history_limit: int = 240,
+        focus_item_id: str | None = None,
+    ) -> ConsumerPlaybackActivityRecord:
+        self.consumer_playback_activity_calls.append(
+            {
+                "tenant_id": tenant_id,
+                "actor_id": actor_id,
+                "actor_type": actor_type,
+                "item_limit": item_limit,
+                "device_limit": device_limit,
+                "history_limit": history_limit,
+                "focus_item_id": focus_item_id,
+            }
+        )
+        return self.consumer_playback_activity
 
     async def search_items(
         self,
@@ -260,17 +366,50 @@ class FakeMediaService:
         sort: list[str] | None = None,
         search: str | None = None,
         extended: bool = False,
+        tenant_id: str | None = None,
+        allowed_item_ids: set[str] | None = None,
     ) -> object:
-        _ = (limit, page, item_types, states, sort, search, extended)
+        self.search_item_calls.append(
+            {
+                "limit": limit,
+                "page": page,
+                "item_types": item_types,
+                "states": states,
+                "sort": sort,
+                "search": search,
+                "extended": extended,
+                "tenant_id": tenant_id,
+                "allowed_item_ids": sorted(allowed_item_ids) if allowed_item_ids is not None else None,
+            }
+        )
 
         @dataclass
         class _Page:
             items: list[MediaItemSummaryRecord]
+            total_items: int
+            limit: int
+            page: int
+            total_pages: int
 
         if self.detail is not None:
-            return _Page(items=[self.detail])
-        return _Page(
-            items=[
+            detail_records = [self.detail]
+            if allowed_item_ids is not None:
+                detail_records = [record for record in detail_records if record.id in allowed_item_ids]
+            total_items = len(detail_records)
+            total_pages = max(1, (total_items + max(limit, 1) - 1) // max(limit, 1))
+            return _Page(
+                items=detail_records,
+                total_items=total_items,
+                limit=limit,
+                page=page,
+                total_pages=total_pages,
+            )
+
+        source_records = list(self.item_records)
+        if allowed_item_ids is not None:
+            source_records = [record for record in source_records if record.id in allowed_item_ids]
+
+        records = [
                 MediaItemSummaryRecord(
                     id=record.id,
                     type=str(record.attributes.get("item_type", "unknown")),
@@ -349,8 +488,281 @@ class FakeMediaService:
                         ),
                     ),
                 )
-                for record in self.item_records[:limit]
+                for record in source_records[:limit]
             ]
+        total_items = len(source_records) if source_records else len(records)
+        total_pages = max(1, (total_items + max(limit, 1) - 1) // max(limit, 1))
+        return _Page(
+            items=records,
+            total_items=total_items,
+            limit=limit,
+            page=page,
+            total_pages=total_pages,
+        )
+
+    async def search_item_details(
+        self,
+        *,
+        limit: int = 24,
+        offset: int = 0,
+        states: list[str] | None = None,
+        query: str | None = None,
+        provider: str | None = None,
+        attachment_state: str | None = None,
+        stream: str | None = None,
+        has_errors: bool = False,
+        sort: str | None = None,
+        tenant_id: str | None = None,
+    ) -> object:
+        _ = (
+            tenant_id,
+        )
+        self.search_item_detail_calls.append(
+            {
+                "limit": limit,
+                "offset": offset,
+                "states": states,
+                "query": query,
+                "provider": provider,
+                "attachment_state": attachment_state,
+                "stream": stream,
+                "has_errors": has_errors,
+                "sort": sort,
+            }
+        )
+
+        if self.detail_page is not None:
+            return self.detail_page
+
+        @dataclass
+        class _Page:
+            items: list[MediaItemSummaryRecord]
+            total_items: int
+            limit: int
+
+        items: list[MediaItemSummaryRecord] = []
+        if self.detail is not None:
+            items = [self.detail]
+        return _Page(items=items, total_items=len(items), limit=limit)
+
+    async def search_request_candidates(
+        self,
+        *,
+        query: str,
+        media_type: str | None = None,
+        limit: int = 12,
+        tenant_id: str | None = None,
+    ) -> list[Any]:
+        self.request_search_calls.append(
+            {
+                "query": query,
+                "media_type": media_type,
+                "limit": limit,
+                "tenant_id": tenant_id,
+            }
+        )
+        return list(self.request_search_results[:limit])
+
+    async def get_request_candidate(
+        self,
+        *,
+        external_ref: str,
+        media_type: str,
+        tenant_id: str | None = None,
+    ) -> Any | None:
+        self.request_candidate_calls.append(
+            {
+                "external_ref": external_ref,
+                "media_type": media_type,
+                "tenant_id": tenant_id,
+            }
+        )
+        return self.request_candidate_result
+
+    async def get_request_history_page(
+        self,
+        *,
+        media_type: str | None = None,
+        limit: int = 6,
+        offset: int = 0,
+        tenant_id: str | None = None,
+    ) -> Any:
+        self.request_history_page_calls.append(
+            {
+                "media_type": media_type,
+                "limit": limit,
+                "offset": offset,
+                "tenant_id": tenant_id,
+            }
+        )
+        if self.request_history_page_result is not None:
+            return self.request_history_page_result
+        return SimpleNamespace(
+            items=[],
+            offset=offset,
+            limit=limit,
+            total_count=0,
+            has_previous_page=offset > 0,
+            has_next_page=False,
+            result_window_complete=True,
+        )
+
+    async def search_request_candidates_page(
+        self,
+        *,
+        query: str,
+        media_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        tenant_id: str | None = None,
+    ) -> Any:
+        self.request_search_page_calls.append(
+            {
+                "query": query,
+                "media_type": media_type,
+                "limit": limit,
+                "offset": offset,
+                "tenant_id": tenant_id,
+            }
+        )
+        if self.request_search_page_result is not None:
+            return self.request_search_page_result
+        return SimpleNamespace(
+            items=[],
+            offset=offset,
+            limit=limit,
+            total_count=0,
+            has_previous_page=offset > 0,
+            has_next_page=False,
+            result_window_complete=True,
+        )
+
+    async def discover_request_candidates(
+        self,
+        *,
+        limit_per_rail: int = 8,
+        rail_ids: list[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> list[Any]:
+        self.request_discovery_calls.append(
+            {
+                "limit_per_rail": limit_per_rail,
+                "rail_ids": list(rail_ids) if rail_ids is not None else None,
+                "tenant_id": tenant_id,
+            }
+        )
+        return list(self.request_discovery_results)
+
+    async def discover_request_editorial_families(
+        self,
+        *,
+        limit_per_family: int = 8,
+        family_ids: list[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> list[Any]:
+        self.request_editorial_family_calls.append(
+            {
+                "limit_per_family": limit_per_family,
+                "family_ids": list(family_ids) if family_ids is not None else None,
+                "tenant_id": tenant_id,
+            }
+        )
+        return list(self.request_editorial_family_results)
+
+    async def discover_request_release_windows(
+        self,
+        *,
+        limit_per_window: int = 8,
+        window_ids: list[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> list[Any]:
+        self.request_release_window_calls.append(
+            {
+                "limit_per_window": limit_per_window,
+                "window_ids": list(window_ids) if window_ids is not None else None,
+                "tenant_id": tenant_id,
+            }
+        )
+        return list(self.request_release_window_results)
+
+    async def discover_request_projection_groups(
+        self,
+        *,
+        media_type: str | None = None,
+        genre: str | None = None,
+        release_year: int | None = None,
+        original_language: str | None = None,
+        company: str | None = None,
+        network: str | None = None,
+        sort: str | None = None,
+        limit_per_group: int = 6,
+        tenant_id: str | None = None,
+    ) -> list[Any]:
+        self.request_projection_group_calls.append(
+            {
+                "media_type": media_type,
+                "genre": genre,
+                "release_year": release_year,
+                "original_language": original_language,
+                "company": company,
+                "network": network,
+                "sort": sort,
+                "limit_per_group": limit_per_group,
+                "tenant_id": tenant_id,
+            }
+        )
+        return list(self.request_projection_group_results)
+
+    async def discover_request_candidates_page(
+        self,
+        *,
+        media_type: str | None = None,
+        genre: str | None = None,
+        release_year: int | None = None,
+        original_language: str | None = None,
+        company: str | None = None,
+        network: str | None = None,
+        sort: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        tenant_id: str | None = None,
+    ) -> Any:
+        self.request_discovery_page_calls.append(
+            {
+                "media_type": media_type,
+                "genre": genre,
+                "release_year": release_year,
+                "original_language": original_language,
+                "company": company,
+                "network": network,
+                "sort": sort,
+                "limit": limit,
+                "offset": offset,
+                "tenant_id": tenant_id,
+            }
+        )
+        if self.request_discovery_page_result is not None:
+            return self.request_discovery_page_result
+        return SimpleNamespace(
+            items=[],
+            offset=offset,
+            limit=limit,
+            total_count=0,
+            has_previous_page=offset > 0,
+            has_next_page=False,
+            result_window_complete=True,
+            facets=SimpleNamespace(
+                genres=[],
+                release_years=[],
+                languages=[],
+                sorts=[
+                    SimpleNamespace(
+                        value="popular",
+                        label="Popular",
+                        selected=True,
+                    )
+                ],
+            ),
         )
 
     async def get_stream_candidates(self, *, media_item_id: str) -> list[StreamORM]:
@@ -360,6 +772,52 @@ class FakeMediaService:
     async def get_recovery_plan(self, *, media_item_id: str) -> RecoveryPlanRecord | None:
         _ = media_item_id
         return self.recovery_plan
+
+    async def get_workflow_checkpoint(
+        self,
+        *,
+        media_item_id: str,
+        workflow_name: str = "item_pipeline",
+    ) -> WorkflowCheckpointRecord | None:
+        _ = (media_item_id, workflow_name)
+        return self.workflow_checkpoint
+
+    async def request_item_with_enrichment(
+        self,
+        external_ref: str,
+        title: str | None = None,
+        *,
+        media_type: str | None = None,
+        attributes: dict[str, object] | None = None,
+        requested_seasons: list[int] | None = None,
+        requested_episodes: dict[str, list[int]] | None = None,
+    ) -> RequestItemServiceResult:
+        _ = (title, media_type, attributes, requested_seasons, requested_episodes)
+        self.request_item_calls.append(
+            {
+                "external_ref": external_ref,
+                "media_type": media_type,
+                "requested_seasons": requested_seasons,
+                "requested_episodes": requested_episodes,
+            }
+        )
+        item_id = next(iter(self.detail_by_item_id.keys()), None) or "item-requested"
+        return RequestItemServiceResult(
+            item=MediaItemRecord(
+                id=item_id,
+                external_ref=external_ref,
+                title="Requested Item",
+                state=ItemState.REQUESTED,
+                attributes={"item_type": media_type or "movie"},
+            ),
+            enrichment=EnrichmentResult(
+                source="tmdb",
+                has_poster=True,
+                has_imdb_id=True,
+                has_tmdb_id=True,
+                warnings=[],
+            ),
+        )
 
     async def list_items(self, limit: int = 100) -> list[MediaItemRecord]:
         return list(self.item_records[:limit])
@@ -834,7 +1292,12 @@ def _graphql_headers(*scopes: str, roles: str = "playback:operator") -> dict[str
 
 
 def _allow_graphql_control_plane_permissions(settings: Settings) -> None:
-    for permission in ("settings:write", "security:policy.approve"):
+    for permission in (
+        "settings:write",
+        "security:policy.approve",
+        "security:apikey.rotate",
+        "tenant:quota.write",
+    ):
         constraint = settings.access_policy.permission_constraints.setdefault(permission, {})
         route_prefixes = constraint.setdefault("route_prefixes", [])
         if "/graphql" not in route_prefixes:
@@ -1418,6 +1881,50 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
                 "soak_proof_refs": ["ops/plugins/plex-soak.md"],
             }
         },
+        "notifications": {
+            "enabled": True,
+            "webhook_url": "https://notify.example/webhook",
+            "contract_proof_refs": ["ops/plugins/notifications-contract.md"],
+            "soak_proof_refs": ["ops/plugins/notifications-soak.md"],
+        },
+        "downloaders": {
+            "real_debrid": {
+                "enabled": True,
+                "api_key": "rd-token",
+                "contract_proof_refs": ["ops/plugins/realdebrid-contract.md"],
+                "soak_proof_refs": ["ops/plugins/realdebrid-soak.md"],
+            },
+            "all_debrid": {
+                "enabled": True,
+                "api_key": "ad-token",
+                "contract_proof_refs": ["ops/plugins/alldebrid-contract.md"],
+                "soak_proof_refs": ["ops/plugins/alldebrid-soak.md"],
+            },
+            "debrid_link": {
+                "enabled": True,
+                "api_key": "dl-token",
+                "contract_proof_refs": ["ops/plugins/debridlink-contract.md"],
+                "soak_proof_refs": ["ops/plugins/debridlink-soak.md"],
+            },
+            "stremthru": {
+                "enabled": True,
+                "url": "https://stremthru.example",
+                "token": "st-token",
+                "contract_proof_refs": ["ops/plugins/stremthru-contract.md"],
+                "soak_proof_refs": ["ops/plugins/stremthru-soak.md"],
+            },
+        },
+        "metadata": {
+            "tmdb": {
+                "contract_proof_refs": ["ops/plugins/tmdb-contract.md"],
+                "soak_proof_refs": ["ops/plugins/tmdb-soak.md"],
+            },
+            "tvdb": {
+                "enabled": True,
+                "contract_proof_refs": ["ops/plugins/tvdb-contract.md"],
+                "soak_proof_refs": ["ops/plugins/tvdb-soak.md"],
+            },
+        },
     }
     registry = PluginRegistry()
     harness = TestPluginContext(settings=plugin_settings)
@@ -1429,6 +1936,9 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
         settings_overrides={
             "FILMU_PY_SCRAPING": plugin_settings["scraping"],
             "FILMU_PY_UPDATERS": plugin_settings["updaters"],
+            "FILMU_PY_DOWNLOADERS": plugin_settings["downloaders"],
+            "FILMU_PY_NOTIFICATIONS": plugin_settings["notifications"],
+            "TMDB_API_KEY": "tmdb-token",
         },
     )
 
@@ -1448,6 +1958,8 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
                       readyPlugins
                       missingContractProofPlugins
                       missingSoakProofPlugins
+                      verifiedPlugins
+                      missingVerificationPlugins
                     }
                     requiredActions
                     remainingGaps
@@ -1471,6 +1983,10 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
                       contractValidated
                       soakValidated
                       proofGapCount
+                      verificationStatus
+                      verificationCheckCount
+                      verifiedCheckCount
+                      missingVerificationChecks
                       requiredActions
                       remainingGaps
                     }
@@ -1484,14 +2000,16 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
     payload = response.json()["data"]["pluginIntegrationReadiness"]
     assert payload["status"] == "ready"
     assert payload["summary"] == {
-        "totalPlugins": 3,
-        "enabledPlugins": 3,
-        "configuredPlugins": 3,
-        "contractValidatedPlugins": 3,
-        "soakValidatedPlugins": 3,
-        "readyPlugins": 3,
+        "totalPlugins": 10,
+        "enabledPlugins": 10,
+        "configuredPlugins": 10,
+        "contractValidatedPlugins": 10,
+        "soakValidatedPlugins": 10,
+        "readyPlugins": 10,
         "missingContractProofPlugins": 0,
         "missingSoakProofPlugins": 0,
+        "verifiedPlugins": 10,
+        "missingVerificationPlugins": 0,
     }
     assert payload["requiredActions"] == []
     assert payload["remainingGaps"] == []
@@ -1501,6 +2019,10 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
     assert by_name["comet"]["endpointConfigured"] is True
     assert by_name["comet"]["contractValidated"] is True
     assert by_name["comet"]["soakValidated"] is True
+    assert by_name["comet"]["verificationStatus"] == "verified"
+    assert by_name["comet"]["verificationCheckCount"] == 4
+    assert by_name["comet"]["verifiedCheckCount"] == 4
+    assert by_name["comet"]["missingVerificationChecks"] == []
     assert by_name["comet"]["contractProofs"] == [
         {
             "ref": "ops/plugins/comet-contract.md",
@@ -1515,6 +2037,13 @@ def test_graphql_plugin_integration_readiness_returns_typed_posture() -> None:
     assert "listrr" not in by_name
     assert by_name["plex"]["ready"] is True
     assert by_name["plex"]["soakProofRefs"] == ["ops/plugins/plex-soak.md"]
+    assert by_name["notifications"]["endpoint"] == "https://notify.example/webhook"
+    assert by_name["tmdb"]["ready"] is True
+    assert by_name["tvdb"]["ready"] is True
+    assert by_name["realdebrid"]["ready"] is True
+    assert by_name["alldebrid"]["ready"] is True
+    assert by_name["debridlink"]["ready"] is True
+    assert by_name["stremthru"]["ready"] is True
 
 
 def test_graphql_plugin_integration_readiness_sanitizes_blank_proof_refs() -> None:
@@ -1537,6 +2066,19 @@ def test_graphql_plugin_integration_readiness_sanitizes_blank_proof_refs() -> No
         plugin_settings_payload=plugin_settings,
         settings_overrides={
             "FILMU_PY_SCRAPING": plugin_settings["scraping"],
+            "FILMU_PY_DOWNLOADERS": {
+                "real_debrid": {"enabled": False, "api_key": ""},
+                "all_debrid": {"enabled": False, "api_key": ""},
+                "debrid_link": {"enabled": False, "api_key": ""},
+                "stremthru": {"enabled": False, "url": "", "token": ""},
+            },
+            "FILMU_PY_NOTIFICATIONS": {
+                "enabled": False,
+                "service_urls": [],
+                "webhook_url": None,
+                "discord_webhook_url": None,
+            },
+            "TMDB_API_KEY": "",
         },
     )
 
@@ -1550,6 +2092,8 @@ def test_graphql_plugin_integration_readiness_sanitizes_blank_proof_refs() -> No
                       totalPlugins
                       contractValidatedPlugins
                       missingContractProofPlugins
+                      verifiedPlugins
+                      missingVerificationPlugins
                     }
                     plugins {
                       name
@@ -1558,6 +2102,10 @@ def test_graphql_plugin_integration_readiness_sanitizes_blank_proof_refs() -> No
                       contractValidated
                       soakValidated
                       proofGapCount
+                      verificationStatus
+                      verificationCheckCount
+                      verifiedCheckCount
+                      missingVerificationChecks
                     }
                   }
                 }
@@ -1571,6 +2119,8 @@ def test_graphql_plugin_integration_readiness_sanitizes_blank_proof_refs() -> No
         "totalPlugins": 1,
         "contractValidatedPlugins": 0,
         "missingContractProofPlugins": 1,
+        "verifiedPlugins": 0,
+        "missingVerificationPlugins": 1,
     }
     assert payload["plugins"] == [
         {
@@ -1580,6 +2130,10 @@ def test_graphql_plugin_integration_readiness_sanitizes_blank_proof_refs() -> No
             "contractValidated": False,
             "soakValidated": True,
             "proofGapCount": 1,
+            "verificationStatus": "partial",
+            "verificationCheckCount": 4,
+            "verifiedCheckCount": 3,
+            "missingVerificationChecks": ["contract_proof"],
         }
     ]
 
@@ -1871,6 +2425,165 @@ def test_graphql_control_plane_posture_returns_typed_summary_and_automation() ->
         "proofReady": True,
         "requiredActions": ["recover_stale_control_plane_subscribers"],
         "remainingGaps": ["control-plane backlog needs recovery"],
+    }
+
+
+def test_graphql_control_plane_hot_reads_cache_and_refresh_after_recovery_mutation() -> None:
+    class FakeAutomation:
+        enabled = True
+        interval_seconds = 30
+        active_within_seconds = 180
+        claim_limit = 25
+        max_claim_passes = 2
+        consumer_group = "filmu-api"
+        consumer_name = "automation"
+        last_run_at = None
+        last_success_at = None
+        last_failure_at = None
+        consecutive_failures = 0
+        last_error = None
+
+        def snapshot(self) -> object:
+            return SimpleNamespace(
+                enabled=True,
+                interval_seconds=30,
+                active_within_seconds=180,
+                pending_min_idle_ms=60_000,
+                claim_limit=25,
+                max_claim_passes=2,
+                consumer_group="filmu-api",
+                consumer_name="automation",
+                service_attached=True,
+                backplane_attached=True,
+                last_run_at=None,
+                last_success_at=None,
+                last_failure_at=None,
+                consecutive_failures=0,
+                last_error=None,
+                remediation_updated_subscribers=1,
+                rewound_subscribers=1,
+                claimed_pending_events=2,
+                claim_passes=1,
+                pending_count_after=0,
+            )
+
+    control_plane_service = FakeControlPlaneService()
+    client = _build_client(
+        FakeMediaService(),
+        control_plane_service=control_plane_service,
+        control_plane_automation=FakeAutomation(),
+        replay_backplane=FakeReplayBackplane(
+            pending_count=3,
+            oldest_event_id="100-0",
+            latest_event_id="120-0",
+            consumer_counts={"worker-a": 2},
+        ),
+    )
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+
+    query = """
+        query {
+          controlPlaneSummary(activeWithinSeconds: 180) {
+            totalSubscribers
+            statusCounts { status count }
+          }
+          controlPlaneStatusCounts(activeWithinSeconds: 180) {
+            key
+            count
+          }
+        }
+    """
+
+    first_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={"query": query},
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["data"] == {
+        "controlPlaneSummary": {
+            "totalSubscribers": 2,
+            "statusCounts": [
+                {"status": "active", "count": 1},
+                {"status": "stale", "count": 1},
+            ],
+        },
+        "controlPlaneStatusCounts": [
+            {"key": "active", "count": 1},
+            {"key": "stale", "count": 1},
+        ],
+    }
+
+    control_plane_service.summary_snapshot = SimpleNamespace(
+        total_subscribers=5,
+        active_subscribers=2,
+        stale_subscribers=3,
+        error_subscribers=0,
+        fenced_subscribers=0,
+        ack_pending_subscribers=3,
+        stream_count=1,
+        group_count=1,
+        node_count=2,
+        tenant_count=1,
+        oldest_heartbeat_age_seconds=90.0,
+        status_counts={"active": 2, "stale": 3},
+        required_actions=["recover_stale_control_plane_subscribers"],
+        remaining_gaps=["control-plane backlog needs recovery"],
+    )
+
+    second_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={"query": query},
+    )
+
+    assert second_response.status_code == 200
+    assert second_response.json()["data"] == first_response.json()["data"]
+
+    mutation_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                mutation {
+                  remediateControlPlaneSubscribers(activeWithinSeconds: 180) {
+                    totalUpdatedSubscribers
+                    summary {
+                      totalSubscribers
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert mutation_response.status_code == 200
+    assert mutation_response.json()["data"]["remediateControlPlaneSubscribers"] == {
+        "totalUpdatedSubscribers": 2,
+        "summary": {"totalSubscribers": 5},
+    }
+
+    third_response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={"query": query},
+    )
+
+    assert third_response.status_code == 200
+    assert third_response.json()["data"] == {
+        "controlPlaneSummary": {
+            "totalSubscribers": 5,
+            "statusCounts": [
+                {"status": "active", "count": 2},
+                {"status": "stale", "count": 3},
+            ],
+        },
+        "controlPlaneStatusCounts": [
+            {"key": "active", "count": 2},
+            {"key": "stale", "count": 3},
+        ],
     }
 
 
@@ -2556,6 +3269,26 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
                     name
                     wiringStatus
                   }
+                  pluginEventsPage(limit: 1, offset: 1) {
+                    totalCount
+                    limit
+                    offset
+                    hasPreviousPage
+                    hasNextPage
+                    publishableEventTotal
+                    hookSubscriptionTotal
+                    publisherCounts { key count }
+                    wiringStatusCounts { key count }
+                    rows {
+                      name
+                      publisher
+                      publishableEvents
+                      hookSubscriptions
+                      publishableEventCount
+                      hookSubscriptionCount
+                      wiringStatus
+                    }
+                  }
                   pluginGovernance {
                     summary {
                       totalPlugins
@@ -2665,6 +3398,31 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
             "wiringStatus": "subscriber_only",
         }
     ]
+    assert payload["pluginEventsPage"] == {
+        "totalCount": 2,
+        "limit": 1,
+        "offset": 1,
+        "hasPreviousPage": True,
+        "hasNextPage": False,
+        "publishableEventTotal": 1,
+        "hookSubscriptionTotal": 2,
+        "publisherCounts": [{"key": "community", "count": 1}],
+        "wiringStatusCounts": [
+            {"key": "publisher_only", "count": 1},
+            {"key": "subscriber_only", "count": 1},
+        ],
+        "rows": [
+            {
+                "name": "hook-plugin",
+                "publisher": None,
+                "publishableEvents": [],
+                "hookSubscriptions": ["item.completed", "item.state.changed"],
+                "publishableEventCount": 0,
+                "hookSubscriptionCount": 2,
+                "wiringStatus": "subscriber_only",
+            }
+        ],
+    }
     governance = payload["pluginGovernance"]
     assert governance["summary"] == {
         "totalPlugins": 2,
@@ -2713,6 +3471,113 @@ def test_graphql_downloader_plugin_event_and_governance_posture_returns_typed_su
         "overrideState": None,
         "warnings": [],
     }
+
+
+def test_graphql_plugin_events_include_queued_delivery_health() -> None:
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "hook-plugin",
+                "version": "1.0.0",
+                "api_version": "1",
+                "entry_module": "plugin.py",
+                "publisher": "community",
+                "event_hook": "ExampleHook",
+            }
+        )
+    )
+    hook = type(
+        "Hook",
+        (),
+        {
+            "plugin_name": "hook-plugin",
+            "subscribed_events": frozenset({"item.completed"}),
+        },
+    )()
+    plugin_registry.register_capability(
+        plugin_name="hook-plugin",
+        kind=PluginCapabilityKind.EVENT_HOOK,
+        implementation=hook,
+    )
+    redis = FakeOperatorRedis()
+    client = _build_client(
+        FakeMediaService(),
+        plugin_registry=plugin_registry,
+        redis=redis,
+        settings_overrides={
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "hook_dispatch_mode": "queued",
+                "queued_hook_events": ["item.completed"],
+            }
+        },
+    )
+    resources = cast(Any, client.app.state.resources)
+    resources.arq_redis = redis
+    asyncio.run(
+        PluginHookQueueStatusStore(redis, queue_name="filmu-py").record_delivery(
+            plugin_name="hook-plugin",
+            event_type="item.completed",
+            queued_at_seconds=10.0,
+            execution_duration_seconds=0.2,
+            matched_hooks=1,
+            successful_hooks=1,
+            timeout_hooks=0,
+            failed_hooks=0,
+            attempt=2,
+            now_seconds=12.5,
+        )
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  pluginEvents {
+                    name
+                    queuedHookSubscriptions
+                    queuedHookSubscriptionCount
+                    hookDispatchMode
+                    queuedDispatchEnabled
+                    queueHealthStatus
+                    queueDeliveryObserved
+                    queueObservationCount
+                    latestQueueLagSeconds
+                    maxQueueLagSeconds
+                    successfulDeliveries
+                    timeoutDeliveries
+                    failedDeliveries
+                    retriedDeliveries
+                    requiredActions
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["pluginEvents"] == [
+        {
+            "name": "hook-plugin",
+            "queuedHookSubscriptions": ["item.completed"],
+            "queuedHookSubscriptionCount": 1,
+            "hookDispatchMode": "queued",
+            "queuedDispatchEnabled": True,
+            "queueHealthStatus": "degraded",
+            "queueDeliveryObserved": True,
+            "queueObservationCount": 1,
+            "latestQueueLagSeconds": 2.5,
+            "maxQueueLagSeconds": 2.5,
+            "successfulDeliveries": 1,
+            "timeoutDeliveries": 0,
+            "failedDeliveries": 0,
+            "retriedDeliveries": 1,
+            "requiredActions": ["stabilize_hook-plugin_queued_hook_delivery"],
+            "remainingGaps": ["hook-plugin queued hook deliveries require retries or time out"],
+        }
+    ]
 
 
 def test_graphql_downloader_execution_evidence_returns_dead_letter_and_history_posture() -> None:
@@ -2974,7 +3839,7 @@ def test_graphql_downloader_execution_evidence_ignores_boolean_dead_letter_statu
     ]
 
 
-def test_graphql_enterprise_operations_governance_returns_typed_slice_posture() -> None:
+def test_graphql_operations_governance_returns_typed_slice_posture() -> None:
     client = _build_client(
         FakeMediaService(),
         settings_overrides={
@@ -3007,7 +3872,7 @@ def test_graphql_enterprise_operations_governance_returns_typed_slice_posture() 
         json={
             "query": """
                 query {
-                  enterpriseOperationsGovernance {
+                  operationsGovernance {
                     operatorLogPipeline {
                       status
                       requiredActions
@@ -3030,7 +3895,7 @@ def test_graphql_enterprise_operations_governance_returns_typed_slice_posture() 
     )
 
     assert response.status_code == 200
-    payload = response.json()["data"]["enterpriseOperationsGovernance"]
+    payload = response.json()["data"]["operationsGovernance"]
     assert payload["operatorLogPipeline"]["status"] == "ready"
     assert payload["operatorLogPipeline"]["requiredActions"] == []
     assert payload["operatorLogPipeline"]["remainingGaps"] == []
@@ -3045,6 +3910,315 @@ def test_graphql_enterprise_operations_governance_returns_typed_slice_posture() 
     )
     assert "plugin_runtime_exit_ready=1" in payload["pluginRuntimeIsolation"]["evidence"]
     assert "resource_scope_constraint_coverage=True" in payload["identityAuthz"]["evidence"]
+
+
+def test_graphql_operations_governance_cache_hot_read_and_refresh_on_access_policy_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from filmu_py.graphql.resolvers import CoreMutationResolver, CoreQueryResolver
+    from filmu_py.graphql.types import AccessPolicyRevisionWriteInput
+
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    access_policy_service = DummyAccessPolicyService(resources.settings)
+    resources.access_policy_service = access_policy_service
+    resources.access_policy_snapshot = access_policy_service.snapshot
+    info = _build_graphql_info(client.app, headers=_graphql_headers("settings:write"))
+    query = CoreQueryResolver()
+    mutation = CoreMutationResolver()
+    state = {"ready": False}
+
+    def _slice(name: str, *, ready: bool, evidence: list[str]) -> SimpleNamespace:
+        return SimpleNamespace(
+            name=name,
+            status="ready" if ready else "blocked",
+            evidence=evidence,
+            required_actions=[] if ready else [f"stabilize_{name}"],
+            remaining_gaps=[] if ready else [f"{name}_gap"],
+        )
+
+    async def fake_get_plugins(request: Any) -> list[object]:
+        _ = request
+        return []
+
+    async def fake_operations_governance(
+        *,
+        request: Any,
+        plugins: list[object],
+    ) -> SimpleNamespace:
+        _ = (request, plugins)
+        ready = state["ready"]
+        return SimpleNamespace(
+            generated_at="2026-04-18T12:00:00Z",
+            playback_gate=_slice(
+                "playback_gate",
+                ready=True,
+                evidence=["playback_gate_environment_class=windows-native:managed"],
+            ),
+            operational_evidence=_slice(
+                "operational_evidence",
+                ready=True,
+                evidence=["artifact_inventory_ready=True"],
+            ),
+            identity_authz=_slice(
+                "identity_authz",
+                ready=ready,
+                evidence=[f"resource_scope_constraint_coverage={ready}"],
+            ),
+            tenant_boundary=_slice(
+                "tenant_boundary",
+                ready=True,
+                evidence=["tenant_scope_enforced=True"],
+            ),
+            vfs_data_plane=_slice(
+                "vfs_data_plane",
+                ready=True,
+                evidence=["catalog_watch_ready=True"],
+            ),
+            distributed_control_plane=_slice(
+                "distributed_control_plane",
+                ready=True,
+                evidence=["subscriber_fencing_ready=True"],
+            ),
+            runtime_lifecycle=_slice(
+                "runtime_lifecycle",
+                ready=True,
+                evidence=["runtime_lifecycle_graph_ready=True"],
+            ),
+            sre_program=_slice(
+                "sre_program",
+                ready=True,
+                evidence=["drill_inventory_ready=True"],
+            ),
+            operator_log_pipeline=_slice(
+                "operator_log_pipeline",
+                ready=ready,
+                evidence=[f"log_search_backend={'opensearch' if ready else 'missing'}"],
+            ),
+            plugin_runtime_isolation=_slice(
+                "plugin_runtime_isolation",
+                ready=ready,
+                evidence=[f"plugin_runtime_exit_ready={1 if ready else 0}"],
+            ),
+            heavy_stage_workload_isolation=_slice(
+                "heavy_stage_workload_isolation",
+                ready=True,
+                evidence=["heavy_stage_isolation_ready=True"],
+            ),
+            release_metadata_performance=_slice(
+                "release_metadata_performance",
+                ready=True,
+                evidence=["release_metadata_hot_path_budget_ready=True"],
+            ),
+        )
+
+    monkeypatch.setattr(default_routes, "get_plugins", fake_get_plugins)
+    monkeypatch.setattr(
+        default_routes,
+        "_operations_governance",
+        fake_operations_governance,
+    )
+
+    async def _scenario() -> None:
+        hits_before = _counter_value(CACHE_HITS_TOTAL, namespace="test")
+
+        first = await query.operations_governance(info)
+        state["ready"] = True
+        second = await query.operations_governance(info)
+
+        assert first.operator_log_pipeline.status == "blocked"
+        assert "log_search_backend=missing" in first.operator_log_pipeline.evidence
+        assert second.operator_log_pipeline.status == "blocked"
+        assert _counter_value(CACHE_HITS_TOTAL, namespace="test") == hits_before + 1
+
+        await mutation.write_access_policy_revision(
+            info,
+            AccessPolicyRevisionWriteInput(
+                version="2026-04-18-operations-governance-refresh",
+                source="graphql_test",
+                role_grants={"platform:admin": ["settings:write"]},
+                principal_roles={"tenant-main:operator-1": ["platform:admin"]},
+                principal_scopes={"tenant-main:operator-1": ["settings:write"]},
+                principal_tenant_grants={"tenant-main:operator-1": ["tenant-main"]},
+                permission_constraints={},
+            ),
+        )
+
+        third = await query.operations_governance(info)
+        assert third.operator_log_pipeline.status == "ready"
+        assert "log_search_backend=opensearch" in third.operator_log_pipeline.evidence
+        assert "resource_scope_constraint_coverage=True" in third.identity_authz.evidence
+
+    asyncio.run(_scenario())
+
+
+def test_graphql_stream_event_types_returns_topics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from filmu_py.api.routes import stream as stream_routes
+
+    client = _build_client(FakeMediaService())
+
+    async def _fake_get_event_types(*, event_bus: object) -> EventTypesResponse:
+        _ = event_bus
+        return EventTypesResponse(event_types=["item.state.changed", "logging"])
+
+    monkeypatch.setattr(stream_routes, "get_event_types", _fake_get_event_types)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  streamEventTypes
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["streamEventTypes"] == ["item.state.changed", "logging"]
+
+
+def test_graphql_serving_status_returns_typed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from filmu_py.api.routes import stream as stream_routes
+
+    client = _build_client(FakeMediaService())
+
+    async def _fake_get_stream_status(
+        *,
+        request: Request,
+        db: object,
+        resources: object,
+    ) -> object:
+        _ = request, db, resources
+        return SimpleNamespace(
+            sessions=[
+                SimpleNamespace(
+                    session_id="session-1",
+                    category="remote",
+                    resource="item-1",
+                    started_at="2026-04-18T10:00:00Z",
+                    last_activity_at="2026-04-18T10:05:00Z",
+                    bytes_served=1024,
+                )
+            ],
+            handles=[
+                SimpleNamespace(
+                    handle_id="handle-1",
+                    session_id="session-1",
+                    category="remote",
+                    path="/library/item-1.mkv",
+                    path_id="path-1",
+                    created_at="2026-04-18T10:00:01Z",
+                    last_activity_at="2026-04-18T10:05:00Z",
+                    bytes_served=1024,
+                    read_offset=512,
+                )
+            ],
+            paths=[
+                SimpleNamespace(
+                    path_id="path-1",
+                    category="remote",
+                    path="/library/item-1.mkv",
+                    created_at="2026-04-18T10:00:01Z",
+                    last_activity_at="2026-04-18T10:05:00Z",
+                    size_bytes=4096,
+                    active_handle_count=1,
+                )
+            ],
+            governance=SimpleNamespace(
+                active_sessions=1,
+                active_handles=1,
+                tracked_paths=1,
+                active_local_sessions=0,
+                active_remote_sessions=1,
+                active_local_handles=0,
+                hls_manifest_invalid=0,
+                hls_route_failures_total=0,
+                hls_route_failures_upstream_failed=0,
+                direct_playback_refresh_trigger_tasks_active=0,
+                hls_failed_lease_refresh_trigger_tasks_active=0,
+                hls_restricted_fallback_refresh_trigger_tasks_active=0,
+                stream_refresh_dispatch_mode="queued",
+                stream_refresh_queue_enabled=1,
+                stream_refresh_queue_ready=1,
+            ),
+        )
+
+    monkeypatch.setattr(stream_routes, "get_stream_status", _fake_get_stream_status)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  servingStatus {
+                    sessions {
+                      sessionId
+                      category
+                      resource
+                      bytesServed
+                    }
+                    handles {
+                      handleId
+                      path
+                      readOffset
+                    }
+                    paths {
+                      pathId
+                      activeHandleCount
+                    }
+                    governance {
+                      activeSessions
+                      activeHandles
+                      trackedPaths
+                      hlsRouteFailuresTotal
+                      streamRefreshDispatchMode
+                      streamRefreshQueueEnabled
+                      streamRefreshQueueReady
+                    }
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["servingStatus"]
+    assert payload["sessions"] == [
+        {
+            "sessionId": "session-1",
+            "category": "remote",
+            "resource": "item-1",
+            "bytesServed": 1024,
+        }
+    ]
+    assert payload["handles"] == [
+        {
+            "handleId": "handle-1",
+            "path": "/library/item-1.mkv",
+            "readOffset": 512,
+        }
+    ]
+    assert payload["paths"] == [
+        {
+            "pathId": "path-1",
+            "activeHandleCount": 1,
+        }
+    ]
+    assert payload["governance"] == {
+        "activeSessions": 1,
+        "activeHandles": 1,
+        "trackedPaths": 1,
+        "hlsRouteFailuresTotal": 0,
+        "streamRefreshDispatchMode": "queued",
+        "streamRefreshQueueEnabled": True,
+        "streamRefreshQueueReady": True,
+    }
 
 
 def test_graphql_library_stats_returns_typed_breakdown() -> None:
@@ -3201,6 +4375,7 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
                         "local_path": None,
                         "download_url": "https://api.real-debrid.com/restricted",
                         "unrestricted_url": "https://cdn.example.com/direct",
+                        "source_attachment_id": "attachment-1",
                         "provider": "realdebrid",
                         "provider_download_id": "torrent-123",
                         "provider_file_id": "file-123",
@@ -3215,6 +4390,29 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
                         "active_for_direct": True,
                         "active_for_hls": False,
                         "is_active_stream": True,
+                        "lifecycle": type(
+                            "MediaEntryLifecycle",
+                            (),
+                            {
+                                "owner_kind": "media-entry",
+                                "owner_id": "entry-1",
+                                "active_roles": ("direct",),
+                                "source_key": "persisted",
+                                "source_attachment_id": "attachment-1",
+                                "provider_family": "debrid",
+                                "locator_source": "unrestricted-url",
+                                "match_basis": "source-attachment-id",
+                                "restricted_fallback": False,
+                                "refresh_state": "ready",
+                                "expires_at": "2026-03-15T12:00:00+00:00",
+                                "last_refreshed_at": "2026-03-15T11:00:00+00:00",
+                                "last_refresh_error": None,
+                                "effective_refresh_state": "ready",
+                                "ready_for_direct": True,
+                                "ready_for_hls": True,
+                                "ready_for_playback": True,
+                            },
+                        )(),
                     },
                 )(),
             )
@@ -3260,7 +4458,7 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
     response = client.post(
         "/graphql",
         json={
-            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } playbackAttachments { id kind sourceKey provider providerDownloadId originalFilename fileSize refreshState } resolvedPlayback { directReady hlsReady missingLocalFile direct { kind locator sourceKey providerDownloadId originalFilename } } activeStream { directReady hlsReady missingLocalFile directOwner { mediaEntryIndex kind providerDownloadId originalFilename } } mediaEntries { entryType kind originalFilename providerDownloadId size refreshState activeForDirect activeForHls isActiveStream } } }'
+            "query": 'query { mediaItem(id: "item-1") { id title state itemType tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } streamCandidates { id rawTitle parsedTitle resolution rankScore levRatio selected passed rejectionReason } selectedStream { id rawTitle selected } playbackAttachments { id kind sourceKey provider providerDownloadId originalFilename fileSize refreshState } resolvedPlayback { directReady hlsReady missingLocalFile direct { kind locator sourceKey providerDownloadId originalFilename } } activeStream { directReady hlsReady missingLocalFile directOwner { mediaEntryIndex kind providerDownloadId originalFilename } } mediaEntries { entryType kind originalFilename sourceAttachmentId providerDownloadId size refreshState activeForDirect activeForHls isActiveStream lifecycle { ownerKind ownerId activeRoles sourceKey sourceAttachmentId providerFamily locatorSource matchBasis restrictedFallback refreshState expiresAt lastRefreshedAt lastRefreshError effectiveRefreshState readyForDirect readyForHls readyForPlayback } } } }'
         },
     )
 
@@ -3325,13 +4523,1020 @@ def test_graphql_media_item_returns_stream_candidates() -> None:
             "entryType": "media",
             "kind": "remote-direct",
             "originalFilename": "Example.Movie.mkv",
+            "sourceAttachmentId": "attachment-1",
             "providerDownloadId": "torrent-123",
             "size": 123456789,
             "refreshState": "ready",
             "activeForDirect": True,
             "activeForHls": False,
             "isActiveStream": True,
+            "lifecycle": {
+                "ownerKind": "media-entry",
+                "ownerId": "entry-1",
+                "activeRoles": ["direct"],
+                "sourceKey": "persisted",
+                "sourceAttachmentId": "attachment-1",
+                "providerFamily": "debrid",
+                "locatorSource": "unrestricted-url",
+                "matchBasis": "source-attachment-id",
+                "restrictedFallback": False,
+                "refreshState": "ready",
+                "expiresAt": "2026-03-15T12:00:00+00:00",
+                "lastRefreshedAt": "2026-03-15T11:00:00+00:00",
+                "lastRefreshError": None,
+                "effectiveRefreshState": "ready",
+                "readyForDirect": True,
+                "readyForHls": True,
+                "readyForPlayback": True,
+            },
         }
+    ]
+
+
+
+
+def test_graphql_consumer_playback_item_returns_null_when_not_visible_in_vfs() -> None:
+    detail = MediaItemSummaryRecord(
+        id="item-hidden",
+        type="movie",
+        title="Hidden Movie",
+        state="completed",
+        tmdb_id="680",
+        tvdb_id=None,
+        external_ref="tmdb:680",
+        aired_at="1994-10-14T00:00:00+00:00",
+        poster_path="/hidden.jpg",
+        created_at="2026-04-19T10:00:00+00:00",
+        updated_at="2026-04-19T10:15:00+00:00",
+        specialization=MediaItemSpecializationRecord(item_type="movie", tmdb_id="680"),
+    )
+    service = FakeMediaService(detail=detail)
+    snapshot = VfsCatalogSnapshot(
+        generation_id="77",
+        published_at=datetime(2026, 4, 19, 12, 0, tzinfo=UTC),
+        entries=(
+            VfsCatalogEntry(
+                entry_id="dir:/",
+                parent_entry_id=None,
+                path="/",
+                name="/",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/"),
+            ),
+            VfsCatalogEntry(
+                entry_id="file:item-visible",
+                parent_entry_id="dir:/",
+                path="/Movies/Visible Movie (1999).mkv",
+                name="Visible Movie (1999).mkv",
+                kind="file",
+                correlation=VfsCatalogCorrelationKeys(
+                    item_id="item-visible",
+                    media_entry_id="entry-visible",
+                    tenant_id="tenant-main",
+                ),
+                file=VfsCatalogFileEntry(
+                    item_id="item-visible",
+                    item_title="Visible Movie",
+                    item_external_ref="tmdb:603",
+                    media_entry_id="entry-visible",
+                    source_attachment_id="attachment-visible",
+                    media_type="movie",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/stream/item-visible",
+                    lease_state="ready",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=1, file_count=1, blocked_item_count=0),
+    )
+    client = _build_client(
+        service,
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(snapshot=snapshot),
+    )
+
+    response = client.post(
+        "/graphql",
+        headers={
+            **_graphql_headers("items:read", roles="consumer:user"),
+            "x-actor-id": "user-1",
+            "x-actor-type": "user",
+            "x-tenant-id": "tenant-main",
+        },
+        json={
+            "query": """
+            query ConsumerPlaybackItem($itemId: ID!) {
+              consumerPlaybackItem(itemId: $itemId) {
+                summary {
+                  id
+                }
+              }
+            }
+            """,
+            "variables": {"itemId": "item-hidden"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["consumerPlaybackItem"] is None
+    assert service.detail_calls == []
+
+
+def test_graphql_consumer_playback_item_returns_summary_and_detail() -> None:
+    detail = MediaItemSummaryRecord(
+        id="item-1",
+        type="episode",
+        title="Example Episode",
+        state="completed",
+        tmdb_id="123",
+        tvdb_id="456",
+        external_ref="tvdb:456",
+        aired_at="2026-03-01T00:00:00+00:00",
+        poster_path="/poster.jpg",
+        created_at="2026-03-15T10:00:00+00:00",
+        updated_at="2026-03-15T12:00:00+00:00",
+        specialization=MediaItemSpecializationRecord(
+            item_type="episode",
+            tmdb_id="123",
+            tvdb_id="456",
+            imdb_id="tt1234567",
+            parent_ids=ParentIdsRecord(tmdb_id="999", tvdb_id="555"),
+            show_title="Example Show",
+            season_number=2,
+            episode_number=7,
+        ),
+    )
+    selected_stream = StreamORM(
+        id="stream-1",
+        media_item_id="item-1",
+        raw_title="Example.Movie.1080p.WEB-DL",
+        parsed_title={"title": "Example Movie"},
+        resolution="1080p",
+        rank=95,
+        lev_ratio=0.9,
+        selected=True,
+    )
+    service = FakeMediaService(
+        detail=detail,
+        stream_candidates=[selected_stream],
+        recovery_plan=RecoveryPlanRecord(
+            mechanism=RecoveryMechanism.ORPHAN_RECOVERY,
+            target_stage=RecoveryTargetStage.FINALIZE,
+            reason="attachment_refresh_pending",
+            next_retry_at=None,
+            recovery_attempt_count=1,
+            is_in_cooldown=False,
+        ),
+        consumer_playback_activity=ConsumerPlaybackActivityRecord(
+            generated_at="2026-04-19T12:00:00+00:00",
+            total_item_count=1,
+            total_view_count=2,
+            total_launch_count=1,
+            total_session_count=1,
+            active_session_count=1,
+            items=(
+                ConsumerPlaybackActivityItemRecord(
+                    item_id="item-1",
+                    title="Example Episode",
+                    subtitle="Example Show S02E07",
+                    poster_path="/poster.jpg",
+                    state="completed",
+                    last_activity_at="2026-04-19T11:58:00+00:00",
+                    last_viewed_at="2026-04-19T11:57:00+00:00",
+                    last_launched_at="2026-04-19T11:56:00+00:00",
+                    view_count=2,
+                    launch_count=1,
+                    session_count=1,
+                    active_session_count=1,
+                    last_session_key="session-item-1",
+                    resume_position_seconds=184,
+                    duration_seconds=3600,
+                    progress_percent=5.1,
+                    completed=False,
+                    last_target="direct",
+                ),
+            ),
+        ),
+    )
+    client = _build_client(service)
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": 'query { consumerPlaybackItem(itemId: "item-1") { summary { id externalRef title state mediaType mediaKind tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber posterPath airedAt } detail { id title state itemType mediaType mediaKind tmdbId tvdbId imdbId parentTmdbId parentTvdbId showTitle seasonNumber episodeNumber createdAt updatedAt recoveryPlan { mechanism targetStage reason nextRetryAt recoveryAttemptCount isInCooldown } selectedStream { id rawTitle selected } resolvedPlayback { directReady hlsReady missingLocalFile } } activity { itemId lastActivityAt viewCount launchCount sessionCount activeSessionCount lastSessionKey resumePositionSeconds durationSeconds progressPercent completed lastTarget } } }'
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["consumerPlaybackItem"]
+    assert payload == {
+        "summary": {
+            "id": "item-1",
+            "externalRef": "tvdb:456",
+            "title": "Example Episode",
+            "state": "completed",
+            "mediaType": "episode",
+            "mediaKind": "EPISODE",
+            "tmdbId": 123,
+            "tvdbId": 456,
+            "imdbId": "tt1234567",
+            "parentTmdbId": 999,
+            "parentTvdbId": 555,
+            "showTitle": "Example Show",
+            "seasonNumber": 2,
+            "episodeNumber": 7,
+            "posterPath": "/poster.jpg",
+            "airedAt": "2026-03-01T00:00:00+00:00",
+        },
+        "detail": {
+            "id": "item-1",
+            "title": "Example Episode",
+            "state": "completed",
+            "itemType": "episode",
+            "mediaType": "episode",
+            "mediaKind": "EPISODE",
+            "tmdbId": 123,
+            "tvdbId": 456,
+            "imdbId": "tt1234567",
+            "parentTmdbId": 999,
+            "parentTvdbId": 555,
+            "showTitle": "Example Show",
+            "seasonNumber": 2,
+            "episodeNumber": 7,
+            "createdAt": "2026-03-15T10:00:00+00:00",
+            "updatedAt": "2026-03-15T12:00:00+00:00",
+            "recoveryPlan": {
+                "mechanism": "ORPHAN_RECOVERY",
+                "targetStage": "FINALIZE",
+                "reason": "attachment_refresh_pending",
+                "nextRetryAt": None,
+                "recoveryAttemptCount": 1,
+                "isInCooldown": False,
+            },
+            "selectedStream": {
+                "id": "stream-1",
+                "rawTitle": "Example.Movie.1080p.WEB-DL",
+                "selected": True,
+            },
+            "resolvedPlayback": None,
+        },
+        "activity": {
+            "itemId": "item-1",
+            "lastActivityAt": "2026-04-19T11:58:00+00:00",
+            "viewCount": 2,
+            "launchCount": 1,
+            "sessionCount": 1,
+            "activeSessionCount": 1,
+            "lastSessionKey": "session-item-1",
+            "resumePositionSeconds": 184,
+            "durationSeconds": 3600,
+            "progressPercent": 5.1,
+            "completed": False,
+            "lastTarget": "direct",
+        },
+    }
+    assert service.detail_calls[-1] == {
+        "item_identifier": "item-1",
+        "media_type": "item",
+        "extended": True,
+        "tenant_id": "tenant-main",
+    }
+    assert service.consumer_playback_activity_calls[-1]["tenant_id"] == "tenant-main"
+    assert service.consumer_playback_activity_calls[-1]["item_limit"] == 1
+    assert service.consumer_playback_activity_calls[-1]["device_limit"] == 1
+    assert service.consumer_playback_activity_calls[-1]["history_limit"] == 240
+    assert service.consumer_playback_activity_calls[-1]["focus_item_id"] == "item-1"
+
+
+def test_graphql_media_item_exposes_compact_request_lifecycle() -> None:
+    service = FakeMediaService(
+        detail=MediaItemSummaryRecord(
+            id="item-42",
+            type="movie",
+            title="Ready Movie",
+            state="downloaded",
+            tmdb_id="42",
+            external_ref="tmdb:42",
+            created_at="2026-04-19T10:00:00+00:00",
+            updated_at="2026-04-19T10:05:00+00:00",
+            request=ItemRequestSummaryRecord(
+                is_partial=False,
+                requested_seasons=None,
+                requested_episodes=None,
+                request_source="director",
+            ),
+            resolved_playback=ResolvedPlaybackSnapshotRecord(
+                direct=ResolvedPlaybackAttachmentRecord(
+                    kind="remote-direct",
+                    locator="https://edge.example.com/current-ready-movie",
+                    source_key="persisted",
+                    unrestricted_url="https://edge.example.com/current-ready-movie",
+                ),
+                hls=None,
+                direct_ready=True,
+                hls_ready=False,
+                missing_local_file=False,
+            ),
+        ),
+    )
+    client = _build_client(service)
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                query MediaItemLifecycle($id: ID!) {
+                  mediaItem(id: $id) {
+                    id
+                    title
+                    request {
+                      isPartial
+                      requestSource
+                    }
+                    requestLifecycle {
+                      requestable
+                      requested
+                      state
+                      playbackReady
+                      cta
+                      statusDetail
+                    }
+                    resolvedPlayback {
+                      directReady
+                    }
+                  }
+                }
+            """,
+            "variables": {"id": "item-42"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["mediaItem"] == {
+        "id": "item-42",
+        "title": "Ready Movie",
+        "request": {
+            "isPartial": False,
+            "requestSource": "director",
+        },
+        "requestLifecycle": {
+            "requestable": False,
+            "requested": True,
+            "state": "ready",
+            "playbackReady": True,
+            "cta": "watch",
+            "statusDetail": "Playback is ready.",
+        },
+        "resolvedPlayback": {"directReady": True},
+    }
+
+
+def test_graphql_consumer_playback_activity_returns_shared_history_and_devices() -> None:
+    service = FakeMediaService(
+        consumer_playback_activity=ConsumerPlaybackActivityRecord(
+            generated_at="2026-04-19T12:00:00+00:00",
+            total_item_count=2,
+            total_view_count=4,
+            total_launch_count=3,
+            total_session_count=2,
+            active_session_count=1,
+            items=(
+                ConsumerPlaybackActivityItemRecord(
+                    item_id="item-1",
+                    title="Example Episode",
+                    subtitle="Example Show S02E07",
+                    poster_path="/episode.jpg",
+                    state="completed",
+                    request=ItemRequestSummaryRecord(
+                        is_partial=True,
+                        requested_seasons=[2],
+                        requested_episodes={"2": [7, 8]},
+                        request_source="graphql",
+                    ),
+                    playback_ready=True,
+                    last_activity_at="2026-04-19T11:58:00+00:00",
+                    last_viewed_at="2026-04-19T11:55:00+00:00",
+                    last_launched_at="2026-04-19T11:56:00+00:00",
+                    view_count=3,
+                    launch_count=2,
+                    session_count=1,
+                    active_session_count=1,
+                    last_session_key="session-item-1",
+                    resume_position_seconds=184,
+                    duration_seconds=3600,
+                    progress_percent=5.1,
+                    completed=False,
+                    last_target="direct",
+                ),
+                ConsumerPlaybackActivityItemRecord(
+                    item_id="item-2",
+                    title="Example Movie",
+                    subtitle="Movie",
+                    poster_path="/movie.jpg",
+                    state="completed",
+                    playback_ready=True,
+                    last_activity_at="2026-04-18T20:06:00+00:00",
+                    last_viewed_at="2026-04-18T20:00:00+00:00",
+                    last_launched_at="2026-04-18T20:05:00+00:00",
+                    view_count=1,
+                    launch_count=1,
+                    session_count=1,
+                    active_session_count=0,
+                    last_session_key="session-item-2",
+                    resume_position_seconds=None,
+                    duration_seconds=7200,
+                    progress_percent=100.0,
+                    completed=True,
+                    last_target="hls",
+                ),
+            ),
+            devices=(
+                ConsumerPlaybackDeviceRecord(
+                    device_key="browser-firefox",
+                    device_label="Firefox on Windows",
+                    last_seen_at="2026-04-19T11:56:00+00:00",
+                    last_activity_at="2026-04-19T11:58:00+00:00",
+                    last_viewed_at="2026-04-19T11:55:00+00:00",
+                    last_launched_at="2026-04-19T11:56:00+00:00",
+                    launch_count=2,
+                    view_count=3,
+                    session_count=1,
+                    active_session_count=1,
+                    last_session_key="session-item-1",
+                    resume_position_seconds=184,
+                    duration_seconds=3600,
+                    progress_percent=5.1,
+                    completed_session_count=0,
+                    last_target="direct",
+                ),
+            ),
+            recent_sessions=(
+                ConsumerPlaybackSessionRecord(
+                    session_key="session-item-1",
+                    item_id="item-1",
+                    device_key="browser-firefox",
+                    device_label="Firefox on Windows",
+                    started_at="2026-04-19T11:55:00+00:00",
+                    last_seen_at="2026-04-19T11:58:00+00:00",
+                    last_target="direct",
+                    active=True,
+                    resume_position_seconds=184,
+                    duration_seconds=3600,
+                    progress_percent=5.1,
+                    completed=False,
+                ),
+            ),
+        )
+    )
+    client = _build_client(service)
+
+    response = client.post(
+        "/graphql",
+        headers={
+            **_graphql_headers("items:read", roles="consumer:user"),
+            "x-actor-id": "user-1",
+            "x-actor-type": "user",
+            "x-tenant-id": "tenant-main",
+        },
+        json={
+            "query": """
+            query {
+              consumerPlaybackActivity(itemLimit: 2, deviceLimit: 1) {
+                generatedAt
+                totalItemCount
+                totalViewCount
+                totalLaunchCount
+                totalSessionCount
+                activeSessionCount
+                items {
+                  itemId
+                  title
+                  subtitle
+                  posterPath
+                  state
+                  request {
+                    isPartial
+                    requestedSeasons
+                    requestedEpisodes {
+                      seasonNumber
+                      episodeNumbers
+                    }
+                    requestSource
+                  }
+                  requestLifecycle {
+                    state
+                    playbackReady
+                    cta
+                    statusDetail
+                  }
+                  lastActivityAt
+                  lastViewedAt
+                  lastLaunchedAt
+                  viewCount
+                  launchCount
+                  sessionCount
+                  activeSessionCount
+                  lastSessionKey
+                  resumePositionSeconds
+                  durationSeconds
+                  progressPercent
+                  completed
+                  lastTarget
+                }
+                devices {
+                  deviceKey
+                  deviceLabel
+                  lastSeenAt
+                  lastActivityAt
+                  lastViewedAt
+                  lastLaunchedAt
+                  launchCount
+                  viewCount
+                  sessionCount
+                  activeSessionCount
+                  lastSessionKey
+                  resumePositionSeconds
+                  durationSeconds
+                  progressPercent
+                  completedSessionCount
+                  lastTarget
+                }
+                recentSessions {
+                  sessionKey
+                  itemId
+                  deviceKey
+                  deviceLabel
+                  startedAt
+                  lastSeenAt
+                  lastTarget
+                  active
+                  resumePositionSeconds
+                  durationSeconds
+                  progressPercent
+                  completed
+                }
+              }
+            }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["consumerPlaybackActivity"] == {
+        "generatedAt": "2026-04-19T12:00:00+00:00",
+        "totalItemCount": 2,
+        "totalViewCount": 4,
+        "totalLaunchCount": 3,
+        "totalSessionCount": 2,
+        "activeSessionCount": 1,
+        "items": [
+            {
+                "itemId": "item-1",
+                "title": "Example Episode",
+                "subtitle": "Example Show S02E07",
+                "posterPath": "/episode.jpg",
+                "state": "completed",
+                "request": {
+                    "isPartial": True,
+                    "requestedSeasons": [2],
+                    "requestedEpisodes": [
+                        {"seasonNumber": 2, "episodeNumbers": [7, 8]}
+                    ],
+                    "requestSource": "graphql",
+                },
+                "requestLifecycle": {
+                    "state": "partial_ready",
+                    "playbackReady": True,
+                    "cta": "watch",
+                    "statusDetail": "Part of the requested scope is already playable.",
+                },
+                "lastActivityAt": "2026-04-19T11:58:00+00:00",
+                "lastViewedAt": "2026-04-19T11:55:00+00:00",
+                "lastLaunchedAt": "2026-04-19T11:56:00+00:00",
+                "viewCount": 3,
+                "launchCount": 2,
+                "sessionCount": 1,
+                "activeSessionCount": 1,
+                "lastSessionKey": "session-item-1",
+                "resumePositionSeconds": 184,
+                "durationSeconds": 3600,
+                "progressPercent": 5.1,
+                "completed": False,
+                "lastTarget": "direct",
+            },
+            {
+                "itemId": "item-2",
+                "title": "Example Movie",
+                "subtitle": "Movie",
+                "posterPath": "/movie.jpg",
+                "state": "completed",
+                "request": None,
+                "requestLifecycle": {
+                    "state": "ready",
+                    "playbackReady": True,
+                    "cta": "watch",
+                    "statusDetail": "Playback is ready.",
+                },
+                "lastActivityAt": "2026-04-18T20:06:00+00:00",
+                "lastViewedAt": "2026-04-18T20:00:00+00:00",
+                "lastLaunchedAt": "2026-04-18T20:05:00+00:00",
+                "viewCount": 1,
+                "launchCount": 1,
+                "sessionCount": 1,
+                "activeSessionCount": 0,
+                "lastSessionKey": "session-item-2",
+                "resumePositionSeconds": None,
+                "durationSeconds": 7200,
+                "progressPercent": 100.0,
+                "completed": True,
+                "lastTarget": "hls",
+            },
+        ],
+        "devices": [
+            {
+                "deviceKey": "browser-firefox",
+                "deviceLabel": "Firefox on Windows",
+                "lastSeenAt": "2026-04-19T11:56:00+00:00",
+                "lastActivityAt": "2026-04-19T11:58:00+00:00",
+                "lastViewedAt": "2026-04-19T11:55:00+00:00",
+                "lastLaunchedAt": "2026-04-19T11:56:00+00:00",
+                "launchCount": 2,
+                "viewCount": 3,
+                "sessionCount": 1,
+                "activeSessionCount": 1,
+                "lastSessionKey": "session-item-1",
+                "resumePositionSeconds": 184,
+                "durationSeconds": 3600,
+                "progressPercent": 5.1,
+                "completedSessionCount": 0,
+                "lastTarget": "direct",
+            }
+        ],
+        "recentSessions": [
+            {
+                "sessionKey": "session-item-1",
+                "itemId": "item-1",
+                "deviceKey": "browser-firefox",
+                "deviceLabel": "Firefox on Windows",
+                "startedAt": "2026-04-19T11:55:00+00:00",
+                "lastSeenAt": "2026-04-19T11:58:00+00:00",
+                "lastTarget": "direct",
+                "active": True,
+                "resumePositionSeconds": 184,
+                "durationSeconds": 3600,
+                "progressPercent": 5.1,
+                "completed": False,
+            }
+        ],
+    }
+    assert service.consumer_playback_activity_calls == [
+        {
+            "tenant_id": "tenant-main",
+            "actor_id": "user-1",
+            "actor_type": "user",
+            "item_limit": 2,
+            "device_limit": 1,
+            "history_limit": 240,
+            "focus_item_id": None,
+        }
+    ]
+
+
+def test_graphql_consumer_profile_returns_identity_library_and_playback_posture() -> None:
+    service = FakeMediaService(
+        stats=StatsProjection(
+            total_items=42,
+            completed_items=30,
+            failed_items=2,
+            incomplete_items=10,
+            movies=18,
+            shows=8,
+            seasons=22,
+            episodes=96,
+        ),
+        consumer_playback_activity=ConsumerPlaybackActivityRecord(
+            generated_at="2026-04-19T12:00:00+00:00",
+            total_item_count=3,
+            total_view_count=5,
+            total_launch_count=4,
+            total_session_count=3,
+            active_session_count=1,
+            items=(
+                ConsumerPlaybackActivityItemRecord(
+                    item_id="item-1",
+                    title="Example Episode",
+                    resume_position_seconds=184,
+                    duration_seconds=3600,
+                    progress_percent=5.1,
+                    completed=False,
+                ),
+                ConsumerPlaybackActivityItemRecord(
+                    item_id="item-2",
+                    title="Example Movie",
+                    duration_seconds=7200,
+                    progress_percent=100.0,
+                    completed=True,
+                ),
+                ConsumerPlaybackActivityItemRecord(
+                    item_id="item-3",
+                    title="Provider Limited Show",
+                    subtitle="Series",
+                    duration_seconds=2400,
+                    progress_percent=24.0,
+                    completed=False,
+                ),
+            ),
+            devices=(
+                ConsumerPlaybackDeviceRecord(
+                    device_key="browser-firefox",
+                    device_label="Firefox on Windows",
+                    last_seen_at="2026-04-19T11:56:00+00:00",
+                ),
+            ),
+            recent_sessions=(
+                ConsumerPlaybackSessionRecord(
+                    session_key="session-item-1",
+                    item_id="item-1",
+                    device_key="browser-firefox",
+                    device_label="Firefox on Windows",
+                    started_at="2026-04-19T11:55:00+00:00",
+                    last_seen_at="2026-04-19T11:58:00+00:00",
+                    active=True,
+                    resume_position_seconds=184,
+                    duration_seconds=3600,
+                    progress_percent=5.1,
+                    completed=False,
+                ),
+            ),
+        ),
+        detail_by_item_id={
+            "item-1": cast(
+                MediaItemSummaryRecord,
+                SimpleNamespace(
+                    state="Available",
+                    resolved_playback=SimpleNamespace(
+                        direct_ready=True,
+                        hls_ready=False,
+                        missing_local_file=False,
+                    ),
+                    active_stream=None,
+                    media_entries=[],
+                ),
+            ),
+            "item-2": cast(
+                MediaItemSummaryRecord,
+                SimpleNamespace(
+                    state="Failed",
+                    resolved_playback=SimpleNamespace(
+                        direct_ready=False,
+                        hls_ready=False,
+                        missing_local_file=False,
+                    ),
+                    active_stream=None,
+                    media_entries=[
+                        SimpleNamespace(
+                            provider="realdebrid",
+                            refresh_state="failed",
+                            last_refresh_error="provider refresh denied",
+                            lifecycle=SimpleNamespace(
+                                ready_for_direct=False,
+                                ready_for_hls=False,
+                                ready_for_playback=False,
+                                restricted_fallback=False,
+                                effective_refresh_state="failed",
+                                last_refresh_error="provider refresh denied",
+                            ),
+                        )
+                    ],
+                ),
+            ),
+            "item-3": cast(
+                MediaItemSummaryRecord,
+                SimpleNamespace(
+                    state="Queued",
+                    resolved_playback=SimpleNamespace(
+                        direct_ready=False,
+                        hls_ready=False,
+                        missing_local_file=True,
+                    ),
+                    active_stream=None,
+                    media_entries=[
+                        SimpleNamespace(
+                            provider="premiumize",
+                            refresh_state="stale",
+                            last_refresh_error=None,
+                            lifecycle=SimpleNamespace(
+                                ready_for_direct=False,
+                                ready_for_hls=False,
+                                ready_for_playback=False,
+                                restricted_fallback=True,
+                                effective_refresh_state="stale",
+                                last_refresh_error=None,
+                            ),
+                        )
+                    ],
+                ),
+            ),
+        },
+    )
+    client = _build_client(service)
+
+    response = client.post(
+        "/graphql",
+        headers={
+            **_graphql_headers("items:read", roles="consumer:user"),
+            "x-actor-id": "user-1",
+            "x-actor-type": "user",
+            "x-actor-display-name": "Ada Lovelace",
+            "x-actor-email": "ada@example.com",
+            "x-tenant-id": "tenant-main",
+            "x-tenant-display-name": "Filmu Preview",
+            "x-tenant-plan": "pro",
+            "x-auth-source": "cookie",
+        },
+        json={
+            "query": """
+            query {
+              consumerProfile(itemLimit: 2, deviceLimit: 2) {
+                authenticated
+                identity {
+                  displayName
+                  email
+                  statusLabel
+                  sourceLabel
+                  actorId
+                  actorType
+                  authenticationMode
+                }
+                workspace {
+                  id
+                  name
+                  planLabel
+                  accessPolicyVersion
+                  quotaPolicyVersion
+                  quotaEnabled
+                }
+                library {
+                  totalItems
+                  completedItems
+                  failedItems
+                }
+                playbackSummary {
+                  activeSessionCount
+                  resumeItemCount
+                  completedItemCount
+                  stalledItemCount
+                  recentDeviceCount
+                  recentSessionCount
+                }
+                availabilitySummary {
+                  trackedItemCount
+                  playbackReadyCount
+                  refreshBlockedCount
+                  providerLimitedCount
+                  pendingCount
+                }
+                availabilityItems {
+                  itemId
+                  title
+                  postureKey
+                  postureLabel
+                  detail
+                  directReady
+                  hlsReady
+                  missingLocalFile
+                  effectiveRefreshState
+                  providerLabels
+                }
+                playback {
+                  totalItemCount
+                  activeSessionCount
+                }
+                postureNotes
+              }
+            }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["consumerProfile"]
+    assert payload["authenticated"] is True
+    assert payload["identity"] == {
+        "displayName": "Ada Lovelace",
+        "email": "ada@example.com",
+        "statusLabel": "Signed in",
+        "sourceLabel": "cookie",
+        "actorId": "user-1",
+        "actorType": "user",
+        "authenticationMode": "api_key",
+    }
+    assert payload["workspace"]["id"] == "tenant-main"
+    assert payload["workspace"]["name"] == "Filmu Preview"
+    assert payload["workspace"]["planLabel"] == "Pro"
+    assert isinstance(payload["workspace"]["accessPolicyVersion"], str)
+    assert payload["workspace"]["quotaEnabled"] in {True, False, None}
+    assert payload["library"] == {
+        "totalItems": 42,
+        "completedItems": 30,
+        "failedItems": 2,
+    }
+    assert payload["playbackSummary"] == {
+        "activeSessionCount": 1,
+        "resumeItemCount": 1,
+        "completedItemCount": 1,
+        "stalledItemCount": 2,
+        "recentDeviceCount": 1,
+        "recentSessionCount": 1,
+    }
+    assert payload["availabilitySummary"] == {
+        "trackedItemCount": 3,
+        "playbackReadyCount": 1,
+        "refreshBlockedCount": 1,
+        "providerLimitedCount": 1,
+        "pendingCount": 0,
+    }
+    assert payload["availabilityItems"] == [
+        {
+            "itemId": "item-1",
+            "title": "Example Episode",
+            "postureKey": "playback-ready",
+            "postureLabel": "Playback ready",
+            "detail": "Direct playback is ready.",
+            "directReady": True,
+            "hlsReady": False,
+            "missingLocalFile": False,
+            "effectiveRefreshState": None,
+            "providerLabels": [],
+        },
+        {
+            "itemId": "item-2",
+            "title": "Example Movie",
+            "postureKey": "refresh-blocked",
+            "postureLabel": "Refresh blocked",
+            "detail": "provider refresh denied",
+            "directReady": False,
+            "hlsReady": False,
+            "missingLocalFile": False,
+            "effectiveRefreshState": "failed",
+            "providerLabels": ["realdebrid"],
+        },
+        {
+            "itemId": "item-3",
+            "title": "Provider Limited Show",
+            "postureKey": "provider-limited",
+            "postureLabel": "Provider limited",
+            "detail": "Playback is waiting on a provider-backed file.",
+            "directReady": False,
+            "hlsReady": False,
+            "missingLocalFile": True,
+            "effectiveRefreshState": "stale",
+            "providerLabels": ["premiumize"],
+        },
+    ]
+    assert payload["playback"] == {
+        "totalItemCount": 3,
+        "activeSessionCount": 1,
+    }
+    assert payload["postureNotes"][0] == (
+        "Authentication mode api_key is mapped to user actor user-1."
+    )
+    assert payload["postureNotes"][2:] == [
+        "42 tracked items, 30 completed, 2 failed.",
+        "1 active sessions across 1 recent devices.",
+        "Recent availability window: 1 ready, 1 blocked, 1 provider-limited.",
+    ]
+    assert service.consumer_playback_activity_calls == [
+        {
+            "tenant_id": "tenant-main",
+            "actor_id": "user-1",
+            "actor_type": "user",
+            "item_limit": 2,
+            "device_limit": 2,
+            "history_limit": 240,
+            "focus_item_id": None,
+        }
+    ]
+    assert service.detail_calls == [
+        {
+            "item_identifier": "item-1",
+            "media_type": "item",
+            "extended": True,
+            "tenant_id": "tenant-main",
+        },
+        {
+            "item_identifier": "item-2",
+            "media_type": "item",
+            "extended": True,
+            "tenant_id": "tenant-main",
+        },
+        {
+            "item_identifier": "item-3",
+            "media_type": "item",
+            "extended": True,
+            "tenant_id": "tenant-main",
+        },
     ]
 
 
@@ -3375,6 +5580,2022 @@ def test_graphql_items_exposes_media_type_and_media_kind() -> None:
             "imdbId": "tt5550001",
             "showTitle": "Example Show",
             "posterPath": "/poster.jpg",
+        }
+    ]
+
+
+
+
+def test_graphql_consumer_available_items_page_filters_to_requested_and_mounted_titles() -> None:
+    media_service = FakeMediaService(
+        item_records=[
+            MediaItemRecord(
+                id="movie-visible",
+                external_ref="tmdb:603",
+                title="The Matrix",
+                state=ItemState.COMPLETED,
+                attributes={
+                    "item_type": "movie",
+                    "tmdb_id": "603",
+                    "poster_path": "/matrix.jpg",
+                    "aired_at": "1999-03-31T00:00:00Z",
+                },
+            ),
+            MediaItemRecord(
+                id="movie-hidden",
+                external_ref="tmdb:680",
+                title="Pulp Fiction",
+                state=ItemState.COMPLETED,
+                attributes={
+                    "item_type": "movie",
+                    "tmdb_id": "680",
+                    "poster_path": "/pulp.jpg",
+                    "aired_at": "1994-10-14T00:00:00Z",
+                },
+            ),
+        ]
+    )
+    snapshot = VfsCatalogSnapshot(
+        generation_id="42",
+        published_at=datetime(2026, 4, 19, 12, 0, tzinfo=UTC),
+        entries=(
+            VfsCatalogEntry(
+                entry_id="dir:/",
+                parent_entry_id=None,
+                path="/",
+                name="/",
+                kind="directory",
+                directory=VfsCatalogDirectoryEntry(path="/"),
+            ),
+            VfsCatalogEntry(
+                entry_id="file:movie-visible",
+                parent_entry_id="dir:/",
+                path="/Movies/The Matrix (1999).mkv",
+                name="The Matrix (1999).mkv",
+                kind="file",
+                correlation=VfsCatalogCorrelationKeys(
+                    item_id="movie-visible",
+                    media_entry_id="entry-visible",
+                    tenant_id="tenant-main",
+                ),
+                file=VfsCatalogFileEntry(
+                    item_id="movie-visible",
+                    item_title="The Matrix",
+                    item_external_ref="tmdb:603",
+                    media_entry_id="entry-visible",
+                    source_attachment_id="attachment-visible",
+                    media_type="movie",
+                    transport="remote-direct",
+                    locator="https://cdn.example.com/stream/movie-visible",
+                    lease_state="ready",
+                ),
+            ),
+        ),
+        stats=VfsCatalogStats(directory_count=1, file_count=1, blocked_item_count=0),
+    )
+    client = _build_client(
+        media_service,
+        vfs_catalog_supplier=FakeVfsCatalogSupplier(snapshot=snapshot),
+    )
+
+    response = client.post(
+        "/graphql",
+        headers={
+            **_graphql_headers("items:read", roles="consumer:user"),
+            "x-actor-id": "user-1",
+            "x-actor-type": "user",
+            "x-tenant-id": "tenant-main",
+        },
+        json={
+            "query": """
+                query ConsumerAvailableItemsPage($limit: Int!, $page: Int!) {
+                  consumerAvailableItemsPage(limit: $limit, page: $page, sort: "recent") {
+                    totalCount
+                    page
+                    limit
+                    totalPages
+                    hasPreviousPage
+                    hasNextPage
+                    items {
+                      id
+                      title
+                    }
+                  }
+                }
+            """,
+            "variables": {"limit": 24, "page": 1},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["consumerAvailableItemsPage"] == {
+        "totalCount": 1,
+        "page": 1,
+        "limit": 24,
+        "totalPages": 1,
+        "hasPreviousPage": False,
+        "hasNextPage": False,
+        "items": [
+            {
+                "id": "movie-visible",
+                "title": "The Matrix",
+            }
+        ],
+    }
+    assert media_service.search_item_calls == [
+        {
+            "limit": 24,
+            "page": 1,
+            "item_types": None,
+            "states": None,
+            "sort": ["date_desc"],
+            "search": None,
+            "extended": False,
+            "tenant_id": "tenant-main",
+            "allowed_item_ids": ["movie-visible"],
+        }
+    ]
+
+
+def test_graphql_library_items_page_uses_native_filters_and_page_metadata() -> None:
+    media_service = FakeMediaService(
+        item_records=[
+            MediaItemRecord(
+                id="movie-1",
+                external_ref="tmdb:603",
+                title="The Matrix",
+                state=ItemState.COMPLETED,
+                attributes={
+                    "item_type": "movie",
+                    "tmdb_id": "603",
+                    "poster_path": "/matrix.jpg",
+                    "aired_at": "1999-03-31T00:00:00Z",
+                },
+            )
+        ]
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers(),
+        json={
+            "query": """
+                query ConsumerLibraryPage(
+                  $query: String
+                  $state: String
+                  $itemType: String
+                  $sort: String
+                  $limit: Int!
+                  $page: Int!
+                ) {
+                  libraryItemsPage(
+                    query: $query
+                    state: $state
+                    itemType: $itemType
+                    sort: $sort
+                    limit: $limit
+                    page: $page
+                  ) {
+                    totalCount
+                    page
+                    limit
+                    totalPages
+                    hasPreviousPage
+                    hasNextPage
+                    items {
+                      id
+                      title
+                      mediaKind
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "query": "matrix",
+                "state": "completed",
+                "itemType": "movie",
+                "sort": "relevance",
+                "limit": 24,
+                "page": 2,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["libraryItemsPage"] == {
+        "totalCount": 1,
+        "page": 2,
+        "limit": 24,
+        "totalPages": 1,
+        "hasPreviousPage": True,
+        "hasNextPage": False,
+        "items": [
+            {
+                "id": "movie-1",
+                "title": "The Matrix",
+                "mediaKind": "MOVIE",
+            }
+        ],
+    }
+    assert media_service.search_item_calls == [
+        {
+            "limit": 24,
+            "page": 2,
+            "item_types": ["movie"],
+            "states": ["completed"],
+            "sort": ["relevance"],
+            "search": "matrix",
+            "extended": False,
+            "tenant_id": "tenant-main",
+            "allowed_item_ids": None,
+        }
+    ]
+
+
+
+
+def test_graphql_request_search_returns_requestable_hits() -> None:
+    media_service = FakeMediaService(
+        request_search_results=[
+            SimpleNamespace(
+                external_ref="tmdb:603",
+                title="The Matrix",
+                media_type="movie",
+                tmdb_id="603",
+                tvdb_id=None,
+                imdb_id="tt0133093",
+                poster_path="/matrix.jpg",
+                overview="Wake up, Neo.",
+                year=1999,
+                is_requested=True,
+                requested_item_id="item-603",
+                requested_state="requested",
+                requested_seasons=None,
+                requested_episodes=None,
+                request_source="webhook:overseerr",
+                request_count=3,
+                first_requested_at="2026-04-17T08:00:00Z",
+                last_requested_at="2026-04-18T09:30:00Z",
+                lifecycle=SimpleNamespace(
+                    stage_name="debrid_item",
+                    stage_status="failed",
+                    provider="realdebrid",
+                    provider_download_id="download-603",
+                    last_error="provider timeout",
+                    updated_at="2026-04-18T09:31:00Z",
+                    recovery_reason="provider_timeout",
+                    retry_at="2026-04-18T09:36:00Z",
+                    recovery_attempt_count=2,
+                    in_cooldown=True,
+                ),
+            ),
+            SimpleNamespace(
+                external_ref="tmdb:1399",
+                title="Game of Thrones",
+                media_type="show",
+                tmdb_id="1399",
+                tvdb_id=None,
+                imdb_id=None,
+                poster_path="/got.jpg",
+                overview="Winter is coming.",
+                year=2011,
+                is_requested=False,
+                requested_item_id=None,
+                requested_state=None,
+                requested_seasons=[1, 2],
+                requested_episodes={"1": [1, 2]},
+                request_source=None,
+                request_count=0,
+                first_requested_at=None,
+                last_requested_at=None,
+                lifecycle=None,
+            ),
+        ]
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestSearch($query: String!, $limit: Int!) {
+                  requestSearch(query: $query, limit: $limit) {
+                    externalRef
+                    title
+                    mediaType
+                    mediaKind
+                    tmdbId
+                    imdbId
+                    posterPath
+                    overview
+                    year
+                    isRequested
+                    requestedItemId
+                    requestedState
+                    requestedSeasons
+                    requestedEpisodes {
+                      seasonNumber
+                      episodeNumbers
+                    }
+                    requestSource
+                    requestCount
+                    firstRequestedAt
+                    lastRequestedAt
+                    requestLifecycle {
+                      requestable
+                      requested
+                      state
+                      playbackReady
+                      cta
+                      statusDetail
+                    }
+                    lifecycle {
+                      stageName
+                      stageStatus
+                      provider
+                      providerDownloadId
+                      lastError
+                      updatedAt
+                      recoveryReason
+                      retryAt
+                      recoveryAttemptCount
+                      inCooldown
+                    }
+                  }
+                }
+            """,
+            "variables": {"query": "matrix", "limit": 2},
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_search_calls[0]["query"] == "matrix"
+    payload = response.json()["data"]["requestSearch"]
+    assert payload == [
+        {
+            "externalRef": "tmdb:603",
+            "title": "The Matrix",
+            "mediaType": "movie",
+            "mediaKind": "MOVIE",
+            "tmdbId": 603,
+            "imdbId": "tt0133093",
+            "posterPath": "/matrix.jpg",
+            "overview": "Wake up, Neo.",
+            "year": 1999,
+            "isRequested": True,
+            "requestedItemId": "item-603",
+            "requestedState": "requested",
+            "requestedSeasons": None,
+            "requestedEpisodes": None,
+            "requestSource": "webhook:overseerr",
+            "requestCount": 3,
+            "firstRequestedAt": "2026-04-17T08:00:00Z",
+            "lastRequestedAt": "2026-04-18T09:30:00Z",
+            "requestLifecycle": {
+                "requestable": False,
+                "requested": True,
+                "state": "failed",
+                "playbackReady": False,
+                "cta": "retry_later",
+                "statusDetail": "provider timeout",
+            },
+            "lifecycle": {
+                "stageName": "debrid_item",
+                "stageStatus": "failed",
+                "provider": "realdebrid",
+                "providerDownloadId": "download-603",
+                "lastError": "provider timeout",
+                "updatedAt": "2026-04-18T09:31:00Z",
+                "recoveryReason": "provider_timeout",
+                "retryAt": "2026-04-18T09:36:00Z",
+                "recoveryAttemptCount": 2,
+                "inCooldown": True,
+            },
+        },
+        {
+            "externalRef": "tmdb:1399",
+            "title": "Game of Thrones",
+            "mediaType": "show",
+            "mediaKind": "SHOW",
+            "tmdbId": 1399,
+            "imdbId": None,
+            "posterPath": "/got.jpg",
+            "overview": "Winter is coming.",
+            "year": 2011,
+            "isRequested": False,
+            "requestedItemId": None,
+            "requestedState": None,
+            "requestedSeasons": [1, 2],
+            "requestedEpisodes": [
+                {
+                    "seasonNumber": 1,
+                    "episodeNumbers": [1, 2],
+                }
+            ],
+            "requestSource": None,
+            "requestCount": 0,
+            "firstRequestedAt": None,
+            "lastRequestedAt": None,
+            "requestLifecycle": {
+                "requestable": True,
+                "requested": False,
+                "state": "discoverable",
+                "playbackReady": False,
+                "cta": "request",
+                "statusDetail": "Title can be requested.",
+            },
+            "lifecycle": None,
+        },
+    ]
+
+
+def test_graphql_request_flow_e2e_covers_discovery_request_detail_and_playback_readiness() -> None:
+    @dataclass
+    class FlowMediaService(FakeMediaService):
+        requested_item_id: str = "item-603"
+
+        async def request_item_with_enrichment(
+            self,
+            external_ref: str,
+            title: str | None = None,
+            *,
+            media_type: str | None = None,
+            attributes: dict[str, object] | None = None,
+            requested_seasons: list[int] | None = None,
+            requested_episodes: dict[str, list[int]] | None = None,
+        ) -> RequestItemServiceResult:
+            _ = (title, attributes, requested_seasons, requested_episodes)
+            self.request_item_calls.append(
+                {
+                    "external_ref": external_ref,
+                    "media_type": media_type,
+                    "requested_seasons": requested_seasons,
+                    "requested_episodes": requested_episodes,
+                }
+            )
+            self.detail_by_item_id[self.requested_item_id] = MediaItemSummaryRecord(
+                id=self.requested_item_id,
+                type="movie",
+                title="The Matrix",
+                state="downloaded",
+                tmdb_id="603",
+                external_ref=external_ref,
+                created_at="2026-04-19T12:00:00+00:00",
+                updated_at="2026-04-19T12:01:00+00:00",
+                request=ItemRequestSummaryRecord(
+                    is_partial=False,
+                    requested_seasons=None,
+                    requested_episodes=None,
+                    request_source="director",
+                ),
+                resolved_playback=ResolvedPlaybackSnapshotRecord(
+                    direct=ResolvedPlaybackAttachmentRecord(
+                        kind="remote-direct",
+                        locator="https://edge.example.com/current-matrix",
+                        source_key="persisted",
+                        unrestricted_url="https://edge.example.com/current-matrix",
+                    ),
+                    hls=None,
+                    direct_ready=True,
+                    hls_ready=False,
+                    missing_local_file=False,
+                ),
+            )
+            return RequestItemServiceResult(
+                item=MediaItemRecord(
+                    id=self.requested_item_id,
+                    external_ref=external_ref,
+                    title="The Matrix",
+                    state=ItemState.DOWNLOADED,
+                    attributes={"item_type": media_type or "movie", "tmdb_id": "603"},
+                ),
+                enrichment=EnrichmentResult(
+                    source="tmdb",
+                    has_poster=True,
+                    has_imdb_id=True,
+                    has_tmdb_id=True,
+                    warnings=[],
+                ),
+            )
+
+    service = FlowMediaService(
+        request_search_results=[
+            SimpleNamespace(
+                external_ref="tmdb:603",
+                title="The Matrix",
+                media_type="movie",
+                tmdb_id="603",
+                tvdb_id=None,
+                imdb_id="tt0133093",
+                poster_path="/matrix.jpg",
+                overview="Wake up, Neo.",
+                year=1999,
+                is_requested=False,
+                requested_item_id=None,
+                requested_state=None,
+                requested_seasons=None,
+                requested_episodes=None,
+                request_source=None,
+                request_count=0,
+                first_requested_at=None,
+                last_requested_at=None,
+                lifecycle=None,
+            )
+        ]
+    )
+    client = _build_client(service)
+
+    discovery = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query RequestSearch($query: String!) {
+                  requestSearch(query: $query, limit: 1) {
+                    externalRef
+                    requestLifecycle {
+                      state
+                      cta
+                    }
+                  }
+                }
+            """,
+            "variables": {"query": "matrix"},
+        },
+    )
+    assert discovery.status_code == 200
+    assert discovery.json()["data"]["requestSearch"] == [
+        {
+            "externalRef": "tmdb:603",
+            "requestLifecycle": {"state": "discoverable", "cta": "request"},
+        }
+    ]
+
+    requested = client.post(
+        "/graphql",
+        json={
+            "query": """
+                mutation RequestItem($externalRef: String!, $mediaType: String!) {
+                  requestItem(input: { externalRef: $externalRef, mediaType: $mediaType }) {
+                    itemId
+                    enrichmentSource
+                  }
+                }
+            """,
+            "variables": {"externalRef": "tmdb:603", "mediaType": "movie"},
+        },
+    )
+    assert requested.status_code == 200
+    assert requested.json()["data"]["requestItem"] == {
+        "itemId": "item-603",
+        "enrichmentSource": "tmdb",
+    }
+
+    detail = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                query RequestedItem($id: ID!) {
+                  mediaItem(id: $id) {
+                    title
+                    requestLifecycle {
+                      state
+                      playbackReady
+                      cta
+                    }
+                    resolvedPlayback {
+                      directReady
+                    }
+                  }
+                }
+            """,
+            "variables": {"id": "item-603"},
+        },
+    )
+    assert detail.status_code == 200
+    assert detail.json()["data"]["mediaItem"] == {
+        "title": "The Matrix",
+        "requestLifecycle": {
+            "state": "ready",
+            "playbackReady": True,
+            "cta": "watch",
+        },
+        "resolvedPlayback": {"directReady": True},
+    }
+
+
+def test_graphql_request_discovery_returns_zero_query_rails() -> None:
+    media_service = FakeMediaService(
+        request_discovery_results=[
+            SimpleNamespace(
+                rail_id="new-sci-fi-films",
+                title="New sci-fi films",
+                description="Fresh science-fiction film candidates with immediate request coverage.",
+                query="science fiction",
+                media_type="movie",
+                items=[
+                    SimpleNamespace(
+                        external_ref="tmdb:603",
+                        title="The Matrix",
+                        media_type="movie",
+                        tmdb_id="603",
+                        tvdb_id=None,
+                        imdb_id="tt0133093",
+                        poster_path="/matrix.jpg",
+                        overview="Wake up, Neo.",
+                        year=1999,
+                        is_requested=True,
+                        requested_item_id="item-603",
+                        requested_state="requested",
+                        requested_seasons=None,
+                        requested_episodes=None,
+                        request_source="webhook:overseerr",
+                        request_count=3,
+                        first_requested_at="2026-04-17T08:00:00Z",
+                        last_requested_at="2026-04-18T09:30:00Z",
+                        lifecycle=None,
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                rail_id="prestige-series",
+                title="Prestige series",
+                description="Returnable drama series that benefit from scoped intake.",
+                query="prestige drama",
+                media_type="show",
+                items=[
+                    SimpleNamespace(
+                        external_ref="tmdb:1399",
+                        title="Game of Thrones",
+                        media_type="show",
+                        tmdb_id="1399",
+                        tvdb_id=None,
+                        imdb_id=None,
+                        poster_path="/got.jpg",
+                        overview="Winter is coming.",
+                        year=2011,
+                        is_requested=False,
+                        requested_item_id=None,
+                        requested_state=None,
+                        requested_seasons=[1, 2],
+                        requested_episodes={"1": [1, 2]},
+                        request_source=None,
+                        request_count=0,
+                        first_requested_at=None,
+                        last_requested_at=None,
+                        lifecycle=None,
+                    )
+                ],
+            ),
+        ]
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestDiscovery($limitPerRail: Int!) {
+                  requestDiscovery(limitPerRail: $limitPerRail) {
+                    railId
+                    title
+                    description
+                    query
+                    mediaType
+                    mediaKind
+                    items {
+                      externalRef
+                      title
+                      mediaType
+                      mediaKind
+                      isRequested
+                      rankingSignals
+                    }
+                  }
+                }
+            """,
+            "variables": {"limitPerRail": 6},
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_discovery_calls == [
+        {
+            "limit_per_rail": 6,
+            "rail_ids": None,
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestDiscovery"] == [
+        {
+            "railId": "new-sci-fi-films",
+            "title": "New sci-fi films",
+            "description": "Fresh science-fiction film candidates with immediate request coverage.",
+            "query": "science fiction",
+            "mediaType": "movie",
+            "mediaKind": "MOVIE",
+            "items": [
+                {
+                    "externalRef": "tmdb:603",
+                    "title": "The Matrix",
+                    "mediaType": "movie",
+                    "mediaKind": "MOVIE",
+                    "isRequested": True,
+                    "rankingSignals": [],
+                }
+            ],
+        },
+        {
+            "railId": "prestige-series",
+            "title": "Prestige series",
+            "description": "Returnable drama series that benefit from scoped intake.",
+            "query": "prestige drama",
+            "mediaType": "show",
+            "mediaKind": "SHOW",
+            "items": [
+                {
+                    "externalRef": "tmdb:1399",
+                    "title": "Game of Thrones",
+                    "mediaType": "show",
+                    "mediaKind": "SHOW",
+                    "isRequested": False,
+                    "rankingSignals": [],
+                }
+            ],
+        },
+    ]
+
+
+def test_graphql_request_editorial_families_returns_backend_owned_editorial_windows() -> None:
+    media_service = FakeMediaService(
+        request_editorial_family_results=[
+            SimpleNamespace(
+                family_id="trending-films",
+                title="Trending films",
+                description="Fast-moving film picks pulled from the live TMDB trend window.",
+                family="trending",
+                media_type="movie",
+                items=[
+                    SimpleNamespace(
+                        external_ref="tmdb:603",
+                        title="The Matrix",
+                        media_type="movie",
+                        tmdb_id="603",
+                        tvdb_id=None,
+                        imdb_id="tt0133093",
+                        poster_path="/matrix.jpg",
+                        overview="Wake up, Neo.",
+                        year=1999,
+                        is_requested=False,
+                        requested_item_id=None,
+                        requested_state=None,
+                        requested_seasons=None,
+                        requested_episodes=None,
+                        request_source=None,
+                        request_count=0,
+                        first_requested_at=None,
+                        last_requested_at=None,
+                        lifecycle=None,
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                family_id="returning-series",
+                title="Returning series",
+                description="Series currently back on air and suited for scoped intake follow-through.",
+                family="returning",
+                media_type="show",
+                items=[
+                    SimpleNamespace(
+                        external_ref="tmdb:1399",
+                        title="Game of Thrones",
+                        media_type="show",
+                        tmdb_id="1399",
+                        tvdb_id=None,
+                        imdb_id=None,
+                        poster_path="/got.jpg",
+                        overview="Winter is coming.",
+                        year=2011,
+                        is_requested=True,
+                        requested_item_id="item-1399",
+                        requested_state="requested",
+                        requested_seasons=[1, 2],
+                        requested_episodes={"1": [1, 2]},
+                        request_source="graphql",
+                        request_count=3,
+                        first_requested_at="2026-04-17T08:00:00Z",
+                        last_requested_at="2026-04-18T09:30:00Z",
+                        lifecycle=None,
+                    )
+                ],
+            ),
+        ]
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestEditorialFamilies($limitPerFamily: Int!) {
+                  requestEditorialFamilies(limitPerFamily: $limitPerFamily) {
+                    familyId
+                    title
+                    description
+                    family
+                    mediaType
+                    mediaKind
+                    items {
+                      externalRef
+                      title
+                      mediaType
+                      mediaKind
+                      isRequested
+                      rankingSignals
+                    }
+                  }
+                }
+            """,
+            "variables": {"limitPerFamily": 4},
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_editorial_family_calls == [
+        {
+            "limit_per_family": 4,
+            "family_ids": None,
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestEditorialFamilies"] == [
+        {
+            "familyId": "trending-films",
+            "title": "Trending films",
+            "description": "Fast-moving film picks pulled from the live TMDB trend window.",
+            "family": "trending",
+            "mediaType": "movie",
+            "mediaKind": "MOVIE",
+            "items": [
+                {
+                    "externalRef": "tmdb:603",
+                    "title": "The Matrix",
+                    "mediaType": "movie",
+                    "mediaKind": "MOVIE",
+                    "isRequested": False,
+                    "rankingSignals": [],
+                }
+            ],
+        },
+        {
+            "familyId": "returning-series",
+            "title": "Returning series",
+            "description": "Series currently back on air and suited for scoped intake follow-through.",
+            "family": "returning",
+            "mediaType": "show",
+            "mediaKind": "SHOW",
+            "items": [
+                {
+                    "externalRef": "tmdb:1399",
+                    "title": "Game of Thrones",
+                    "mediaType": "show",
+                    "mediaKind": "SHOW",
+                    "isRequested": True,
+                    "rankingSignals": [],
+                }
+            ],
+        },
+    ]
+
+
+def test_graphql_request_release_windows_returns_backend_owned_temporal_windows() -> None:
+    media_service = FakeMediaService(
+        request_release_window_results=[
+            SimpleNamespace(
+                window_id="theatrical-films",
+                title="Theatrical window",
+                description="Films playing in the near theatrical window for quick intake decisions.",
+                window="theatrical",
+                media_type="movie",
+                items=[
+                    SimpleNamespace(
+                        external_ref="tmdb:603",
+                        title="The Matrix",
+                        media_type="movie",
+                        tmdb_id="603",
+                        tvdb_id=None,
+                        imdb_id="tt0133093",
+                        poster_path="/matrix.jpg",
+                        overview="Wake up, Neo.",
+                        year=1999,
+                        is_requested=False,
+                        requested_item_id=None,
+                        requested_state=None,
+                        requested_seasons=None,
+                        requested_episodes=None,
+                        request_source=None,
+                        request_count=0,
+                        first_requested_at=None,
+                        last_requested_at=None,
+                        lifecycle=None,
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                window_id="limited-series-launches",
+                title="Limited-series launches",
+                description="Bounded series launches that fit short-run intake and completion loops.",
+                window="limited-series",
+                media_type="show",
+                items=[
+                    SimpleNamespace(
+                        external_ref="tmdb:1399",
+                        title="Game of Thrones",
+                        media_type="show",
+                        tmdb_id="1399",
+                        tvdb_id=None,
+                        imdb_id=None,
+                        poster_path="/got.jpg",
+                        overview="Winter is coming.",
+                        year=2011,
+                        is_requested=True,
+                        requested_item_id="item-1399",
+                        requested_state="requested",
+                        requested_seasons=[1],
+                        requested_episodes={"1": [1]},
+                        request_source="graphql",
+                        request_count=1,
+                        first_requested_at="2026-04-18T09:00:00Z",
+                        last_requested_at="2026-04-18T09:00:00Z",
+                        lifecycle=None,
+                    )
+                ],
+            ),
+        ]
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestReleaseWindows($limitPerWindow: Int!) {
+                  requestReleaseWindows(limitPerWindow: $limitPerWindow) {
+                    windowId
+                    title
+                    description
+                    window
+                    mediaType
+                    mediaKind
+                    items {
+                      externalRef
+                      title
+                      mediaType
+                      mediaKind
+                      isRequested
+                    }
+                  }
+                }
+            """,
+            "variables": {"limitPerWindow": 3},
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_release_window_calls == [
+        {
+            "limit_per_window": 3,
+            "window_ids": None,
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestReleaseWindows"] == [
+        {
+            "windowId": "theatrical-films",
+            "title": "Theatrical window",
+            "description": "Films playing in the near theatrical window for quick intake decisions.",
+            "window": "theatrical",
+            "mediaType": "movie",
+            "mediaKind": "MOVIE",
+            "items": [
+                {
+                    "externalRef": "tmdb:603",
+                    "title": "The Matrix",
+                    "mediaType": "movie",
+                    "mediaKind": "MOVIE",
+                    "isRequested": False,
+                }
+            ],
+        },
+        {
+            "windowId": "limited-series-launches",
+            "title": "Limited-series launches",
+            "description": "Bounded series launches that fit short-run intake and completion loops.",
+            "window": "limited-series",
+            "mediaType": "show",
+            "mediaKind": "SHOW",
+            "items": [
+                {
+                    "externalRef": "tmdb:1399",
+                    "title": "Game of Thrones",
+                    "mediaType": "show",
+                    "mediaKind": "SHOW",
+                    "isRequested": True,
+                }
+            ],
+        },
+    ]
+
+
+def test_graphql_request_discovery_projections_returns_grouped_follow_up_pivots() -> None:
+    media_service = FakeMediaService(
+        request_projection_group_results=[
+            SimpleNamespace(
+                group_id="people",
+                title="People around this window",
+                description="Pivot through cast, creators, and directors tied to the current discovery window.",
+                projection_type="person",
+                items=[
+                    SimpleNamespace(
+                        projection_id="person:31",
+                        label="Keanu Reeves",
+                        projection_type="person",
+                        match_count=2,
+                        image_path="/keanu.jpg",
+                        sample_titles=("The Matrix", "The Matrix Reloaded"),
+                        local_match_count=2,
+                        requested_match_count=2,
+                        active_match_count=1,
+                        completed_match_count=1,
+                        preview_signals=(
+                            "2 local matches",
+                            "2 requested locally",
+                            "1 resume path",
+                            "1 completed locally",
+                        ),
+                        action=SimpleNamespace(
+                            kind="query",
+                            value="Keanu Reeves",
+                            media_type="movie",
+                        ),
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                group_id="companies",
+                title="Companies in this window",
+                description="Follow production-company clusters without dropping out of the current discover flow.",
+                projection_type="company",
+                items=[
+                    SimpleNamespace(
+                        projection_id="company:9993",
+                        label="Warner Bros. Pictures",
+                        projection_type="company",
+                        match_count=2,
+                        image_path="/wb.jpg",
+                        sample_titles=("The Matrix", "The Matrix Reloaded"),
+                        local_match_count=2,
+                        requested_match_count=2,
+                        active_match_count=1,
+                        completed_match_count=1,
+                        preview_signals=(
+                            "2 local matches",
+                            "2 requested locally",
+                            "1 resume path",
+                            "1 completed locally",
+                        ),
+                        action=SimpleNamespace(
+                            kind="company",
+                            value="9993",
+                            media_type="movie",
+                        ),
+                    )
+                ],
+            ),
+        ]
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestDiscoveryProjections($company: String, $sort: String, $limitPerGroup: Int!) {
+                  requestDiscoveryProjections(company: $company, sort: $sort, limitPerGroup: $limitPerGroup) {
+                    groupId
+                    title
+                    description
+                    projectionType
+                    items {
+                      projectionId
+                      label
+                      projectionType
+                      matchCount
+                      imagePath
+                      sampleTitles
+                      localMatchCount
+                      requestedMatchCount
+                      activeMatchCount
+                      completedMatchCount
+                      previewSignals
+                      action {
+                        kind
+                        value
+                        mediaType
+                      }
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "company": "9993",
+                "sort": "rating",
+                "limitPerGroup": 4,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_projection_group_calls == [
+        {
+            "media_type": None,
+            "genre": None,
+            "release_year": None,
+            "original_language": None,
+            "company": "9993",
+            "network": None,
+            "sort": "rating",
+            "limit_per_group": 4,
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestDiscoveryProjections"] == [
+        {
+            "groupId": "people",
+            "title": "People around this window",
+            "description": "Pivot through cast, creators, and directors tied to the current discovery window.",
+            "projectionType": "person",
+            "items": [
+                {
+                    "projectionId": "person:31",
+                    "label": "Keanu Reeves",
+                    "projectionType": "person",
+                    "matchCount": 2,
+                    "imagePath": "/keanu.jpg",
+                    "sampleTitles": ["The Matrix", "The Matrix Reloaded"],
+                    "localMatchCount": 2,
+                    "requestedMatchCount": 2,
+                    "activeMatchCount": 1,
+                    "completedMatchCount": 1,
+                    "previewSignals": [
+                        "2 local matches",
+                        "2 requested locally",
+                        "1 resume path",
+                        "1 completed locally",
+                    ],
+                    "action": {
+                        "kind": "query",
+                        "value": "Keanu Reeves",
+                        "mediaType": "movie",
+                    },
+                }
+            ],
+        },
+        {
+            "groupId": "companies",
+            "title": "Companies in this window",
+            "description": "Follow production-company clusters without dropping out of the current discover flow.",
+            "projectionType": "company",
+            "items": [
+                {
+                    "projectionId": "company:9993",
+                    "label": "Warner Bros. Pictures",
+                    "projectionType": "company",
+                    "matchCount": 2,
+                    "imagePath": "/wb.jpg",
+                    "sampleTitles": ["The Matrix", "The Matrix Reloaded"],
+                    "localMatchCount": 2,
+                    "requestedMatchCount": 2,
+                    "activeMatchCount": 1,
+                    "completedMatchCount": 1,
+                    "previewSignals": [
+                        "2 local matches",
+                        "2 requested locally",
+                        "1 resume path",
+                        "1 completed locally",
+                    ],
+                    "action": {
+                        "kind": "company",
+                        "value": "9993",
+                        "mediaType": "movie",
+                    },
+                }
+            ],
+        },
+    ]
+
+
+def test_graphql_request_discovery_page_returns_filters_facets_and_page_metadata() -> None:
+    media_service = FakeMediaService(
+        request_discovery_page_result=SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    external_ref="tmdb:603",
+                    title="The Matrix",
+                    media_type="movie",
+                    tmdb_id="603",
+                    tvdb_id=None,
+                    imdb_id="tt0133093",
+                    poster_path="/matrix.jpg",
+                    overview="Wake up, Neo.",
+                    year=1999,
+                    is_requested=False,
+                    requested_item_id=None,
+                    requested_state=None,
+                    requested_seasons=None,
+                    requested_episodes=None,
+                    request_source=None,
+                    request_count=0,
+                    first_requested_at=None,
+                    last_requested_at=None,
+                    lifecycle=None,
+                )
+            ],
+            offset=20,
+            limit=1,
+            total_count=48,
+            has_previous_page=True,
+            has_next_page=True,
+            result_window_complete=False,
+            facets=SimpleNamespace(
+                genres=[
+                    SimpleNamespace(
+                        value="Science Fiction",
+                        label="Science Fiction",
+                        count=14,
+                        selected=True,
+                    )
+                ],
+                release_years=[
+                    SimpleNamespace(
+                        value="1999",
+                        label="1999",
+                        count=3,
+                        selected=True,
+                    )
+                ],
+                languages=[
+                    SimpleNamespace(
+                        value="en",
+                        label="EN",
+                        count=21,
+                        selected=True,
+                    )
+                ],
+                companies=[
+                    SimpleNamespace(
+                        value="4",
+                        label="Paramount Pictures",
+                        count=9,
+                        selected=True,
+                    )
+                ],
+                networks=[
+                    SimpleNamespace(
+                        value="49",
+                        label="HBO",
+                        count=4,
+                        selected=False,
+                    )
+                ],
+                sorts=[
+                    SimpleNamespace(
+                        value="popular",
+                        label="Popular",
+                        selected=False,
+                    ),
+                    SimpleNamespace(
+                        value="rating",
+                        label="Top rated",
+                        selected=True,
+                    ),
+                ],
+            ),
+        )
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestDiscoveryPage(
+                  $offset: Int!
+                  $limit: Int!
+                  $genre: String!
+                  $releaseYear: Int!
+                  $originalLanguage: String!
+                  $company: String!
+                  $sort: String!
+                ) {
+                  requestDiscoveryPage(
+                    mediaType: "movie"
+                    offset: $offset
+                    limit: $limit
+                    genre: $genre
+                    releaseYear: $releaseYear
+                    originalLanguage: $originalLanguage
+                    company: $company
+                    sort: $sort
+                  ) {
+                    offset
+                    limit
+                    totalCount
+                    hasPreviousPage
+                    hasNextPage
+                    resultWindowComplete
+                    items {
+                      externalRef
+                      title
+                      mediaType
+                      mediaKind
+                    }
+                    facets {
+                      genres {
+                        value
+                        label
+                        count
+                        selected
+                      }
+                      releaseYears {
+                        value
+                        label
+                        count
+                        selected
+                      }
+                      languages {
+                        value
+                        label
+                        count
+                        selected
+                      }
+                      companies {
+                        value
+                        label
+                        count
+                        selected
+                      }
+                      networks {
+                        value
+                        label
+                        count
+                        selected
+                      }
+                      sorts {
+                        value
+                        label
+                        selected
+                      }
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "offset": 20,
+                "limit": 1,
+                "genre": "Science Fiction",
+                "releaseYear": 1999,
+                "originalLanguage": "en",
+                "company": "4",
+                "sort": "rating",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_discovery_page_calls == [
+        {
+            "media_type": "movie",
+            "genre": "Science Fiction",
+            "release_year": 1999,
+            "original_language": "en",
+            "company": "4",
+            "network": None,
+            "sort": "rating",
+            "limit": 1,
+            "offset": 20,
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestDiscoveryPage"] == {
+        "offset": 20,
+        "limit": 1,
+        "totalCount": 48,
+        "hasPreviousPage": True,
+        "hasNextPage": True,
+        "resultWindowComplete": False,
+        "items": [
+            {
+                "externalRef": "tmdb:603",
+                "title": "The Matrix",
+                "mediaType": "movie",
+                "mediaKind": "MOVIE",
+            }
+        ],
+        "facets": {
+            "genres": [
+                {
+                    "value": "Science Fiction",
+                    "label": "Science Fiction",
+                    "count": 14,
+                    "selected": True,
+                }
+            ],
+            "releaseYears": [
+                {
+                    "value": "1999",
+                    "label": "1999",
+                    "count": 3,
+                    "selected": True,
+                }
+            ],
+            "languages": [
+                {
+                    "value": "en",
+                    "label": "EN",
+                    "count": 21,
+                    "selected": True,
+                }
+            ],
+            "companies": [
+                {
+                    "value": "4",
+                    "label": "Paramount Pictures",
+                    "count": 9,
+                    "selected": True,
+                }
+            ],
+            "networks": [
+                {
+                    "value": "49",
+                    "label": "HBO",
+                    "count": 4,
+                    "selected": False,
+                }
+            ],
+            "sorts": [
+                {
+                    "value": "popular",
+                    "label": "Popular",
+                    "selected": False,
+                },
+                {
+                    "value": "rating",
+                    "label": "Top rated",
+                    "selected": True,
+                },
+            ],
+        },
+    }
+
+
+def test_graphql_request_search_page_returns_ranked_page_metadata() -> None:
+    media_service = FakeMediaService(
+        request_search_page_result=SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    external_ref="tmdb:603",
+                    title="The Matrix",
+                    media_type="movie",
+                    tmdb_id="603",
+                    tvdb_id=None,
+                    imdb_id="tt0133093",
+                    poster_path="/matrix.jpg",
+                    overview="Wake up, Neo.",
+                    year=1999,
+                    is_requested=True,
+                    requested_item_id="item-603",
+                    requested_state="requested",
+                    requested_seasons=None,
+                    requested_episodes=None,
+                    request_source="webhook:overseerr",
+                    request_count=3,
+                    first_requested_at="2026-04-17T08:00:00Z",
+                    last_requested_at="2026-04-18T09:30:00Z",
+                    lifecycle=None,
+                    ranking_signals=("Requested 3x", "Resume activity"),
+                ),
+                SimpleNamespace(
+                    external_ref="tmdb:604",
+                    title="The Matrix Reloaded",
+                    media_type="movie",
+                    tmdb_id="604",
+                    tvdb_id=None,
+                    imdb_id="tt0234215",
+                    poster_path="/matrix-reloaded.jpg",
+                    overview="Reloaded.",
+                    year=2003,
+                    is_requested=False,
+                    requested_item_id=None,
+                    requested_state=None,
+                    requested_seasons=None,
+                    requested_episodes=None,
+                    request_source=None,
+                    request_count=0,
+                    first_requested_at=None,
+                    last_requested_at=None,
+                    lifecycle=None,
+                    ranking_signals=(),
+                ),
+            ],
+            offset=20,
+            limit=2,
+            total_count=46,
+            has_previous_page=True,
+            has_next_page=True,
+            result_window_complete=False,
+        )
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestSearchPage($query: String!, $limit: Int!, $offset: Int!) {
+                  requestSearchPage(query: $query, limit: $limit, offset: $offset) {
+                    offset
+                    limit
+                    totalCount
+                    hasPreviousPage
+                    hasNextPage
+                    resultWindowComplete
+                    items {
+                      externalRef
+                      title
+                      mediaType
+                      mediaKind
+                      isRequested
+                      rankingSignals
+                    }
+                  }
+                }
+            """,
+            "variables": {"query": "matrix", "limit": 2, "offset": 20},
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_search_page_calls == [
+        {
+            "query": "matrix",
+            "media_type": None,
+            "limit": 2,
+            "offset": 20,
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestSearchPage"] == {
+        "offset": 20,
+        "limit": 2,
+        "totalCount": 46,
+        "hasPreviousPage": True,
+        "hasNextPage": True,
+        "resultWindowComplete": False,
+        "items": [
+            {
+                "externalRef": "tmdb:603",
+                "title": "The Matrix",
+                "mediaType": "movie",
+                "mediaKind": "MOVIE",
+                "isRequested": True,
+                "rankingSignals": ["Requested 3x", "Resume activity"],
+            },
+            {
+                "externalRef": "tmdb:604",
+                "title": "The Matrix Reloaded",
+                "mediaType": "movie",
+                "mediaKind": "MOVIE",
+                "isRequested": False,
+                "rankingSignals": [],
+            },
+        ],
+    }
+
+
+def test_graphql_request_candidate_returns_show_season_preview() -> None:
+    media_service = FakeMediaService(
+        request_candidate_result=RequestSearchCandidateRecord(
+            external_ref="tmdb:1399",
+            title="Game of Thrones",
+            media_type="show",
+            tmdb_id="1399",
+            poster_path="/got.jpg",
+            overview="Seven kingdoms compete for the throne.",
+            year=2011,
+            is_requested=True,
+            requested_item_id="item-1399",
+            requested_state="requested",
+            requested_seasons=[1, 2],
+            requested_episodes={"3": [1, 2, 3]},
+            request_source="webhook:overseerr",
+            request_count=4,
+            first_requested_at="2026-04-15T08:00:00Z",
+            last_requested_at="2026-04-18T09:30:00Z",
+            lifecycle=RequestSearchLifecycleRecord(
+                stage_name="download",
+                stage_status="queued",
+                provider="real_debrid",
+                provider_download_id="rd-123",
+            ),
+            ranking_signals=("Requested 4x",),
+            season_summary=RequestCandidateSeasonSummaryRecord(
+                total_seasons=4,
+                released_seasons=3,
+                requested_seasons=3,
+                partial_seasons=1,
+                local_seasons=1,
+                unreleased_seasons=1,
+                next_air_date="2026-05-01T00:00:00+00:00",
+            ),
+            season_preview=(
+                RequestCandidateSeasonRecord(
+                    season_number=1,
+                    title="Season 1",
+                    episode_count=10,
+                    air_date="2011-04-17",
+                    is_released=True,
+                    has_local_coverage=True,
+                    is_requested=True,
+                    requested_episode_count=10,
+                    requested_all_episodes=True,
+                    status="local",
+                ),
+                RequestCandidateSeasonRecord(
+                    season_number=3,
+                    title="Season 3",
+                    episode_count=10,
+                    air_date="2013-03-31",
+                    is_released=True,
+                    has_local_coverage=False,
+                    is_requested=True,
+                    requested_episode_count=3,
+                    requested_all_episodes=False,
+                    status="partial",
+                ),
+                RequestCandidateSeasonRecord(
+                    season_number=4,
+                    title="Season 4",
+                    episode_count=8,
+                    air_date="2026-05-01",
+                    is_released=False,
+                    has_local_coverage=False,
+                    is_requested=False,
+                    requested_episode_count=0,
+                    requested_all_episodes=False,
+                    status="upcoming",
+                ),
+            ),
+        )
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestCandidate($externalRef: String!, $mediaType: String!) {
+                  requestCandidate(externalRef: $externalRef, mediaType: $mediaType) {
+                    externalRef
+                    title
+                    mediaType
+                    seasonSummary {
+                      totalSeasons
+                      partialSeasons
+                      localSeasons
+                      nextAirDate
+                    }
+                    seasonPreview {
+                      seasonNumber
+                      title
+                      status
+                      hasLocalCoverage
+                      isRequested
+                      requestedEpisodeCount
+                      requestedAllEpisodes
+                    }
+                  }
+                }
+            """,
+            "variables": {"externalRef": "tmdb:1399", "mediaType": "show"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_candidate_calls == [
+        {
+            "external_ref": "tmdb:1399",
+            "media_type": "show",
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestCandidate"] == {
+        "externalRef": "tmdb:1399",
+        "title": "Game of Thrones",
+        "mediaType": "show",
+        "seasonSummary": {
+            "totalSeasons": 4,
+            "partialSeasons": 1,
+            "localSeasons": 1,
+            "nextAirDate": "2026-05-01T00:00:00+00:00",
+        },
+        "seasonPreview": [
+            {
+                "seasonNumber": 1,
+                "title": "Season 1",
+                "status": "local",
+                "hasLocalCoverage": True,
+                "isRequested": True,
+                "requestedEpisodeCount": 10,
+                "requestedAllEpisodes": True,
+            },
+            {
+                "seasonNumber": 3,
+                "title": "Season 3",
+                "status": "partial",
+                "hasLocalCoverage": False,
+                "isRequested": True,
+                "requestedEpisodeCount": 3,
+                "requestedAllEpisodes": False,
+            },
+            {
+                "seasonNumber": 4,
+                "title": "Season 4",
+                "status": "upcoming",
+                "hasLocalCoverage": False,
+                "isRequested": False,
+                "requestedEpisodeCount": 0,
+                "requestedAllEpisodes": False,
+            },
+        ],
+    }
+
+
+def test_graphql_request_history_page_returns_persisted_request_window() -> None:
+    media_service = FakeMediaService(
+        request_history_page_result=RequestSearchPageRecord(
+            items=[
+                RequestSearchCandidateRecord(
+                    external_ref="tmdb:1399",
+                    title="Game of Thrones",
+                    media_type="show",
+                    tmdb_id="1399",
+                    poster_path="/got.jpg",
+                    overview="Seven kingdoms compete for the throne.",
+                    year=2011,
+                    is_requested=True,
+                    requested_item_id="item-1399",
+                    requested_state="requested",
+                    requested_seasons=[1, 2],
+                    requested_episodes={"3": [1, 2]},
+                    request_source="webhook:overseerr",
+                    request_count=4,
+                    first_requested_at="2026-04-15T08:00:00Z",
+                    last_requested_at="2026-04-18T09:30:00Z",
+                    ranking_signals=("Requested 4x",),
+                ),
+                RequestSearchCandidateRecord(
+                    external_ref="tmdb:680",
+                    title="Pulp Fiction",
+                    media_type="movie",
+                    tmdb_id="680",
+                    poster_path="/pulp-fiction.jpg",
+                    overview="The lives of two mob hitmen intertwine.",
+                    year=1994,
+                    is_requested=True,
+                    requested_item_id="item-680",
+                    requested_state="requested",
+                    request_source="graphql",
+                    request_count=1,
+                    first_requested_at="2026-04-14T08:00:00Z",
+                    last_requested_at="2026-04-17T11:00:00Z",
+                ),
+            ],
+            offset=2,
+            limit=2,
+            total_count=7,
+            has_previous_page=True,
+            has_next_page=True,
+            result_window_complete=True,
+        )
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query ConsumerRequestHistoryPage($limit: Int!, $offset: Int!) {
+                  requestHistoryPage(limit: $limit, offset: $offset) {
+                    offset
+                    limit
+                    totalCount
+                    hasPreviousPage
+                    hasNextPage
+                    items {
+                      externalRef
+                      title
+                      mediaType
+                      isRequested
+                      requestCount
+                    }
+                  }
+                }
+            """,
+            "variables": {"limit": 2, "offset": 2},
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_service.request_history_page_calls == [
+        {
+            "media_type": None,
+            "limit": 2,
+            "offset": 2,
+            "tenant_id": "global",
+        }
+    ]
+    assert response.json()["data"]["requestHistoryPage"] == {
+        "offset": 2,
+        "limit": 2,
+        "totalCount": 7,
+        "hasPreviousPage": True,
+        "hasNextPage": True,
+        "items": [
+            {
+                "externalRef": "tmdb:1399",
+                "title": "Game of Thrones",
+                "mediaType": "show",
+                "isRequested": True,
+                "requestCount": 4,
+            },
+            {
+                "externalRef": "tmdb:680",
+                "title": "Pulp Fiction",
+                "mediaType": "movie",
+                "isRequested": True,
+                "requestCount": 1,
+            },
+        ],
+    }
+
+def test_graphql_media_items_page_accepts_native_playback_filters_and_page_info() -> None:
+    @dataclass
+    class _Page:
+        items: list[MediaItemSummaryRecord]
+        total_items: int
+        limit: int
+
+    item = MediaItemSummaryRecord(
+        id="item-1",
+        type="movie",
+        title="Harbor Watch",
+        state="failed",
+        created_at="2026-04-18T08:00:00Z",
+        updated_at="2026-04-18T10:00:00Z",
+        playback_attachments=[
+            PlaybackAttachmentDetailRecord(
+                id="attachment-1",
+                kind="direct",
+                locator="https://cdn.example.com/direct",
+                provider="realdebrid",
+                refresh_state="failed",
+                last_refresh_error="provider_timeout",
+            )
+        ],
+        resolved_playback=ResolvedPlaybackSnapshotRecord(
+            direct=None,
+            hls=ResolvedPlaybackAttachmentRecord(
+                kind="hls",
+                locator="https://cdn.example.com/hls",
+                source_key="persisted",
+                provider="realdebrid",
+            ),
+            direct_ready=False,
+            hls_ready=True,
+            missing_local_file=False,
+        ),
+        active_stream=ActiveStreamDetailRecord(
+            direct_ready=False,
+            hls_ready=True,
+            missing_local_file=False,
+        ),
+        media_entries=[
+            MediaEntryDetailRecord(
+                provider="realdebrid",
+                refresh_state="failed",
+                last_refresh_error="provider_timeout",
+                active_for_hls=True,
+            )
+        ],
+    )
+    media_service = FakeMediaService(
+        detail_page=_Page(
+            items=[item],
+            total_items=1,
+            limit=12,
+        ),
+        recovery_plan=RecoveryPlanRecord(
+            mechanism=RecoveryMechanism.ORPHAN_RECOVERY,
+            target_stage=RecoveryTargetStage.FINALIZE,
+            reason="orphaned_downloaded_item",
+            next_retry_at=None,
+            recovery_attempt_count=2,
+            is_in_cooldown=False,
+        ),
+    )
+    client = _build_client(media_service)
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query PlaybackRecoveryPage(
+                  $state: String
+                  $query: String
+                  $provider: String
+                  $attachmentState: String
+                  $stream: String
+                  $hasErrors: Boolean
+                  $sort: String
+                  $limit: Int!
+                  $offset: Int!
+                ) {
+                  mediaItemsPage(
+                    state: $state
+                    query: $query
+                    provider: $provider
+                    attachmentState: $attachmentState
+                    stream: $stream
+                    hasErrors: $hasErrors
+                    sort: $sort
+                    limit: $limit
+                    offset: $offset
+                  ) {
+                    totalCount
+                    limit
+                    offset
+                    hasPreviousPage
+                    hasNextPage
+                    items {
+                      id
+                      title
+                      state
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "state": "failed",
+                "query": "harbor",
+                "provider": "realdebrid",
+                "attachmentState": "failed",
+                "stream": "hls_ready",
+                "hasErrors": True,
+                "sort": "updated_desc",
+                "limit": 12,
+                "offset": 0,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["mediaItemsPage"] == {
+        "totalCount": 1,
+        "limit": 12,
+        "offset": 0,
+        "hasPreviousPage": False,
+        "hasNextPage": False,
+        "items": [
+            {
+                "id": "item-1",
+                "title": "Harbor Watch",
+                "state": "failed",
+            }
+        ],
+    }
+    assert media_service.search_item_detail_calls == [
+        {
+            "limit": 12,
+            "offset": 0,
+            "states": ["failed"],
+            "query": "harbor",
+            "provider": "realdebrid",
+            "attachment_state": "failed",
+            "stream": "hls_ready",
+            "has_errors": True,
+            "sort": "updated_desc",
         }
     ]
 
@@ -4489,6 +8710,74 @@ def test_graphql_operator_queries_expose_runtime_queue_and_metadata_history() ->
     ]
 
 
+def test_graphql_run_item_workflow_drill_mutation_returns_route_parity_status(
+    monkeypatch: Any,
+) -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+
+    async def fake_run_worker_item_workflow_drill(request: Any) -> Any:
+        _ = request
+        return SimpleNamespace(
+            queue_name="filmu-py",
+            has_history=True,
+            observed_at="2026-04-18T12:10:00+00:00",
+            examined_checkpoints=1,
+            replayed_checkpoints=1,
+            compensated_checkpoints=0,
+            finalize_requeues=1,
+            parse_requeues=0,
+            scrape_requeues=0,
+            index_requeues=0,
+            skipped_active=0,
+            unrecoverable=0,
+            failed=0,
+            candidate_status_counts={"pending": 1},
+            compensation_stage_counts={},
+            outcome="ok",
+            run_failed=False,
+            last_error=None,
+        )
+
+    monkeypatch.setattr(
+        default_routes,
+        "run_worker_item_workflow_drill",
+        fake_run_worker_item_workflow_drill,
+    )
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                mutation {
+                  runItemWorkflowDrill {
+                    queueName
+                    hasHistory
+                    replayedCheckpoints
+                    compensatedCheckpoints
+                    finalizeRequeues
+                    candidateStatusCounts
+                    outcome
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["runItemWorkflowDrill"] == {
+        "queueName": "filmu-py",
+        "hasHistory": True,
+        "replayedCheckpoints": 1,
+        "compensatedCheckpoints": 0,
+        "finalizeRequeues": 1,
+        "candidateStatusCounts": {"pending": 1},
+        "outcome": "ok",
+    }
+
+
 def test_graphql_playback_control_plane_mutations_use_shared_resources() -> None:
     direct_controller = FakePlaybackTriggerController(
         result=DirectPlaybackRefreshControlPlaneTriggerResult(
@@ -5066,7 +9355,7 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
         json={
             "query": """
                 query {
-                  enterpriseRolloutEvidence {
+                  rolloutEvidence {
                     status
                     totalCheckCount
                     readyCheckCount
@@ -5088,6 +9377,7 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
                     providerGateRequired
                     providerGateRan
                     windowsSoakReady
+                    windowsSoakPressureCauseBuckets
                     policyValidationStatus
                     requiredActions
                     remainingGaps
@@ -5112,10 +9402,10 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
 
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert payload["enterpriseRolloutEvidence"]["status"] == "ready"
-    assert payload["enterpriseRolloutEvidence"]["totalCheckCount"] == 7
-    assert payload["enterpriseRolloutEvidence"]["readyCheckCount"] == 7
-    checks = {row["key"]: row for row in payload["enterpriseRolloutEvidence"]["checks"]}
+    assert payload["rolloutEvidence"]["status"] == "ready"
+    assert payload["rolloutEvidence"]["totalCheckCount"] == 7
+    assert payload["rolloutEvidence"]["readyCheckCount"] == 7
+    checks = {row["key"]: row for row in payload["rolloutEvidence"]["checks"]}
     assert checks["observability_rollout"]["evidenceRefs"] == ["ops/observability/rollout.md"]
     assert checks["control_plane_replay"]["ready"] is True
     assert payload["playbackGateGovernance"] == {
@@ -5126,6 +9416,7 @@ def test_graphql_rollout_evidence_and_runtime_rollout_queries_return_typed_gover
         "providerGateRequired": True,
         "providerGateRan": True,
         "windowsSoakReady": True,
+        "windowsSoakPressureCauseBuckets": {},
         "policyValidationStatus": "ready",
         "requiredActions": ["keep_required_checks_enforced"],
         "remainingGaps": [],
@@ -5786,7 +10077,7 @@ def test_graphql_vfs_generation_history_returns_rollups_and_delta_counts() -> No
     ]
 
 
-def test_graphql_enterprise_rollout_supporting_queries_return_typed_counts_inventory_actions_and_gaps(
+def test_graphql_rollout_supporting_queries_return_typed_counts_inventory_actions_and_gaps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -5865,22 +10156,22 @@ def test_graphql_enterprise_rollout_supporting_queries_return_typed_counts_inven
         json={
             "query": """
                 query {
-                  enterpriseRolloutStatusCounts {
+                  rolloutStatusCounts {
                     status
                     count
                   }
-                  enterpriseRolloutArtifactInventory(checkKey: "observability_rollout") {
+                  rolloutArtifactInventory(checkKey: "observability_rollout") {
                     checkKey
                     ref
                     category
                     recorded
                   }
-                  enterpriseRolloutActions(domain: "playback_gate") {
+                  rolloutActions(domain: "playback_gate") {
                     domain
                     subject
                     action
                   }
-                  enterpriseRolloutGaps(domain: "vfs_runtime_rollout") {
+                  rolloutGaps(domain: "vfs_runtime_rollout") {
                     domain
                     subject
                     message
@@ -5892,8 +10183,8 @@ def test_graphql_enterprise_rollout_supporting_queries_return_typed_counts_inven
 
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert {"status": "ready", "count": 7} in payload["enterpriseRolloutStatusCounts"]
-    assert payload["enterpriseRolloutArtifactInventory"] == [
+    assert {"status": "ready", "count": 7} in payload["rolloutStatusCounts"]
+    assert payload["rolloutArtifactInventory"] == [
         {
             "checkKey": "observability_rollout",
             "ref": "ops/observability/rollout.md",
@@ -5901,14 +10192,14 @@ def test_graphql_enterprise_rollout_supporting_queries_return_typed_counts_inven
             "recorded": True,
         }
     ]
-    assert payload["enterpriseRolloutActions"] == [
+    assert payload["rolloutActions"] == [
         {
             "domain": "playback_gate",
             "subject": "playback_gate_governance",
             "action": "keep_required_checks_enforced",
         }
     ]
-    assert payload["enterpriseRolloutGaps"] == [
+    assert payload["rolloutGaps"] == [
         {
             "domain": "vfs_runtime_rollout",
             "subject": "vfs_runtime_rollout",
@@ -6004,7 +10295,7 @@ def test_graphql_downloader_supporting_summaries_return_typed_grouped_evidence()
                     averageDeadLetterJobs
                     latestAlertLevel
                   }
-                  downloaderProviderSummaries(provider: "realdebrid") {
+                  downloaderProviderSummaries(provider: "realdebrid", statusCode: 429) {
                     provider
                     sampleCount
                     reasonCodeCounts { key count }
@@ -7014,6 +11305,367 @@ def test_graphql_access_policy_revisions_query_and_mutations_follow_route_parity
     ]
 
 
+def test_graphql_access_policy_context_query_returns_current_actor_posture() -> None:
+    client = _build_client(
+        FakeMediaService(),
+        settings_overrides={
+            "FILMU_PY_OIDC": {
+                "allow_api_key_fallback": False,
+                "rollout_stage": "enforced",
+            }
+        },
+    )
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": """
+                query {
+                  accessPolicyContext {
+                    authenticationMode
+                    actorId
+                    actorType
+                    tenantId
+                    authorizationTenantScope
+                    authorizedTenantIds
+                    oidcClaimsPresent
+                    oidcTokenValidated
+                    oidcAllowApiKeyFallback
+                    oidcRolloutStage
+                    accessPolicyVersion
+                    quotaPolicyVersion
+                    permissionsModel
+                    policySource
+                    auditMode
+                    policyAlertingEnabled
+                    repeatedDenialWarningThreshold
+                    repeatedDenialCriticalThreshold
+                    decisions {
+                      name
+                      allowed
+                      requiredPermissions
+                      targetTenantId
+                    }
+                    warnings
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["accessPolicyContext"]
+    assert payload["authenticationMode"] == "api_key"
+    assert payload["actorId"] == "api-key:primary"
+    assert payload["actorType"] == "service"
+    assert payload["tenantId"] == "global"
+    assert payload["authorizationTenantScope"] == "self"
+    assert payload["authorizedTenantIds"] == ["global"]
+    assert payload["oidcClaimsPresent"] is False
+    assert payload["oidcTokenValidated"] is False
+    assert payload["oidcAllowApiKeyFallback"] is False
+    assert payload["oidcRolloutStage"] == "enforced"
+    assert payload["accessPolicyVersion"] == "default-v1"
+    assert payload["quotaPolicyVersion"] is None
+    assert payload["permissionsModel"].startswith("role_scope_effective_permissions")
+    assert payload["policySource"] == "settings"
+    assert payload["auditMode"] == "structured_log_history_only"
+    assert payload["policyAlertingEnabled"] is True
+    assert payload["repeatedDenialWarningThreshold"] == 3
+    assert payload["repeatedDenialCriticalThreshold"] == 5
+    assert any(row["name"] == "library_read" for row in payload["decisions"])
+    assert "authentication is still API-key anchored" in payload["warnings"]
+    assert "oidc claims are not present on this request" in payload["warnings"]
+    assert isinstance(payload["remainingGaps"], list)
+
+
+def test_graphql_access_policy_audit_query_returns_records_and_alerts() -> None:
+    class FakeAuthorizationAuditService:
+        async def record_decision(self, **kwargs: Any) -> None:
+            _ = kwargs
+
+        async def search(
+            self,
+            *,
+            limit: int,
+            actor_id: str | None = None,
+            tenant_id: str | None = None,
+            target_tenant_id: str | None = None,
+            permission: str | None = None,
+            allowed: bool | None = None,
+            reason: str | None = None,
+            path_prefix: str | None = None,
+        ) -> object:
+            assert limit == 12
+            assert actor_id is None
+            assert tenant_id is None
+            assert target_tenant_id is None
+            assert permission == "security:policy.approve"
+            assert allowed is False
+            assert reason is None
+            assert path_prefix is None
+            return SimpleNamespace(
+                total_matches=1,
+                records=[
+                    SimpleNamespace(
+                        occurred_at=datetime(2026, 4, 18, 9, 30, tzinfo=UTC),
+                        path="/api/v1/auth/policy/revisions",
+                        method="POST",
+                        resource_scope="access_policy",
+                        actor_id="operator-1",
+                        actor_type="human",
+                        tenant_id="tenant-main",
+                        target_tenant_id="tenant-main",
+                        required_permissions=("security:policy.approve",),
+                        matched_permissions=(),
+                        missing_permissions=("security:policy.approve",),
+                        constrained_permissions=(),
+                        constraint_failures=("missing approval scope",),
+                        allowed=False,
+                        reason="missing_permissions",
+                        tenant_scope="scoped",
+                        authentication_mode="oidc",
+                        access_policy_version="access-2026.04.18",
+                        access_policy_source="runtime",
+                        oidc_issuer="https://auth.example.test",
+                        oidc_subject="subject-17",
+                    )
+                ],
+            )
+
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    resources.settings.access_policy.repeated_denial_warning_threshold = 1
+    resources.settings.access_policy.repeated_denial_critical_threshold = 1
+    resources.authorization_audit_service = FakeAuthorizationAuditService()
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("settings:write"),
+        json={
+            "query": """
+                query AccessPolicyAudit(
+                  $limit: Int!
+                  $allowed: Boolean
+                  $permission: String
+                ) {
+                  accessPolicyAudit(
+                    limit: $limit
+                    allowed: $allowed
+                    permission: $permission
+                  ) {
+                    totalMatches
+                    entries
+                    records {
+                      occurredAt
+                      path
+                      method
+                      resourceScope
+                      actorId
+                      targetTenantId
+                      requiredPermissions
+                      missingPermissions
+                      constraintFailures
+                      allowed
+                      reason
+                      authenticationMode
+                      accessPolicyVersion
+                      accessPolicySource
+                      oidcIssuer
+                      oidcSubject
+                      summary
+                    }
+                    alerts {
+                      code
+                      severity
+                      count
+                      message
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "limit": 12,
+                "allowed": False,
+                "permission": "security:policy.approve",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]["accessPolicyAudit"]
+    assert payload["totalMatches"] == 1
+    assert len(payload["entries"]) == 1
+    assert payload["records"] == [
+        {
+            "occurredAt": "2026-04-18T09:30:00+00:00",
+            "path": "/api/v1/auth/policy/revisions",
+            "method": "POST",
+            "resourceScope": "access_policy",
+            "actorId": "operator-1",
+            "targetTenantId": "tenant-main",
+            "requiredPermissions": ["security:policy.approve"],
+            "missingPermissions": ["security:policy.approve"],
+            "constraintFailures": ["missing approval scope"],
+            "allowed": False,
+            "reason": "missing_permissions",
+            "authenticationMode": "oidc",
+            "accessPolicyVersion": "access-2026.04.18",
+            "accessPolicySource": "runtime",
+            "oidcIssuer": "https://auth.example.test",
+            "oidcSubject": "subject-17",
+            "summary": (
+                "2026-04-18T09:30:00+00:00 denied POST /api/v1/auth/policy/revisions "
+                "actor=operator-1 tenant=tenant-main->tenant-main "
+                "reason=missing_permissions permissions=security:policy.approve"
+            ),
+        }
+    ]
+    assert payload["alerts"] == [
+        {
+            "code": "repeated_denials",
+            "severity": "critical",
+            "count": 1,
+            "message": (
+                "actor 'operator-1' saw 1 denied authorization decisions for "
+                "/api/v1/auth/policy/revisions (missing_permissions) in the current result set"
+            ),
+        }
+    ]
+
+
+def test_graphql_tenant_quota_policy_query_returns_visible_limits() -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    quota_constraint = resources.settings.access_policy.permission_constraints.setdefault(
+        "tenant:quota.read",
+        {},
+    )
+    route_prefixes = quota_constraint.setdefault("route_prefixes", [])
+    if "/graphql" not in route_prefixes:
+        route_prefixes.append("/graphql")
+    resources.settings.tenant_quotas.enabled = True
+    resources.settings.tenant_quotas.version = "quota-2026.04.18"
+    resources.settings.tenant_quotas.default.api_requests_per_minute = 900
+    resources.settings.tenant_quotas.default.worker_enqueues_per_minute = 180
+    resources.settings.tenant_quotas.default.playback_refreshes_per_minute = 90
+    resources.settings.tenant_quotas.default.provider_refreshes_per_minute = 60
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("tenant:quota.read"),
+        json={
+            "query": """
+                query {
+                  tenantQuotaPolicy {
+                    tenantId
+                    enabled
+                    policyVersion
+                    apiRequestsPerMinute
+                    workerEnqueuesPerMinute
+                    playbackRefreshesPerMinute
+                    providerRefreshesPerMinute
+                    enforcementPoints
+                    remainingGaps
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tenantQuotaPolicy"] == {
+        "tenantId": "tenant-main",
+        "enabled": True,
+        "policyVersion": "quota-2026.04.18",
+        "apiRequestsPerMinute": 900,
+        "workerEnqueuesPerMinute": 180,
+        "playbackRefreshesPerMinute": 90,
+        "providerRefreshesPerMinute": 60,
+        "enforcementPoints": [
+            "api_request_intake",
+            "worker_enqueue_policy",
+            "provider_refresh_policy",
+            "playback_refresh_policy",
+        ],
+        "remainingGaps": [
+            "worker/provider/playback quota ceilings are visible but not yet enforced everywhere",
+            "quota counters are Redis minute buckets, not long-horizon billing records",
+        ],
+    }
+
+
+def test_graphql_write_tenant_quota_policy_mutation_persists_and_returns_policy() -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    resources.settings.tenant_quotas.enabled = False
+    resources.settings.tenant_quotas.version = "quota-2026.04.18"
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("tenant:quota.write"),
+        json={
+            "query": """
+                mutation WriteTenantQuotaPolicy($input: TenantQuotaPolicyWriteInput!) {
+                  writeTenantQuotaPolicy(input: $input) {
+                    tenantId
+                    enabled
+                    policyVersion
+                    apiRequestsPerMinute
+                    workerEnqueuesPerMinute
+                    playbackRefreshesPerMinute
+                    providerRefreshesPerMinute
+                    enforcementPoints
+                    remainingGaps
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "tenantId": "tenant-main",
+                    "enabled": True,
+                    "policyVersion": "quota-2026.04.19",
+                    "apiRequestsPerMinute": 1200,
+                    "workerEnqueuesPerMinute": 240,
+                    "playbackRefreshesPerMinute": 120,
+                    "providerRefreshesPerMinute": 80,
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["writeTenantQuotaPolicy"] == {
+        "tenantId": "tenant-main",
+        "enabled": True,
+        "policyVersion": "quota-2026.04.19",
+        "apiRequestsPerMinute": 1200,
+        "workerEnqueuesPerMinute": 240,
+        "playbackRefreshesPerMinute": 120,
+        "providerRefreshesPerMinute": 80,
+        "enforcementPoints": [
+            "api_request_intake",
+            "worker_enqueue_policy",
+            "provider_refresh_policy",
+            "playback_refresh_policy",
+        ],
+        "remainingGaps": [
+            "worker/provider/playback quota ceilings are visible but not yet enforced everywhere",
+            "quota counters are Redis minute buckets, not long-horizon billing records",
+        ],
+    }
+    assert resources.settings.tenant_quotas.enabled is True
+    assert resources.settings.tenant_quotas.version == "quota-2026.04.19"
+    persisted_limits = resources.settings.tenant_quotas.tenants["tenant-main"]
+    assert persisted_limits.api_requests_per_minute == 1200
+    assert persisted_limits.worker_enqueues_per_minute == 240
+    assert persisted_limits.playback_refreshes_per_minute == 120
+    assert persisted_limits.provider_refreshes_per_minute == 80
+
+
 def test_graphql_write_access_policy_revision_requires_settings_write() -> None:
     client = _build_client(FakeMediaService())
     resources = cast(Any, client.app.state.resources)
@@ -7327,6 +11979,106 @@ def test_graphql_plugin_governance_cache_hot_read_and_invalidate_on_override_wri
     asyncio.run(_scenario())
 
 
+def test_graphql_plugin_integration_readiness_cache_hot_read_and_refresh_on_override_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from filmu_py.graphql.resolvers import CoreMutationResolver, CoreQueryResolver
+    from filmu_py.graphql.types import PluginGovernanceOverrideWriteInput
+
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    resources.plugin_governance_service = DummyPluginGovernanceService()
+    info = _build_graphql_info(client.app, headers=_graphql_headers("settings:write"))
+    query = CoreQueryResolver()
+    mutation = CoreMutationResolver()
+    state = {"ready": False}
+
+    def _proof(ref: str, category: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            ref=ref,
+            category=category,
+            label=f"{ref} proof",
+            recorded=True,
+        )
+
+    async def fake_build_plugin_integration_readiness_posture(
+        resources_arg: Any,
+    ) -> SimpleNamespace:
+        _ = resources_arg
+        ready = state["ready"]
+        plugin = SimpleNamespace(
+            name="comet",
+            capability_kind="scraper",
+            status="ready" if ready else "blocked",
+            registered=True,
+            enabled=True,
+            configured=True,
+            ready=ready,
+            endpoint="https://comet.example",
+            endpoint_configured=True,
+            config_source="scraping.comet",
+            required_settings=[],
+            missing_settings=[] if ready else ["api_key"],
+            contract_proof_refs=["ops/plugins/comet-contract.md"],
+            soak_proof_refs=["ops/plugins/comet-soak.md"] if ready else [],
+            contract_proofs=[
+                _proof("ops/plugins/comet-contract.md", "plugin_contract")
+            ],
+            soak_proofs=[_proof("ops/plugins/comet-soak.md", "plugin_soak")] if ready else [],
+            contract_validated=True,
+            soak_validated=ready,
+            proof_gap_count=0 if ready else 1,
+            verification_status="verified" if ready else "partial",
+            verification_check_count=4,
+            verified_check_count=4 if ready else 3,
+            missing_verification_checks=[] if ready else ["soak_proof"],
+            required_actions=[] if ready else ["capture_soak_proof"],
+            remaining_gaps=[] if ready else ["missing_soak_proof"],
+        )
+        return SimpleNamespace(
+            generated_at="2026-04-18T12:00:00Z",
+            status="ready" if ready else "partial",
+            plugins=[plugin],
+            required_actions=[] if ready else ["capture_soak_proof"],
+            remaining_gaps=[] if ready else ["missing_soak_proof"],
+        )
+
+    monkeypatch.setattr(
+        "filmu_py.graphql.resolvers.build_plugin_integration_readiness_posture",
+        fake_build_plugin_integration_readiness_posture,
+    )
+
+    async def _scenario() -> None:
+        hits_before = _counter_value(CACHE_HITS_TOTAL, namespace="test")
+
+        first = await query.plugin_integration_readiness(info, include_disabled=False)
+        state["ready"] = True
+        second = await query.plugin_integration_readiness(info, include_disabled=False)
+
+        assert first.status == "partial"
+        assert first.plugins[0].missing_settings == ["api_key"]
+        assert second.status == "partial"
+        assert second.plugins[0].missing_verification_checks == ["soak_proof"]
+        assert _counter_value(CACHE_HITS_TOTAL, namespace="test") == hits_before + 1
+
+        await mutation.write_plugin_governance_override(
+            info,
+            "comet",
+            PluginGovernanceOverrideWriteInput(
+                state="quarantined",
+                reason="refresh GraphQL operator posture",
+            ),
+        )
+
+        third = await query.plugin_integration_readiness(info, include_disabled=False)
+        assert third.status == "ready"
+        assert third.plugins[0].soak_validated is True
+        assert third.plugins[0].missing_verification_checks == []
+
+    asyncio.run(_scenario())
+
+
 def test_graphql_write_plugin_governance_override_requires_settings_write() -> None:
     client = _build_client(FakeMediaService())
     resources = cast(Any, client.app.state.resources)
@@ -7356,6 +12108,124 @@ def test_graphql_write_plugin_governance_override_requires_settings_write() -> N
 
     assert response.status_code == 200
     assert "Authorization denied (missing_permissions)" in response.json()["errors"][0]["message"]
+
+
+def test_graphql_execute_plugin_stream_control_mutation_reuses_route_contract() -> None:
+    plugin_registry = PluginRegistry()
+
+    class ExampleStreamControl:
+        plugin_name = "stream-control-plugin"
+
+        async def initialize(self, ctx: object) -> None:
+            _ = ctx
+
+        async def control(self, request: Any) -> Any:
+            return SimpleNamespace(
+                action=request.action,
+                item_identifier=request.item_identifier,
+                accepted=True,
+                outcome="handled",
+                detail=None,
+                controller_attached=True,
+                retry_after_seconds=None,
+                metadata={"source": "test"},
+            )
+
+    plugin_registry.register_capability(
+        plugin_name="stream-control-plugin",
+        kind=PluginCapabilityKind.STREAM_CONTROL,
+        implementation=ExampleStreamControl(),
+    )
+
+    client = _build_client(FakeMediaService(), plugin_registry=plugin_registry)
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("backend:admin"),
+        json={
+            "query": """
+                mutation ExecutePluginStreamControl($input: PluginStreamControlInput!) {
+                  executePluginStreamControl(input: $input) {
+                    pluginName
+                    action
+                    itemIdentifier
+                    accepted
+                    outcome
+                    controllerAttached
+                    metadata
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "pluginName": "stream-control-plugin",
+                    "action": "TRIGGER_DIRECT_PLAYBACK_REFRESH",
+                    "itemIdentifier": "item-123",
+                    "preferQueued": True,
+                    "metadata": {"reason": "operator-test"},
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["executePluginStreamControl"] == {
+        "pluginName": "stream-control-plugin",
+        "action": "TRIGGER_DIRECT_PLAYBACK_REFRESH",
+        "itemIdentifier": "item-123",
+        "accepted": True,
+        "outcome": "handled",
+        "controllerAttached": True,
+        "metadata": {"source": "test"},
+    }
+
+
+def test_graphql_generate_api_key_mutation_rotates_runtime_key(
+    monkeypatch: Any,
+) -> None:
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+
+    async def fake_save_settings(db: Any, data: dict[str, Any]) -> None:
+        db.settings_blob = dict(data)
+
+    monkeypatch.setattr(default_routes, "save_settings", fake_save_settings)
+
+    previous_key = resources.settings.api_key.get_secret_value()
+    previous_key_id = resources.settings.api_key_id
+
+    response = client.post(
+        "/graphql",
+        headers=_graphql_headers("security:apikey.rotate"),
+        json={
+            "query": """
+                mutation {
+                  generateApiKey {
+                    key
+                    apiKeyId
+                    warning
+                  }
+                }
+            """
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]["generateApiKey"]
+    assert isinstance(body["key"], str)
+    assert len(body["key"]) >= 32
+    assert body["key"] != previous_key
+    assert isinstance(body["apiKeyId"], str)
+    assert body["apiKeyId"] != previous_key_id
+    assert "Update BACKEND_API_KEY" in body["warning"]
+    assert resources.settings.api_key.get_secret_value() == body["key"]
+    assert resources.settings.api_key_id == body["apiKeyId"]
+    assert resources.db.settings_blob is not None
+    assert resources.db.settings_blob["api_key"] == body["key"]
+    assert resources.db.settings_blob["api_key_id"] == body["apiKeyId"]
 
 
 def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_history_and_audit(
@@ -7472,23 +12342,19 @@ def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_h
 
     assert mutation_response.status_code == 200
     mutation_payload = mutation_response.json()["data"]["persistVfsRolloutControl"]
-    assert mutation_payload == {
-        "environmentClass": "windows-native:managed",
-        "promotionPaused": True,
-        "promotionPauseReason": "repeat soak after GraphQL review",
-        "promotionPauseExpiresAt": expires_at,
+    assert mutation_payload["environmentClass"] == "windows-native:managed"
+    assert mutation_payload["promotionPaused"] is True
+    assert mutation_payload["promotionPauseReason"] == "repeat soak after GraphQL review"
+    assert mutation_payload["promotionPauseExpiresAt"] == expires_at
+    assert mutation_payload["promotionPauseActive"] is True
+    assert mutation_payload["rollbackRequested"] is False
+    assert mutation_payload["updatedBy"] == "tenant-main:operator-1"
+    assert mutation_payload["mergeGate"] == "hold"
+    assert mutation_payload["canaryDecision"] == "hold_canary_and_repeat_soak"
+    assert mutation_payload["history"][0] == {
+        "actorId": "tenant-main:operator-1",
+        "summary": "promotion pause enabled; environment updated; notes updated (windows-native:managed)",
         "promotionPauseActive": True,
-        "rollbackRequested": False,
-        "updatedBy": "tenant-main:operator-1",
-        "mergeGate": "hold",
-        "canaryDecision": "hold_canary_and_repeat_soak",
-        "history": [
-            {
-                "actorId": "tenant-main:operator-1",
-                "summary": "promotion pause enabled; environment updated; notes updated (windows-native:managed)",
-                "promotionPauseActive": True,
-            }
-        ],
     }
     assert audit_calls == [
         {
@@ -7537,6 +12403,226 @@ def test_graphql_vfs_rollout_control_query_and_mutation_return_persisted_state_h
             }
         ],
     }
+
+
+def test_graphql_vfs_rollout_control_cache_hot_read_and_refresh_on_persist_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from filmu_py.graphql.resolvers import CoreMutationResolver, CoreQueryResolver
+    from filmu_py.graphql.types import PersistVfsRolloutControlInput
+
+    @dataclass
+    class FakeRolloutSnapshot:
+        generated_at: str
+        environment_class: str
+        runtime_status_path: str | None
+        promotion_paused: bool
+        promotion_pause_reason: str | None
+        promotion_pause_expires_at: str | None
+        promotion_pause_active: bool
+        rollback_requested: bool
+        rollback_reason: str | None
+        rollback_expires_at: str | None
+        rollback_active: bool
+        notes: str | None
+        updated_at: str
+        updated_by: str | None
+        rollout_readiness: str
+        next_action: str
+        canary_decision: str
+        merge_gate: str
+        reasons: list[str]
+        allowed_actions: list[str]
+        history: list[object]
+
+        def model_dump(self) -> dict[str, object]:
+            return {
+                "generated_at": self.generated_at,
+                "environment_class": self.environment_class,
+                "runtime_status_path": self.runtime_status_path,
+                "promotion_paused": self.promotion_paused,
+                "promotion_pause_reason": self.promotion_pause_reason,
+                "promotion_pause_expires_at": self.promotion_pause_expires_at,
+                "promotion_pause_active": self.promotion_pause_active,
+                "rollback_requested": self.rollback_requested,
+                "rollback_reason": self.rollback_reason,
+                "rollback_expires_at": self.rollback_expires_at,
+                "rollback_active": self.rollback_active,
+                "notes": self.notes,
+                "updated_at": self.updated_at,
+                "updated_by": self.updated_by,
+                "rollout_readiness": self.rollout_readiness,
+                "next_action": self.next_action,
+                "canary_decision": self.canary_decision,
+                "merge_gate": self.merge_gate,
+                "reasons": list(self.reasons),
+                "allowed_actions": list(self.allowed_actions),
+                "history": list(self.history),
+            }
+
+    state: dict[str, object] = {
+        "environment_class": "windows-native:managed",
+        "runtime_status_path": None,
+        "promotion_paused": False,
+        "promotion_pause_reason": None,
+        "promotion_pause_expires_at": None,
+        "promotion_pause_active": False,
+        "rollback_requested": False,
+        "rollback_reason": None,
+        "rollback_expires_at": None,
+        "rollback_active": False,
+        "notes": None,
+        "updated_at": "2026-04-18T12:00:00Z",
+        "updated_by": "tenant-main:operator-1",
+        "rollout_readiness": "ready",
+        "next_action": "promote_to_next_environment_class",
+        "canary_decision": "promote_to_next_environment_class",
+        "merge_gate": "ready",
+        "reasons": ["no_blocking_runtime_signals"],
+        "allowed_actions": ["hold", "rollback"],
+        "history": [
+                SimpleNamespace(
+                    entry_id="ledger-initial",
+                    recorded_at="2026-04-18T12:00:00Z",
+                    action="initial",
+                    actor_id="tenant-main:operator-1",
+                    summary="initial rollout posture",
+                    environment_class="windows-native:managed",
+                    runtime_status_path=None,
+                    promotion_paused=False,
+                    promotion_pause_reason=None,
+                    promotion_pause_expires_at=None,
+                    promotion_pause_active=False,
+                    rollback_requested=False,
+                    rollback_reason=None,
+                    rollback_expires_at=None,
+                    rollback_active=False,
+                    notes=None,
+                )
+            ],
+    }
+
+    def fake_rollout_snapshot() -> FakeRolloutSnapshot:
+        return FakeRolloutSnapshot(
+            generated_at="2026-04-18T12:00:00Z",
+            environment_class=cast(str, state["environment_class"]),
+            runtime_status_path=cast(str | None, state["runtime_status_path"]),
+            promotion_paused=bool(state["promotion_paused"]),
+            promotion_pause_reason=cast(str | None, state["promotion_pause_reason"]),
+            promotion_pause_expires_at=cast(str | None, state["promotion_pause_expires_at"]),
+            promotion_pause_active=bool(state["promotion_pause_active"]),
+            rollback_requested=bool(state["rollback_requested"]),
+            rollback_reason=cast(str | None, state["rollback_reason"]),
+            rollback_expires_at=cast(str | None, state["rollback_expires_at"]),
+            rollback_active=bool(state["rollback_active"]),
+            notes=cast(str | None, state["notes"]),
+            updated_at=cast(str, state["updated_at"]),
+            updated_by=cast(str | None, state["updated_by"]),
+            rollout_readiness=cast(str, state["rollout_readiness"]),
+            next_action=cast(str, state["next_action"]),
+            canary_decision=cast(str, state["canary_decision"]),
+            merge_gate=cast(str, state["merge_gate"]),
+            reasons=list(cast(list[str], state["reasons"])),
+            allowed_actions=list(cast(list[str], state["allowed_actions"])),
+            history=list(cast(list[object], state["history"])),
+        )
+
+    def fake_persist_managed_windows_vfs_state(
+        updates: dict[str, object],
+        *,
+        actor_id: str,
+    ) -> None:
+        state.update(updates)
+        state["updated_by"] = actor_id
+        state["updated_at"] = "2026-04-18T12:05:00Z"
+        promotion_paused = bool(state["promotion_paused"])
+        state["promotion_pause_active"] = promotion_paused
+        state["merge_gate"] = "hold" if promotion_paused else "ready"
+        state["canary_decision"] = (
+            "hold_canary_and_repeat_soak"
+            if promotion_paused
+            else "promote_to_next_environment_class"
+        )
+        state["next_action"] = cast(str, state["canary_decision"])
+        state["reasons"] = (
+            ["operator_requested_promotion_pause"]
+            if promotion_paused
+            else ["no_blocking_runtime_signals"]
+        )
+        state["history"] = [
+                SimpleNamespace(
+                    entry_id="ledger-persist",
+                    recorded_at="2026-04-18T12:05:00Z",
+                    action="persist",
+                    actor_id=actor_id,
+                    summary=(
+                        "promotion pause enabled"
+                    if promotion_paused
+                    else "promotion pause cleared"
+                    ),
+                    environment_class=cast(str, state["environment_class"]),
+                    runtime_status_path=None,
+                    promotion_paused=promotion_paused,
+                    promotion_pause_reason=cast(str | None, state["promotion_pause_reason"]),
+                    promotion_pause_expires_at=cast(
+                        str | None,
+                        state["promotion_pause_expires_at"],
+                    ),
+                    promotion_pause_active=promotion_paused,
+                    rollback_requested=False,
+                    rollback_reason=None,
+                    rollback_expires_at=None,
+                    rollback_active=False,
+                    notes=cast(str | None, state["notes"]),
+                )
+            ]
+
+    monkeypatch.setattr(default_routes, "_vfs_rollout_control_response", fake_rollout_snapshot)
+    monkeypatch.setattr(
+        default_routes,
+        "persist_managed_windows_vfs_state",
+        fake_persist_managed_windows_vfs_state,
+    )
+    monkeypatch.setattr("filmu_py.graphql.resolvers.audit_action", lambda request, **kwargs: None)
+
+    client = _build_client(FakeMediaService())
+    resources = cast(Any, client.app.state.resources)
+    _allow_graphql_control_plane_permissions(resources.settings)
+    info = _build_graphql_info(client.app, headers=_graphql_headers("backend:admin"))
+    query = CoreQueryResolver()
+    mutation = CoreMutationResolver()
+
+    async def _scenario() -> None:
+        hits_before = _counter_value(CACHE_HITS_TOTAL, namespace="test")
+
+        first = await query.vfs_rollout_control(info, history_limit=1)
+        state["promotion_paused"] = True
+        state["promotion_pause_active"] = True
+        state["promotion_pause_reason"] = "out-of-band hold"
+        state["merge_gate"] = "hold"
+        second = await query.vfs_rollout_control(info, history_limit=1)
+
+        assert first.promotion_paused is False
+        assert second.promotion_paused is False
+        assert _counter_value(CACHE_HITS_TOTAL, namespace="test") == hits_before + 1
+
+        await mutation.persist_vfs_rollout_control(
+            info,
+            PersistVfsRolloutControlInput(
+                environment_class="windows-native:managed",
+                promotion_paused=True,
+                promotion_pause_reason="repeat soak from GraphQL cache test",
+                notes="hold",
+            ),
+        )
+
+        third = await query.vfs_rollout_control(info, history_limit=1)
+        assert third.promotion_paused is True
+        assert third.promotion_pause_reason == "repeat soak from GraphQL cache test"
+        assert third.merge_gate == "hold"
+        assert third.history[0].summary == "promotion pause enabled"
+
+    asyncio.run(_scenario())
 
 
 def test_graphql_authorization_audit_failures_do_not_break_allowed_rollout_mutation(
@@ -7607,6 +12693,116 @@ def test_graphql_authorization_audit_failures_do_not_break_allowed_rollout_mutat
         "promotionPauseReason": "repeat soak after audit outage",
         "updatedBy": "tenant-main:operator-1",
     }
+
+
+def test_graphql_execute_vfs_rollout_action_matches_rest_guardrails(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    (windows_artifacts_root / "filmuvfs-windows-state.json").write_text(
+        json.dumps({"environment_class": "windows-native:managed"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: {"playback_gate_environment_class": "windows-native:managed"},
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "vfs_runtime_governance_snapshot",
+        lambda playback_gate_governance=None, **kwargs: {
+            "vfs_runtime_rollout_readiness": "blocked",
+            "vfs_runtime_rollout_next_action": "rollback_current_environment",
+            "vfs_runtime_rollout_canary_decision": "rollback_current_environment",
+            "vfs_runtime_rollout_merge_gate": "blocked",
+            "vfs_runtime_rollout_environment_class": "windows-native:managed",
+            "vfs_runtime_rollout_reasons": ["mounted_read_errors"],
+        },
+    )
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr("filmu_py.graphql.resolvers.audit_action", fake_audit_action)
+    client = _build_client(FakeMediaService())
+
+    response = client.post(
+        "/graphql",
+        headers={
+            "x-api-key": "a" * 32,
+            "x-actor-id": "operator-1",
+            "x-tenant-id": "tenant-main",
+            "x-actor-roles": "platform:admin",
+            "x-actor-scopes": "backend:admin",
+        },
+        json={
+            "query": """
+                mutation Execute($input: ExecuteVfsRolloutActionInput!) {
+                  executeVfsRolloutAction(input: $input) {
+                    environmentClass
+                    rollbackRequested
+                    rollbackReason
+                    canaryDecision
+                    mergeGate
+                    allowedActions
+                    history {
+                      action
+                      summary
+                    }
+                  }
+                }
+            """,
+            "variables": {
+                "input": {
+                    "action": "rollback",
+                    "reason": "mounted reads regressed after GraphQL canary",
+                    "targetEnvironmentClass": "windows-native:recovery",
+                    "expectedCanaryDecision": "rollback_current_environment",
+                    "expectedMergeGate": "blocked",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "errors" not in body
+    assert body["data"]["executeVfsRolloutAction"] == {
+        "environmentClass": "windows-native:recovery",
+        "rollbackRequested": True,
+        "rollbackReason": "mounted reads regressed after GraphQL canary",
+        "canaryDecision": "rollback_current_environment",
+        "mergeGate": "blocked",
+        "allowedActions": ["clear_rollback"],
+        "history": [
+            {
+                "action": "execute_rollback",
+                "summary": (
+                    "rollback executed: mounted reads regressed after GraphQL canary "
+                    "(windows-native:recovery)"
+                ),
+            }
+        ],
+    }
+    assert audit_calls == [
+        {
+            "action": "operations.vfs_rollout.execute_action",
+            "target": "operations.vfs_rollout",
+            "details": {
+                "requested_action": "rollback",
+                "reason": "mounted reads regressed after GraphQL canary",
+                "target_environment_class": "windows-native:recovery",
+                "expected_canary_decision": "rollback_current_environment",
+                "expected_merge_gate": "blocked",
+            },
+        }
+    ]
 
 
 def test_graphql_persist_vfs_rollout_control_requires_backend_admin() -> None:

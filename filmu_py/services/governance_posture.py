@@ -37,7 +37,7 @@ class GovernanceEvidenceCheckSnapshot:
 
 
 @dataclass(slots=True)
-class EnterpriseRolloutEvidenceSnapshot:
+class RolloutEvidenceSnapshot:
     generated_at: str
     status: Literal["ready", "partial", "blocked"]
     total_check_count: int
@@ -70,6 +70,7 @@ class PlaybackGateGovernanceSnapshot:
     windows_soak_repeat_count: int
     windows_soak_profile_coverage_complete: bool
     windows_soak_profile_coverage: list[str]
+    windows_soak_pressure_cause_buckets: dict[str, int]
     policy_validation_status: str
     policy_ready: bool
     required_actions: list[str]
@@ -178,7 +179,7 @@ class PluginRuntimeOverviewSnapshot:
 @dataclass(slots=True)
 class PluginRuntimeWarningSnapshot:
     plugin_name: str
-    source: Literal["governance", "integration"]
+    source: Literal["governance", "integration", "events"]
     severity: Literal["warning", "critical"]
     status: str
     message: str
@@ -505,6 +506,14 @@ def build_playback_gate_governance_posture() -> PlaybackGateGovernanceSnapshot:
         windows_soak_profile_coverage=_as_str_list(
             snapshot.get("playback_gate_windows_soak_profile_coverage")
         ),
+        windows_soak_pressure_cause_buckets={
+            str(key): _as_int(value)
+            for key, value in cast(
+                Mapping[str, object],
+                snapshot.get("playback_gate_windows_soak_pressure_cause_buckets") or {},
+            ).items()
+            if str(key).strip()
+        },
         policy_validation_status=str(
             snapshot.get("playback_gate_policy_validation_status", "unverified")
         ),
@@ -674,9 +683,9 @@ def build_vfs_runtime_telemetry_posture(resources: AppResources) -> VfsRuntimeTe
     )
 
 
-def build_enterprise_rollout_evidence_posture(
+def build_rollout_evidence_posture(
     resources: AppResources,
-) -> EnterpriseRolloutEvidenceSnapshot:
+) -> RolloutEvidenceSnapshot:
     """Return retained rollout-evidence posture across GraphQL-first operator domains."""
 
     playback_gate = runtime_governance._playback_gate_governance_snapshot()
@@ -881,7 +890,7 @@ def build_enterprise_rollout_evidence_posture(
     else:
         status = "ready"
 
-    return EnterpriseRolloutEvidenceSnapshot(
+    return RolloutEvidenceSnapshot(
         generated_at=datetime.now(UTC).isoformat(),
         status=status,
         total_check_count=len(checks),
@@ -907,8 +916,8 @@ async def build_plugin_runtime_overview_posture(
 ) -> tuple[PluginRuntimeOverviewSnapshot, list[PluginRuntimeWarningSnapshot]]:
     """Return plugin runtime overview plus actionable warning rows."""
 
-    integration = build_plugin_integration_readiness_posture(resources)
-    event_rows = build_plugin_event_status_posture(resources)
+    integration = await build_plugin_integration_readiness_posture(resources)
+    event_rows = await build_plugin_event_status_posture(resources)
     governance = await build_plugin_governance_posture(resources, app_state=app_state)
     governance_plugins = list(governance.plugins)
 
@@ -916,9 +925,7 @@ async def build_plugin_runtime_overview_posture(
         1 for plugin in governance_plugins if str(getattr(plugin, "status", "")) == "load_failed"
     )
     ready_plugins = sum(1 for plugin in governance_plugins if bool(getattr(plugin, "ready", False)))
-    wiring_ready_plugins = sum(
-        1 for row in event_rows if str(row.wiring_status) == "wired"
-    )
+    wiring_ready_plugins = sum(1 for row in event_rows if str(row.wiring_status) != "idle")
     contract_validated_plugins = sum(1 for row in integration.plugins if row.contract_validated)
     soak_validated_plugins = sum(1 for row in integration.plugins if row.soak_validated)
     quarantined_plugins = sum(
@@ -973,6 +980,24 @@ async def build_plugin_runtime_overview_posture(
                 capability_kind=readiness_plugin.capability_kind,
             )
         )
+
+    for event_row in event_rows:
+        if not event_row.remaining_gaps:
+            continue
+        severity: Literal["warning", "critical"] = (
+            "critical" if event_row.queue_health_status == "blocked" else "warning"
+        )
+        for gap in event_row.remaining_gaps:
+            warnings.append(
+                PluginRuntimeWarningSnapshot(
+                    plugin_name=event_row.name,
+                    source="events",
+                    severity=severity,
+                    status=event_row.queue_health_status,
+                    message=gap,
+                    capability_kind="event_hook" if event_row.hook_subscription_count > 0 else None,
+                )
+            )
 
     status: Literal["ready", "partial", "blocked"]
     if load_failed_plugins or quarantined_plugins:
@@ -1099,12 +1124,12 @@ async def build_vfs_generation_history_posture(
     return list(reversed(results))
 
 
-def build_enterprise_rollout_status_counts(
+def build_rollout_status_counts(
     resources: AppResources,
 ) -> list[GovernanceStatusCountSnapshot]:
     """Return status buckets for retained rollout evidence checks."""
 
-    evidence = build_enterprise_rollout_evidence_posture(resources)
+    evidence = build_rollout_evidence_posture(resources)
     counts: dict[str, int] = {}
     for check in evidence.checks:
         counts[check.status] = counts.get(check.status, 0) + 1
@@ -1114,12 +1139,12 @@ def build_enterprise_rollout_status_counts(
     ]
 
 
-def build_enterprise_rollout_artifact_inventory(
+def build_rollout_artifact_inventory(
     resources: AppResources,
 ) -> list[GovernanceArtifactInventorySnapshot]:
     """Return the retained rollout-evidence artifact inventory for GraphQL."""
 
-    evidence = build_enterprise_rollout_evidence_posture(resources)
+    evidence = build_rollout_evidence_posture(resources)
     rows: list[GovernanceArtifactInventorySnapshot] = []
     for check in evidence.checks:
         for artifact in check.proof_artifacts:
@@ -1136,12 +1161,12 @@ def build_enterprise_rollout_artifact_inventory(
     return rows
 
 
-def build_enterprise_rollout_action_items(
+def build_rollout_action_items(
     resources: AppResources,
 ) -> list[OperatorActionItemSnapshot]:
     """Return one flattened governance-action feed for Director/operator screens."""
 
-    evidence = build_enterprise_rollout_evidence_posture(resources)
+    evidence = build_rollout_evidence_posture(resources)
     playback_gate = build_playback_gate_governance_posture()
     vfs_runtime = build_vfs_runtime_rollout_posture(resources)
     actions: list[OperatorActionItemSnapshot] = []
@@ -1152,7 +1177,7 @@ def build_enterprise_rollout_action_items(
         for action in check.required_actions:
             actions.append(
                 OperatorActionItemSnapshot(
-                    domain="enterprise_rollout",
+                    domain="rollout",
                     subject=check.key,
                     severity=severity,
                     status=check.status,
@@ -1185,12 +1210,12 @@ def build_enterprise_rollout_action_items(
     return list(deduped.values())
 
 
-def build_enterprise_rollout_gap_items(
+def build_rollout_gap_items(
     resources: AppResources,
 ) -> list[OperatorGapItemSnapshot]:
     """Return flattened retained rollout gaps for GraphQL-first consoles."""
 
-    evidence = build_enterprise_rollout_evidence_posture(resources)
+    evidence = build_rollout_evidence_posture(resources)
     playback_gate = build_playback_gate_governance_posture()
     vfs_runtime = build_vfs_runtime_rollout_posture(resources)
     gaps: list[OperatorGapItemSnapshot] = []
@@ -1201,7 +1226,7 @@ def build_enterprise_rollout_gap_items(
         for message in check.remaining_gaps:
             gaps.append(
                 OperatorGapItemSnapshot(
-                    domain="enterprise_rollout",
+                    domain="rollout",
                     subject=check.key,
                     severity=severity,
                     status=check.status,
@@ -1382,8 +1407,8 @@ async def build_plugin_runtime_rows(
 ) -> list[PluginRuntimeRowSnapshot]:
     """Return per-plugin runtime rows combining governance, events, and proof posture."""
 
-    integration = build_plugin_integration_readiness_posture(resources)
-    event_rows = build_plugin_event_status_posture(resources)
+    integration = await build_plugin_integration_readiness_posture(resources)
+    event_rows = await build_plugin_event_status_posture(resources)
     governance = await build_plugin_governance_posture(resources, app_state=app_state)
     integration_by_name = _integration_by_name(list(integration.plugins))
     event_by_name = _event_by_name(list(event_rows))
@@ -1405,6 +1430,9 @@ async def build_plugin_runtime_rows(
         if integration_row is not None:
             row_remaining_gaps.extend(integration_row.remaining_gaps)
             recommended_actions.update(integration_row.required_actions)
+        if event_row is not None:
+            row_remaining_gaps.extend(list(getattr(event_row, "remaining_gaps", ())))
+            recommended_actions.update(list(getattr(event_row, "required_actions", ())))
         rows.append(
             PluginRuntimeRowSnapshot(
                 name=plugin.name,

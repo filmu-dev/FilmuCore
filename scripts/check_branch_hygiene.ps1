@@ -26,7 +26,7 @@ $allowedSemanticReviewBranchPrefixes = @(
     'revert/'
 )
 $permanentlyBlockedReviewBranches = @{
-    'codex/windows-vfs-rollout-20260415' = 'Previously-used review branch retained only for history. Push local main to a fresh remote review branch instead.'
+    'codex/windows-vfs-rollout-20260415' = 'Previously-used review branch retained only for history. Push local main to a fresh remote review branch instead, and do not create a local branch copy.'
 }
 
 function Invoke-GitCapture {
@@ -167,7 +167,7 @@ if ($behindBy -gt 0) {
     }
 }
 if ($aheadBy -eq 0) {
-    $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from a real feature branch instead.")
+    $actions.Add("Branch '$Branch' has no commits beyond '$Remote/$BaseBranch'. Push the intended change from local '$BaseBranch' to a dedicated remote review branch instead, and do not create a local branch copy.")
 }
 if ($null -ne $closedReuse) {
     $stateLabel = if ($closedReuse.merged) { 'merged' } else { 'closed' }

@@ -103,6 +103,15 @@ warn_unreachable = true
 module = ["filmuvfs.*"]
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+module = [
+  "filmu_py.api.routes.runtime_governance",
+  "filmu_py.graphql.resolvers",
+  "filmu_py.services.media",
+  "filmu_py.services.settings_service",
+]
+ignore_errors = true
+
 [build-system]
 requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"

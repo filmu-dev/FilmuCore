@@ -1,5 +1,8 @@
 {
-  "required_fields": [
+  "schema_version": 1,
+  "artifact_kind": "operator_log_pipeline_rollout",
+  "freshness_window_hours": 24,
+  "required_log_fields": [
     "@timestamp",
     "log.level",
     "message",
@@ -12,5 +15,18 @@
   "max_search_latency_ms": 5000,
   "max_alert_latency_ms": 5000,
   "max_active_alerts": -1,
-  "minimum_green_streak": 3
+  "minimum_green_streak": 3,
+  "required_fields": [
+    "schema_version",
+    "artifact_kind",
+    "captured_at",
+    "expires_at",
+    "environment",
+    "status",
+    "checks",
+    "green_streak",
+    "minimum_green_streak",
+    "failure_reasons",
+    "required_actions"
+  ]
 }

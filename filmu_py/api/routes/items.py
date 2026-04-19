@@ -27,6 +27,7 @@ from filmu_py.api.models import (
     ItemsResponse,
     ItemSummaryResponse,
     MediaEntryDetailResponse,
+    MediaEntryLifecycleResponse,
     MessageResponse,
     PlaybackAttachmentDetailResponse,
     ResolvedPlaybackAttachmentResponse,
@@ -167,6 +168,27 @@ def _to_resolved_playback_snapshot(
 
 
 def _to_media_entry_detail(entry: MediaEntryDetailRecord) -> MediaEntryDetailResponse:
+    lifecycle = None
+    if entry.lifecycle is not None:
+        lifecycle = MediaEntryLifecycleResponse(
+            owner_kind=entry.lifecycle.owner_kind,
+            owner_id=entry.lifecycle.owner_id,
+            active_roles=list(entry.lifecycle.active_roles),
+            source_key=entry.lifecycle.source_key,
+            source_attachment_id=entry.lifecycle.source_attachment_id,
+            provider_family=entry.lifecycle.provider_family,
+            locator_source=entry.lifecycle.locator_source,
+            match_basis=entry.lifecycle.match_basis,
+            restricted_fallback=entry.lifecycle.restricted_fallback,
+            refresh_state=entry.lifecycle.refresh_state,
+            expires_at=entry.lifecycle.expires_at,
+            last_refreshed_at=entry.lifecycle.last_refreshed_at,
+            last_refresh_error=entry.lifecycle.last_refresh_error,
+            effective_refresh_state=entry.lifecycle.effective_refresh_state,
+            ready_for_direct=entry.lifecycle.ready_for_direct,
+            ready_for_hls=entry.lifecycle.ready_for_hls,
+            ready_for_playback=entry.lifecycle.ready_for_playback,
+        )
     return MediaEntryDetailResponse(
         entry_type=entry.entry_type,
         kind=entry.kind,
@@ -175,6 +197,7 @@ def _to_media_entry_detail(entry: MediaEntryDetailRecord) -> MediaEntryDetailRes
         local_path=entry.local_path,
         download_url=entry.download_url,
         unrestricted_url=entry.unrestricted_url,
+        source_attachment_id=entry.source_attachment_id,
         provider=entry.provider,
         provider_download_id=entry.provider_download_id,
         provider_file_id=entry.provider_file_id,
@@ -189,6 +212,7 @@ def _to_media_entry_detail(entry: MediaEntryDetailRecord) -> MediaEntryDetailRes
         active_for_direct=entry.active_for_direct,
         active_for_hls=entry.active_for_hls,
         is_active_stream=entry.is_active_stream,
+        lifecycle=lifecycle,
     )
 
 

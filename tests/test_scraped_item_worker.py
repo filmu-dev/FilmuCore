@@ -16,6 +16,7 @@ from arq.jobs import JobStatus
 from filmu_py import config as config_module
 from filmu_py.config import Settings, reset_runtime_settings
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.item_workflow_drill_status import ItemWorkflowDrillStatusStore
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.db.models import (
     EpisodeORM,
@@ -41,7 +42,13 @@ from filmu_py.services.media import (
     RequestMetadataResolution,
     ScrapeCandidateRecord,
     ShowCompletionResult,
+    WorkflowCheckpointRecord,
+    WorkflowCheckpointStatus,
+    WorkflowDrillCandidateRecord,
+    WorkflowResumeStage,
     _build_recovery_plan_record,
+    attach_parse_validation,
+    parse_stage_rejection_reason,
     parse_stream_candidate_title,
     validate_parsed_stream_candidate,
 )
@@ -152,6 +159,9 @@ class FakePipelineMediaService:
     has_media_entries: bool = False
     last_requested_seasons: list[int] | None = None
     blacklisted_stream_ids: set[str] = field(default_factory=set)
+    workflow_checkpoint: WorkflowCheckpointRecord | None = None
+    workflow_checkpoint_history: list[WorkflowCheckpointRecord] = field(default_factory=list)
+    workflow_drill_candidates: list[WorkflowDrillCandidateRecord] = field(default_factory=list)
     enrichment_resolution: RequestMetadataResolution = field(
         default_factory=lambda: RequestMetadataResolution(
             metadata=None,
@@ -261,16 +271,16 @@ class FakePipelineMediaService:
         for raw_title in raw_titles:
             candidate = parse_stream_candidate_title(raw_title, infohash=infohash)
             validation = validate_parsed_stream_candidate(item_orm, candidate)
-            if not validation.ok:
-                continue
+            parsed_payload = attach_parse_validation(candidate.parsed_title, validation)
             for stream in self.streams:
                 if (
                     stream.infohash == candidate.infohash
                     and stream.raw_title == candidate.raw_title
                 ):
-                    stream.parsed_title = candidate.parsed_title
+                    stream.parsed_title = parsed_payload
                     stream.resolution = candidate.resolution
-                    persisted.append(stream)
+                    if validation.ok:
+                        persisted.append(stream)
                     break
             else:
                 created = StreamORM(
@@ -278,14 +288,15 @@ class FakePipelineMediaService:
                     media_item_id=self.item_id,
                     infohash=candidate.infohash,
                     raw_title=candidate.raw_title,
-                    parsed_title=candidate.parsed_title,
+                    parsed_title=parsed_payload,
                     rank=0,
                     lev_ratio=None,
                     resolution=candidate.resolution,
                     selected=False,
                 )
                 self.streams.append(created)
-                persisted.append(created)
+                if validation.ok:
+                    persisted.append(created)
         return persisted
 
     async def get_latest_item_request(
@@ -397,6 +408,63 @@ class FakePipelineMediaService:
             }
         )
         return []
+
+    async def get_workflow_checkpoint(
+        self,
+        *,
+        media_item_id: str,
+        workflow_name: str = "item_pipeline",
+    ) -> WorkflowCheckpointRecord | None:
+        self.calls.append("get_workflow_checkpoint")
+        assert media_item_id == self.item_id
+        _ = workflow_name
+        return self.workflow_checkpoint
+
+    async def persist_workflow_checkpoint(
+        self,
+        *,
+        media_item_id: str,
+        stage_name: str,
+        resume_stage: WorkflowResumeStage,
+        status: WorkflowCheckpointStatus,
+        workflow_name: str = "item_pipeline",
+        item_request_id: str | None = None,
+        selected_stream_id: str | None = None,
+        provider: str | None = None,
+        provider_download_id: str | None = None,
+        checkpoint_payload: dict[str, object] | None = None,
+        compensation_payload: dict[str, object] | None = None,
+        last_error: str | None = None,
+    ) -> WorkflowCheckpointRecord:
+        self.calls.append("persist_workflow_checkpoint")
+        assert media_item_id == self.item_id
+        record = WorkflowCheckpointRecord(
+            workflow_name=workflow_name,
+            stage_name=stage_name,
+            resume_stage=resume_stage,
+            status=status,
+            item_request_id=item_request_id,
+            selected_stream_id=selected_stream_id,
+            provider=provider,
+            provider_download_id=provider_download_id,
+            checkpoint_payload=dict(checkpoint_payload or {}),
+            compensation_payload=dict(compensation_payload or {}),
+            last_error=last_error,
+            updated_at="2026-04-18T12:00:00+00:00",
+        )
+        self.workflow_checkpoint = record
+        self.workflow_checkpoint_history.append(record)
+        return record
+
+    async def list_workflow_drill_candidates(
+        self,
+        *,
+        workflow_name: str = "item_pipeline",
+        limit: int = 100,
+    ) -> list[WorkflowDrillCandidateRecord]:
+        self.calls.append("list_workflow_drill_candidates")
+        _ = workflow_name, limit
+        return list(self.workflow_drill_candidates)
 
     async def list_items_in_states(self, *, states: list[ItemState]) -> list[MediaItemRecord]:
         self.calls.append("list_items_in_states")
@@ -1440,16 +1508,82 @@ def test_debrid_item_persists_entries_and_enqueues_finalize(monkeypatch: Any) ->
     )
 
     assert result == item_id
-    assert media_service.calls[:4] == [
+    assert media_service.calls[:6] == [
         "get_item",
         "get_latest_item_request_id",
+        "get_workflow_checkpoint",
         "get_stream_candidates",
+        "persist_workflow_checkpoint",
         "persist_debrid_download_entries",
     ]
     assert media_service.persisted_downloads[0]["provider"] == "realdebrid"
     assert media_service.persisted_downloads[0]["download_urls"] == [
         "https://cdn.example.com/movie"
     ]
+    assert media_service.workflow_checkpoint is not None
+    assert media_service.workflow_checkpoint.resume_stage is WorkflowResumeStage.FINALIZE
+    assert media_service.workflow_checkpoint.status is WorkflowCheckpointStatus.PENDING
+    assert media_service.workflow_checkpoint.checkpoint_payload == {
+        "download_url_count": 1,
+        "persisted_media_entry_count": 0,
+        "fanout_parallelism": 1,
+        "attempted_providers": ["realdebrid"],
+        "successful_providers": ["realdebrid"],
+        "failed_providers": [],
+        "provider_failure_types": [],
+        "selected_provider_priority": 0,
+        "selected_container_root": None,
+        "matched_file_ids": ["file-1"],
+        "selected_file_ids": ["file-1"],
+    }
+    assert redis.calls[-1] == (
+        "finalize_item",
+        (item_id,),
+        {"_job_id": tasks.finalize_item_job_id(item_id), "_queue_name": "filmu-py"},
+    )
+
+
+def test_debrid_item_resumes_from_persisted_finalize_checkpoint(monkeypatch: Any) -> None:
+    item_id = "item-debrid-resume"
+    selected = _build_stream(
+        stream_id="stream-resume", item_id=item_id, parsed=True, selected=True
+    )
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+        workflow_checkpoint=WorkflowCheckpointRecord(
+            workflow_name="item_pipeline",
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.FINALIZE,
+            status=WorkflowCheckpointStatus.PENDING,
+            item_request_id=f"request-{item_id}",
+            selected_stream_id=selected.id,
+            provider="realdebrid",
+            provider_download_id="provider-torrent-1",
+            checkpoint_payload={"persisted_media_entry_count": 1},
+            compensation_payload={"selected_stream_id": selected.id},
+            updated_at="2026-04-18T12:00:00+00:00",
+        ),
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **_: (_ for _ in ()).throw(AssertionError("provider client should not run")),
+    )
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": _build_worker_settings(), "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.persisted_downloads == []
     assert redis.calls[-1] == (
         "finalize_item",
         (item_id,),
@@ -1519,6 +1653,22 @@ def test_debrid_item_fails_over_to_next_downloader_provider(monkeypatch: Any) ->
 
     assert result == item_id
     assert media_service.persisted_downloads[0]["provider"] == "alldebrid"
+    assert media_service.workflow_checkpoint is not None
+    assert media_service.workflow_checkpoint.checkpoint_payload["fanout_parallelism"] == 2
+    assert media_service.workflow_checkpoint.checkpoint_payload["attempted_providers"] == [
+        "realdebrid",
+        "alldebrid",
+    ]
+    assert media_service.workflow_checkpoint.checkpoint_payload["successful_providers"] == [
+        "alldebrid"
+    ]
+    assert media_service.workflow_checkpoint.checkpoint_payload["failed_providers"] == [
+        "realdebrid"
+    ]
+    assert media_service.workflow_checkpoint.checkpoint_payload["provider_failure_types"] == [
+        {"provider": "realdebrid", "error_type": "HTTPStatusError"}
+    ]
+    assert media_service.workflow_checkpoint.checkpoint_payload["selected_provider_priority"] == 1
     assert redis.calls[-1] == (
         "finalize_item",
         (item_id,),
@@ -1580,13 +1730,13 @@ def test_debrid_item_fails_over_when_provider_manifest_is_incomplete(monkeypatch
                     _TorrentFile(
                         file_id="file-1",
                         file_name="Episode 01.mkv",
-                        file_path="Show A/Season 01/Episode 01.mkv",
+                        file_path="Show/Season 01/Episode 01.mkv",
                         file_size_bytes=800 * 1024 * 1024,
                     ),
                     _TorrentFile(
                         file_id="file-2",
                         file_name="Episode 02.mkv",
-                        file_path="Show B/Season 01/Episode 02.mkv",
+                        file_path="Show/Season 01/Episode 02.mkv",
                         file_size_bytes=810 * 1024 * 1024,
                     ),
                 ],
@@ -1623,6 +1773,387 @@ def test_debrid_item_fails_over_when_provider_manifest_is_incomplete(monkeypatch
 
     assert result == item_id
     assert media_service.persisted_downloads[0]["provider"] == "alldebrid"
+    assert redis.calls[-1] == (
+        "finalize_item",
+        (item_id,),
+        {"_job_id": tasks.finalize_item_job_id(item_id), "_queue_name": "filmu-py"},
+    )
+
+
+def test_debrid_item_fails_over_when_provider_selection_misses_expected_episode(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-debrid-content-match-failover"
+    selected = _build_stream(
+        stream_id="stream-content-match",
+        item_id=item_id,
+        parsed=True,
+        selected=True,
+    )
+    selected.parsed_title = {"title": "Example Show", "season": 1, "episode": 2}
+    selected.raw_title = "Example.Show.S01E02.1080p.WEB-DL"
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    settings.downloaders.all_debrid.enabled = True
+    settings.downloaders.all_debrid.api_key = "ad-token"
+
+    class _WrongEpisodeClient:
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return "provider-torrent-rd"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            _ = provider_torrent_id
+
+            @dataclass(frozen=True)
+            class _TorrentFile:
+                file_id: str
+                file_name: str
+                file_path: str | None
+                file_size_bytes: int | None
+                selected: bool = True
+                download_url: str | None = None
+                media_type: str | None = "episode"
+
+            @dataclass(frozen=True)
+            class _TorrentInfo:
+                provider_torrent_id: str
+                status: str
+                name: str | None
+                info_hash: str | None
+                files: list[_TorrentFile]
+                links: list[str]
+
+            return _TorrentInfo(
+                provider_torrent_id="provider-torrent-rd",
+                status="downloaded",
+                name="Pack",
+                info_hash="abc123",
+                files=[
+                    _TorrentFile(
+                        file_id="file-3",
+                        file_name="Episode 03.mkv",
+                        file_path="Show/Season 01/Example.Show.S01E03.mkv",
+                        file_size_bytes=800 * 1024 * 1024,
+                        download_url="https://cdn.example.com/show-s01e03",
+                    )
+                ],
+                links=["https://cdn.example.com/show-s01e03"],
+            )
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            return ["https://cdn.example.com/show-s01e03"]
+
+    class _MatchingEpisodeClient:
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return "provider-torrent-ad"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            _ = provider_torrent_id
+
+            @dataclass(frozen=True)
+            class _TorrentFile:
+                file_id: str
+                file_name: str
+                file_path: str | None
+                file_size_bytes: int | None
+                selected: bool = True
+                download_url: str | None = None
+                media_type: str | None = "episode"
+
+            @dataclass(frozen=True)
+            class _TorrentInfo:
+                provider_torrent_id: str
+                status: str
+                name: str | None
+                info_hash: str | None
+                files: list[_TorrentFile]
+                links: list[str]
+
+            return _TorrentInfo(
+                provider_torrent_id="provider-torrent-ad",
+                status="downloaded",
+                name="Pack",
+                info_hash="abc123",
+                files=[
+                    _TorrentFile(
+                        file_id="file-2",
+                        file_name="Episode 02.mkv",
+                        file_path="Show/Season 01/Example.Show.S01E02.mkv",
+                        file_size_bytes=800 * 1024 * 1024,
+                        download_url="https://cdn.example.com/show-s01e02",
+                    )
+                ],
+                links=["https://cdn.example.com/show-s01e02"],
+            )
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            return ["https://cdn.example.com/show-s01e02"]
+
+    async def fake_plugin_registry(_: dict[str, object]) -> _PluginRegistryStub:
+        return _PluginRegistryStub([])
+
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+    monkeypatch.setattr(tasks, "_resolve_plugin_registry", fake_plugin_registry)
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **kwargs: _WrongEpisodeClient()
+        if kwargs["provider"] == "realdebrid"
+        else _MatchingEpisodeClient(),
+    )
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert media_service.persisted_downloads[0]["provider"] == "alldebrid"
+    assert redis.calls[-1] == (
+        "finalize_item",
+        (item_id,),
+        {"_job_id": tasks.finalize_item_job_id(item_id), "_queue_name": "filmu-py"},
+    )
+
+
+def test_debrid_item_selects_matching_container_from_multi_container_provider_payload(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-debrid-container-fanout"
+    selected = _build_stream(
+        stream_id="stream-container-fanout",
+        item_id=item_id,
+        parsed=True,
+        selected=True,
+    )
+    selected.parsed_title = {"title": "Example Show", "season": 1, "episode": 2}
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+    )
+    redis = FakeArqRedis()
+
+    class _MultiContainerClient:
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return "provider-torrent-1"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            _ = provider_torrent_id
+
+            @dataclass(frozen=True)
+            class _TorrentFile:
+                file_id: str
+                file_name: str
+                file_path: str | None
+                file_size_bytes: int | None
+                selected: bool = True
+                download_url: str | None = None
+                media_type: str | None = "episode"
+
+            @dataclass(frozen=True)
+            class _TorrentInfo:
+                provider_torrent_id: str
+                status: str
+                name: str | None
+                info_hash: str | None
+                files: list[_TorrentFile]
+                links: list[str]
+
+            return _TorrentInfo(
+                provider_torrent_id="provider-torrent-1",
+                status="downloaded",
+                name="Pack",
+                info_hash="abc123",
+                files=[
+                    _TorrentFile(
+                        file_id="file-1",
+                        file_name="Episode 01.mkv",
+                        file_path="Show A/Season 01/Example.Show.S01E01.mkv",
+                        file_size_bytes=800 * 1024 * 1024,
+                        download_url="https://cdn.example.com/show-a-s01e01",
+                    ),
+                    _TorrentFile(
+                        file_id="file-2",
+                        file_name="Episode 02.mkv",
+                        file_path="Show B/Season 01/Example.Show.S01E02.mkv",
+                        file_size_bytes=810 * 1024 * 1024,
+                        download_url="https://cdn.example.com/show-b-s01e02",
+                    ),
+                ],
+                links=[
+                    "https://cdn.example.com/show-a-s01e01",
+                    "https://cdn.example.com/show-b-s01e02",
+                ],
+            )
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            return [
+                "https://cdn.example.com/show-a-s01e01",
+                "https://cdn.example.com/show-b-s01e02",
+            ]
+
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+    monkeypatch.setattr(tasks, "_build_provider_client", lambda **_: _MultiContainerClient())
+    monkeypatch.setattr(
+        tasks,
+        "_resolve_enabled_downloader",
+        lambda settings, item_id=None, item_request_id=None: "realdebrid",
+    )
+    monkeypatch.setattr(tasks, "_resolve_downloader_api_key", lambda settings, provider: "rd-token")
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": _build_worker_settings(), "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    persisted = media_service.persisted_downloads[0]
+    persisted_info = cast(Any, persisted["torrent_info"])
+    assert persisted["provider"] == "realdebrid"
+    assert persisted["download_urls"] == ["https://cdn.example.com/show-b-s01e02"]
+    assert len(persisted_info.files) == 1
+    assert persisted_info.files[0].file_path == "Show B/Season 01/Example.Show.S01E02.mkv"
+
+
+def test_debrid_item_fanout_parallelism_is_bounded_and_selection_is_deterministic(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-debrid-bounded-fanout"
+    selected = _build_stream(
+        stream_id="stream-bounded-fanout",
+        item_id=item_id,
+        parsed=True,
+        selected=True,
+    )
+    selected.parsed_title = {"title": "Example Show", "season": 1, "episode": 2}
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        streams=[selected],
+    )
+    redis = FakeArqRedis()
+    settings = _build_worker_settings()
+    settings.downloaders.all_debrid.enabled = True
+    settings.downloaders.all_debrid.api_key = "ad-token"
+    settings.downloaders.debrid_link.enabled = True
+    settings.downloaders.debrid_link.api_key = "dl-token"
+    settings.orchestration.downloader_provider_parallelism = 2
+
+    active_attempts = {"count": 0, "max": 0}
+
+    class _ParallelClient:
+        def __init__(self, provider: str, delay_seconds: float) -> None:
+            self.provider = provider
+            self.delay_seconds = delay_seconds
+
+        async def add_magnet(self, magnet_url: str) -> str:
+            _ = magnet_url
+            return f"{self.provider}-torrent"
+
+        async def get_torrent_info(self, provider_torrent_id: str) -> object:
+            _ = provider_torrent_id
+            active_attempts["count"] += 1
+            active_attempts["max"] = max(active_attempts["max"], active_attempts["count"])
+            try:
+                await asyncio.sleep(self.delay_seconds)
+            finally:
+                active_attempts["count"] -= 1
+
+            @dataclass(frozen=True)
+            class _TorrentFile:
+                file_id: str
+                file_name: str
+                file_path: str | None
+                file_size_bytes: int | None
+                selected: bool = True
+                download_url: str | None = None
+                media_type: str | None = "episode"
+
+            @dataclass(frozen=True)
+            class _TorrentInfo:
+                provider_torrent_id: str
+                status: str
+                name: str | None
+                info_hash: str | None
+                files: list[_TorrentFile]
+                links: list[str]
+
+            return _TorrentInfo(
+                provider_torrent_id=f"{self.provider}-torrent",
+                status="downloaded",
+                name=f"{self.provider}-pack",
+                info_hash="abc123",
+                files=[
+                    _TorrentFile(
+                        file_id=f"{self.provider}-file",
+                        file_name="Episode 02.mkv",
+                        file_path=f"{self.provider}/Season 01/Example.Show.S01E02.mkv",
+                        file_size_bytes=800 * 1024 * 1024,
+                        download_url=f"https://cdn.example.com/{self.provider}/s01e02",
+                    )
+                ],
+                links=[f"https://cdn.example.com/{self.provider}/s01e02"],
+            )
+
+        async def select_files(self, provider_torrent_id: str, file_ids: list[str]) -> None:
+            _ = (provider_torrent_id, file_ids)
+
+        async def get_download_links(self, provider_torrent_id: str) -> list[str]:
+            _ = provider_torrent_id
+            return [f"https://cdn.example.com/{self.provider}/s01e02"]
+
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "_resolve_limiter", lambda _: _AllowedLimiter())
+    monkeypatch.setattr(
+        tasks,
+        "_build_provider_client",
+        lambda **kwargs: _ParallelClient(
+            kwargs["provider"],
+            {
+                "realdebrid": 0.05,
+                "alldebrid": 0.0,
+                "debridlink": 0.01,
+            }[kwargs["provider"]],
+        ),
+    )
+
+    result = asyncio.run(
+        tasks.debrid_item(
+            {"settings": settings, "arq_redis": redis, "queue_name": "filmu-py"},
+            item_id,
+        )
+    )
+
+    assert result == item_id
+    assert active_attempts["max"] <= 2
+    assert media_service.persisted_downloads[0]["provider"] == "realdebrid"
     assert redis.calls[-1] == (
         "finalize_item",
         (item_id,),
@@ -1977,6 +2508,30 @@ def test_parse_scrape_results_rejects_wrong_season(monkeypatch: Any) -> None:
     ]
 
 
+def test_parse_scrape_results_persists_parse_rejection_reason_for_incomplete_season_candidate(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-parse-incomplete-season"
+    wrong = _build_stream(stream_id="stream-season-pack", item_id=item_id, parsed=False)
+    wrong.raw_title = "Example.Show.S01E02.1080p.WEB-DL"
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        streams=[wrong],
+        item_attributes={"item_type": "season", "season_number": 1},
+    )
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+
+    result = asyncio.run(
+        tasks.parse_scrape_results({"settings": _build_worker_settings()}, item_id)
+    )
+
+    assert result == item_id
+    assert media_service.state is ItemState.FAILED
+    assert parse_stage_rejection_reason(wrong.parsed_title) == (
+        "season_request_incomplete_episode_candidate"
+    )
+
+
 def test_parse_scrape_results_passes_partial_seasons_to_media_service(monkeypatch: Any) -> None:
     item_id = "item-parse-partial"
     matching = _build_stream(stream_id="stream-season", item_id=item_id, parsed=False)
@@ -2068,6 +2623,48 @@ def test_rank_streams_prefers_enqueued_partial_scope_over_latest_request_scope(
         if record.stream_id == out_of_scope.id
     )
     assert rejected.rejection_reason == "partial_scope_season_mismatch"
+
+
+def test_rank_streams_skips_parse_rejected_candidates(monkeypatch: Any) -> None:
+    item_id = "item-rank-parse-rejected"
+    selected = _build_stream(stream_id="stream-valid", item_id=item_id, parsed=True, selected=True)
+    selected.parsed_title = {"title": "Example Show", "season": 1}
+    selected.raw_title = "Example.Show.Season.01.Complete.1080p.WEB-DL"
+
+    rejected = _build_stream(stream_id="stream-invalid", item_id=item_id, parsed=True)
+    rejected.parsed_title = {
+        "title": "Example Show",
+        "season": 1,
+        "episode": 2,
+        "_parse_validation": {
+            "ok": False,
+            "reason": "season_request_incomplete_episode_candidate",
+        },
+    }
+    rejected.raw_title = "Example.Show.S01E02.1080p.WEB-DL"
+
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        streams=[selected, rejected],
+        selected_stream_id=selected.id,
+        item_attributes={"item_type": "show"},
+    )
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    settings = _build_worker_settings()
+    settings.scraping = {"dubbed_anime_only": False, "bucket_limit": 5}
+
+    result = asyncio.run(tasks.rank_streams({"settings": settings}, item_id))
+
+    assert result == item_id
+    invalid_record = next(
+        record
+        for record in media_service.persisted_ranked_results
+        if record.stream_id == rejected.id
+    )
+    assert invalid_record.rejection_reason == "season_request_incomplete_episode_candidate"
+    assert media_service.transition_messages == [
+        (ItemEvent.DOWNLOAD, f"rank_streams selected stream {selected.id}")
+    ]
 
 def test_rank_streams_skips_non_dubbed_anime_when_enabled(monkeypatch: Any) -> None:
     item_id = "item-anime-dubbed-only"
@@ -2916,12 +3513,10 @@ def test_worker_plugin_registry_refreshes_when_plugin_settings_payload_changes(m
     assert third is not first
     builtin_calls = [call for call in build_calls if call["phase"] == "builtin"]
     assert len(builtin_calls) == 2
-    assert cast(dict[str, object], builtin_calls[0]["settings"])["scraping"] == {
-        "torrentio": {"enabled": False}
-    }
-    assert cast(dict[str, object], builtin_calls[1]["settings"])["scraping"] == {
-        "torrentio": {"enabled": True}
-    }
+    first_scraping = cast(dict[str, object], builtin_calls[0]["settings"])["scraping"]
+    second_scraping = cast(dict[str, object], builtin_calls[1]["settings"])["scraping"]
+    assert cast(dict[str, object], first_scraping)["torrentio"]["enabled"] is False
+    assert cast(dict[str, object], second_scraping)["torrentio"]["enabled"] is True
 
 
 def test_transition_item_enqueues_scraped_item_processing_job() -> None:
@@ -3155,6 +3750,7 @@ def test_build_worker_settings_includes_recovery_worker() -> None:
     worker_settings = tasks.build_worker_settings(_build_worker_settings())
 
     assert tasks.recover_incomplete_library in worker_settings["functions"]
+    assert tasks.run_item_workflow_drill in worker_settings["functions"]
     assert tasks.scheduled_metadata_reindex_reconciliation in worker_settings["functions"]
 
 
@@ -3171,6 +3767,150 @@ def test_build_worker_settings_includes_scheduled_metadata_reindex_cron() -> Non
     assert metadata_reindex_job.hour == {0}
     assert metadata_reindex_job.minute == {45}
     assert metadata_reindex_job.job_id == "scheduled-metadata-reindex-reconciliation"
+
+
+def test_build_worker_settings_includes_item_workflow_drill_cron() -> None:
+    worker_settings = tasks.build_worker_settings(_build_worker_settings())
+    cron_jobs = worker_settings["cron_jobs"]
+    workflow_drill_job = next(job for job in cron_jobs if job.name == "run_item_workflow_drill")
+
+    assert workflow_drill_job.hour == {0, 6, 12, 18}
+    assert workflow_drill_job.minute == {20}
+    assert workflow_drill_job.second == 45
+    assert workflow_drill_job.job_id == "run-item-workflow-drill"
+
+
+def test_run_item_workflow_drill_replays_finalize_checkpoint_and_records_history(
+    monkeypatch: Any,
+) -> None:
+    item_id = "item-workflow-drill-replay"
+    candidate = WorkflowDrillCandidateRecord(
+        media_item_id=item_id,
+        tenant_id="tenant-main",
+        item_state=ItemState.DOWNLOADED,
+        recovery_plan=_build_recovery_plan_record(state=ItemState.DOWNLOADED),
+        checkpoint=WorkflowCheckpointRecord(
+            workflow_name="item_pipeline",
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.FINALIZE,
+            status=WorkflowCheckpointStatus.PENDING,
+            item_request_id="request-workflow-drill-replay",
+            selected_stream_id="stream-1",
+            provider="realdebrid",
+            provider_download_id="download-1",
+            checkpoint_payload={"persisted_media_entry_count": 1},
+            compensation_payload={"selected_stream_id": "stream-1"},
+            updated_at="2026-04-18T12:00:00+00:00",
+        ),
+    )
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.DOWNLOADED,
+        workflow_drill_candidates=[candidate],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def finalize_job_inactive(_: object, *, item_id: str) -> bool:
+        assert item_id == "item-workflow-drill-replay"
+        return False
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_finalize_item_job_active", finalize_job_inactive)
+
+    result = asyncio.run(
+        tasks.run_item_workflow_drill(
+            {"settings": _build_worker_settings(), "queue_name": "filmu-py"}
+        )
+    )
+
+    assert result["replayed_checkpoints"] == 1
+    assert result["compensated_checkpoints"] == 0
+    assert result["finalize_requeues"] == 1
+    assert result["candidate_status_counts"] == {"pending": 1}
+    assert redis.calls == [
+        (
+            "finalize_item",
+            (item_id,),
+            {
+                "_job_id": tasks.finalize_item_job_id(item_id),
+                "_queue_name": "filmu-py",
+            },
+        )
+    ]
+    history = asyncio.run(ItemWorkflowDrillStatusStore(redis, queue_name="filmu-py").history(limit=5))
+    assert len(history) == 1
+    assert history[0].replayed_checkpoints == 1
+    assert history[0].compensation_stage_counts == {}
+    assert history[0].outcome == "ok"
+    assert media_service.calls == ["list_workflow_drill_candidates"]
+
+
+def test_run_item_workflow_drill_compensates_failed_parse_target(monkeypatch: Any) -> None:
+    item_id = "item-workflow-drill-compensation"
+    candidate = WorkflowDrillCandidateRecord(
+        media_item_id=item_id,
+        tenant_id="tenant-main",
+        item_state=ItemState.SCRAPED,
+        recovery_plan=_build_recovery_plan_record(state=ItemState.SCRAPED),
+        checkpoint=WorkflowCheckpointRecord(
+            workflow_name="item_pipeline",
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.DEBRID,
+            status=WorkflowCheckpointStatus.FAILED,
+            item_request_id="request-workflow-drill-compensation",
+            last_error="transient provider timeout",
+            updated_at="2026-04-18T12:05:00+00:00",
+        ),
+    )
+    media_service = FakePipelineMediaService(
+        item_id=item_id,
+        state=ItemState.SCRAPED,
+        workflow_drill_candidates=[candidate],
+    )
+    redis = FakeArqRedis()
+    monkeypatch.setattr(tasks, "_resolve_media_service", lambda _: media_service)
+    monkeypatch.setattr(tasks, "get_settings", _build_worker_settings)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> FakeArqRedis:
+        return redis
+
+    async def parse_job_inactive(_: object, *, item_id: str) -> bool:
+        assert item_id == "item-workflow-drill-compensation"
+        return False
+
+    monkeypatch.setattr(tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(tasks, "is_process_scraped_item_job_active", parse_job_inactive)
+
+    result = asyncio.run(
+        tasks.run_item_workflow_drill(
+            {"settings": _build_worker_settings(), "queue_name": "filmu-py"}
+        )
+    )
+
+    assert result["replayed_checkpoints"] == 0
+    assert result["compensated_checkpoints"] == 1
+    assert result["parse_requeues"] == 1
+    assert result["compensation_stage_counts"] == {"parse": 1}
+    assert redis.calls == [
+        (
+            "parse_scrape_results",
+            (item_id,),
+            {
+                "_job_id": tasks.parse_scrape_results_job_id(item_id),
+                "_queue_name": "filmu-py",
+            },
+        )
+    ]
+    history = asyncio.run(ItemWorkflowDrillStatusStore(redis, queue_name="filmu-py").latest())
+    assert history is not None
+    assert history.compensated_checkpoints == 1
+    assert history.compensation_stage_counts == {"parse": 1}
+    assert history.candidate_status_counts == {"failed": 1}
 
 
 def test_scheduled_metadata_reindex_reconciliation_runs_reindex_and_completed_refresh(
@@ -3508,6 +4248,9 @@ def test_finalize_item_partial_scope_incomplete(monkeypatch: Any) -> None:
         missing_seasons=[1],
         missing_episodes={"1": [2]},
     )
+    assert media_service.workflow_checkpoint is not None
+    assert media_service.workflow_checkpoint.status is WorkflowCheckpointStatus.COMPLETED
+    assert media_service.workflow_checkpoint.resume_stage is WorkflowResumeStage.NONE
 
 
 def test_finalize_item_full_show_ongoing(monkeypatch: Any) -> None:

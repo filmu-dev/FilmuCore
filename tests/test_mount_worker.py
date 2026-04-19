@@ -188,6 +188,72 @@ def test_build_mount_media_entry_query_contract_from_snapshot_blocks_when_lifecy
     assert contract.steps == ()
 
 
+def test_build_mount_media_entry_query_contract_from_snapshot_reuses_active_media_entry_lifecycle() -> (
+    None
+):
+    item = _build_item("item-mount-contract-persisted-fallback")
+    media_entry = MediaEntryORM(
+        id="media-entry-mount-persisted-fallback",
+        item_id=item.id,
+        kind="remote-direct",
+        source_attachment_id="attachment-mount-persisted-fallback",
+        provider="realdebrid",
+        provider_download_id="download-mount-persisted-fallback",
+        provider_file_id="file-mount-persisted-fallback",
+        provider_file_path="folder/Mount Persisted Fallback.mkv",
+        original_filename="Mount Persisted Fallback.mkv",
+        size_bytes=654321,
+        download_url="https://api.example.com/restricted-mount-persisted-fallback",
+        unrestricted_url="https://cdn.example.com/mount-persisted-fallback",
+        refresh_state="ready",
+        created_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+    )
+    item.media_entries = [media_entry]
+    item.active_streams = [
+        ActiveStreamORM(
+            id="active-stream-mount-persisted-fallback",
+            item_id=item.id,
+            media_entry_id=media_entry.id,
+            role="direct",
+            created_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+        )
+    ]
+    snapshot = PlaybackResolutionSnapshot(
+        direct=PlaybackAttachment(
+            kind="remote-direct",
+            locator="https://edge.example.com/current-mount-persisted-fallback",
+            source_key="persisted",
+            provider="realdebrid",
+            restricted_url="https://api.example.com/restricted-mount-persisted-fallback",
+            unrestricted_url="https://edge.example.com/current-mount-persisted-fallback",
+        ),
+        hls=None,
+        direct_ready=True,
+        hls_ready=False,
+        missing_local_file=False,
+    )
+
+    contract = build_mount_media_entry_query_contract_from_snapshot(item, snapshot, role="direct")
+
+    assert contract.status == "queryable"
+    assert contract.blocked_reason is None
+    assert contract.provider_family == "debrid"
+    assert contract.provider == "realdebrid"
+    assert contract.source_key == "persisted"
+    assert contract.resolved_locator == "https://edge.example.com/current-mount-persisted-fallback"
+    assert [step.strategy for step in contract.steps] == [
+        "by-media-entry-id",
+        "by-source-attachment-id",
+        "by-provider-file-id",
+        "by-provider-file-path",
+        "by-provider-download-id-and-filename",
+        "by-provider-download-id-and-provider-file-path",
+        "by-provider-download-id-and-file-size",
+    ]
+
+
 def test_build_mount_media_entry_query_contract_uses_snapshot_supplier_protocol() -> None:
     item = _build_item("item-mount-contract-supplier")
     snapshot = PlaybackResolutionSnapshot(

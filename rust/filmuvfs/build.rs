@@ -198,29 +198,30 @@ fn resolve_msvc_tools_dir() -> Result<PathBuf, Box<dyn Error>> {
 
     let program_files =
         env::var("ProgramFiles").unwrap_or_else(|_| String::from(r"C:\Program Files"));
-    let editions = ["Enterprise", "Professional", "Community", "BuildTools"];
     let mut candidates = Vec::new();
-
-    for edition in editions {
-        let msvc_root = PathBuf::from(&program_files)
-            .join("Microsoft Visual Studio")
-            .join("2022")
-            .join(edition)
-            .join("VC")
-            .join("Tools")
-            .join("MSVC");
-        if !msvc_root.exists() {
-            continue;
-        }
-
-        for entry in fs::read_dir(&msvc_root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+    let vs_2022_root = PathBuf::from(&program_files)
+        .join("Microsoft Visual Studio")
+        .join("2022");
+    if vs_2022_root.exists() {
+        for edition_dir in fs::read_dir(&vs_2022_root)? {
+            let edition_dir = edition_dir?;
+            if !edition_dir.file_type()?.is_dir() {
                 continue;
             }
-            let tools_dir = entry.path().join("bin").join("Hostx64").join("x64");
-            if tools_dir.join("lib.exe").exists() && tools_dir.join("dumpbin.exe").exists() {
-                candidates.push(tools_dir);
+            let msvc_root = edition_dir.path().join("VC").join("Tools").join("MSVC");
+            if !msvc_root.exists() {
+                continue;
+            }
+
+            for entry in fs::read_dir(&msvc_root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let tools_dir = entry.path().join("bin").join("Hostx64").join("x64");
+                if tools_dir.join("lib.exe").exists() && tools_dir.join("dumpbin.exe").exists() {
+                    candidates.push(tools_dir);
+                }
             }
         }
     }

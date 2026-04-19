@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from filmu_py.config import Settings
 from filmu_py.core.cache import CacheManager
 from filmu_py.core.chunk_engine import ChunkCache
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.item_workflow_drill_status import ItemWorkflowDrillStatusStore
+from filmu_py.core.plugin_hook_queue_status import PluginHookQueueStatusStore
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.graphql.plugin_registry import GraphQLPluginRegistry
 from filmu_py.plugins import TestPluginContext
@@ -34,7 +37,18 @@ from filmu_py.plugins.registry import PluginCapabilityKind, PluginRegistry
 from filmu_py.resources import AppResources
 from filmu_py.services.access_policy import snapshot_from_settings
 from filmu_py.services.debrid import DownloaderAccountService
-from filmu_py.services.media import StatsProjection, StatsYearReleaseRecord
+from filmu_py.services.media import (
+    RecoveryMechanism,
+    RecoveryPlanRecord,
+    RecoveryTargetStage,
+    StatsProjection,
+    StatsYearReleaseRecord,
+    WorkflowCheckpointRecord,
+    WorkflowCheckpointStatus,
+    WorkflowDrillCandidateRecord,
+    WorkflowResumeStage,
+)
+from filmu_py.state.item import ItemState
 from filmuvfs.catalog.v1 import catalog_pb2
 
 
@@ -48,6 +62,7 @@ class DummyRedis:
         self.lists: dict[str, list[bytes]] = {}
         self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self.stream_groups: dict[str, dict[str, set[str]]] = {}
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
     def ping(self, **kwargs: Any) -> bool:
         _ = kwargs
@@ -62,6 +77,10 @@ class DummyRedis:
 
     async def delete(self, key: str) -> None:
         self.values.pop(key, None)
+
+    async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> object | None:
+        self.calls.append((function, args, kwargs))
+        return object()
 
     async def incr(self, key: str) -> int:
         self.integers[key] = self.integers.get(key, 0) + 1
@@ -1313,12 +1332,48 @@ def test_plugin_events_route_returns_declared_events_and_hook_subscriptions() ->
             "publisher": None,
             "publishable_events": [],
             "hook_subscriptions": ["item.completed", "item.state.changed"],
+            "queued_hook_subscriptions": [],
+            "publishable_event_count": 0,
+            "hook_subscription_count": 2,
+            "queued_hook_subscription_count": 0,
+            "wiring_status": "subscriber_only",
+            "hook_dispatch_mode": "in_process",
+            "queued_dispatch_enabled": False,
+            "queue_health_status": "inactive",
+            "queue_delivery_observed": False,
+            "queue_observation_count": 0,
+            "latest_queue_lag_seconds": None,
+            "max_queue_lag_seconds": None,
+            "successful_deliveries": 0,
+            "timeout_deliveries": 0,
+            "failed_deliveries": 0,
+            "retried_deliveries": 0,
+            "required_actions": [],
+            "remaining_gaps": [],
         },
         {
             "name": "torrentio",
             "publisher": None,
             "publishable_events": ["torrentio.scan.completed"],
             "hook_subscriptions": [],
+            "queued_hook_subscriptions": [],
+            "publishable_event_count": 1,
+            "hook_subscription_count": 0,
+            "queued_hook_subscription_count": 0,
+            "wiring_status": "publisher_only",
+            "hook_dispatch_mode": "in_process",
+            "queued_dispatch_enabled": False,
+            "queue_health_status": "inactive",
+            "queue_delivery_observed": False,
+            "queue_observation_count": 0,
+            "latest_queue_lag_seconds": None,
+            "max_queue_lag_seconds": None,
+            "successful_deliveries": 0,
+            "timeout_deliveries": 0,
+            "failed_deliveries": 0,
+            "retried_deliveries": 0,
+            "required_actions": [],
+            "remaining_gaps": [],
         },
     ]
 
@@ -2086,7 +2141,7 @@ def test_auth_policy_revision_routes_return_inventory_and_support_approval_flow(
     assert "records" in audit_response.json()
 
 
-def test_operations_governance_route_returns_enterprise_slice_posture(
+def test_operations_governance_route_returns_slice_posture(
     monkeypatch: Any,
 ) -> None:
     playback_gate_governance = stream_routes._empty_playback_gate_governance_snapshot()
@@ -2140,7 +2195,7 @@ def test_operations_governance_route_returns_enterprise_slice_posture(
         "release_metadata_performance",
     }
     assert body["playback_gate"]["status"] == "blocked"
-    assert "proof:playback:gate:enterprise package entrypoint exists" in body[
+    assert "proof:playback:gate:strict package entrypoint exists" in body[
         "playback_gate"
     ]["evidence"]
     assert "playback_gate_rollout_readiness=blocked" in body["playback_gate"]["evidence"]
@@ -2740,7 +2795,7 @@ def test_operations_governance_route_promotes_wave1_when_gate_and_canary_are_rea
         json.dumps(
             {
                 "timestamp": captured_at_text,
-                "environment_class": "windows-native:enterprise",
+                "environment_class": "windows-native:strict",
                 "repeat_count": 2,
                 "dry_run": False,
                 "all_green": True,
@@ -3063,6 +3118,10 @@ def test_playback_gate_evidence_route_surfaces_stale_windows_soak_and_media_proo
             "playback_gate_windows_soak_required_actions": [
                 "refresh_windows_vfs_soak_program"
             ],
+            "playback_gate_windows_soak_pressure_cause_buckets": {
+                "provider_refresh_pressure": 3,
+                "fairness_denial": 1,
+            },
             "playback_gate_rollout_readiness": "blocked",
             "playback_gate_rollout_reasons": [
                 "windows_provider_gate_stale",
@@ -3090,6 +3149,10 @@ def test_playback_gate_evidence_route_surfaces_stale_windows_soak_and_media_proo
         "rerun_native_windows_provider_proof_tv",
     ]
     assert body["windows_soak_required_actions"] == ["refresh_windows_vfs_soak_program"]
+    assert body["windows_soak_pressure_cause_buckets"] == {
+        "provider_refresh_pressure": 3,
+        "fairness_denial": 1,
+    }
     assert "refresh_native_windows_provider_proof_matrix" in body["required_actions"]
     assert "refresh_windows_vfs_soak_program" in body["required_actions"]
 
@@ -3311,6 +3374,133 @@ def test_vfs_rollout_control_route_rejects_rollback_without_reason(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "rollback_reason_required"
+
+
+def test_vfs_rollout_action_route_executes_rollback_and_exposes_clear_action(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    windows_artifacts_root = artifacts_root / "windows-native-stack"
+    windows_artifacts_root.mkdir(parents=True)
+    state_path = windows_artifacts_root / "filmuvfs-windows-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "environment_class": "windows-native:managed",
+                "last_mount_health": "yellow",
+                "preserved_state": {"last_good_generation": 41},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: {"playback_gate_environment_class": "windows-native:managed"},
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "vfs_runtime_governance_snapshot",
+        lambda playback_gate_governance=None, **kwargs: {
+            "vfs_runtime_rollout_readiness": "blocked",
+            "vfs_runtime_rollout_next_action": "rollback_current_environment",
+            "vfs_runtime_rollout_canary_decision": "rollback_current_environment",
+            "vfs_runtime_rollout_merge_gate": "blocked",
+            "vfs_runtime_rollout_environment_class": "windows-native:managed",
+            "vfs_runtime_rollout_reasons": ["mounted_read_errors"],
+        },
+    )
+    audit_calls: list[dict[str, Any]] = []
+
+    def fake_audit_action(request: Any, **kwargs: Any) -> None:
+        _ = request
+        audit_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(default_routes, "audit_action", fake_audit_action)
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/operations/vfs-rollout/actions",
+        headers=_headers(),
+        json={
+            "action": "rollback",
+            "reason": "mounted reads regressed after canary",
+            "target_environment_class": "windows-native:recovery",
+            "expected_canary_decision": "rollback_current_environment",
+            "expected_merge_gate": "blocked",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["environment_class"] == "windows-native:recovery"
+    assert body["rollback_requested"] is True
+    assert body["rollback_reason"] == "mounted reads regressed after canary"
+    assert body["canary_decision"] == "rollback_current_environment"
+    assert body["merge_gate"] == "blocked"
+    assert body["allowed_actions"] == ["clear_rollback"]
+    assert body["history"][0]["action"] == "execute_rollback"
+    assert body["history"][0]["summary"] == (
+        "rollback executed: mounted reads regressed after canary "
+        "(windows-native:recovery)"
+    )
+    assert audit_calls == [
+        {
+            "action": "operations.vfs_rollout.execute_action",
+            "target": "operations.vfs_rollout",
+            "details": {
+                "requested_action": "rollback",
+                "reason": "mounted reads regressed after canary",
+                "target_environment_class": "windows-native:recovery",
+                "expected_canary_decision": "rollback_current_environment",
+                "expected_merge_gate": "blocked",
+            },
+        }
+    ]
+    persisted_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted_state["last_mount_health"] == "yellow"
+    assert persisted_state["preserved_state"] == {"last_good_generation": 41}
+
+
+def test_vfs_rollout_action_route_rejects_decision_mismatch(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    artifacts_root = tmp_path / "playback-proof-artifacts"
+    (artifacts_root / "windows-native-stack").mkdir(parents=True)
+    monkeypatch.setenv("FILMU_PY_PLAYBACK_PROOF_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setattr(
+        default_routes,
+        "playback_gate_governance_snapshot",
+        lambda: {"playback_gate_environment_class": "windows-native:managed"},
+    )
+    monkeypatch.setattr(
+        default_routes,
+        "vfs_runtime_governance_snapshot",
+        lambda playback_gate_governance=None, **kwargs: {
+            "vfs_runtime_rollout_readiness": "ready",
+            "vfs_runtime_rollout_next_action": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_canary_decision": "promote_to_next_environment_class",
+            "vfs_runtime_rollout_merge_gate": "ready",
+            "vfs_runtime_rollout_environment_class": "windows-native:managed",
+            "vfs_runtime_rollout_reasons": ["no_blocking_runtime_signals"],
+        },
+    )
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/operations/vfs-rollout/actions",
+        headers=_headers(),
+        json={
+            "action": "promote",
+            "target_environment_class": "windows-native:expanded",
+            "expected_canary_decision": "rollback_current_environment",
+            "expected_merge_gate": "ready",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "rollout_decision_mismatch"
 
 
 def test_control_plane_summary_route_returns_ack_backlog_visibility() -> None:
@@ -3555,7 +3745,7 @@ def test_control_plane_automation_route_deduplicates_remaining_gaps() -> None:
     ]
 
 
-def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins() -> None:
+def test_plugin_integration_readiness_route_validates_supported_integrations() -> None:
     plugin_settings = {
         "scraping": {
             "comet": {
@@ -3590,6 +3780,50 @@ def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins
                 "soak_proof_refs": ["ops/plugins/plex-soak.md"],
             }
         },
+        "notifications": {
+            "enabled": True,
+            "webhook_url": "https://notify.example/webhook",
+            "contract_proof_refs": ["ops/plugins/notifications-contract.md"],
+            "soak_proof_refs": ["ops/plugins/notifications-soak.md"],
+        },
+        "downloaders": {
+            "real_debrid": {
+                "enabled": True,
+                "api_key": "rd-token",
+                "contract_proof_refs": ["ops/plugins/realdebrid-contract.md"],
+                "soak_proof_refs": ["ops/plugins/realdebrid-soak.md"],
+            },
+            "all_debrid": {
+                "enabled": True,
+                "api_key": "ad-token",
+                "contract_proof_refs": ["ops/plugins/alldebrid-contract.md"],
+                "soak_proof_refs": ["ops/plugins/alldebrid-soak.md"],
+            },
+            "debrid_link": {
+                "enabled": True,
+                "api_key": "dl-token",
+                "contract_proof_refs": ["ops/plugins/debridlink-contract.md"],
+                "soak_proof_refs": ["ops/plugins/debridlink-soak.md"],
+            },
+            "stremthru": {
+                "enabled": True,
+                "url": "https://stremthru.example",
+                "token": "st-token",
+                "contract_proof_refs": ["ops/plugins/stremthru-contract.md"],
+                "soak_proof_refs": ["ops/plugins/stremthru-soak.md"],
+            },
+        },
+        "metadata": {
+            "tmdb": {
+                "contract_proof_refs": ["ops/plugins/tmdb-contract.md"],
+                "soak_proof_refs": ["ops/plugins/tmdb-soak.md"],
+            },
+            "tvdb": {
+                "enabled": True,
+                "contract_proof_refs": ["ops/plugins/tvdb-contract.md"],
+                "soak_proof_refs": ["ops/plugins/tvdb-soak.md"],
+            },
+        },
     }
     registry = PluginRegistry()
     harness = TestPluginContext(settings=plugin_settings)
@@ -3599,6 +3833,9 @@ def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins
         settings_overrides={
             "FILMU_PY_SCRAPING": plugin_settings["scraping"],
             "FILMU_PY_UPDATERS": plugin_settings["updaters"],
+            "FILMU_PY_DOWNLOADERS": plugin_settings["downloaders"],
+            "FILMU_PY_NOTIFICATIONS": plugin_settings["notifications"],
+            "TMDB_API_KEY": "tmdb-token",
         },
     )
     resources = cast(Any, client.app.state.resources)
@@ -3611,9 +3848,107 @@ def test_plugin_integration_readiness_route_validates_builtin_enterprise_plugins
     assert body["status"] == "ready"
     by_name = {entry["name"]: entry for entry in body["plugins"]}
     assert by_name["comet"]["ready"] is True
+    assert by_name["comet"]["contract_validated"] is True
+    assert by_name["comet"]["verification_status"] == "verified"
+    assert by_name["comet"]["verification_check_count"] == 4
+    assert by_name["comet"]["verified_check_count"] == 4
     assert by_name["seerr"]["config_source"] == "content.overseerr"
     assert by_name["listrr"]["missing_settings"] == []
     assert by_name["plex"]["ready"] is True
+    assert by_name["notifications"]["endpoint"] == "https://notify.example/webhook"
+    assert by_name["notifications"]["ready"] is True
+    assert by_name["tmdb"]["ready"] is True
+    assert by_name["tvdb"]["ready"] is True
+    assert by_name["realdebrid"]["ready"] is True
+    assert by_name["alldebrid"]["ready"] is True
+    assert by_name["debridlink"]["ready"] is True
+    assert by_name["stremthru"]["ready"] is True
+
+
+def test_plugin_events_route_surfaces_queued_delivery_health() -> None:
+    plugin_registry = PluginRegistry()
+    plugin_registry.register_manifest(
+        PluginManifest.model_validate(
+            {
+                "name": "hook-plugin",
+                "version": "1.0.0",
+                "api_version": "1",
+                "entry_module": "plugin.py",
+                "publisher": "community",
+                "event_hook": "ExampleHook",
+            }
+        )
+    )
+    hook = type(
+        "Hook",
+        (),
+        {
+            "plugin_name": "hook-plugin",
+            "subscribed_events": frozenset({"item.completed"}),
+        },
+    )()
+    plugin_registry.register_capability(
+        plugin_name="hook-plugin",
+        kind=PluginCapabilityKind.EVENT_HOOK,
+        implementation=hook,
+    )
+    client = _build_client(
+        plugin_registry=plugin_registry,
+        settings_overrides={
+            "FILMU_PY_PLUGIN_RUNTIME": {
+                "hook_dispatch_mode": "queued",
+                "queued_hook_events": ["item.completed"],
+            }
+        },
+    )
+    resources = cast(Any, client.app.state.resources)
+    resources.arq_redis = resources.redis
+    asyncio.run(
+        PluginHookQueueStatusStore(resources.redis, queue_name="filmu-py").record_delivery(
+            plugin_name="hook-plugin",
+            event_type="item.completed",
+            queued_at_seconds=time.time() - 2.0,
+            execution_duration_seconds=0.15,
+            matched_hooks=1,
+            successful_hooks=1,
+            timeout_hooks=0,
+            failed_hooks=0,
+            attempt=2,
+        )
+    )
+
+    response = client.get("/api/v1/plugins/events", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == [
+        {
+            "name": "hook-plugin",
+            "publisher": "community",
+            "publishable_events": [],
+            "hook_subscriptions": ["item.completed"],
+            "queued_hook_subscriptions": ["item.completed"],
+            "publishable_event_count": 0,
+            "hook_subscription_count": 1,
+            "queued_hook_subscription_count": 1,
+            "wiring_status": "subscriber_only",
+            "hook_dispatch_mode": "queued",
+            "queued_dispatch_enabled": True,
+            "queue_health_status": "degraded",
+            "queue_delivery_observed": True,
+            "queue_observation_count": 1,
+            "latest_queue_lag_seconds": body[0]["latest_queue_lag_seconds"],
+            "max_queue_lag_seconds": body[0]["max_queue_lag_seconds"],
+            "successful_deliveries": 1,
+            "timeout_deliveries": 0,
+            "failed_deliveries": 0,
+            "retried_deliveries": 1,
+            "required_actions": ["stabilize_hook-plugin_queued_hook_delivery"],
+            "remaining_gaps": ["hook-plugin queued hook deliveries require retries or time out"],
+        }
+    ]
+    assert body[0]["latest_queue_lag_seconds"] >= 1.0
+    assert body[0]["max_queue_lag_seconds"] >= body[0]["latest_queue_lag_seconds"]
 
 
 def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> None:
@@ -3660,9 +3995,12 @@ def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> 
     assert body["log_shipper_type"] == "vector"
     assert body["log_shipper_target_configured"] is True
     assert body["log_shipper_healthcheck_configured"] is True
+    assert body["log_field_mapping_version"] == "filmu-ecs-v1"
     assert body["search_backend"] == "opensearch"
     assert body["environment_shipping_enabled"] is True
+    assert body["environment_rollout_ready"] is True
     assert body["alerting_enabled"] is True
+    assert body["alert_rollout_ready"] is True
     assert body["rust_trace_correlation_enabled"] is True
     assert body["correlation_contract_complete"] is True
     assert body["required_correlation_fields"] == [
@@ -3675,9 +4013,79 @@ def test_observability_convergence_route_surfaces_cross_process_exit_gates() -> 
         "provider.file_id",
         "vfs.handle_key",
     ]
+    assert body["trace_context_headers"] == ["traceparent", "tracestate", "baggage"]
+    assert body["correlation_headers"] == [
+        "x-request-id",
+        "x-tenant-id",
+        "x-filmu-vfs-session-id",
+        "x-filmu-vfs-daemon-id",
+        "x-filmu-vfs-entry-id",
+        "x-filmu-vfs-provider-file-id",
+        "x-filmu-vfs-handle-key",
+    ]
+    assert body["shared_cross_process_headers"] == [
+        "traceparent",
+        "tracestate",
+        "baggage",
+        "x-request-id",
+        "x-tenant-id",
+        "x-filmu-vfs-session-id",
+        "x-filmu-vfs-daemon-id",
+        "x-filmu-vfs-entry-id",
+        "x-filmu-vfs-provider-file-id",
+        "x-filmu-vfs-handle-key",
+    ]
+    assert body["expected_correlation_fields_ready"] is True
+    assert body["expected_correlation_fields"] == [
+        "request.id",
+        "trace.id",
+        "tenant.id",
+        "vfs.session_id",
+        "vfs.daemon_id",
+        "catalog.entry_id",
+        "provider.file_id",
+        "vfs.handle_key",
+    ]
+    assert body["missing_expected_correlation_fields"] == []
+    assert body["grpc_bind_address"] == "127.0.0.1:50051"
+    assert body["grpc_service_name"] == "filmu.vfs.catalog.v1.FilmuVfsCatalogService"
+    assert body["otlp_endpoint"] == "http://collector.internal:4318"
+    assert body["log_shipper_target"] == "opensearch://logs-filmu"
     assert body["proof_refs"] == ["ops/wave4/log-pipeline-rollout.md"]
+    assert body["proof_ref_count"] == 1
     assert body["required_actions"] == []
     assert body["remaining_gaps"] == []
+
+
+def test_observability_convergence_route_requires_non_blank_alert_proof_refs() -> None:
+    client = _build_client(
+        settings_overrides={
+            "FILMU_PY_LOGGING": {"structured": True},
+            "FILMU_PY_OTEL_ENABLED": True,
+            "FILMU_PY_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.internal:4318",
+            "FILMU_PY_LOG_SHIPPER": {
+                "enabled": True,
+                "type": "vector",
+                "target": "opensearch://logs-filmu",
+                "healthcheck_url": "http://vector.internal:8686/health",
+                "field_mapping_version": "filmu-ecs-v1",
+            },
+            "FILMU_PY_OBSERVABILITY": {
+                "environment_shipping_enabled": True,
+                "search_backend": "opensearch",
+                "alerting_enabled": True,
+                "rust_trace_correlation_enabled": True,
+                "proof_refs": ["", "   "],
+            },
+        }
+    )
+
+    response = client.get("/api/v1/operations/observability/convergence", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["alerting_enabled"] is True
+    assert body["alert_rollout_ready"] is False
 
 
 def test_downloader_orchestration_route_surfaces_ordered_failover_and_plugin_gap() -> None:
@@ -3706,11 +4114,18 @@ def test_downloader_orchestration_route_surfaces_ordered_failover_and_plugin_gap
     body = response.json()
     assert body["selection_mode"] == "ordered_failover_policy_fanout"
     assert body["selected_provider"] == "realdebrid"
+    assert body["selected_provider_source"] == "builtin"
+    assert body["enabled_provider_count"] == 3
+    assert body["configured_provider_count"] == 3
+    assert body["builtin_enabled_provider_count"] == 2
+    assert body["plugin_enabled_provider_count"] == 1
     assert body["multi_provider_enabled"] is True
     assert body["plugin_downloaders_registered"] == 1
     assert body["worker_plugin_dispatch_ready"] is True
+    assert body["ordered_failover_ready"] is True
     assert body["fanout_ready"] is True
     assert body["multi_container_ready"] is True
+    assert body["provider_priority_order"] == ["realdebrid", "alldebrid", "debridlink", "stremthru"]
     assert body["required_actions"] == []
     providers = {(row["name"], row["source"]): row for row in body["providers"]}
     assert providers[("realdebrid", "builtin")]["enabled"] is True
@@ -4013,6 +4428,200 @@ def test_worker_metadata_reindex_history_route_returns_bounded_summary() -> None
         "latest_run_failed": True,
         "latest_error": "metadata source unavailable",
     }
+
+
+def test_worker_item_workflow_drill_route_returns_latest_run_summary() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    asyncio.run(
+        ItemWorkflowDrillStatusStore(redis, queue_name="filmu-py").record_run(
+            examined_checkpoints=2,
+            replayed_checkpoints=1,
+            compensated_checkpoints=1,
+            finalize_requeues=1,
+            parse_requeues=1,
+            scrape_requeues=0,
+            index_requeues=0,
+            skipped_active=0,
+            unrecoverable=0,
+            failed=0,
+            candidate_status_counts={"pending": 1, "failed": 1},
+            compensation_stage_counts={"parse": 1},
+            now_seconds=1_776_000_000,
+        )
+    )
+
+    response = client.get("/api/v1/workers/item-workflow-drill", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["observed_at"].endswith("Z")
+    assert body == {
+        "queue_name": "filmu-py",
+        "has_history": True,
+        "observed_at": body["observed_at"],
+        "examined_checkpoints": 2,
+        "replayed_checkpoints": 1,
+        "compensated_checkpoints": 1,
+        "finalize_requeues": 1,
+        "parse_requeues": 1,
+        "scrape_requeues": 0,
+        "index_requeues": 0,
+        "skipped_active": 0,
+        "unrecoverable": 0,
+        "failed": 0,
+        "candidate_status_counts": {"failed": 1, "pending": 1},
+        "compensation_stage_counts": {"parse": 1},
+        "outcome": "ok",
+        "run_failed": False,
+        "last_error": None,
+    }
+
+
+def test_worker_item_workflow_drill_history_route_returns_bounded_summary() -> None:
+    client = _build_client(arq_enabled=True)
+    redis = cast(DummyRedis, client.app.state.resources.redis)
+    store = ItemWorkflowDrillStatusStore(redis, queue_name="filmu-py")
+    asyncio.run(
+        store.record_run(
+            examined_checkpoints=1,
+            replayed_checkpoints=1,
+            compensated_checkpoints=0,
+            finalize_requeues=1,
+            parse_requeues=0,
+            scrape_requeues=0,
+            index_requeues=0,
+            skipped_active=0,
+            unrecoverable=0,
+            failed=0,
+            candidate_status_counts={"pending": 1},
+            compensation_stage_counts={},
+            now_seconds=1_776_000_000,
+        )
+    )
+    asyncio.run(
+        store.record_run(
+            examined_checkpoints=2,
+            replayed_checkpoints=0,
+            compensated_checkpoints=1,
+            finalize_requeues=0,
+            parse_requeues=1,
+            scrape_requeues=0,
+            index_requeues=0,
+            skipped_active=1,
+            unrecoverable=1,
+            failed=0,
+            candidate_status_counts={"failed": 2},
+            compensation_stage_counts={"parse": 1},
+            now_seconds=1_776_000_300,
+        )
+    )
+
+    response = client.get("/api/v1/workers/item-workflow-drill/history", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queue_name"] == "filmu-py"
+    assert len(body["history"]) == 2
+    assert body["summary"] == {
+        "points": 2,
+        "latest_outcome": "warning",
+        "critical_points": 0,
+        "warning_points": 1,
+        "total_examined_checkpoints": 3,
+        "total_replayed_checkpoints": 1,
+        "total_compensated_checkpoints": 1,
+        "total_finalize_requeues": 1,
+        "total_parse_requeues": 1,
+        "total_scrape_requeues": 0,
+        "total_index_requeues": 0,
+        "total_skipped_active": 1,
+        "total_unrecoverable": 1,
+        "total_failed": 0,
+        "max_examined_checkpoints": 2,
+        "max_failed": 0,
+        "latest_run_failed": False,
+        "latest_error": None,
+        "aggregate_candidate_status_counts": {"failed": 2, "pending": 1},
+        "aggregate_compensation_stage_counts": {"parse": 1},
+    }
+
+
+def test_worker_item_workflow_drill_run_route_replays_finalize_checkpoint(
+    monkeypatch: Any,
+) -> None:
+    client = _build_client(arq_enabled=True)
+    resources = cast(Any, client.app.state.resources)
+    resources.arq_redis = resources.redis
+
+    class DrillMediaService:
+        def __init__(self, candidates: list[WorkflowDrillCandidateRecord]) -> None:
+            self.candidates = candidates
+
+        async def list_workflow_drill_candidates(
+            self,
+            *,
+            workflow_name: str = "item_pipeline",
+            limit: int = 100,
+        ) -> list[WorkflowDrillCandidateRecord]:
+            _ = workflow_name, limit
+            return list(self.candidates)
+
+    candidate = WorkflowDrillCandidateRecord(
+        media_item_id="item-workflow-drill-route",
+        tenant_id="tenant-main",
+        item_state=ItemState.DOWNLOADED,
+        recovery_plan=RecoveryPlanRecord(
+            mechanism=RecoveryMechanism.ORPHAN_RECOVERY,
+            target_stage=RecoveryTargetStage.FINALIZE,
+            reason="downloaded_without_finalize_job",
+            next_retry_at=None,
+            recovery_attempt_count=0,
+            is_in_cooldown=False,
+        ),
+        checkpoint=WorkflowCheckpointRecord(
+            workflow_name="item_pipeline",
+            stage_name="debrid_item",
+            resume_stage=WorkflowResumeStage.FINALIZE,
+            status=WorkflowCheckpointStatus.PENDING,
+            item_request_id="request-item-workflow-drill-route",
+            updated_at="2026-04-18T12:00:00+00:00",
+        ),
+    )
+    resources.media_service = DrillMediaService([candidate])
+    monkeypatch.setattr(default_routes.worker_tasks, "get_settings", lambda: resources.settings)
+    monkeypatch.setattr(default_routes.worker_tasks, "_resolve_media_service", lambda _: resources.media_service)
+
+    async def resolve_arq_redis(_: dict[str, object]) -> DummyRedis:
+        return resources.redis
+
+    async def finalize_job_inactive(_: object, *, item_id: str) -> bool:
+        assert item_id == "item-workflow-drill-route"
+        return False
+
+    monkeypatch.setattr(default_routes.worker_tasks, "_resolve_arq_redis", resolve_arq_redis)
+    monkeypatch.setattr(default_routes.worker_tasks, "is_finalize_item_job_active", finalize_job_inactive)
+
+    response = client.post("/api/v1/workers/item-workflow-drill/run", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["replayed_checkpoints"] == 1
+    assert body["compensated_checkpoints"] == 0
+    assert body["finalize_requeues"] == 1
+    assert body["candidate_status_counts"] == {"pending": 1}
+    assert resources.redis.calls == [
+        (
+            "finalize_item",
+            ("item-workflow-drill-route",),
+            {
+                "_job_id": default_routes.worker_tasks.finalize_item_job_id(
+                    "item-workflow-drill-route"
+                ),
+                "_queue_name": "filmu-py",
+            },
+        )
+    ]
 
 
 def test_runtime_lifecycle_route_returns_bounded_transition_history() -> None:

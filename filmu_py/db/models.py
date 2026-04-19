@@ -388,6 +388,135 @@ class ControlPlaneSubscriberORM(Base):
     )
 
 
+class ItemWorkflowCheckpointORM(Base):
+    """Durable item-pipeline checkpoint for resumable worker orchestration."""
+
+    __tablename__ = "item_workflow_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("item_id", "workflow_name", name="uq_item_workflow_checkpoint_identity"),
+        Index(
+            "ix_item_workflow_checkpoints_resume_status",
+            "resume_stage",
+            "status",
+        ),
+        Index(
+            "ix_item_workflow_checkpoints_updated_at",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    item_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("media_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workflow_name: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="item_pipeline",
+        server_default=text("'item_pipeline'"),
+    )
+    stage_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    resume_stage: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="none",
+        server_default=text("'none'"),
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+        index=True,
+    )
+    item_request_id: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    selected_stream_id: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    provider: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    provider_download_id: Mapped[str | None] = mapped_column(String(256), default=None)
+    checkpoint_payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    compensation_payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    last_error: Mapped[str | None] = mapped_column(Text(), default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    item: Mapped[MediaItemORM] = relationship(back_populates="workflow_checkpoints")
+
+
+class ConsumerPlaybackActivityEventORM(Base):
+    """Durable consumer playback activity ledger grouped by actor, tenant, and item."""
+
+    __tablename__ = "consumer_playback_activity_events"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    actor_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    actor_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    item_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("media_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    activity_kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    target: Mapped[str | None] = mapped_column(String(16), default=None, index=True)
+    device_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    device_label: Mapped[str] = mapped_column(String(256), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+
+    item: Mapped[MediaItemORM] = relationship(back_populates="consumer_playback_activity_events")
+
+
 class MediaItemORM(Base):
     """Persistent media item tracked through pipeline lifecycle states."""
 
@@ -479,6 +608,18 @@ class MediaItemORM(Base):
         back_populates="item",
         cascade="all, delete-orphan",
         order_by="OutboxEventORM.created_at",
+    )
+    workflow_checkpoints: Mapped[list[ItemWorkflowCheckpointORM]] = relationship(
+        back_populates="item",
+        cascade="all, delete-orphan",
+        order_by="ItemWorkflowCheckpointORM.updated_at",
+    )
+    consumer_playback_activity_events: Mapped[list[ConsumerPlaybackActivityEventORM]] = (
+        relationship(
+            back_populates="item",
+            cascade="all, delete-orphan",
+            order_by="ConsumerPlaybackActivityEventORM.occurred_at",
+        )
     )
 
 
@@ -1157,6 +1298,18 @@ Index("ix_item_state_events_item_created", ItemStateEventORM.item_id, ItemStateE
 Index("ix_outbox_events_item_created", OutboxEventORM.item_id, OutboxEventORM.created_at)
 Index("ix_outbox_events_pending_created", OutboxEventORM.published_at, OutboxEventORM.created_at)
 Index(
+    "ix_consumer_playback_activity_actor_tenant_occurred",
+    ConsumerPlaybackActivityEventORM.actor_id,
+    ConsumerPlaybackActivityEventORM.tenant_id,
+    ConsumerPlaybackActivityEventORM.occurred_at,
+)
+Index(
+    "ix_consumer_playback_activity_device_tenant_occurred",
+    ConsumerPlaybackActivityEventORM.device_key,
+    ConsumerPlaybackActivityEventORM.tenant_id,
+    ConsumerPlaybackActivityEventORM.occurred_at,
+)
+Index(
     "ix_scrape_candidates_item_created", ScrapeCandidateORM.item_id, ScrapeCandidateORM.created_at
 )
 Index("ix_streams_media_item_created", StreamORM.media_item_id, StreamORM.created_at)
@@ -1185,3 +1338,4 @@ Index(
     StreamRelationORM.parent_stream_id,
     StreamRelationORM.created_at,
 )
+

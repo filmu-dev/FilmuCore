@@ -313,14 +313,19 @@ def post_rank_expected_scope_reason(item: MediaItemRecord, stream: StreamORM) ->
         "parent_season_number",
     )
     expected_episode = extract_int_value(item.attributes, "episode_number", "episode")
-    parsed_title = stream.parsed_title if isinstance(stream.parsed_title, dict) else {}
-    parsed_season = extract_int_value(parsed_title, "season")
-    parsed_episode = extract_int_value(parsed_title, "episode")
+    parsed_seasons = parsed_seasons_from_stream(stream)
+    parsed_episodes = parsed_episode_numbers_from_stream(stream)
 
-    if expected_season is not None and parsed_season != expected_season:
-        return "season_mismatch" if parsed_season is not None else "season_missing"
-    if expected_episode is not None and parsed_episode != expected_episode:
-        return "episode_mismatch" if parsed_episode is not None else "episode_missing"
+    if expected_season is not None:
+        if parsed_seasons is None:
+            return "season_missing"
+        if expected_season not in parsed_seasons:
+            return "season_mismatch"
+    if expected_episode is not None:
+        if parsed_episodes is None:
+            return "episode_missing"
+        if expected_episode not in parsed_episodes:
+            return "episode_mismatch"
     return None
 
 

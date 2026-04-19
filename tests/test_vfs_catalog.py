@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import cast
 
+from filmu_py.api.playback_resolution import PlaybackAttachment
 from filmu_py.db.models import (
     ActiveStreamORM,
     EpisodeORM,
@@ -17,7 +18,11 @@ from filmu_py.db.models import (
     ShowORM,
 )
 from filmu_py.db.runtime import DatabaseRuntime
-from filmu_py.services.playback import PlaybackSourceService
+from filmu_py.services.playback import (
+    DirectFileLinkLifecycleSnapshot,
+    PlaybackResolutionSnapshot,
+    PlaybackSourceService,
+)
 from filmu_py.services.vfs_catalog import FilmuVfsCatalogSupplier
 
 
@@ -75,6 +80,22 @@ def _build_supplier(items: list[MediaItemORM]) -> FilmuVfsCatalogSupplier:
     return FilmuVfsCatalogSupplier(
         database,
         playback_snapshot_supplier=PlaybackSourceService(database),
+    )
+
+
+def _build_supplier_with_snapshot(
+    items: list[MediaItemORM],
+    snapshot: PlaybackResolutionSnapshot,
+) -> FilmuVfsCatalogSupplier:
+    class StubSnapshotSupplier:
+        def build_resolution_snapshot(self, item: MediaItemORM) -> PlaybackResolutionSnapshot:
+            _ = item
+            return snapshot
+
+    database = cast(DatabaseRuntime, DummyDatabaseRuntime(items))
+    return FilmuVfsCatalogSupplier(
+        database,
+        playback_snapshot_supplier=StubSnapshotSupplier(),
     )
 
 
@@ -693,6 +714,174 @@ def test_build_snapshot_counts_items_blocked_before_mount_query_resolution() -> 
     assert snapshot.stats.blocked_item_count == 1
     assert snapshot.blocked_items[0].reason == "no_attachment"
     assert all(entry.kind == "directory" for entry in snapshot.entries)
+
+
+def test_build_snapshot_reuses_persisted_media_entry_lifecycle_when_snapshot_lifecycle_is_missing() -> (
+    None
+):
+    item = _build_item("item-catalog-persisted-lifecycle-fallback", title="Fallback Movie")
+    item.attributes = {
+        "item_type": "movie",
+        "year": 2026,
+    }
+    media_entry = MediaEntryORM(
+        id="media-entry-catalog-persisted-lifecycle-fallback",
+        item_id=item.id,
+        kind="remote-direct",
+        source_attachment_id="attachment-catalog-persisted-lifecycle-fallback",
+        original_filename="Fallback Movie.mkv",
+        download_url="https://api.example.com/restricted/catalog-fallback",
+        unrestricted_url="https://cdn.example.com/catalog-fallback",
+        provider="realdebrid",
+        provider_download_id="download-catalog-fallback",
+        provider_file_id="provider-file-catalog-fallback",
+        provider_file_path="Movies/Fallback Movie.mkv",
+        size_bytes=1111,
+        refresh_state="ready",
+        created_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+    )
+    item.media_entries = [media_entry]
+    item.active_streams = [
+        ActiveStreamORM(
+            id="active-stream-catalog-persisted-lifecycle-fallback",
+            item_id=item.id,
+            media_entry_id=media_entry.id,
+            role="direct",
+            created_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+        )
+    ]
+    snapshot = PlaybackResolutionSnapshot(
+        direct=PlaybackAttachment(
+            kind="remote-direct",
+            locator="https://edge.example.com/current-catalog-fallback",
+            source_key="persisted",
+            provider="realdebrid",
+            restricted_url="https://api.example.com/restricted/current-catalog-fallback",
+            unrestricted_url="https://edge.example.com/current-catalog-fallback",
+        ),
+        hls=None,
+        direct_ready=True,
+        hls_ready=False,
+        missing_local_file=False,
+    )
+
+    built = asyncio.run(_build_supplier_with_snapshot([item], snapshot).build_snapshot())
+
+    assert built.stats.file_count == 1
+    assert built.stats.blocked_item_count == 0
+    file_entries = [entry for entry in built.entries if entry.kind == "file"]
+    assert len(file_entries) == 1
+    assert file_entries[0].file is not None
+    assert file_entries[0].file.source_key == "persisted"
+    assert file_entries[0].file.provider_family == "debrid"
+    assert file_entries[0].file.locator == "https://edge.example.com/current-catalog-fallback"
+    assert (
+        file_entries[0].file.restricted_url
+        == "https://api.example.com/restricted/current-catalog-fallback"
+    )
+    assert (
+        file_entries[0].file.unrestricted_url
+        == "https://edge.example.com/current-catalog-fallback"
+    )
+    assert file_entries[0].file.query_strategy == "by-media-entry-id"
+
+
+def test_build_snapshot_uses_per_media_entry_lifecycle_for_multi_entry_items() -> None:
+    item = _build_item("item-catalog-multi-entry-lifecycle", title="Lifecycle Show")
+    item.attributes = {
+        "item_type": "show",
+        "tvdb_id": "tvdb-lifecycle-show",
+    }
+    remote_entry = MediaEntryORM(
+        id="media-entry-catalog-remote-lifecycle",
+        item_id=item.id,
+        kind="remote-direct",
+        original_filename="Lifecycle Show - S01E01.mkv",
+        download_url="https://api.example.com/restricted/lifecycle-show-1",
+        unrestricted_url="https://cdn.example.com/lifecycle-show-1",
+        provider="realdebrid",
+        provider_download_id="download-lifecycle-show-1",
+        provider_file_id="provider-file-lifecycle-show-1",
+        provider_file_path="Lifecycle Show/S01E01.mkv",
+        size_bytes=2222,
+        refresh_state="ready",
+        created_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+    )
+    local_entry = MediaEntryORM(
+        id="media-entry-catalog-local-lifecycle",
+        item_id=item.id,
+        kind="local-file",
+        original_filename="Lifecycle Show - S01E02.mkv",
+        local_path="E:\\Media\\Lifecycle Show - S01E02.mkv",
+        size_bytes=3333,
+        refresh_state="ready",
+        created_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 3, 14, 12, 1, tzinfo=UTC),
+    )
+    item.media_entries = [remote_entry, local_entry]
+    item.active_streams = [
+        ActiveStreamORM(
+            id="active-stream-catalog-remote-lifecycle",
+            item_id=item.id,
+            media_entry_id=remote_entry.id,
+            role="direct",
+            created_at=datetime(2026, 3, 14, 12, 2, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 14, 12, 2, tzinfo=UTC),
+        )
+    ]
+    snapshot = PlaybackResolutionSnapshot(
+        direct=PlaybackAttachment(
+            kind="remote-direct",
+            locator="https://edge.example.com/current-lifecycle-show-1",
+            source_key="persisted",
+            provider="realdebrid",
+            provider_download_id="download-lifecycle-show-1",
+            provider_file_id="provider-file-lifecycle-show-1",
+            provider_file_path="Lifecycle Show/S01E01.mkv",
+            original_filename="Lifecycle Show - S01E01.mkv",
+            file_size=2222,
+            restricted_url="https://api.example.com/restricted/current-lifecycle-show-1",
+            unrestricted_url="https://edge.example.com/current-lifecycle-show-1",
+        ),
+        hls=None,
+        direct_ready=True,
+        hls_ready=False,
+        direct_lifecycle=DirectFileLinkLifecycleSnapshot(
+            owner_kind="media-entry",
+            owner_id=remote_entry.id,
+            provider_family="debrid",
+            locator_source="unrestricted-url",
+            restricted_fallback=False,
+            match_basis="provider-file-id",
+        ),
+        missing_local_file=False,
+    )
+
+    built = asyncio.run(_build_supplier_with_snapshot([item], snapshot).build_snapshot())
+
+    file_entries = [entry for entry in built.entries if entry.kind == "file"]
+    assert len(file_entries) == 2
+    entries_by_id = {
+        entry.file.media_entry_id: entry.file
+        for entry in file_entries
+        if entry.file is not None
+    }
+    remote_file = entries_by_id[remote_entry.id]
+    local_file = entries_by_id[local_entry.id]
+
+    assert remote_file.provider_family == "debrid"
+    assert remote_file.locator == "https://edge.example.com/current-lifecycle-show-1"
+    assert remote_file.restricted_url == "https://api.example.com/restricted/current-lifecycle-show-1"
+    assert remote_file.unrestricted_url == "https://edge.example.com/current-lifecycle-show-1"
+    assert remote_file.locator_source == "unrestricted-url"
+    assert remote_file.source_key == "persisted"
+    assert local_file.provider_family == "none"
+    assert local_file.locator_source == "local-path"
+    assert local_file.restricted_fallback is False
+    assert local_file.source_key == "media-entry"
 
 
 def test_build_delta_reports_removed_catalog_file() -> None:

@@ -244,6 +244,22 @@ def _as_str_list(value: object) -> list[str]:
     return normalized[:10]
 
 
+def _as_count_mapping(value: object) -> dict[str, int]:
+    """Normalize one string-keyed numeric mapping into bounded additive counters."""
+
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str):
+            continue
+        cleaned_key = key.strip()
+        if not cleaned_key:
+            continue
+        normalized[cleaned_key] = _as_int(raw)
+    return dict(sorted(normalized.items()))
+
+
 def _as_mapping_list(value: object) -> list[dict[str, object]]:
     """Normalize list-like runtime snapshot mappings into typed rows."""
 
@@ -622,6 +638,20 @@ def _persist_managed_windows_vfs_state(
     return state
 
 
+def _replace_managed_windows_vfs_state(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Persist one complete managed Windows rollout-control payload as-is."""
+
+    state_path = _preferred_managed_windows_vfs_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return payload
+
+
 def _candidate_github_main_policy_paths() -> list[Path]:
     """Return candidate current-policy artifact paths in precedence order."""
 
@@ -840,7 +870,7 @@ def _windows_provider_media_gate_snapshot() -> dict[str, int | str | list[str]]:
 
 def _windows_soak_profile_gate_snapshot(
     windows_soak_summary: dict[str, object] | None,
-) -> dict[str, int | str | list[str]]:
+) -> dict[str, int | str | list[str] | dict[str, int]]:
     """Return bounded native Windows soak-profile coverage posture."""
 
     if windows_soak_summary is None:
@@ -849,6 +879,7 @@ def _windows_soak_profile_gate_snapshot(
             "playback_gate_windows_soak_repeat_count": 0,
             "playback_gate_windows_soak_profile_coverage_complete": 0,
             "playback_gate_windows_soak_profile_coverage": [],
+            "playback_gate_windows_soak_pressure_cause_buckets": {},
             "playback_gate_windows_soak_recorded_at": "",
             "playback_gate_windows_soak_expires_at": "",
             "playback_gate_windows_soak_stale": 0,
@@ -874,6 +905,9 @@ def _windows_soak_profile_gate_snapshot(
     stale = _as_int(freshness.get("stale"))
     failure_reasons = _as_str_list(windows_soak_summary.get("failure_reasons"))
     required_actions = _as_str_list(windows_soak_summary.get("required_actions"))
+    pressure_cause_buckets = _as_count_mapping(
+        windows_soak_summary.get("pressure_cause_buckets")
+    )
     if stale > 0 and "windows_vfs_soak_program_stale" not in failure_reasons:
         failure_reasons.append("windows_vfs_soak_program_stale")
     if stale > 0 and "refresh_windows_vfs_soak_program" not in required_actions:
@@ -885,6 +919,7 @@ def _windows_soak_profile_gate_snapshot(
         "playback_gate_windows_soak_repeat_count": _as_int(windows_soak_summary.get("repeat_count")),
         "playback_gate_windows_soak_profile_coverage_complete": int(coverage_complete),
         "playback_gate_windows_soak_profile_coverage": sorted(profiles),
+        "playback_gate_windows_soak_pressure_cause_buckets": pressure_cause_buckets,
         "playback_gate_windows_soak_recorded_at": _as_str(freshness.get("recorded_at")),
         "playback_gate_windows_soak_expires_at": _as_str(freshness.get("expires_at")),
         "playback_gate_windows_soak_stale": stale,
@@ -982,6 +1017,7 @@ def _empty_playback_gate_governance_snapshot() -> dict[str, int | str | list[str
         "playback_gate_windows_soak_repeat_count": 0,
         "playback_gate_windows_soak_profile_coverage_complete": 0,
         "playback_gate_windows_soak_profile_coverage": [],
+        "playback_gate_windows_soak_pressure_cause_buckets": {},
         "playback_gate_windows_soak_recorded_at": "",
         "playback_gate_windows_soak_expires_at": "",
         "playback_gate_windows_soak_stale": 0,
@@ -1869,6 +1905,13 @@ def managed_windows_vfs_state_snapshot() -> dict[str, object]:
     )
 
 
+def managed_windows_vfs_state_payload() -> dict[str, object]:
+    """Return the raw managed Windows rollout-control payload with preserved fields."""
+
+    payload = _load_managed_windows_vfs_state()
+    return dict(payload) if payload is not None else {}
+
+
 def persist_managed_windows_vfs_state(
     updates: dict[str, object | None],
     *,
@@ -1877,4 +1920,12 @@ def persist_managed_windows_vfs_state(
     """Persist managed Windows rollout-control state and return the resulting payload."""
 
     return _persist_managed_windows_vfs_state(updates, actor_id=actor_id)
+
+
+def replace_managed_windows_vfs_state(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Persist one fully materialized managed Windows rollout-control payload."""
+
+    return _replace_managed_windows_vfs_state(payload)
 

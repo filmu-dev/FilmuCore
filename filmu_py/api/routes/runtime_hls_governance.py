@@ -33,6 +33,9 @@ _HLS_ROUTE_FAILURE_GOVERNANCE = {
     "generation_capacity_exceeded": 0,
     "generator_unavailable": 0,
     "lease_failed": 0,
+    "transcode_source_requires_refresh": 0,
+    "transcode_source_provider_circuit_open": 0,
+    "transcode_source_rate_limited": 0,
     "transcode_source_unavailable": 0,
     "manifest_invalid": 0,
     "generated_missing": 0,
@@ -81,6 +84,12 @@ def classify_hls_route_failure_reason(exc: HTTPException) -> str:
     """Classify one normalized HLS route failure into a small reason taxonomy."""
 
     detail = exc.detail if isinstance(exc.detail, str) else ""
+    if detail.startswith("HLS transcode source requires direct playback refresh"):
+        return "transcode_source_requires_refresh"
+    if detail.startswith("HLS transcode source refresh is paused"):
+        return "transcode_source_provider_circuit_open"
+    if detail.startswith("HLS transcode source refresh is rate limited"):
+        return "transcode_source_rate_limited"
     if detail.startswith("HLS transcode source is unavailable"):
         return "transcode_source_unavailable"
     if detail.startswith("HLS generation capacity exceeded"):
@@ -114,6 +123,15 @@ def hls_route_failure_governance_snapshot() -> dict[str, int]:
             "generator_unavailable"
         ],
         "hls_route_failures_lease_failed": _HLS_ROUTE_FAILURE_GOVERNANCE["lease_failed"],
+        "hls_route_failures_transcode_source_requires_refresh": _HLS_ROUTE_FAILURE_GOVERNANCE[
+            "transcode_source_requires_refresh"
+        ],
+        "hls_route_failures_transcode_source_provider_circuit_open": (
+            _HLS_ROUTE_FAILURE_GOVERNANCE["transcode_source_provider_circuit_open"]
+        ),
+        "hls_route_failures_transcode_source_rate_limited": _HLS_ROUTE_FAILURE_GOVERNANCE[
+            "transcode_source_rate_limited"
+        ],
         "hls_route_failures_transcode_source_unavailable": _HLS_ROUTE_FAILURE_GOVERNANCE[
             "transcode_source_unavailable"
         ],

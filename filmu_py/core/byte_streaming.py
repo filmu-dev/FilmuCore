@@ -67,6 +67,11 @@ HLS_TRANSCODE_STDERR_EVENTS = Counter(
     "Count of classified ffmpeg stderr outcomes for local HLS generation.",
     labelnames=("kind",),
 )
+HLS_FFMPEG_FAILURE_EVENTS = Counter(
+    "filmu_py_stream_hls_ffmpeg_failure_events_total",
+    "Count of local HLS ffmpeg generation failures by classified kind.",
+    labelnames=("kind",),
+)
 HLS_ACTIVE_TRANSCODES = Gauge(
     "filmu_py_stream_hls_active_transcodes",
     "Number of active local HLS ffmpeg processes.",
@@ -140,6 +145,7 @@ _HLS_GENERATION_TIMEOUT_SECONDS: Final[int] = 60
 _HLS_GOVERNANCE_INTERVAL_SECONDS: Final[int] = 30
 _HLS_DISK_HIGH_WATER_BYTES: Final[int] = 2 * 1024 * 1024 * 1024
 _HLS_DISK_LOW_WATER_BYTES: Final[int] = 1024 * 1024 * 1024
+_HLS_FFMPEG_MAX_TRANSPORT_RETRIES: Final[int] = 1
 _SESSION_RETENTION_SECONDS: Final[int] = 15 * 60
 _SCAN_PATTERN_MAX_BYTES: Final[int] = 1024 * 1024
 _SESSION_RETENTION_BY_OWNER: Final[dict[str, int]] = {
@@ -193,6 +199,21 @@ _GOVERNANCE_COUNTERS = {
     "hls_generation_killed": 0,
     "hls_manifest_invalid": 0,
     "hls_manifest_regenerated": 0,
+    "hls_ffmpeg_failures_unavailable": 0,
+    "hls_ffmpeg_failures_timeout": 0,
+    "hls_ffmpeg_failures_manifest_invalid": 0,
+    "hls_ffmpeg_failures_incomplete_output": 0,
+    "hls_ffmpeg_failures_empty": 0,
+    "hls_ffmpeg_failures_io": 0,
+    "hls_ffmpeg_failures_input": 0,
+    "hls_ffmpeg_failures_codec": 0,
+    "hls_ffmpeg_failures_transport": 0,
+    "hls_ffmpeg_failures_unknown": 0,
+    "hls_ffmpeg_retry_attempts": 0,
+    "hls_ffmpeg_retry_recovered": 0,
+    "hls_ffmpeg_retry_suppressed": 0,
+    "hls_ffmpeg_cleanup_failures": 0,
+    "hls_ffmpeg_cleanup_suppressed_usable_output": 0,
     "stream_abort_events": 0,
     "local_stream_abort_events": 0,
     "remote_stream_abort_events": 0,
@@ -638,6 +659,27 @@ def get_serving_governance_snapshot() -> dict[str, int]:
         "hls_disk_usage_bytes": hls_disk_usage_bytes,
         "hls_manifest_invalid": _GOVERNANCE_COUNTERS["hls_manifest_invalid"],
         "hls_manifest_regenerated": _GOVERNANCE_COUNTERS["hls_manifest_regenerated"],
+        "hls_ffmpeg_failures_unavailable": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_unavailable"],
+        "hls_ffmpeg_failures_timeout": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_timeout"],
+        "hls_ffmpeg_failures_manifest_invalid": _GOVERNANCE_COUNTERS[
+            "hls_ffmpeg_failures_manifest_invalid"
+        ],
+        "hls_ffmpeg_failures_incomplete_output": _GOVERNANCE_COUNTERS[
+            "hls_ffmpeg_failures_incomplete_output"
+        ],
+        "hls_ffmpeg_failures_empty": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_empty"],
+        "hls_ffmpeg_failures_io": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_io"],
+        "hls_ffmpeg_failures_input": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_input"],
+        "hls_ffmpeg_failures_codec": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_codec"],
+        "hls_ffmpeg_failures_transport": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_transport"],
+        "hls_ffmpeg_failures_unknown": _GOVERNANCE_COUNTERS["hls_ffmpeg_failures_unknown"],
+        "hls_ffmpeg_retry_attempts": _GOVERNANCE_COUNTERS["hls_ffmpeg_retry_attempts"],
+        "hls_ffmpeg_retry_recovered": _GOVERNANCE_COUNTERS["hls_ffmpeg_retry_recovered"],
+        "hls_ffmpeg_retry_suppressed": _GOVERNANCE_COUNTERS["hls_ffmpeg_retry_suppressed"],
+        "hls_ffmpeg_cleanup_failures": _GOVERNANCE_COUNTERS["hls_ffmpeg_cleanup_failures"],
+        "hls_ffmpeg_cleanup_suppressed_usable_output": _GOVERNANCE_COUNTERS[
+            "hls_ffmpeg_cleanup_suppressed_usable_output"
+        ],
         "stream_abort_events": _GOVERNANCE_COUNTERS["stream_abort_events"],
         "local_stream_abort_events": _GOVERNANCE_COUNTERS["local_stream_abort_events"],
         "remote_stream_abort_events": _GOVERNANCE_COUNTERS["remote_stream_abort_events"],
@@ -1019,6 +1061,23 @@ def _remove_directory_tree(path: Path) -> bool:
     return True
 
 
+def _cleanup_failed_hls_generation_output(
+    output_dir: Path,
+    *,
+    playlist_path: Path | None = None,
+    suppress_if_usable: bool = False,
+) -> bool:
+    """Remove failed generated-HLS output unless an already-usable playlist should be preserved."""
+
+    if suppress_if_usable and playlist_path is not None and is_usable_local_hls_playlist(playlist_path):
+        _GOVERNANCE_COUNTERS["hls_ffmpeg_cleanup_suppressed_usable_output"] += 1
+        return True
+    cleaned = _remove_directory_tree(output_dir)
+    if not cleaned:
+        _GOVERNANCE_COUNTERS["hls_ffmpeg_cleanup_failures"] += 1
+    return cleaned
+
+
 def _hls_generation_lock(item_id: str) -> asyncio.Lock:
     """Return the per-item lock used to avoid duplicate HLS generation work."""
 
@@ -1061,6 +1120,33 @@ def _classify_ffmpeg_stderr_kind(stderr_text: str) -> str:
     if "connection reset" in lowered or "timed out" in lowered:
         return "transport"
     return "unknown"
+
+
+def _classify_generated_playlist_failure_kind(playlist_path: Path) -> str:
+    """Classify one generated playlist failure when ffmpeg exits without a complete output."""
+
+    if not playlist_path.exists():
+        return "incomplete_output"
+    try:
+        referenced = referenced_local_hls_files(playlist_path)
+    except (HTTPException, OSError, UnicodeError):
+        return "manifest_invalid"
+    return "incomplete_output" if not all(path.is_file() for path in referenced) else "unknown"
+
+
+def _record_hls_ffmpeg_failure_kind(kind: str) -> None:
+    """Record one classified local-HLS ffmpeg failure for operator surfaces."""
+
+    HLS_FFMPEG_FAILURE_EVENTS.labels(kind=kind).inc()
+    counter_key = f"hls_ffmpeg_failures_{kind}"
+    if counter_key in _GOVERNANCE_COUNTERS:
+        _GOVERNANCE_COUNTERS[counter_key] += 1
+
+
+def _should_retry_hls_ffmpeg_failure(*, kind: str, attempt: int) -> bool:
+    """Return whether one classified HLS generation failure is worth retrying once."""
+
+    return kind == "transport" and attempt < _HLS_FFMPEG_MAX_TRANSPORT_RETRIES
 
 
 def _record_hls_ffmpeg_observability(stderr_text: str) -> None:
@@ -1326,13 +1412,22 @@ async def _monitor_hls_generation_completion(
         _stdout, stderr = await process.communicate()
         stderr_text = (stderr or b"").decode("utf-8", errors="replace").strip()
         if process.returncode != 0 or not is_complete_local_hls_playlist(playlist_path):
+            failure_kind = (
+                _classify_ffmpeg_stderr_kind(stderr_text)
+                if process.returncode != 0
+                else _classify_generated_playlist_failure_kind(playlist_path)
+            )
+            _record_hls_ffmpeg_failure_kind(failure_kind)
             _GOVERNANCE_COUNTERS["hls_generation_failed"] += 1
             HLS_GENERATION_EVENTS.labels(result="failed").inc()
             HLS_GENERATION_DURATION_SECONDS.labels(result="failed").observe(
                 perf_counter() - generation_started
             )
-            if not is_usable_local_hls_playlist(playlist_path):
-                _remove_directory_tree(output_dir)
+            _cleanup_failed_hls_generation_output(
+                output_dir,
+                playlist_path=playlist_path,
+                suppress_if_usable=True,
+            )
             return
 
         _GOVERNANCE_COUNTERS["hls_generation_completed"] += 1
@@ -1343,8 +1438,11 @@ async def _monitor_hls_generation_completion(
     except asyncio.CancelledError:
         await _terminate_hls_process(process)
         await process.communicate()
-        if not is_usable_local_hls_playlist(playlist_path):
-            _remove_directory_tree(output_dir)
+        _cleanup_failed_hls_generation_output(
+            output_dir,
+            playlist_path=playlist_path,
+            suppress_if_usable=True,
+        )
         raise
     finally:
         _record_hls_ffmpeg_observability(stderr_text)
@@ -1516,166 +1614,195 @@ async def ensure_local_hls_playlist(
         _write_local_hls_source_marker(output_dir, source_marker=source_marker)
 
         async with _HLS_GENERATION_SEMAPHORE:
-            _GOVERNANCE_COUNTERS["hls_generation_started"] += 1
-            HLS_GENERATION_EVENTS.labels(result="started").inc()
-            generation_started = perf_counter()
-            stderr_text = ""
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    source_path,
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    "0:a:0?",
-                    "-map_metadata",
-                    "-1",
-                    "-map_chapters",
-                    "-1",
-                    "-sn",
-                    "-dn",
-                    "-preset",
-                    "ultrafast",
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    transcode_profile.pix_fmt,
-                    "-profile:v",
-                    transcode_profile.profile,
-                    "-level:v",
-                    transcode_profile.level,
-                    "-sc_threshold",
-                    "0",
-                    "-force_key_frames",
-                    "expr:gte(t,n_forced*2)",
-                    "-g",
-                    "48",
-                    "-keyint_min",
-                    "48",
-                    "-c:a",
-                    "aac",
-                    "-ac",
-                    "2",
-                    "-ar",
-                    "48000",
-                    "-b:a",
-                    "192k",
-                    "-f",
-                    "hls",
-                    "-hls_time",
-                    "2",
-                    "-hls_list_size",
-                    "0",
-                    "-hls_playlist_type",
-                    "event",
-                    "-hls_flags",
-                    "independent_segments",
-                    "-hls_segment_filename",
-                    str(segment_pattern),
-                    str(playlist_path),
-                    stdout=DEVNULL,
-                    stderr=DEVNULL,
-                )
-                _attach_hls_process(item_id, process)
-            except FileNotFoundError as exc:
-                HLS_GENERATION_EVENTS.labels(result="unavailable").inc()
-                HLS_GENERATION_DURATION_SECONDS.labels(result="unavailable").observe(
-                    perf_counter() - generation_started
-                )
-                _release_hls_generation(item_id)
-                raise HTTPException(
-                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                    detail="ffmpeg is not available for HLS generation",
-                ) from exc
-            except Exception:
-                _release_hls_generation(item_id)
-                raise
+            attempt = 0
+            while True:
+                if attempt > 0:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    _write_local_hls_source_marker(output_dir, source_marker=source_marker)
 
-            try:
-                await asyncio.wait_for(
-                    _wait_for_local_hls_playlist_ready(playlist_path, process=process),
-                    timeout=_HLS_GENERATION_TIMEOUT_SECONDS,
-                )
-            except asyncio.CancelledError:
-                _GOVERNANCE_COUNTERS["hls_generation_cancelled"] += 1
-                HLS_GENERATION_EVENTS.labels(result="cancelled").inc()
-                await _terminate_hls_process(process)
-                await process.communicate()
-                _remove_directory_tree(output_dir)
-                _release_hls_generation(item_id)
-                raise
-            except TimeoutError as exc:
-                _GOVERNANCE_COUNTERS["hls_generation_failed"] += 1
-                _GOVERNANCE_COUNTERS["hls_generation_timeouts"] += 1
-                HLS_GENERATION_EVENTS.labels(result="timeout").inc()
-                HLS_GENERATION_DURATION_SECONDS.labels(result="timeout").observe(
-                    perf_counter() - generation_started
-                )
-                await _terminate_hls_process(process)
-                await process.communicate()
-                _remove_directory_tree(output_dir)
-                _release_hls_generation(item_id)
-                raise HTTPException(
-                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                    detail="HLS generation timed out",
-                ) from exc
-
-            if process.returncode is None and _is_usable_local_hls_playlist_for_source(
-                playlist_path,
-                source_marker=source_marker,
-            ):
-                tracked_generation = _ACTIVE_HLS_GENERATIONS.get(item_id)
-                if tracked_generation is not None:
-                    tracked_generation.monitor_task = asyncio.create_task(
-                        _monitor_hls_generation_completion(
-                            item_id,
-                            process=process,
-                            playlist_path=playlist_path,
-                            output_dir=output_dir,
-                            generation_started=generation_started,
-                        )
+                _GOVERNANCE_COUNTERS["hls_generation_started"] += 1
+                HLS_GENERATION_EVENTS.labels(result="started").inc()
+                generation_started = perf_counter()
+                stderr_text = ""
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        source_path,
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a:0?",
+                        "-map_metadata",
+                        "-1",
+                        "-map_chapters",
+                        "-1",
+                        "-sn",
+                        "-dn",
+                        "-preset",
+                        "ultrafast",
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        transcode_profile.pix_fmt,
+                        "-profile:v",
+                        transcode_profile.profile,
+                        "-level:v",
+                        transcode_profile.level,
+                        "-sc_threshold",
+                        "0",
+                        "-force_key_frames",
+                        "expr:gte(t,n_forced*2)",
+                        "-g",
+                        "48",
+                        "-keyint_min",
+                        "48",
+                        "-c:a",
+                        "aac",
+                        "-ac",
+                        "2",
+                        "-ar",
+                        "48000",
+                        "-b:a",
+                        "192k",
+                        "-f",
+                        "hls",
+                        "-hls_time",
+                        "2",
+                        "-hls_list_size",
+                        "0",
+                        "-hls_playlist_type",
+                        "event",
+                        "-hls_flags",
+                        "independent_segments",
+                        "-hls_segment_filename",
+                        str(segment_pattern),
+                        str(playlist_path),
+                        stdout=DEVNULL,
+                        stderr=DEVNULL,
                     )
-                return playlist_path
+                    _attach_hls_process(item_id, process)
+                except FileNotFoundError as exc:
+                    _record_hls_ffmpeg_failure_kind("unavailable")
+                    HLS_GENERATION_EVENTS.labels(result="unavailable").inc()
+                    HLS_GENERATION_DURATION_SECONDS.labels(result="unavailable").observe(
+                        perf_counter() - generation_started
+                    )
+                    _release_hls_generation(item_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="ffmpeg is not available for HLS generation",
+                    ) from exc
+                except Exception:
+                    _release_hls_generation(item_id)
+                    raise
 
-            _stdout, stderr = await process.communicate()
-            stderr_text = (stderr or b"").decode("utf-8", errors="replace").strip()
-            if process.returncode != 0 or not playlist_path.is_file():
-                _GOVERNANCE_COUNTERS["hls_generation_failed"] += 1
-                HLS_GENERATION_EVENTS.labels(result="failed").inc()
-                HLS_GENERATION_DURATION_SECONDS.labels(result="failed").observe(
+                try:
+                    await asyncio.wait_for(
+                        _wait_for_local_hls_playlist_ready(playlist_path, process=process),
+                        timeout=_HLS_GENERATION_TIMEOUT_SECONDS,
+                    )
+                except asyncio.CancelledError:
+                    _GOVERNANCE_COUNTERS["hls_generation_cancelled"] += 1
+                    HLS_GENERATION_EVENTS.labels(result="cancelled").inc()
+                    await _terminate_hls_process(process)
+                    await process.communicate()
+                    _cleanup_failed_hls_generation_output(output_dir)
+                    _release_hls_generation(item_id)
+                    raise
+                except TimeoutError as exc:
+                    _record_hls_ffmpeg_failure_kind("timeout")
+                    _GOVERNANCE_COUNTERS["hls_generation_failed"] += 1
+                    _GOVERNANCE_COUNTERS["hls_generation_timeouts"] += 1
+                    HLS_GENERATION_EVENTS.labels(result="timeout").inc()
+                    HLS_GENERATION_DURATION_SECONDS.labels(result="timeout").observe(
+                        perf_counter() - generation_started
+                    )
+                    await _terminate_hls_process(process)
+                    await process.communicate()
+                    _cleanup_failed_hls_generation_output(output_dir)
+                    _release_hls_generation(item_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                        detail="HLS generation timed out",
+                    ) from exc
+
+                if process.returncode is None and _is_usable_local_hls_playlist_for_source(
+                    playlist_path,
+                    source_marker=source_marker,
+                ):
+                    tracked_generation = _ACTIVE_HLS_GENERATIONS.get(item_id)
+                    if tracked_generation is not None:
+                        tracked_generation.monitor_task = asyncio.create_task(
+                            _monitor_hls_generation_completion(
+                                item_id,
+                                process=process,
+                                playlist_path=playlist_path,
+                                output_dir=output_dir,
+                                generation_started=generation_started,
+                            )
+                        )
+                    if attempt > 0:
+                        _GOVERNANCE_COUNTERS["hls_ffmpeg_retry_recovered"] += 1
+                    return playlist_path
+
+                _stdout, stderr = await process.communicate()
+                stderr_text = (stderr or b"").decode("utf-8", errors="replace").strip()
+                if process.returncode != 0 or not playlist_path.is_file():
+                    failure_kind = _classify_ffmpeg_stderr_kind(stderr_text)
+                    _record_hls_ffmpeg_failure_kind(failure_kind)
+                    if _should_retry_hls_ffmpeg_failure(kind=failure_kind, attempt=attempt):
+                        _GOVERNANCE_COUNTERS["hls_ffmpeg_retry_attempts"] += 1
+                        if not _cleanup_failed_hls_generation_output(output_dir):
+                            _GOVERNANCE_COUNTERS["hls_ffmpeg_retry_suppressed"] += 1
+                        else:
+                            attempt += 1
+                            continue
+                    _GOVERNANCE_COUNTERS["hls_generation_failed"] += 1
+                    HLS_GENERATION_EVENTS.labels(result="failed").inc()
+                    HLS_GENERATION_DURATION_SECONDS.labels(result="failed").observe(
+                        perf_counter() - generation_started
+                    )
+                    _cleanup_failed_hls_generation_output(output_dir)
+                    _record_hls_ffmpeg_observability(stderr_text)
+                    _release_hls_generation(item_id)
+                    detail = stderr_text or "HLS generation failed"
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=detail,
+                    )
+                if not is_complete_local_hls_playlist(playlist_path):
+                    failure_kind = _classify_generated_playlist_failure_kind(playlist_path)
+                    _record_hls_ffmpeg_failure_kind(failure_kind)
+                    _GOVERNANCE_COUNTERS["hls_generation_failed"] += 1
+                    if failure_kind == "manifest_invalid":
+                        _GOVERNANCE_COUNTERS["hls_manifest_invalid"] += 1
+                    HLS_GENERATION_EVENTS.labels(result="failed").inc()
+                    HLS_GENERATION_DURATION_SECONDS.labels(result="failed").observe(
+                        perf_counter() - generation_started
+                    )
+                    _cleanup_failed_hls_generation_output(output_dir)
+                    _record_hls_ffmpeg_observability(stderr_text)
+                    _release_hls_generation(item_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=(
+                            "Generated HLS playlist is malformed"
+                            if failure_kind == "manifest_invalid"
+                            else "HLS generation completed without a complete playlist"
+                        ),
+                    )
+                _record_hls_ffmpeg_observability(stderr_text)
+                _GOVERNANCE_COUNTERS["hls_generation_completed"] += 1
+                HLS_GENERATION_EVENTS.labels(result="completed").inc()
+                HLS_GENERATION_DURATION_SECONDS.labels(result="completed").observe(
                     perf_counter() - generation_started
                 )
-                _remove_directory_tree(output_dir)
-                _record_hls_ffmpeg_observability(stderr_text)
+                if attempt > 0:
+                    _GOVERNANCE_COUNTERS["hls_ffmpeg_retry_recovered"] += 1
                 _release_hls_generation(item_id)
-                detail = stderr_text or "HLS generation failed"
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=detail,
-                )
-            if not is_complete_local_hls_playlist(playlist_path):
-                _GOVERNANCE_COUNTERS["hls_generation_failed"] += 1
-                _GOVERNANCE_COUNTERS["hls_manifest_invalid"] += 1
-                HLS_GENERATION_EVENTS.labels(result="failed").inc()
-                HLS_GENERATION_DURATION_SECONDS.labels(result="failed").observe(
-                    perf_counter() - generation_started
-                )
-                _remove_directory_tree(output_dir)
-                _record_hls_ffmpeg_observability(stderr_text)
-                _release_hls_generation(item_id)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Generated HLS playlist is malformed",
-                )
-            _record_hls_ffmpeg_observability(stderr_text)
-            _GOVERNANCE_COUNTERS["hls_generation_completed"] += 1
-            HLS_GENERATION_EVENTS.labels(result="completed").inc()
-            HLS_GENERATION_DURATION_SECONDS.labels(result="completed").observe(
-                perf_counter() - generation_started
-            )
-            _release_hls_generation(item_id)
+                break
 
     return playlist_path
 

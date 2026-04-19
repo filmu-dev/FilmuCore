@@ -1,4 +1,4 @@
-name: Enterprise Rollout Continuity
+name: Rollout Continuity
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ on:
       - "filmu_py/workers/tasks.py"
       - "filmu_py/api/routes/stream.py"
       - "filmu_py/**/runtime_*.py"
-      - "scripts/check_enterprise_rollout_continuity.ps1"
+      - "scripts/check_rollout_continuity.ps1"
       - "scripts/check_playback_stability_trends.ps1"
       - "scripts/check_operator_log_pipeline_rollout.ps1"
       - "scripts/run_windows_vfs_multi_environment_gate.ps1"
@@ -41,29 +41,29 @@ on:
     - cron: "45 * * * *"
 
 concurrency:
-  group: enterprise-rollout-continuity-${{ github.event.pull_request.number || github.ref }}
+  group: rollout-continuity-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  enterprise-rollout-continuity-pr:
+  rollout-continuity-pr:
     if: github.event_name == 'pull_request'
-    name: Enterprise Rollout Continuity
+    name: Rollout Continuity
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Run enterprise continuity PR contract gate
+      - name: Run rollout continuity PR contract gate
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           & pwsh `
             -NoProfile `
-            -File ./scripts/check_enterprise_rollout_continuity.ps1 `
+            -File ./scripts/check_rollout_continuity.ps1 `
             -AllowBootstrap `
             -AllowOfflineOperator `
             -WindowsSoakContractPath ./ops/rollout/windows-vfs-soak-program.contract.json `
@@ -77,7 +77,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: enterprise-rollout-continuity-${{ github.run_id }}
+          name: rollout-continuity-${{ github.run_id }}
           path: |
             artifacts/operations/**
             playback-proof-artifacts/playback-stability-trend-summary-*.json
@@ -85,9 +85,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 21
 
-  enterprise-rollout-continuity-managed:
+  rollout-continuity-managed:
     if: github.event_name != 'pull_request'
-    name: Enterprise Rollout Continuity
+    name: Rollout Continuity
     runs-on: [self-hosted, windows, filmu-vfs]
     timeout-minutes: 40
     env:
@@ -102,14 +102,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Run enterprise continuity gate
+      - name: Run rollout continuity gate
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $args = @(
             '-NoProfile',
             '-File',
-            './scripts/check_enterprise_rollout_continuity.ps1',
+            './scripts/check_rollout_continuity.ps1',
             '-ProbeOperatorNow',
             '-WindowsSoakContractPath',
             './ops/rollout/windows-vfs-soak-program.contract.json',
@@ -133,7 +133,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: enterprise-rollout-continuity-${{ github.run_id }}
+          name: rollout-continuity-${{ github.run_id }}
           path: |
             artifacts/operations/**
             playback-proof-artifacts/playback-stability-trend-summary-*.json

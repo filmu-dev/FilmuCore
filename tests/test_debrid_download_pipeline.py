@@ -14,8 +14,10 @@ from filmu_py.services.debrid import (
     DebridRateLimitError,
     RealDebridPlaybackClient,
     TorrentFile,
+    build_download_container_candidates,
     build_download_manifest,
     filter_torrent_files,
+    validate_download_manifest,
 )
 
 
@@ -468,3 +470,154 @@ def test_build_download_manifest_reports_unresolved_selected_files() -> None:
     assert manifest.multi_container is False
     assert manifest.unresolved_file_count == 1
     assert manifest.download_urls == []
+
+
+def test_validate_download_manifest_rejects_multi_container_selection_with_evidence() -> None:
+    settings = DownloadersSettings(
+        movie_filesize_mb_min=700,
+        movie_filesize_mb_max=-1,
+        episode_filesize_mb_min=100,
+        episode_filesize_mb_max=-1,
+        video_extensions=["mkv"],
+    )
+
+    validation = validate_download_manifest(
+        [
+            TorrentFile(
+                file_id="1",
+                file_name="Episode 01.mkv",
+                file_path="Show A/Season 01/Episode 01.mkv",
+                file_size_bytes=800 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            ),
+            TorrentFile(
+                file_id="2",
+                file_name="Episode 02.mkv",
+                file_path="Show B/Season 01/Episode 02.mkv",
+                file_size_bytes=810 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            ),
+        ],
+        download_urls=[
+            "https://cdn.example.com/show-a-s01e01",
+            "https://cdn.example.com/show-b-s01e02",
+        ],
+        settings=settings,
+        expected_parsed_title={"season": 1},
+    )
+
+    assert validation.ok is False
+    assert validation.rejection_reason == "download_manifest_multi_container"
+    assert validation.matched_file_ids == ("1", "2")
+    assert [evidence.container_root for evidence in validation.selected_file_evidence] == [
+        "Show A",
+        "Show B",
+    ]
+
+
+def test_validate_download_manifest_rejects_unmatched_episode_scope() -> None:
+    settings = DownloadersSettings(
+        movie_filesize_mb_min=700,
+        movie_filesize_mb_max=-1,
+        episode_filesize_mb_min=100,
+        episode_filesize_mb_max=-1,
+        video_extensions=["mkv"],
+    )
+
+    validation = validate_download_manifest(
+        [
+            TorrentFile(
+                file_id="1",
+                file_name="Episode 03.mkv",
+                file_path="Show/Season 01/Episode 03.mkv",
+                file_size_bytes=800 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            )
+        ],
+        download_urls=["https://cdn.example.com/show-s01e03"],
+        settings=settings,
+        expected_parsed_title={"season": 1, "episode": 2},
+    )
+
+    assert validation.ok is False
+    assert validation.rejection_reason == "download_manifest_no_matching_episode"
+    assert validation.matched_file_ids == ()
+    assert validation.selected_file_evidence[0].scope_season == 1
+    assert validation.selected_file_evidence[0].scope_episodes == (3,)
+
+
+def test_validate_download_manifest_accepts_matching_episode_scope() -> None:
+    settings = DownloadersSettings(
+        movie_filesize_mb_min=700,
+        movie_filesize_mb_max=-1,
+        episode_filesize_mb_min=100,
+        episode_filesize_mb_max=-1,
+        video_extensions=["mkv"],
+    )
+
+    validation = validate_download_manifest(
+        [
+            TorrentFile(
+                file_id="1",
+                file_name="Episode 02.mkv",
+                file_path="Show/Season 01/Example.Show.S01E02.mkv",
+                file_size_bytes=800 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            )
+        ],
+        download_urls=["https://cdn.example.com/show-s01e02"],
+        settings=settings,
+        expected_parsed_title={"season": 1, "episode": 2},
+    )
+
+    assert validation.ok is True
+    assert validation.rejection_reason is None
+    assert validation.matched_file_ids == ("1",)
+    assert validation.selected_file_evidence[0].match_reason == "expected_episode"
+
+
+def test_build_download_container_candidates_splits_multi_container_payload() -> None:
+    settings = DownloadersSettings(
+        movie_filesize_mb_min=700,
+        movie_filesize_mb_max=-1,
+        episode_filesize_mb_min=100,
+        episode_filesize_mb_max=-1,
+        video_extensions=["mkv"],
+    )
+
+    candidates = build_download_container_candidates(
+        [
+            TorrentFile(
+                file_id="1",
+                file_name="Episode 01.mkv",
+                file_path="Show A/Season 01/Example.Show.S01E01.mkv",
+                file_size_bytes=800 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            ),
+            TorrentFile(
+                file_id="2",
+                file_name="Episode 02.mkv",
+                file_path="Show B/Season 01/Example.Show.S01E02.mkv",
+                file_size_bytes=810 * 1024 * 1024,
+                selected=True,
+                media_type="episode",
+            ),
+        ],
+        download_urls=[
+            "https://cdn.example.com/show-a-s01e01",
+            "https://cdn.example.com/show-b-s01e02",
+        ],
+        settings=settings,
+        expected_parsed_title={"season": 1, "episode": 2},
+    )
+
+    assert [candidate.container_root for candidate in candidates] == ["Show A", "Show B"]
+    assert candidates[0].validation.ok is False
+    assert candidates[0].validation.rejection_reason == "download_manifest_no_matching_episode"
+    assert candidates[1].validation.ok is True
+    assert candidates[1].validation.matched_file_ids == ("2",)

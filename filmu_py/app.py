@@ -36,6 +36,7 @@ from .middleware import RequestIdMiddleware
 from .observability import setup_observability
 from .plugins import PluginRuntimePolicy, load_plugins, register_builtin_plugins
 from .plugins.context import HostPluginDatasource, PluginContextProvider
+from .plugins.hooks import PluginHookWorkerExecutor, QueuedPluginHookDispatcher
 from .plugins.registry import PluginRegistry
 from .plugins.stream_control import HostStreamControlGateway
 from .resources import AppResources
@@ -426,7 +427,26 @@ def _build_lifespan(
                 context_provider=plugin_context_provider,
             )
             plugin_context_provider.lock()
-            resources.event_bus.attach_plugin_runtime(plugin_registry)
+            hook_executor: PluginHookWorkerExecutor | QueuedPluginHookDispatcher = (
+                PluginHookWorkerExecutor(
+                    timeout_seconds=runtime_settings.plugin_runtime.hook_timeout_seconds
+                )
+            )
+            if (
+                runtime_settings.plugin_runtime.hook_dispatch_mode == "queued"
+                and arq_redis is not None
+                and runtime_settings.plugin_runtime.queued_hook_events
+            ):
+                hook_executor = QueuedPluginHookDispatcher(
+                    arq_redis=arq_redis,
+                    queue_name=queue_name,
+                    queued_events=frozenset(runtime_settings.plugin_runtime.queued_hook_events),
+                    fallback_executor=PluginHookWorkerExecutor(
+                        timeout_seconds=runtime_settings.plugin_runtime.hook_timeout_seconds
+                    ),
+                    fallback_enabled=runtime_settings.plugin_runtime.queued_hook_fallback_enabled,
+                )
+            resources.event_bus.attach_plugin_runtime(plugin_registry, hook_executor=hook_executor)
             resources.playback_service = build_playback_service(resources)
             resources.playback_refresh_controller = build_playback_refresh_controller(resources)
             resources.hls_failed_lease_refresh_controller = (

@@ -267,6 +267,21 @@ def _build_playback_attachment(
     )
 
 
+def test_classify_generated_playlist_failure_kind_handles_manifest_read_errors(tmp_path: Path) -> None:
+    playlist = tmp_path / "playlist.m3u8"
+    playlist.write_text("#EXTM3U\nsegment.ts\n", encoding="utf-8")
+    original = byte_streaming.referenced_local_hls_files
+
+    def raise_unicode_error(_: Path) -> list[Path]:
+        raise UnicodeError("bad playlist")
+
+    byte_streaming.referenced_local_hls_files = raise_unicode_error
+    try:
+        assert byte_streaming._classify_generated_playlist_failure_kind(playlist) == "manifest_invalid"
+    finally:
+        byte_streaming.referenced_local_hls_files = original
+
+
 def _build_media_entry(
     *,
     media_entry_id: str | None = None,
@@ -591,6 +606,21 @@ def test_stream_status_route_exposes_serving_governance_snapshot() -> None:
     assert payload["governance"]["hls_generation_timeouts"] == 0
     assert payload["governance"]["hls_manifest_invalid"] == 0
     assert payload["governance"]["hls_manifest_regenerated"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_unavailable"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_timeout"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_manifest_invalid"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_incomplete_output"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_empty"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_io"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_input"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_codec"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_transport"] == 0
+    assert payload["governance"]["hls_ffmpeg_failures_unknown"] == 0
+    assert payload["governance"]["hls_ffmpeg_retry_attempts"] == 0
+    assert payload["governance"]["hls_ffmpeg_retry_recovered"] == 0
+    assert payload["governance"]["hls_ffmpeg_retry_suppressed"] == 0
+    assert payload["governance"]["hls_ffmpeg_cleanup_failures"] == 0
+    assert payload["governance"]["hls_ffmpeg_cleanup_suppressed_usable_output"] == 0
     assert payload["governance"]["stream_abort_events"] == 0
     assert payload["governance"]["local_stream_abort_events"] == 0
     assert payload["governance"]["remote_stream_abort_events"] == 0
@@ -706,6 +736,10 @@ def test_stream_status_route_exposes_playback_governance_snapshot() -> None:
     assert governance["selected_hls_streams_needing_refresh"] == 0
     assert governance["selected_direct_streams_failed"] == 0
     assert governance["selected_hls_streams_failed"] == 1
+    assert governance["hls_transcode_remote_direct_candidates"] == 1
+    assert governance["hls_transcode_remote_direct_blocked_requires_refresh"] == 1
+    assert governance["hls_transcode_remote_direct_blocked_provider_circuit_open"] == 0
+    assert governance["hls_transcode_remote_direct_blocked_failed_lease"] == 0
     assert governance["hls_manifest_invalid"] >= 0
     assert governance["hls_manifest_regenerated"] >= 0
 
@@ -4116,6 +4150,75 @@ def test_playback_source_service_uses_remote_direct_as_hls_transcode_fallback() 
     assert attachment.locator == "https://cdn.example.com/direct-hevc.mkv"
 
 
+def test_playback_source_service_rejects_restricted_remote_direct_hls_fallback() -> None:
+    item = _build_item(item_id="item-hls-remote-direct-requires-refresh")
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-direct-requires-refresh",
+        item_id=item.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/restricted-hls-remote-direct-requires-refresh.mkv",
+        unrestricted_url="https://api.example.com/restricted-hls-remote-direct-requires-refresh.mkv",
+        provider="realdebrid",
+        provider_download_id="download-hls-remote-direct-requires-refresh",
+        refresh_state="stale",
+    )
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="direct")
+    ]
+    _, resources = _build_client(items=[item])
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(PlaybackSourceService(resources.db).resolve_hls_attachment(item.id))
+
+    assert exc_info.value.status_code == 503
+    assert (
+        exc_info.value.detail
+        == "HLS transcode source requires direct playback refresh before transcode can start"
+    )
+    assert exc_info.value.headers == {"Retry-After": "10"}
+
+
+def test_playback_source_service_rejects_remote_direct_hls_fallback_when_provider_circuit_is_open() -> None:
+    item = _build_item(item_id="item-hls-remote-direct-provider-recovery")
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-direct-provider-recovery",
+        item_id=item.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/restricted-hls-remote-direct-provider-recovery.mkv",
+        unrestricted_url="https://api.example.com/restricted-hls-remote-direct-provider-recovery.mkv",
+        provider="realdebrid",
+        provider_download_id="download-hls-remote-direct-provider-recovery",
+        refresh_state="stale",
+    )
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="direct")
+    ]
+    provider_circuit_breaker = ProviderCircuitBreaker(
+        failure_threshold=1,
+        reset_timeout_seconds=45.0,
+    )
+    provider_circuit_breaker.record_failure("realdebrid")
+    _, resources = _build_client(items=[item])
+    service = PlaybackSourceService(
+        resources.db,
+        provider_circuit_breaker=provider_circuit_breaker,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.resolve_hls_attachment(item.id))
+
+    assert exc_info.value.status_code == 503
+    assert (
+        exc_info.value.detail
+        == "HLS transcode source refresh is paused while provider recovery is in progress"
+    )
+    assert exc_info.value.headers is not None
+    assert int(exc_info.value.headers["Retry-After"]) >= 1
+    assert exc_info.value.headers.get("X-Filmu-Refresh-Deferred") == "provider_circuit_open"
+
+
 def test_playback_source_service_prefers_mounted_local_file_for_hls_over_remote_direct_lease(
     tmp_path: Path,
 ) -> None:
@@ -5034,6 +5137,193 @@ def test_playback_source_service_executes_media_entry_refreshes_with_provider_cl
     assert media_entry.download_url == "https://api.example.com/restricted-provider-refresh"
     assert media_entry.refresh_state == "ready"
     assert media_entry.expires_at == datetime(2026, 3, 15, 12, 0, tzinfo=UTC)
+
+
+def test_playback_source_service_builds_media_entry_refresh_request_with_source_attachment_identity_fallback() -> (
+    None
+):
+    attachment = _build_playback_attachment(
+        attachment_id="attachment-media-entry-fallback",
+        item_id="item-media-entry-fallback",
+        kind="remote-direct",
+        locator="https://api.example.com/restricted-fallback",
+        provider="realdebrid",
+        provider_download_id="download-media-entry-fallback",
+        provider_file_id="provider-file-fallback",
+        provider_file_path="folder/Fallback.mkv",
+        restricted_url="https://api.example.com/restricted-fallback",
+        unrestricted_url="https://cdn.example.com/fallback",
+        original_filename="Fallback.mkv",
+        file_size=321,
+        refresh_state="stale",
+    )
+    entry = _build_media_entry(
+        media_entry_id="media-entry-fallback",
+        item_id="item-media-entry-fallback",
+        source_attachment_id=attachment.id,
+        kind="remote-direct",
+        provider=None,
+        provider_download_id=None,
+        provider_file_id=None,
+        provider_file_path=None,
+        download_url=None,
+        unrestricted_url=None,
+        original_filename=None,
+        size_bytes=None,
+        refresh_state="stale",
+    )
+    entry.source_attachment = attachment
+
+    request = PlaybackSourceService.build_media_entry_refresh_request(entry, roles=("direct",))
+
+    assert request is not None
+    assert request.provider == "realdebrid"
+    assert request.provider_download_id == "download-media-entry-fallback"
+    assert request.provider_file_id == "provider-file-fallback"
+    assert request.provider_file_path == "folder/Fallback.mkv"
+    assert request.restricted_url == "https://api.example.com/restricted-fallback"
+    assert request.unrestricted_url == "https://cdn.example.com/fallback"
+    assert request.original_filename == "Fallback.mkv"
+    assert request.file_size == 321
+
+
+def test_playback_source_service_executes_media_entry_refreshes_with_source_attachment_identity_fallback() -> (
+    None
+):
+    item = _build_item(item_id="item-media-entry-source-identity-fallback")
+    attachment = _build_playback_attachment(
+        attachment_id="attachment-media-entry-source-identity-fallback",
+        item_id=item.id,
+        kind="remote-direct",
+        locator="https://api.example.com/restricted-source-fallback",
+        provider="realdebrid",
+        provider_download_id="download-media-entry-source-fallback",
+        restricted_url="https://api.example.com/restricted-source-fallback",
+        refresh_state="stale",
+        original_filename="Fallback Source.mkv",
+        file_size=654,
+    )
+    media_entry = _build_media_entry(
+        media_entry_id="media-entry-source-identity-fallback",
+        item_id=item.id,
+        source_attachment_id=attachment.id,
+        kind="remote-direct",
+        provider=None,
+        provider_download_id=None,
+        download_url=None,
+        unrestricted_url=None,
+        original_filename=None,
+        size_bytes=None,
+        refresh_state="stale",
+    )
+    media_entry.source_attachment = attachment
+    item.playback_attachments = [attachment]
+    item.media_entries = [media_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=media_entry.id, role="direct")
+    ]
+    _, resources = _build_client(items=[item])
+
+    class FakeProviderClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None, str | None]] = []
+
+        async def unrestrict_link(
+            self,
+            link: str,
+            *,
+            request: PlaybackAttachmentRefreshRequest,
+        ) -> PlaybackAttachmentProviderUnrestrictedLink | None:
+            self.calls.append((link, request.provider_download_id, request.original_filename))
+            return PlaybackAttachmentProviderUnrestrictedLink(
+                download_url="https://cdn.example.com/media-entry-source-fallback",
+                restricted_url=link,
+                expires_at=datetime(2026, 3, 19, 12, 0, tzinfo=UTC),
+                provider=request.provider,
+                provider_download_id=request.provider_download_id,
+                original_filename="Fallback Source Refreshed.mkv",
+                file_size=777,
+            )
+
+    client = FakeProviderClient()
+    executed = asyncio.run(
+        PlaybackSourceService(resources.db).execute_media_entry_refreshes_with_providers(
+            item,
+            provider_clients={"realdebrid": cast(PlaybackAttachmentProviderClient, client)},
+        )
+    )
+
+    assert client.calls == [
+        (
+            "https://api.example.com/restricted-source-fallback",
+            "download-media-entry-source-fallback",
+            "Fallback Source.mkv",
+        )
+    ]
+    assert executed == [
+        MediaEntryLeaseRefreshExecution(
+            media_entry_id=media_entry.id,
+            ok=True,
+            refresh_state="ready",
+            locator="https://cdn.example.com/media-entry-source-fallback",
+            error=None,
+        )
+    ]
+    assert media_entry.provider == "realdebrid"
+    assert media_entry.provider_download_id == "download-media-entry-source-fallback"
+    assert media_entry.download_url == "https://api.example.com/restricted-source-fallback"
+    assert media_entry.unrestricted_url == "https://cdn.example.com/media-entry-source-fallback"
+    assert media_entry.original_filename == "Fallback Source Refreshed.mkv"
+    assert media_entry.size_bytes == 777
+    assert attachment.provider == "realdebrid"
+    assert attachment.provider_download_id == "download-media-entry-source-fallback"
+    assert attachment.unrestricted_url == "https://cdn.example.com/media-entry-source-fallback"
+    assert attachment.original_filename == "Fallback Source Refreshed.mkv"
+    assert attachment.file_size == 777
+
+
+def test_playback_source_service_selects_provider_file_projection_by_basename_and_size_fallback() -> (
+    None
+):
+    request = PlaybackAttachmentRefreshRequest(
+        attachment_id="attachment-projection-basename-match",
+        item_id="item-projection-basename-match",
+        kind="remote-direct",
+        provider="realdebrid",
+        provider_download_id="download-projection-basename-match",
+        restricted_url=None,
+        unrestricted_url=None,
+        local_path=None,
+        refresh_state="stale",
+        provider_file_path="nested/folder/Episode.mkv",
+        original_filename=None,
+        file_size=456,
+    )
+    projections = [
+        PlaybackAttachmentProviderFileProjection(
+            provider="realdebrid",
+            provider_download_id="download-projection-basename-match",
+            provider_file_id="file-basename-winner",
+            provider_file_path="Episode.mkv",
+            original_filename=None,
+            file_size=456,
+            restricted_url="https://api.example.com/restricted-basename-winner",
+        ),
+        PlaybackAttachmentProviderFileProjection(
+            provider="realdebrid",
+            provider_download_id="download-projection-basename-match",
+            provider_file_id="file-basename-other",
+            provider_file_path="Different.mkv",
+            original_filename=None,
+            file_size=456,
+            restricted_url="https://api.example.com/restricted-basename-other",
+        ),
+    ]
+
+    assert (
+        PlaybackSourceService.select_provider_file_projection(request, projections)
+        == projections[0]
+    )
 
 
 def test_stream_file_returns_503_when_selected_media_entry_lease_refresh_failed(
@@ -6717,6 +7007,8 @@ def test_playback_source_service_builds_provider_client_refresh_executor() -> No
         locator="https://cdn.example.com/provider-client",
         unrestricted_url="https://cdn.example.com/provider-client",
         expires_at=datetime(2026, 3, 14, 13, 0, tzinfo=UTC),
+        provider="realdebrid",
+        provider_download_id="download-client-1",
     )
 
 
@@ -6833,6 +7125,10 @@ def test_realdebrid_playback_client_unrestricts_link() -> None:
     assert result == PlaybackAttachmentProviderUnrestrictedLink(
         download_url="https://cdn.example.com/rd-unrestricted",
         restricted_url="https://api.example.com/restricted-rd-client",
+        provider="realdebrid",
+        provider_download_id="download-rd-client",
+        original_filename="Movie.mkv",
+        file_size=123,
     )
     assert captured == {
         "method": "POST",
@@ -6912,6 +7208,12 @@ def test_realdebrid_playback_client_refreshes_download_id_via_torrent_info() -> 
     assert result == PlaybackAttachmentProviderUnrestrictedLink(
         download_url="https://cdn.example.com/rd-download",
         restricted_url="https://api.real-debrid.com/rd-restricted-link",
+        provider="realdebrid",
+        provider_download_id="torrent-123",
+        provider_file_id="11",
+        provider_file_path="folder/Movie.mkv",
+        original_filename="Movie.mkv",
+        file_size=123,
     )
     assert calls == [
         (
@@ -6974,7 +7276,11 @@ def test_alldebrid_playback_client_unlocks_link() -> None:
     )
 
     assert result == PlaybackAttachmentProviderUnrestrictedLink(
-        download_url="https://cdn.example.com/ad-unlocked"
+        download_url="https://cdn.example.com/ad-unlocked",
+        provider="alldebrid",
+        provider_download_id="download-ad-client",
+        original_filename="Movie.mkv",
+        file_size=123,
     )
     assert captured == {
         "method": "GET",
@@ -7007,7 +7313,9 @@ def test_debridlink_playback_client_returns_direct_link() -> None:
     )
 
     assert result == PlaybackAttachmentProviderUnrestrictedLink(
-        download_url="https://cdn.example.com/dl-direct"
+        download_url="https://cdn.example.com/dl-direct",
+        provider="debridlink",
+        provider_download_id="download-dl-client",
     )
 
 
@@ -7407,6 +7715,12 @@ def test_playback_source_service_uses_provider_download_id_refresh_when_restrict
                 download_url="https://cdn.example.com/provider-download-refresh",
                 restricted_url="https://api.example.com/provider-download-refresh",
                 expires_at=datetime(2026, 3, 18, 13, 0, tzinfo=UTC),
+                provider="realdebrid",
+                provider_download_id=request.provider_download_id,
+                provider_file_id="provider-file-download-refresh",
+                provider_file_path="folder/Movie.mkv",
+                original_filename="Movie.mkv",
+                file_size=123,
             )
 
     client = FakeDownloadRefreshClient()
@@ -7432,6 +7746,12 @@ def test_playback_source_service_uses_provider_download_id_refresh_when_restrict
     assert attachment.restricted_url == "https://api.example.com/provider-download-refresh"
     assert attachment.unrestricted_url == "https://cdn.example.com/provider-download-refresh"
     assert attachment.expires_at == datetime(2026, 3, 18, 13, 0, tzinfo=UTC)
+    assert attachment.provider == "realdebrid"
+    assert attachment.provider_download_id == "torrent-456"
+    assert attachment.provider_file_id == "provider-file-download-refresh"
+    assert attachment.provider_file_path == "folder/Movie.mkv"
+    assert attachment.original_filename == "Movie.mkv"
+    assert attachment.file_size == 123
 
 
 def test_stream_file_matches_imdb_identifier_when_present(tmp_path: Path) -> None:
@@ -7972,6 +8292,107 @@ def test_hls_playlist_route_uses_remote_direct_transcode_source(
     assert triggered == [item.id]
 
 
+def test_hls_playlist_route_rejects_remote_direct_transcode_source_until_refresh_completes(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-hls-remote-direct-refresh-required")
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-direct-refresh-required",
+        item_id=item.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/restricted-hls-remote-direct-refresh-required.mkv",
+        unrestricted_url="https://api.example.com/restricted-hls-remote-direct-refresh-required.mkv",
+        provider="realdebrid",
+        provider_download_id="download-hls-remote-direct-refresh-required",
+        refresh_state="stale",
+    )
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="direct")
+    ]
+    client, _ = _build_client(items=[item])
+
+    triggered: list[str] = []
+
+    monkeypatch.setattr(
+        stream_routes,
+        "_start_direct_playback_refresh_trigger",
+        lambda *args, **kwargs: triggered.append(kwargs["item_identifier"]),
+    )
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/index.m3u8", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "10"
+    assert (
+        response.json()["detail"]
+        == "HLS transcode source requires direct playback refresh before transcode can start"
+    )
+    assert triggered == [item.id]
+    assert (
+        governance["hls_route_failures_transcode_source_requires_refresh"]
+        == before["hls_route_failures_transcode_source_requires_refresh"] + 1
+    )
+    assert governance["hls_route_failures_total"] == before["hls_route_failures_total"] + 1
+
+
+def test_hls_playlist_route_rejects_remote_direct_transcode_source_when_provider_recovery_is_active(
+    monkeypatch: Any,
+) -> None:
+    item = _build_item(item_id="item-hls-remote-direct-provider-recovery-route")
+    selected_entry = _build_media_entry(
+        media_entry_id="media-entry-hls-remote-direct-provider-recovery-route",
+        item_id=item.id,
+        kind="remote-direct",
+        download_url="https://api.example.com/restricted-hls-remote-direct-provider-recovery-route.mkv",
+        unrestricted_url="https://api.example.com/restricted-hls-remote-direct-provider-recovery-route.mkv",
+        provider="realdebrid",
+        provider_download_id="download-hls-remote-direct-provider-recovery-route",
+        refresh_state="stale",
+    )
+    item.media_entries = [selected_entry]
+    item.active_streams = [
+        _build_active_stream(item_id=item.id, media_entry_id=selected_entry.id, role="direct")
+    ]
+    client, resources = _build_client(items=[item])
+    provider_circuit_breaker = ProviderCircuitBreaker(
+        failure_threshold=1,
+        reset_timeout_seconds=45.0,
+    )
+    provider_circuit_breaker.record_failure("realdebrid")
+    resources.playback_service = PlaybackSourceService(
+        resources.db,
+        provider_circuit_breaker=provider_circuit_breaker,
+    )
+
+    triggered: list[str] = []
+
+    monkeypatch.setattr(
+        stream_routes,
+        "_start_direct_playback_refresh_trigger",
+        lambda *args, **kwargs: triggered.append(kwargs["item_identifier"]),
+    )
+
+    before = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+    response = client.get(f"/api/v1/stream/hls/{item.id}/index.m3u8", headers=_headers())
+    governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
+
+    assert response.status_code == 503
+    assert int(response.headers["Retry-After"]) >= 1
+    assert (
+        response.json()["detail"]
+        == "HLS transcode source refresh is paused while provider recovery is in progress"
+    )
+    assert triggered == [item.id]
+    assert (
+        governance["hls_route_failures_transcode_source_provider_circuit_open"]
+        == before["hls_route_failures_transcode_source_provider_circuit_open"] + 1
+    )
+    assert governance["hls_route_failures_total"] == before["hls_route_failures_total"] + 1
+
+
 def test_hls_playlist_route_refreshes_media_entry_backed_transcode_source_after_head_failure(
     tmp_path: Path,
     monkeypatch: Any,
@@ -8179,14 +8600,11 @@ def test_hls_playlist_route_returns_503_when_transcode_source_refresh_is_rate_li
     governance = client.get("/api/v1/stream/status", headers=_headers()).json()["governance"]
 
     assert response.status_code == 503
-    assert response.headers["Retry-After"] == "10"
+    assert response.headers["Retry-After"] == "6"
+    assert response.json()["detail"] == "HLS transcode source refresh is rate limited"
     assert (
-        response.json()["detail"]
-        == "HLS transcode source is unavailable: Selected direct playback lease refresh failed"
-    )
-    assert (
-        governance["hls_route_failures_transcode_source_unavailable"]
-        == before["hls_route_failures_transcode_source_unavailable"] + 1
+        governance["hls_route_failures_transcode_source_rate_limited"]
+        == before["hls_route_failures_transcode_source_rate_limited"] + 1
     )
     assert governance["hls_route_failures_total"] == before["hls_route_failures_total"] + 1
 
@@ -8879,6 +9297,124 @@ def test_ensure_local_hls_playlist_cleans_partial_output_after_failure(
     )
 
 
+def test_ensure_local_hls_playlist_retries_one_transport_failure_before_succeeding(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    media_file = tmp_path / "retryable-transport-hls-input.mkv"
+    media_file.write_bytes(b"movie")
+    output_dir = tmp_path / "retryable-transport-generated-hls"
+    attempts = {"count": 0}
+
+    class RetryProcess:
+        def __init__(self, *, attempt: int) -> None:
+            self.returncode = 1 if attempt == 0 else 0
+            self._attempt = attempt
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            if self._attempt == 0:
+                return (b"", b"Connection reset by peer")
+            (output_dir / "index.m3u8").write_text(
+                "#EXTM3U\n#EXTINF:6,\nsegment_00001.ts\n#EXT-X-ENDLIST\n",
+                encoding="utf-8",
+            )
+            (output_dir / "segment_00001.ts").write_bytes(b"segment")
+            return (b"", b"speed=1.2x")
+
+        async def wait(self) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> RetryProcess:
+        _ = args, kwargs
+        process = RetryProcess(attempt=attempts["count"])
+        attempts["count"] += 1
+        return process
+
+    before_transport = byte_streaming.get_serving_governance_snapshot()[
+        "hls_ffmpeg_failures_transport"
+    ]
+    before_retry_attempts = byte_streaming.get_serving_governance_snapshot()[
+        "hls_ffmpeg_retry_attempts"
+    ]
+    before_retry_recovered = byte_streaming.get_serving_governance_snapshot()[
+        "hls_ffmpeg_retry_recovered"
+    ]
+
+    monkeypatch.setattr(
+        byte_streaming, "local_hls_directory", lambda item_id, **_kwargs: output_dir
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    playlist = asyncio.run(
+        byte_streaming.ensure_local_hls_playlist(str(media_file), "item-retryable-transport-hls")
+    )
+
+    governance = byte_streaming.get_serving_governance_snapshot()
+    assert playlist == output_dir / "index.m3u8"
+    assert attempts["count"] == 2
+    assert governance["hls_ffmpeg_failures_transport"] == before_transport + 1
+    assert governance["hls_ffmpeg_retry_attempts"] == before_retry_attempts + 1
+    assert governance["hls_ffmpeg_retry_recovered"] == before_retry_recovered + 1
+
+
+def test_ensure_local_hls_playlist_classifies_incomplete_output_failure(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    media_file = tmp_path / "incomplete-output-hls-input.mkv"
+    media_file.write_bytes(b"movie")
+    output_dir = tmp_path / "incomplete-output-generated-hls"
+
+    class DummyProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "index.m3u8").write_text(
+                "#EXTM3U\n#EXTINF:6,\nsegment_00001.ts\n#EXT-X-ENDLIST\n",
+                encoding="utf-8",
+            )
+            return (b"", b"")
+
+        async def wait(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> DummyProcess:
+        return DummyProcess()
+
+    before_incomplete = byte_streaming.get_serving_governance_snapshot()[
+        "hls_ffmpeg_failures_incomplete_output"
+    ]
+    monkeypatch.setattr(
+        byte_streaming, "local_hls_directory", lambda item_id, **_kwargs: output_dir
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            byte_streaming.ensure_local_hls_playlist(
+                str(media_file), "item-incomplete-output-hls"
+            )
+        )
+
+    governance = byte_streaming.get_serving_governance_snapshot()
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "HLS generation completed without a complete playlist"
+    assert governance["hls_ffmpeg_failures_incomplete_output"] == before_incomplete + 1
+    assert output_dir.exists() is False
+
+
 def test_hls_generation_metrics_track_failure_and_timeout_results(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -9058,6 +9594,81 @@ def test_ensure_local_hls_playlist_returns_when_playlist_becomes_usable_before_f
     asyncio.run(exercise())
 
     assert byte_streaming.get_serving_governance_snapshot()["active_hls_generation_processes"] == 0
+
+
+def test_background_hls_generation_failure_preserves_usable_output_and_records_suppression(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    media_file = tmp_path / "background-failure-hls-input.mkv"
+    media_file.write_bytes(b"movie")
+    output_dir = tmp_path / "background-failure-generated-hls"
+    playlist_path = output_dir / "index.m3u8"
+    segment_path = output_dir / "segment_00001.ts"
+
+    class RunningProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.finished = asyncio.Event()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await self.finished.wait()
+            return (b"", b"timed out")
+
+        async def wait(self) -> int:
+            await self.finished.wait()
+            return self.returncode or 1
+
+        def terminate(self) -> None:
+            self.returncode = -15
+            self.finished.set()
+
+        def kill(self) -> None:
+            self.returncode = -9
+            self.finished.set()
+
+    process = RunningProcess()
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> RunningProcess:
+        _ = args, kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        async def write_initial_playlist() -> None:
+            await asyncio.sleep(0)
+            playlist_path.write_text("#EXTM3U\n#EXTINF:2,\nsegment_00001.ts\n", encoding="utf-8")
+            segment_path.write_bytes(b"segment")
+
+        process.playlist_task = asyncio.create_task(write_initial_playlist())
+        return process
+
+    monkeypatch.setattr(
+        byte_streaming, "local_hls_directory", lambda item_id, **_kwargs: output_dir
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    before_transport = byte_streaming.get_serving_governance_snapshot()[
+        "hls_ffmpeg_failures_transport"
+    ]
+    before_suppressed = byte_streaming.get_serving_governance_snapshot()[
+        "hls_ffmpeg_cleanup_suppressed_usable_output"
+    ]
+
+    async def exercise() -> None:
+        ready_path = await byte_streaming.ensure_local_hls_playlist(
+            str(media_file), "item-background-failure-hls"
+        )
+        assert ready_path == playlist_path
+        tracked = byte_streaming._ACTIVE_HLS_GENERATIONS["item-background-failure-hls"]
+        assert tracked.monitor_task is not None
+        process.returncode = 1
+        process.finished.set()
+        await tracked.monitor_task
+
+    asyncio.run(exercise())
+
+    governance = byte_streaming.get_serving_governance_snapshot()
+    assert governance["hls_ffmpeg_failures_transport"] == before_transport + 1
+    assert governance["hls_ffmpeg_cleanup_suppressed_usable_output"] == before_suppressed + 1
+    assert playlist_path.is_file()
 
 def test_ensure_local_hls_playlist_cancels_and_terminates_ffmpeg_process(
     tmp_path: Path, monkeypatch: Any
@@ -9580,6 +10191,10 @@ def test_stream_status_route_exposes_hls_route_failure_counters() -> None:
     assert governance["hls_route_failures_generation_timeout"] >= 0
     assert governance["hls_route_failures_generator_unavailable"] >= 0
     assert governance["hls_route_failures_lease_failed"] >= 0
+    assert governance["hls_route_failures_transcode_source_requires_refresh"] >= 0
+    assert governance["hls_route_failures_transcode_source_provider_circuit_open"] >= 0
+    assert governance["hls_route_failures_transcode_source_rate_limited"] >= 0
+    assert governance["hls_route_failures_transcode_source_unavailable"] >= 0
     assert governance["hls_route_failures_manifest_invalid"] >= 0
     assert governance["hls_route_failures_generated_missing"] >= 0
     assert governance["hls_route_failures_upstream_failed"] >= 0
@@ -10197,6 +10812,10 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
                     "full",
                 ],
                 "profile_coverage_complete": True,
+                "pressure_cause_buckets": {
+                    "provider_refresh_pressure": 2,
+                    "fairness_denial": 1,
+                },
                 "failure_reasons": [],
                 "required_actions": [],
                 "all_green": True,
@@ -10274,6 +10893,10 @@ def test_stream_status_route_exposes_playback_gate_and_vfs_canary_readiness(
     assert governance["playback_gate_windows_provider_stale"] == 0
     assert governance["playback_gate_windows_soak_ready"] == 1
     assert governance["playback_gate_windows_soak_stale"] == 0
+    assert governance["playback_gate_windows_soak_pressure_cause_buckets"] == {
+        "fairness_denial": 1,
+        "provider_refresh_pressure": 2,
+    }
     assert governance["playback_gate_policy_validation_status"] == "ready"
     assert governance["playback_gate_policy_ready"] == 1
     assert governance["playback_gate_policy_validation_stale"] == 0

@@ -21,6 +21,7 @@ from typing import Literal, cast
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from filmu_py.api.playback_resolution import PlaybackAttachment
 from filmu_py.db.models import MediaEntryORM, MediaItemORM
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.services.media import (
@@ -30,13 +31,11 @@ from filmu_py.services.media import (
 )
 from filmu_py.services.mount_worker import (
     MountMediaEntryQueryBlockedReason,
-    MountMediaEntryQueryContract,
     MountMediaEntryQueryExecutor,
     MountMediaEntryQueryStrategy,
     MountPlaybackSnapshotSupplier,
     PersistedMountMediaEntryQueryExecutor,
     build_mount_media_entry_query_contract,
-    build_mount_media_entry_query_contract_from_snapshot,
 )
 from filmu_py.services.playback import (
     DirectFileLinkLifecycleSnapshot,
@@ -624,12 +623,23 @@ class FilmuVfsCatalogSupplier:
             )
 
         snapshot = self._playback_snapshot_supplier.build_resolution_snapshot(item)
-        contract = build_mount_media_entry_query_contract_from_snapshot(
-            item, snapshot, role="direct"
-        )
         media_type = self._normalize_media_type(item)
         prepared_list: list[_PreparedCatalogFile] = []
+        single_entry_item = len(file_entries) == 1
         for media_entry in file_entries:
+            matching_snapshot = (
+                snapshot
+                if self._snapshot_matches_media_entry(
+                    media_entry,
+                    snapshot=snapshot,
+                    single_entry_item=single_entry_item,
+                )
+                else None
+            )
+            attachment, lifecycle = self._resolve_media_entry_attachment_lifecycle(
+                media_entry,
+                snapshot=matching_snapshot,
+            )
             filename = self._select_original_filename(item, media_entry, snapshot)
             candidate_path = self._build_candidate_path_for_entry(
                 item,
@@ -638,7 +648,12 @@ class FilmuVfsCatalogSupplier:
                 filename=filename,
             )
             correlation = self._build_correlation_keys(item, media_entry)
-            payload = self._build_entry_payload(item, media_entry, snapshot, contract=contract)
+            payload = self._build_entry_payload(
+                item,
+                media_entry,
+                attachment=attachment,
+                lifecycle=lifecycle,
+            )
             # Combine external_ref + entry-ID suffix to guarantee uniqueness per file.
             dedupe_suffix = self._sanitize_path_segment(
                 f"{item.external_ref or media_entry.id[:8]}-{media_entry.id[:8]}"
@@ -678,8 +693,10 @@ class FilmuVfsCatalogSupplier:
         if media_entry.kind not in {"local-file", "remote-direct"}:
             return None, self._build_blocked_item(item, "non_file_attachment")
 
-        direct_attachment = snapshot.direct
-        direct_lifecycle = snapshot.direct_lifecycle
+        direct_attachment, direct_lifecycle = self._resolve_media_entry_attachment_lifecycle(
+            media_entry,
+            snapshot=snapshot,
+        )
         if direct_attachment is None or direct_lifecycle is None:
             return None, self._build_blocked_item(item, "missing_lifecycle")
 
@@ -692,7 +709,7 @@ class FilmuVfsCatalogSupplier:
         payload = self._build_file_payload(
             item,
             media_entry,
-            snapshot,
+            attachment=direct_attachment,
             lifecycle=direct_lifecycle,
             query_strategy=query_result.matched_strategy,
             media_type=media_type,
@@ -817,9 +834,9 @@ class FilmuVfsCatalogSupplier:
     def _build_entry_payload(
         item: MediaItemORM,
         media_entry: MediaEntryORM,
-        snapshot: PlaybackResolutionSnapshot,
         *,
-        contract: MountMediaEntryQueryContract,
+        attachment: PlaybackAttachment | None,
+        lifecycle: DirectFileLinkLifecycleSnapshot | None,
     ) -> VfsCatalogFileEntry:
         """Build a file-entry payload directly from a specific MediaEntryORM.
 
@@ -828,17 +845,28 @@ class FilmuVfsCatalogSupplier:
         own fields so that every entry in a multi-file item gets an
         accurate, distinct payload.
         """
-        active_attachment = snapshot.direct
+        provider = media_entry.provider or (attachment.provider if attachment else None)
+        preferred_restricted_url = (
+            attachment.restricted_url
+            if attachment is not None and attachment.restricted_url is not None
+            else media_entry.download_url
+        )
+        preferred_unrestricted_url = (
+            attachment.unrestricted_url
+            if attachment is not None and attachment.unrestricted_url is not None
+            else media_entry.unrestricted_url
+        )
         restricted_url, unrestricted_url = PlaybackSourceService._normalize_media_entry_urls(
-            provider=media_entry.provider,
-            restricted_url=media_entry.download_url,
-            unrestricted_url=media_entry.unrestricted_url,
+            provider=provider,
+            restricted_url=preferred_restricted_url,
+            unrestricted_url=preferred_unrestricted_url,
         )
         locator = (
-            unrestricted_url
+            (attachment.locator if attachment is not None else None)
+            or unrestricted_url
             or restricted_url
             or media_entry.local_path
-            or (active_attachment.locator if active_attachment else "")
+            or ""
         )
         active_roles = tuple(
             role
@@ -849,12 +877,11 @@ class FilmuVfsCatalogSupplier:
         )
         effective_refresh_state = PlaybackSourceService._effective_media_entry_refresh_state(
             media_entry.refresh_state,
-            provider=media_entry.provider,
+            provider=provider,
             restricted_url=restricted_url,
-            unrestricted_url=media_entry.unrestricted_url,
+            unrestricted_url=preferred_unrestricted_url,
         )
         lease_state = FilmuVfsCatalogSupplier._normalize_lease_state(effective_refresh_state)
-        direct_lifecycle = snapshot.direct_lifecycle
         media_type = FilmuVfsCatalogSupplier._normalize_media_type(item)
         return VfsCatalogFileEntry(
             item_id=item.id,
@@ -865,28 +892,34 @@ class FilmuVfsCatalogSupplier:
             media_type=media_type,
             transport=("local-file" if media_entry.kind == "local-file" else "remote-direct"),
             locator=locator,
-            local_path=media_entry.local_path,
+            local_path=media_entry.local_path or (attachment.local_path if attachment else None),
             restricted_url=restricted_url,
             unrestricted_url=unrestricted_url,
-            original_filename=media_entry.original_filename,
-            size_bytes=media_entry.size_bytes,
+            original_filename=media_entry.original_filename
+            or (attachment.original_filename if attachment else None),
+            size_bytes=media_entry.size_bytes if media_entry.size_bytes is not None else (
+                attachment.file_size if attachment else None
+            ),
             lease_state=lease_state,
             expires_at=media_entry.expires_at,
             last_refreshed_at=media_entry.last_refreshed_at,
             last_refresh_error=media_entry.last_refresh_error,
-            provider=media_entry.provider,
-            provider_download_id=media_entry.provider_download_id,
-            provider_file_id=media_entry.provider_file_id,
-            provider_file_path=media_entry.provider_file_path,
+            provider=provider,
+            provider_download_id=media_entry.provider_download_id
+            or (attachment.provider_download_id if attachment else None),
+            provider_file_id=media_entry.provider_file_id
+            or (attachment.provider_file_id if attachment else None),
+            provider_file_path=media_entry.provider_file_path
+            or (attachment.provider_file_path if attachment else None),
             active_roles=active_roles,
-            source_key=contract.source_key,
+            source_key=attachment.source_key if attachment else None,
             query_strategy="by-media-entry-id",
-            provider_family=direct_lifecycle.provider_family if direct_lifecycle else "none",
-            locator_source=direct_lifecycle.locator_source if direct_lifecycle else "locator",
-            match_basis=direct_lifecycle.match_basis if direct_lifecycle else None,
+            provider_family=lifecycle.provider_family if lifecycle else "none",
+            locator_source=lifecycle.locator_source if lifecycle else "locator",
+            match_basis=lifecycle.match_basis if lifecycle else None,
             restricted_fallback=(
-                direct_lifecycle.restricted_fallback
-                if direct_lifecycle
+                lifecycle.restricted_fallback
+                if lifecycle
                 else unrestricted_url is None and restricted_url is not None
             ),
         )
@@ -922,15 +955,12 @@ class FilmuVfsCatalogSupplier:
     def _build_file_payload(
         item: MediaItemORM,
         media_entry: MediaEntryORM,
-        snapshot: PlaybackResolutionSnapshot,
         *,
+        attachment: PlaybackAttachment,
         lifecycle: DirectFileLinkLifecycleSnapshot,
         query_strategy: MountMediaEntryQueryStrategy | None,
         media_type: VfsCatalogMediaType,
     ) -> VfsCatalogFileEntry:
-        direct_attachment = snapshot.direct
-        assert direct_attachment is not None
-
         active_roles = tuple(
             role
             for role in FilmuVfsCatalogSupplier._active_roles_for_media_entry(item, media_entry.id)
@@ -945,32 +975,77 @@ class FilmuVfsCatalogSupplier:
             source_attachment_id=media_entry.source_attachment_id,
             media_type=media_type,
             transport=("local-file" if media_entry.kind == "local-file" else "remote-direct"),
-            locator=direct_attachment.locator,
-            local_path=media_entry.local_path or direct_attachment.local_path,
-            restricted_url=media_entry.download_url or direct_attachment.restricted_url,
-            unrestricted_url=media_entry.unrestricted_url or direct_attachment.unrestricted_url,
-            original_filename=media_entry.original_filename or direct_attachment.original_filename,
+            locator=attachment.locator,
+            local_path=media_entry.local_path or attachment.local_path,
+            restricted_url=media_entry.download_url or attachment.restricted_url,
+            unrestricted_url=media_entry.unrestricted_url or attachment.unrestricted_url,
+            original_filename=media_entry.original_filename or attachment.original_filename,
             size_bytes=media_entry.size_bytes
             if media_entry.size_bytes is not None
-            else direct_attachment.file_size,
+            else attachment.file_size,
             lease_state=lease_state,
             expires_at=media_entry.expires_at,
             last_refreshed_at=media_entry.last_refreshed_at,
             last_refresh_error=media_entry.last_refresh_error,
-            provider=media_entry.provider or direct_attachment.provider,
+            provider=media_entry.provider or attachment.provider,
             provider_download_id=media_entry.provider_download_id
-            or direct_attachment.provider_download_id,
-            provider_file_id=media_entry.provider_file_id or direct_attachment.provider_file_id,
+            or attachment.provider_download_id,
+            provider_file_id=media_entry.provider_file_id or attachment.provider_file_id,
             provider_file_path=media_entry.provider_file_path
-            or direct_attachment.provider_file_path,
+            or attachment.provider_file_path,
             active_roles=active_roles,
-            source_key=direct_attachment.source_key,
+            source_key=attachment.source_key,
             query_strategy=query_strategy,
             provider_family=lifecycle.provider_family,
             locator_source=lifecycle.locator_source,
             match_basis=lifecycle.match_basis,
             restricted_fallback=lifecycle.restricted_fallback,
         )
+
+    @staticmethod
+    def _resolve_media_entry_attachment_lifecycle(
+        media_entry: MediaEntryORM,
+        *,
+        snapshot: PlaybackResolutionSnapshot | None = None,
+    ) -> tuple[PlaybackAttachment | None, DirectFileLinkLifecycleSnapshot | None]:
+        attachment, lifecycle = PlaybackSourceService.build_media_entry_direct_file_link_snapshot(
+            media_entry
+        )
+        if snapshot is None:
+            return attachment, lifecycle
+
+        snapshot_attachment = snapshot.direct
+        snapshot_lifecycle = snapshot.direct_lifecycle
+        if snapshot_attachment is not None:
+            if attachment is None:
+                attachment = snapshot_attachment
+            else:
+                attachment = PlaybackSourceService.merge_attachment_identity(
+                    snapshot_attachment,
+                    attachment,
+                )
+        if lifecycle is None:
+            lifecycle = snapshot_lifecycle
+        return attachment, lifecycle
+
+    @staticmethod
+    def _snapshot_matches_media_entry(
+        media_entry: MediaEntryORM,
+        *,
+        snapshot: PlaybackResolutionSnapshot,
+        single_entry_item: bool,
+    ) -> bool:
+        if snapshot.direct is None:
+            return False
+
+        lifecycle = snapshot.direct_lifecycle
+        if lifecycle is None:
+            return single_entry_item
+        if lifecycle.owner_kind == "media-entry":
+            return lifecycle.owner_id == media_entry.id
+        if lifecycle.owner_kind == "attachment":
+            return lifecycle.owner_id == media_entry.source_attachment_id
+        return single_entry_item
 
     @staticmethod
     def _active_roles_for_media_entry(

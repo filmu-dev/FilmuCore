@@ -7,6 +7,8 @@ import pytest
 from filmu_py.services.vfs_rollout_control import (
     apply_vfs_rollout_control_updates,
     build_vfs_rollout_control_state,
+    derive_vfs_rollout_allowed_actions,
+    execute_vfs_rollout_action,
 )
 
 
@@ -76,3 +78,64 @@ def test_vfs_rollout_control_marks_expired_overrides_inactive_and_bounds_history
     assert len(state.history) == 20
     assert state.history[0].entry_id == "entry-0"
     assert state.history[-1].entry_id == "entry-19"
+
+
+def test_vfs_rollout_action_promote_requires_gate_and_changes_environment() -> None:
+    now = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
+    raw_state = {
+        "environment_class": "windows-native:managed",
+        "promotion_paused": True,
+        "promotion_pause_reason": "manual hold",
+        "promotion_pause_expires_at": "2026-04-18T12:00:00Z",
+    }
+
+    allowed_actions = derive_vfs_rollout_allowed_actions(
+        raw_state,
+        canary_decision="promote_to_next_environment_class",
+        merge_gate="ready",
+        now=now,
+    )
+
+    assert allowed_actions == ("clear_hold", "promote", "hold", "rollback")
+
+    payload = execute_vfs_rollout_action(
+        raw_state,
+        action="promote",
+        actor_id="tenant-main:operator-1",
+        canary_decision="promote_to_next_environment_class",
+        merge_gate="ready",
+        target_environment_class="windows-native:expanded",
+        expected_canary_decision="promote_to_next_environment_class",
+        expected_merge_gate="ready",
+        now=now,
+    )
+
+    state = build_vfs_rollout_control_state(payload, now=now)
+    assert state.environment_class == "windows-native:expanded"
+    assert state.promotion_paused is False
+    assert state.rollback_requested is False
+    assert state.history[0].action == "execute_promote"
+    assert state.history[0].summary == "promotion executed (windows-native:expanded)"
+
+
+def test_vfs_rollout_action_rejects_non_rollback_when_runtime_is_blocked() -> None:
+    now = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
+
+    allowed_actions = derive_vfs_rollout_allowed_actions(
+        {"environment_class": "windows-native:managed"},
+        canary_decision="rollback_current_environment",
+        merge_gate="blocked",
+        now=now,
+    )
+
+    assert allowed_actions == ("rollback",)
+    with pytest.raises(ValueError, match="rollout_action_not_allowed:hold"):
+        execute_vfs_rollout_action(
+            {"environment_class": "windows-native:managed"},
+            action="hold",
+            actor_id="tenant-main:operator-1",
+            canary_decision="rollback_current_environment",
+            merge_gate="blocked",
+            reason="not allowed",
+            now=now,
+        )

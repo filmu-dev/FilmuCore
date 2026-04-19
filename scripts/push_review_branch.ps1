@@ -32,10 +32,10 @@ if ([string]::IsNullOrWhiteSpace($currentBranch)) {
     throw 'Cannot push review branches from a detached HEAD.'
 }
 if ($currentBranch -ne 'main') {
-    throw "Review branch pushes must come from local 'main'. Current branch is '$currentBranch'."
+    throw "Review branch pushes must come from local 'main'. Current branch is '$currentBranch'. Do not create or use a local branch copy for review publishing."
 }
 if ($RemoteBranch -eq $BaseBranch) {
-    throw "Review branch pushes must not target '$Remote/$BaseBranch'. Push local '$currentBranch' to a dedicated remote review branch instead."
+    throw "Review branch pushes must not target '$Remote/$BaseBranch'. Push local '$currentBranch' to a dedicated remote review branch instead, and do not create a local branch copy."
 }
 
 $hygieneArgs = @(
@@ -56,7 +56,7 @@ $hygieneArgs = @(
 
 $hygieneOutput = & pwsh @hygieneArgs
 if ($LASTEXITCODE -ne 0) {
-    throw 'Branch hygiene failed. Fix the local source branch state or use a fresh remote review branch before pushing.'
+    throw 'Branch hygiene failed. Fix the local source branch state or use a fresh remote review branch before pushing. Do not create a local branch copy.'
 }
 @($hygieneOutput) | ForEach-Object { Write-Output $_ }
 

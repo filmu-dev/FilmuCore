@@ -14,6 +14,7 @@ from filmu_py.rtn import parse_torrent_name
 
 _TITLE_ALIASES_ATTRIBUTE_KEY = "aliases"
 _SIMILARITY_THRESHOLD_DEFAULT = 0.85
+_PARSE_VALIDATION_KEY = "_parse_validation"
 _RESOLUTION_RANKS: dict[str, int] = {
     "2160p": 7,
     "1080p": 6,
@@ -221,6 +222,69 @@ def candidate_parsed_seasons(parsed_title: dict[str, object]) -> list[int] | Non
         seasons = [value for value in raw_value if isinstance(value, int)]
         return seasons or None
     return None
+
+
+def candidate_parsed_episodes(parsed_title: dict[str, object]) -> list[int] | None:
+    """Return normalized parsed episode numbers from one torrent-title payload when present."""
+
+    raw_value = parsed_title.get("episode")
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, int):
+        return [raw_value] if raw_value > 0 else None
+    if isinstance(raw_value, str) and raw_value.strip().isdigit():
+        episode = int(raw_value.strip())
+        return [episode] if episode > 0 else None
+    if isinstance(raw_value, list):
+        episodes = sorted(
+            {
+                value
+                for value in raw_value
+                if isinstance(value, int) and value > 0
+            }
+        )
+        return episodes or None
+    return None
+
+
+def attach_parse_validation(
+    parsed_title: dict[str, object],
+    validation: ParsedStreamCandidateValidation,
+) -> dict[str, object]:
+    """Return one parsed-title payload augmented with invariant parse validation state."""
+
+    payload = dict(parsed_title)
+    if validation.ok or validation.reason is None:
+        payload.pop(_PARSE_VALIDATION_KEY, None)
+        return payload
+    payload[_PARSE_VALIDATION_KEY] = {
+        "ok": False,
+        "reason": validation.reason,
+    }
+    return payload
+
+
+def parse_stage_rejection_reason(parsed_title: dict[str, object]) -> str | None:
+    """Return one persisted parse-stage rejection reason when present."""
+
+    raw_validation = parsed_title.get(_PARSE_VALIDATION_KEY)
+    if not isinstance(raw_validation, dict):
+        return None
+    if raw_validation.get("ok") is True:
+        return None
+    reason = raw_validation.get("reason")
+    return reason if isinstance(reason, str) and reason.strip() else None
+
+
+def _candidate_has_complete_marker(candidate: ParsedStreamCandidateRecord) -> bool:
+    other = candidate.parsed_title.get("other")
+    if isinstance(other, str) and other.casefold() == "complete":
+        return True
+    if isinstance(other, list) and any(
+        isinstance(value, str) and value.casefold() == "complete" for value in other
+    ):
+        return True
+    return bool(re.search(r"\b(?:complete|season[ ._-]*pack|full[ ._-]*season)\b", candidate.raw_title, re.IGNORECASE))
 
 
 def _fallback_infohash_for_raw_title(raw_title: str) -> str:
@@ -603,30 +667,40 @@ def validate_parsed_stream_candidate(
             ok=False, reason="movie_request_got_episode_candidate"
         )
     if expected_type in {"show", "season", "episode"} and parsed_kind == "movie":
-        has_season_marker = extract_int(candidate.parsed_title, "season") is not None
-        has_episode_marker = extract_int(candidate.parsed_title, "episode") is not None
+        has_season_marker = candidate_parsed_seasons(candidate.parsed_title) is not None
+        has_episode_marker = candidate_parsed_episodes(candidate.parsed_title) is not None
         if has_season_marker or has_episode_marker:
             return ParsedStreamCandidateValidation(ok=False, reason="show_request_got_movie_candidate")
 
     expected_season = extract_int_value(attributes, "season_number", "season", "parent_season_number")
-    parsed_season = extract_int(candidate.parsed_title, "season")
+    parsed_seasons = candidate_parsed_seasons(candidate.parsed_title)
     if (
         expected_type in {"season", "episode"}
         and expected_season is not None
-        and parsed_season is not None
-        and expected_season != parsed_season
+        and parsed_seasons is not None
+        and expected_season not in parsed_seasons
     ):
         return ParsedStreamCandidateValidation(ok=False, reason="season_mismatch")
 
     expected_episode = extract_int_value(attributes, "episode_number", "episode")
-    parsed_episode = extract_int(candidate.parsed_title, "episode")
+    parsed_episodes = candidate_parsed_episodes(candidate.parsed_title)
     if (
         expected_type == "episode"
         and expected_episode is not None
-        and parsed_episode is not None
-        and expected_episode != parsed_episode
+        and parsed_episodes is not None
+        and expected_episode not in parsed_episodes
     ):
         return ParsedStreamCandidateValidation(ok=False, reason="episode_mismatch")
+
+    if (
+        expected_type == "season"
+        and parsed_episodes is not None
+        and not _candidate_has_complete_marker(candidate)
+    ):
+        return ParsedStreamCandidateValidation(
+            ok=False,
+            reason="season_request_incomplete_episode_candidate",
+        )
 
     expected_year = extract_int(attributes, "year")
     parsed_year = extract_int(candidate.parsed_title, "year")

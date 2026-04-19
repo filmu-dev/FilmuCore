@@ -20,6 +20,7 @@ from filmu_py.services.playback import (
     DirectFileLinkLifecycleSnapshot,
     DirectFileLinkProviderFamily,
     PlaybackResolutionSnapshot,
+    PlaybackSourceService,
 )
 
 MountPlaybackRole = Literal["direct", "hls"]
@@ -241,6 +242,49 @@ def _select_snapshot_attachment_lifecycle(
     return snapshot.hls, snapshot.hls_lifecycle
 
 
+def _find_active_media_entry(
+    item: MediaItemORM,
+    *,
+    role: MountPlaybackRole,
+) -> MediaEntryORM | None:
+    active_media_entry_id = PersistedMountMediaEntryQueryExecutor._get_active_media_entry_id(
+        item,
+        role=role,
+    )
+    if active_media_entry_id is None:
+        return None
+    for media_entry in item.media_entries:
+        if media_entry.id == active_media_entry_id:
+            return media_entry
+    return None
+
+
+def _select_mount_attachment_lifecycle(
+    item: MediaItemORM,
+    snapshot: PlaybackResolutionSnapshot,
+    *,
+    role: MountPlaybackRole,
+) -> tuple[PlaybackAttachment | None, DirectFileLinkLifecycleSnapshot | None]:
+    attachment, lifecycle = _select_snapshot_attachment_lifecycle(snapshot, role=role)
+    active_media_entry = _find_active_media_entry(item, role=role)
+    if active_media_entry is None:
+        return attachment, lifecycle
+
+    persisted_attachment, persisted_lifecycle = (
+        PlaybackSourceService.build_media_entry_direct_file_link_snapshot(active_media_entry)
+    )
+    if attachment is None:
+        attachment = persisted_attachment
+    elif persisted_attachment is not None:
+        attachment = PlaybackSourceService.merge_attachment_identity(
+            attachment,
+            persisted_attachment,
+        )
+    if lifecycle is None:
+        lifecycle = persisted_lifecycle
+    return attachment, lifecycle
+
+
 def _build_mount_media_entry_query_steps(
     attachment: PlaybackAttachment,
     lifecycle: DirectFileLinkLifecycleSnapshot,
@@ -324,7 +368,7 @@ def build_mount_media_entry_query_contract_from_snapshot(
 ) -> MountMediaEntryQueryContract:
     """Build the explicit persisted media-entry query contract for one future mount-worker open path."""
 
-    attachment, lifecycle = _select_snapshot_attachment_lifecycle(snapshot, role=role)
+    attachment, lifecycle = _select_mount_attachment_lifecycle(item, snapshot, role=role)
     if attachment is None:
         return MountMediaEntryQueryContract(
             item_id=item.id,

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "backup_restore_rehearsal",
+  "freshness_window_hours": 24,
+  "migration_revision": "head",
+  "required_tables": [
+    "alembic_version",
+    "settings",
+    "media_items",
+    "streams",
+    "item_requests",
+    "control_plane_subscribers",
+    "item_workflow_checkpoints"
+  ],
+  "required_fields": [
+    "schema_version",
+    "artifact_kind",
+    "captured_at",
+    "expires_at",
+    "status",
+    "database_backup",
+    "settings_backup",
+    "source_snapshot",
+    "restore_snapshot",
+    "snapshot_parity",
+    "migration_rehearsal",
+    "failure_reasons",
+    "required_actions"
+  ]
+}

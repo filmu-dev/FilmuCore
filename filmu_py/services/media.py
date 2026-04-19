@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 from collections import Counter
@@ -30,9 +31,11 @@ from filmu_py.core.event_bus import EventBus
 from filmu_py.core.rate_limiter import DistributedRateLimiter
 from filmu_py.db.models import (
     ActiveStreamORM,
+    ConsumerPlaybackActivityEventORM,
     EpisodeORM,
     ItemRequestORM,
     ItemStateEventORM,
+    ItemWorkflowCheckpointORM,
     MediaEntryORM,
     MediaItemORM,
     MovieORM,
@@ -47,12 +50,19 @@ from filmu_py.db.models import (
 )
 from filmu_py.db.runtime import DatabaseRuntime
 from filmu_py.services.debrid import TorrentInfo
-from filmu_py.services.playback import PlaybackResolutionSnapshot, PlaybackSourceService
+from filmu_py.services.playback import (
+    DirectFileLinkLifecycleSnapshot,
+    PlaybackResolutionSnapshot,
+    PlaybackSourceService,
+)
 from filmu_py.services.settings_service import load_settings
 from filmu_py.services.tmdb import (
     MovieMetadata,
     ShowMetadata,
+    TmdbDiscoveryProfile,
     TmdbMetadataClient,
+    TmdbSearchPage,
+    TmdbSearchResult,
     build_tmdb_metadata_client,
 )
 from filmu_py.services.tvdb import TvdbClient, TvdbSeriesMetadata
@@ -71,6 +81,177 @@ _SUPPORTED_EXTERNAL_REF_SYSTEMS = frozenset({"tmdb", "tvdb", "imdb"})
 _GET_ITEM_UUID_ERROR = (
     "get_item() requires a UUID; use get_item_by_external_id() for external refs"
 )
+_REQUEST_SEARCH_MAX_REMOTE_PAGES = 6
+_REQUEST_SEARCH_DEFAULT_SCAN_WINDOW = 60
+_REQUEST_SEARCH_MAX_SCAN_WINDOW = 120
+_REQUEST_DISCOVER_MAX_REMOTE_PAGES = 6
+_REQUEST_DISCOVER_DEFAULT_SCAN_WINDOW = 80
+_REQUEST_DISCOVER_MAX_SCAN_WINDOW = 180
+_REQUEST_LOCAL_SIGNAL_PLAYBACK_WINDOW = timedelta(days=120)
+_REQUEST_DISCOVERY_FACET_DETAIL_WINDOW = 48
+_REQUEST_DISCOVERY_FACET_DETAIL_CONCURRENCY = 8
+_REQUEST_DISCOVERY_PROJECTION_WINDOW = 20
+_REQUEST_DISCOVERY_EDITORIAL_BLEND_PAGE_LIMIT = 2
+_REQUEST_DISCOVERY_RELEASE_WINDOW_BLEND_PAGE_LIMIT = 2
+_REQUEST_DISCOVERY_STUDIO_HINTS = (
+    "studio",
+    "studios",
+    "pictures",
+    "films",
+    "television",
+    "animation",
+    "entertainment",
+    "bros",
+    "productions",
+)
+_REQUEST_DISCOVERY_RAILS: tuple[dict[str, str], ...] = (
+    {
+        "id": "new-sci-fi-films",
+        "title": "New sci-fi films",
+        "description": "Fresh science-fiction film candidates with immediate request coverage.",
+        "query": "science fiction",
+        "media_type": "movie",
+    },
+    {
+        "id": "prestige-crime-films",
+        "title": "Prestige crime films",
+        "description": "High-signal crime films when you want tighter catalog depth.",
+        "query": "crime thriller",
+        "media_type": "movie",
+    },
+    {
+        "id": "historical-epics",
+        "title": "Historical epics",
+        "description": "Large-scale period films ready for the same request flow.",
+        "query": "historical epic",
+        "media_type": "movie",
+    },
+    {
+        "id": "animated-features",
+        "title": "Animated features",
+        "description": "Animated film candidates with broad catalog and family coverage.",
+        "query": "animated adventure",
+        "media_type": "movie",
+    },
+    {
+        "id": "prestige-series",
+        "title": "Prestige series",
+        "description": "Returnable drama series that benefit from scoped intake.",
+        "query": "prestige drama",
+        "media_type": "show",
+    },
+    {
+        "id": "mystery-series",
+        "title": "Mystery series",
+        "description": "Serialized mysteries suited for season-level request follow-through.",
+        "query": "mystery series",
+        "media_type": "show",
+    },
+    {
+        "id": "space-operas",
+        "title": "Space operas",
+        "description": "Large-arc science-fiction series without dropping into a generic browse route.",
+        "query": "space opera",
+        "media_type": "show",
+    },
+    {
+        "id": "limited-series",
+        "title": "Limited series",
+        "description": "Shorter-form series candidates for bounded intake and faster completion.",
+        "query": "limited series",
+        "media_type": "show",
+    },
+)
+_REQUEST_EDITORIAL_DISCOVERY_FAMILIES: tuple[dict[str, str], ...] = (
+    {
+        "id": "trending-films",
+        "family": "trending",
+        "title": "Trending films",
+        "description": "Fast-moving film picks pulled from the live TMDB trend window.",
+        "media_type": "movie",
+    },
+    {
+        "id": "popular-films",
+        "family": "popular",
+        "title": "Popular films",
+        "description": "Broad-audience films ranked by current popularity signals.",
+        "media_type": "movie",
+    },
+    {
+        "id": "anticipated-films",
+        "family": "anticipated",
+        "title": "Anticipated films",
+        "description": "Upcoming film releases with active audience demand.",
+        "media_type": "movie",
+    },
+    {
+        "id": "newly-released-films",
+        "family": "newly-released",
+        "title": "Newly released films",
+        "description": "Recently released films that are already entering the current window.",
+        "media_type": "movie",
+    },
+    {
+        "id": "trending-series",
+        "family": "trending",
+        "title": "Trending series",
+        "description": "Fast-moving series picks pulled from the live TMDB trend window.",
+        "media_type": "show",
+    },
+    {
+        "id": "popular-series",
+        "family": "popular",
+        "title": "Popular series",
+        "description": "Broad-audience series ranked by current popularity signals.",
+        "media_type": "show",
+    },
+    {
+        "id": "returning-series",
+        "family": "returning",
+        "title": "Returning series",
+        "description": "Series currently back on air and suited for scoped intake follow-through.",
+        "media_type": "show",
+    },
+    {
+        "id": "newly-released-series",
+        "family": "newly-released",
+        "title": "Newly released series",
+        "description": "Series with fresh first-run episodes in the active release window.",
+        "media_type": "show",
+    },
+)
+_REQUEST_RELEASE_WINDOWS: tuple[dict[str, str], ...] = (
+    {
+        "id": "theatrical-films",
+        "window": "theatrical",
+        "title": "Theatrical window",
+        "description": "Films playing in the near theatrical window for quick intake decisions.",
+        "media_type": "movie",
+    },
+    {
+        "id": "digital-film-premieres",
+        "window": "digital",
+        "title": "Digital window",
+        "description": "Films crossing into digital availability without waiting on generic browse drift.",
+        "media_type": "movie",
+    },
+    {
+        "id": "returning-series-window",
+        "window": "returning",
+        "title": "Returning series",
+        "description": "Series already back on air in the current active episode window.",
+        "media_type": "show",
+    },
+    {
+        "id": "limited-series-launches",
+        "window": "limited-series",
+        "title": "Limited-series launches",
+        "description": "Bounded series launches that fit short-run intake and completion loops.",
+        "media_type": "show",
+    },
+)
+_CONSUMER_PLAYBACK_ACTIVE_WINDOW = timedelta(minutes=15)
+_CONSUMER_PLAYBACK_SESSION_LIMIT = 6
 
 
 class ItemNotFoundError(RuntimeError):
@@ -532,12 +713,181 @@ def _build_summary_record(item: MediaItemORM, *, extended: bool) -> MediaItemSum
     )
 
 
+def _build_consumer_activity_subtitle(summary: MediaItemSummaryRecord) -> str | None:
+    """Return a compact subtitle for shared consumer activity surfaces."""
+
+    metadata = summary.metadata or {}
+    year_label: str | None = None
+    if summary.aired_at:
+        try:
+            year_label = str(datetime.fromisoformat(summary.aired_at.replace("Z", "+00:00")).year)
+        except ValueError:
+            year_label = None
+
+    if summary.type == "episode":
+        show_title = _extract_first_string(
+            cast(dict[str, object], metadata),
+            "show_title",
+            "series_title",
+            "parent_title",
+        )
+        season_number = metadata.get("season_number")
+        episode_number = metadata.get("episode_number")
+        season_label = (
+            f"S{int(season_number):02d}"
+            if isinstance(season_number, int)
+            else None
+        )
+        episode_label = (
+            f"E{int(episode_number):02d}"
+            if isinstance(episode_number, int)
+            else None
+        )
+        return " • ".join(
+            part
+            for part in (
+                show_title,
+                " ".join(part for part in (season_label, episode_label) if part) or None,
+                year_label,
+            )
+            if part
+        ) or None
+
+    if summary.type == "season":
+        show_title = _extract_first_string(
+            cast(dict[str, object], metadata),
+            "show_title",
+            "series_title",
+            "parent_title",
+        )
+        return " • ".join(part for part in (show_title, year_label) if part) or None
+
+    return year_label
+
+
+def _build_consumer_activity_item_record(
+    summary: MediaItemSummaryRecord,
+    *,
+    last_activity_at: datetime | None,
+    last_viewed_at: datetime | None,
+    last_launched_at: datetime | None,
+    view_count: int,
+    launch_count: int,
+    session_count: int,
+    active_session_count: int,
+    last_session_key: str | None,
+    resume_position_seconds: int | None,
+    duration_seconds: int | None,
+    progress_percent: float | None,
+    completed: bool,
+    last_target: str | None,
+) -> ConsumerPlaybackActivityItemRecord:
+    """Return one shared consumer activity row from one current item summary."""
+
+    return ConsumerPlaybackActivityItemRecord(
+        item_id=summary.id,
+        title=summary.title,
+        subtitle=_build_consumer_activity_subtitle(summary),
+        poster_path=summary.poster_path,
+        state=summary.state,
+        request=summary.request,
+        playback_ready=(
+            (
+                summary.resolved_playback is not None
+                and (
+                    summary.resolved_playback.direct_ready
+                    or summary.resolved_playback.hls_ready
+                )
+            )
+            or (
+                summary.active_stream is not None
+                and (
+                    summary.active_stream.direct_ready
+                    or summary.active_stream.hls_ready
+                )
+            )
+            or any(
+                bool(entry.lifecycle and entry.lifecycle.ready_for_playback)
+                for entry in (summary.media_entries or [])
+            )
+        ),
+        last_activity_at=_serialize_datetime(last_activity_at),
+        last_viewed_at=_serialize_datetime(last_viewed_at),
+        last_launched_at=_serialize_datetime(last_launched_at),
+        view_count=view_count,
+        launch_count=launch_count,
+        session_count=session_count,
+        active_session_count=active_session_count,
+        last_session_key=last_session_key,
+        resume_position_seconds=resume_position_seconds,
+        duration_seconds=duration_seconds,
+        progress_percent=progress_percent,
+        completed=completed,
+        last_target=last_target,
+    )
+
+
 def _serialize_datetime(value: datetime | None) -> str | None:
     """Return one optional datetime as an ISO-8601 string for compatibility responses."""
 
     if value is None:
         return None
     return value.isoformat()
+
+
+def _coerce_activity_payload_str(
+    payload: dict[str, object],
+    key: str,
+) -> str | None:
+    """Return one normalized string field from an activity payload when present."""
+
+    value = payload.get(key)
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None
+
+
+def _coerce_activity_payload_seconds(
+    payload: dict[str, object],
+    key: str,
+) -> int | None:
+    """Return one non-negative second count from an activity payload when present."""
+
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and value.is_integer():
+        integer_value = int(value)
+        return integer_value if integer_value >= 0 else None
+    return None
+
+
+def _coerce_activity_payload_bool(
+    payload: dict[str, object],
+    key: str,
+) -> bool | None:
+    """Return one boolean field from an activity payload when present."""
+
+    value = payload.get(key)
+    return value if isinstance(value, bool) else None
+
+
+def _build_progress_percent(
+    position_seconds: int | None,
+    duration_seconds: int | None,
+    *,
+    completed: bool,
+) -> float | None:
+    """Return one bounded progress percentage from retained playback counters."""
+
+    if completed:
+        return 100.0
+    if position_seconds is None or duration_seconds is None or duration_seconds <= 0:
+        return None
+    return round(min(100.0, (position_seconds / duration_seconds) * 100.0), 1)
 
 
 def _effective_next_retry_at(
@@ -757,6 +1107,22 @@ def _build_media_entry_detail_record(
     download_url = attachment.restricted_url
     unrestricted_url = attachment.unrestricted_url
     url = unrestricted_url or download_url
+    lifecycle_snapshot = _build_attachment_direct_file_link_lifecycle_snapshot(attachment)
+    lifecycle = _build_media_entry_lifecycle_record(
+        owner_kind="attachment",
+        owner_id=attachment.id,
+        kind=attachment.kind,
+        provider=attachment.provider,
+        local_path=attachment.local_path,
+        restricted_url=download_url,
+        unrestricted_url=unrestricted_url,
+        refresh_state=attachment.refresh_state,
+        source_attachment_id=attachment.id,
+        source_key=attachment.source_key,
+        lifecycle_snapshot=lifecycle_snapshot,
+        active_for_direct=active_for_direct,
+        active_for_hls=active_for_hls,
+    )
     return MediaEntryDetailRecord(
         entry_type="media",
         kind=attachment.kind,
@@ -765,6 +1131,7 @@ def _build_media_entry_detail_record(
         local_path=attachment.local_path,
         download_url=download_url,
         unrestricted_url=unrestricted_url,
+        source_attachment_id=attachment.id,
         provider=attachment.provider,
         provider_download_id=attachment.provider_download_id,
         provider_file_id=attachment.provider_file_id,
@@ -775,6 +1142,7 @@ def _build_media_entry_detail_record(
         active_for_direct=active_for_direct,
         active_for_hls=active_for_hls,
         is_active_stream=active_for_direct or active_for_hls,
+        lifecycle=lifecycle,
     )
 
 
@@ -790,6 +1158,22 @@ def _build_persisted_media_entry_detail_record(
         entry.local_path or entry.provider_file_path or entry.unrestricted_url or entry.download_url
     )
     url = entry.unrestricted_url or entry.download_url
+    _, lifecycle_snapshot = PlaybackSourceService.build_media_entry_direct_file_link_snapshot(entry)
+    lifecycle = _build_media_entry_lifecycle_record(
+        owner_kind="media-entry",
+        owner_id=entry.id,
+        kind=entry.kind,
+        provider=entry.provider or (entry.source_attachment.provider if entry.source_attachment else None),
+        local_path=entry.local_path,
+        restricted_url=entry.download_url,
+        unrestricted_url=entry.unrestricted_url,
+        refresh_state=entry.refresh_state,
+        source_attachment_id=entry.source_attachment_id,
+        source_key=entry.source_attachment.source_key if entry.source_attachment is not None else None,
+        lifecycle_snapshot=lifecycle_snapshot,
+        active_for_direct=active_for_direct,
+        active_for_hls=active_for_hls,
+    )
     return MediaEntryDetailRecord(
         entry_type=entry.entry_type,
         kind=entry.kind,
@@ -798,6 +1182,7 @@ def _build_persisted_media_entry_detail_record(
         local_path=entry.local_path,
         download_url=entry.download_url,
         unrestricted_url=entry.unrestricted_url,
+        source_attachment_id=entry.source_attachment_id,
         provider=entry.provider,
         provider_download_id=entry.provider_download_id,
         provider_file_id=entry.provider_file_id,
@@ -812,6 +1197,7 @@ def _build_persisted_media_entry_detail_record(
         active_for_direct=active_for_direct,
         active_for_hls=active_for_hls,
         is_active_stream=active_for_direct or active_for_hls,
+        lifecycle=lifecycle,
     )
 
 
@@ -826,6 +1212,151 @@ def _build_subtitle_entry_detail_record(entry: SubtitleEntryORM) -> SubtitleEntr
         url=entry.url,
         is_default=entry.is_default,
         is_forced=entry.is_forced,
+    )
+
+
+def _build_media_entry_active_roles(
+    *,
+    active_for_direct: bool,
+    active_for_hls: bool,
+) -> tuple[str, ...]:
+    roles: list[str] = []
+    if active_for_direct:
+        roles.append("direct")
+    if active_for_hls:
+        roles.append("hls")
+    return tuple(roles)
+
+
+def _build_media_entry_lifecycle_record(
+    *,
+    owner_kind: str,
+    owner_id: str | None,
+    kind: str,
+    provider: str | None,
+    local_path: str | None,
+    restricted_url: str | None,
+    unrestricted_url: str | None,
+    refresh_state: str,
+    source_attachment_id: str | None,
+    source_key: str | None,
+    lifecycle_snapshot: DirectFileLinkLifecycleSnapshot | None,
+    active_for_direct: bool,
+    active_for_hls: bool,
+) -> MediaEntryLifecycleRecord:
+    locator = unrestricted_url or restricted_url or local_path or ""
+    provider_family = (
+        str(lifecycle_snapshot.provider_family)
+        if lifecycle_snapshot is not None
+        else PlaybackSourceService._classify_direct_file_provider_family(provider)
+    )
+    locator_source = (
+        str(lifecycle_snapshot.locator_source)
+        if lifecycle_snapshot is not None
+        else PlaybackSourceService._classify_direct_file_locator_source(
+            locator,
+            local_path=local_path,
+            unrestricted_url=unrestricted_url,
+            restricted_url=restricted_url,
+        )
+    )
+    normalized_refresh_state = (
+        str(lifecycle_snapshot.refresh_state)
+        if lifecycle_snapshot is not None and lifecycle_snapshot.refresh_state is not None
+        else None
+    )
+    effective_refresh_state = PlaybackSourceService._effective_media_entry_refresh_state(
+        normalized_refresh_state or refresh_state,
+        provider=provider,
+        restricted_url=restricted_url,
+        unrestricted_url=unrestricted_url,
+    )
+    active_roles = _build_media_entry_active_roles(
+        active_for_direct=active_for_direct,
+        active_for_hls=active_for_hls,
+    )
+    ready_state = effective_refresh_state in _SATISFYING_MEDIA_ENTRY_REFRESH_STATES
+    has_locator = bool(locator)
+    ready_for_direct = has_locator and ready_state and kind in {"local-file", "remote-direct"}
+    ready_for_hls = has_locator and ready_state and kind in {
+        "local-file",
+        "remote-direct",
+        "remote-hls",
+    }
+    return MediaEntryLifecycleRecord(
+        owner_kind=(
+            str(lifecycle_snapshot.owner_kind) if lifecycle_snapshot is not None else owner_kind
+        ),
+        owner_id=lifecycle_snapshot.owner_id if lifecycle_snapshot is not None else owner_id,
+        active_roles=active_roles,
+        source_key=source_key,
+        source_attachment_id=(
+            lifecycle_snapshot.source_attachment_id
+            if lifecycle_snapshot is not None
+            else source_attachment_id
+        ),
+        provider_family=provider_family,
+        locator_source=locator_source,
+        match_basis=(
+            lifecycle_snapshot.match_basis
+            if lifecycle_snapshot is not None
+            else ("source-attachment-id" if source_attachment_id is not None else None)
+        ),
+        restricted_fallback=(
+            bool(lifecycle_snapshot.restricted_fallback)
+            if lifecycle_snapshot is not None
+            else bool(
+                (source_key is not None and source_key.endswith(":restricted-fallback"))
+                or (unrestricted_url is None and restricted_url is not None)
+            )
+        ),
+        refresh_state=normalized_refresh_state,
+        expires_at=(
+            _serialize_datetime(lifecycle_snapshot.expires_at)
+            if lifecycle_snapshot is not None
+            else None
+        ),
+        last_refreshed_at=(
+            _serialize_datetime(lifecycle_snapshot.last_refreshed_at)
+            if lifecycle_snapshot is not None
+            else None
+        ),
+        last_refresh_error=(
+            lifecycle_snapshot.last_refresh_error if lifecycle_snapshot is not None else None
+        ),
+        effective_refresh_state=effective_refresh_state,
+        ready_for_direct=ready_for_direct,
+        ready_for_hls=ready_for_hls,
+        ready_for_playback=ready_for_direct or ready_for_hls,
+    )
+
+
+def _build_attachment_direct_file_link_lifecycle_snapshot(
+    attachment: PlaybackAttachmentORM,
+) -> DirectFileLinkLifecycleSnapshot:
+    """Return the owner-aligned lifecycle snapshot for one persisted attachment row."""
+
+    resolved = PlaybackAttachment(
+        kind=attachment.kind,
+        locator=attachment.locator,
+        source_key=attachment.source_key,
+        provider=attachment.provider,
+        provider_download_id=attachment.provider_download_id,
+        provider_file_id=attachment.provider_file_id,
+        provider_file_path=attachment.provider_file_path,
+        original_filename=attachment.original_filename,
+        file_size=attachment.file_size,
+        local_path=attachment.local_path,
+        restricted_url=attachment.restricted_url,
+        unrestricted_url=attachment.unrestricted_url,
+        expires_at=attachment.expires_at,
+        refresh_state=PlaybackSourceService._normalize_refresh_state(attachment.refresh_state),
+    )
+    match_basis = PlaybackSourceService._match_basis_for_attachment_owner(attachment, resolved)
+    return PlaybackSourceService._build_attachment_direct_file_link_lifecycle(
+        attachment,
+        attachment=resolved,
+        match_basis=match_basis,
     )
 
 
@@ -1360,12 +1891,23 @@ def _matches_search(item: MediaItemSummaryRecord, search: str | None) -> bool:
     needle = search.casefold().strip()
     if not needle:
         return True
-    searchable = [item.title, item.external_ref, item.tmdb_id, item.tvdb_id]
+    specialization = item.specialization
+    searchable = [
+        item.title,
+        item.external_ref,
+        item.tmdb_id,
+        item.tvdb_id,
+        specialization.show_title if specialization is not None else None,
+        specialization.imdb_id if specialization is not None else None,
+    ]
     return any(value is not None and needle in value.casefold() for value in searchable)
 
 
 def _sort_items(
-    items: list[MediaItemSummaryRecord], sort: list[str] | None
+    items: list[MediaItemSummaryRecord],
+    sort: list[str] | None,
+    *,
+    search: str | None = None,
 ) -> list[MediaItemSummaryRecord]:
     """Return items sorted using the first compatible frontend sort directive."""
 
@@ -1373,15 +1915,267 @@ def _sort_items(
         return list(items)
 
     directive = sort[0]
+    if directive == "relevance":
+        needle = (search or "").casefold().strip()
+
+        def _relevance_score(item: MediaItemSummaryRecord) -> tuple[int, int, str]:
+            title = item.title.casefold()
+            subtitle = (item.specialization.show_title or "").casefold()
+            if not needle:
+                score = 0
+            elif title == needle:
+                score = 4
+            elif title.startswith(needle):
+                score = 3
+            elif needle in title:
+                score = 2
+            elif needle in subtitle:
+                score = 1
+            else:
+                score = 0
+            return (score, int(bool(item.aired_at)), item.title.casefold())
+
+        return sorted(
+            items,
+            key=lambda item: _relevance_score(item),
+            reverse=True,
+        )
     if directive == "title_asc":
         return sorted(items, key=lambda item: item.title.casefold())
     if directive == "title_desc":
         return sorted(items, key=lambda item: item.title.casefold(), reverse=True)
+    if directive == "state_asc":
+        return sorted(items, key=lambda item: (item.state.casefold(), item.title.casefold()))
     if directive == "date_asc":
         return sorted(items, key=lambda item: item.aired_at or "")
     if directive == "date_desc":
         return sorted(items, key=lambda item: item.aired_at or "", reverse=True)
+    if directive == "year_desc":
+        return sorted(
+            items,
+            key=lambda item: ((item.aired_at or "")[:4], item.title.casefold()),
+            reverse=True,
+        )
     return list(items)
+
+
+def _normalized_playback_filter_value(value: str | None) -> str:
+    """Return a trimmed lowercase filter value for playback recovery matching."""
+
+    return value.casefold().strip() if isinstance(value, str) else ""
+
+
+def _collect_playback_recovery_providers(item: MediaItemSummaryRecord) -> list[str]:
+    """Return all provider labels visible on one playback recovery detail row."""
+
+    providers = [
+        *(attachment.provider for attachment in item.playback_attachments or []),
+        *(entry.provider for entry in item.media_entries or []),
+        (
+            item.resolved_playback.direct.provider
+            if item.resolved_playback is not None and item.resolved_playback.direct is not None
+            else None
+        ),
+        (
+            item.resolved_playback.hls.provider
+            if item.resolved_playback is not None and item.resolved_playback.hls is not None
+            else None
+        ),
+        (
+            item.active_stream.direct_owner.provider
+            if item.active_stream is not None and item.active_stream.direct_owner is not None
+            else None
+        ),
+        (
+            item.active_stream.hls_owner.provider
+            if item.active_stream is not None and item.active_stream.hls_owner is not None
+            else None
+        ),
+    ]
+    return [
+        provider.strip()
+        for provider in providers
+        if isinstance(provider, str) and provider.strip()
+    ]
+
+
+def _matches_playback_recovery_text_query(
+    item: MediaItemSummaryRecord,
+    query: str | None,
+) -> bool:
+    """Return whether one detail row matches the current playback text query."""
+
+    needle = _normalized_playback_filter_value(query)
+    if not needle:
+        return True
+    searchable = [
+        item.title,
+        item.external_ref,
+        item.state,
+        item.type,
+        item.tmdb_id,
+        item.tvdb_id,
+        (
+            item.specialization.show_title
+            if item.specialization is not None
+            else None
+        ),
+        (
+            item.request.request_source
+            if item.request is not None
+            else None
+        ),
+        *(
+            attachment.original_filename
+            for attachment in item.playback_attachments or []
+        ),
+        *(attachment.provider for attachment in item.playback_attachments or []),
+        *(attachment.locator for attachment in item.playback_attachments or []),
+        *(attachment.refresh_state for attachment in item.playback_attachments or []),
+        *(
+            attachment.last_refresh_error
+            for attachment in item.playback_attachments or []
+        ),
+        *(entry.original_filename for entry in item.media_entries or []),
+        *(entry.provider for entry in item.media_entries or []),
+        *(entry.local_path for entry in item.media_entries or []),
+        *(entry.url for entry in item.media_entries or []),
+        *(entry.download_url for entry in item.media_entries or []),
+        *(entry.unrestricted_url for entry in item.media_entries or []),
+        *(entry.refresh_state for entry in item.media_entries or []),
+        *(entry.last_refresh_error for entry in item.media_entries or []),
+        (
+            item.recovery_plan.reason
+            if item.recovery_plan is not None
+            else None
+        ),
+        (
+            item.selected_stream.parsed_title
+            if item.selected_stream is not None
+            else None
+        ),
+        (
+            item.selected_stream.raw_title
+            if item.selected_stream is not None
+            else None
+        ),
+    ]
+    haystack = " ".join(
+        value for value in searchable if isinstance(value, str) and value.strip()
+    ).casefold()
+    return needle in haystack
+
+
+def _matches_playback_recovery_provider(
+    item: MediaItemSummaryRecord,
+    provider: str | None,
+) -> bool:
+    """Return whether one detail row matches the current playback provider filter."""
+
+    expected = _normalized_playback_filter_value(provider)
+    if not expected:
+        return True
+    return expected in {
+        _normalized_playback_filter_value(current)
+        for current in _collect_playback_recovery_providers(item)
+    }
+
+
+def _matches_playback_recovery_attachment_state(
+    item: MediaItemSummaryRecord,
+    attachment_state: str | None,
+) -> bool:
+    """Return whether one detail row has a matching attachment refresh state."""
+
+    expected = _normalized_playback_filter_value(attachment_state)
+    if not expected:
+        return True
+    return expected in {
+        _normalized_playback_filter_value(attachment.refresh_state)
+        for attachment in item.playback_attachments or []
+    }
+
+
+def _matches_playback_recovery_stream(
+    item: MediaItemSummaryRecord,
+    stream: str | None,
+) -> bool:
+    """Return whether one detail row matches the current playback stream posture."""
+
+    if stream is None:
+        return True
+    if stream == "direct_ready":
+        return bool(
+            (item.resolved_playback is not None and item.resolved_playback.direct_ready)
+            or (item.active_stream is not None and item.active_stream.direct_ready)
+        )
+    if stream == "hls_ready":
+        return bool(
+            (item.resolved_playback is not None and item.resolved_playback.hls_ready)
+            or (item.active_stream is not None and item.active_stream.hls_ready)
+        )
+    if stream == "missing_local_file":
+        return bool(
+            (item.resolved_playback is not None and item.resolved_playback.missing_local_file)
+            or (item.active_stream is not None and item.active_stream.missing_local_file)
+        )
+    return True
+
+
+def _item_has_playback_errors(item: MediaItemSummaryRecord) -> bool:
+    """Return whether one detail row surfaces any playback-facing failure signal."""
+
+    normalized_state = _normalized_playback_filter_value(item.state)
+    return (
+        "fail" in normalized_state
+        or "error" in normalized_state
+        or any(
+            bool(attachment.last_refresh_error)
+            for attachment in item.playback_attachments or []
+        )
+        or any(bool(entry.last_refresh_error) for entry in item.media_entries or [])
+    )
+
+
+def _playback_recovery_priority_rank(item: MediaItemSummaryRecord) -> int:
+    """Return the Director-compatible recovery priority rank for one detail row."""
+
+    normalized_state = _normalized_playback_filter_value(item.state)
+    if _item_has_playback_errors(item):
+        return 0
+    if item.recovery_plan is not None and item.recovery_plan.is_in_cooldown:
+        return 1
+    if "queued" in normalized_state:
+        return 2
+    if "final" in normalized_state:
+        return 4
+    return 3
+
+
+def _sort_playback_recovery_items(
+    items: list[MediaItemSummaryRecord],
+    sort: str | None,
+) -> list[MediaItemSummaryRecord]:
+    """Return playback recovery items sorted with Director-compatible ordering."""
+
+    if sort == "updated_asc":
+        return sorted(items, key=lambda item: item.updated_at or "")
+    if sort == "updated_desc":
+        return sorted(items, key=lambda item: item.updated_at or "", reverse=True)
+    if sort == "title_asc":
+        return sorted(items, key=lambda item: item.title.casefold())
+    return sorted(
+        items,
+        key=lambda item: (
+            _playback_recovery_priority_rank(item),
+            -(
+                item.recovery_plan.recovery_attempt_count
+                if item.recovery_plan is not None
+                else 0
+            ),
+            -(datetime.fromisoformat((item.updated_at or "1970-01-01T00:00:00+00:00").replace("Z", "+00:00")).timestamp()),
+        ),
+    )
 
 
 def _extract_int(attributes: dict[str, object], key: str) -> int | None:
@@ -1485,6 +2279,313 @@ class RequestItemServiceResult:
 
 
 @dataclass(frozen=True)
+class RequestSearchLifecycleRecord:
+    """Live intake lifecycle detail attached to one request-search hit."""
+
+    stage_name: str | None = None
+    stage_status: str | None = None
+    provider: str | None = None
+    provider_download_id: str | None = None
+    last_error: str | None = None
+    updated_at: str | None = None
+    recovery_reason: str | None = None
+    retry_at: str | None = None
+    recovery_attempt_count: int = 0
+    in_cooldown: bool = False
+
+
+@dataclass(frozen=True)
+class RequestSearchCandidateRecord:
+    """One TMDB-backed request search hit with current library/request state."""
+
+    external_ref: str
+    title: str
+    media_type: str
+    tmdb_id: str | None = None
+    tvdb_id: str | None = None
+    imdb_id: str | None = None
+    poster_path: str | None = None
+    overview: str = ""
+    year: int | None = None
+    is_requested: bool = False
+    requested_item_id: str | None = None
+    requested_state: str | None = None
+    requested_seasons: list[int] | None = None
+    requested_episodes: dict[str, list[int]] | None = None
+    request_source: str | None = None
+    request_count: int = 0
+    first_requested_at: str | None = None
+    last_requested_at: str | None = None
+    lifecycle: RequestSearchLifecycleRecord | None = None
+    ranking_signals: tuple[str, ...] = ()
+    season_summary: RequestCandidateSeasonSummaryRecord | None = None
+    season_preview: tuple[RequestCandidateSeasonRecord, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestCandidateSeasonRecord:
+    """One show season preview row for the focused requester detail route."""
+
+    season_number: int
+    title: str | None = None
+    episode_count: int | None = None
+    air_date: str | None = None
+    is_released: bool = True
+    has_local_coverage: bool = False
+    is_requested: bool = False
+    requested_episode_count: int = 0
+    requested_all_episodes: bool = False
+    status: str = "available"
+
+
+@dataclass(frozen=True)
+class RequestCandidateSeasonSummaryRecord:
+    """Aggregated show-season request posture for requester detail routes."""
+
+    total_seasons: int = 0
+    released_seasons: int = 0
+    requested_seasons: int = 0
+    partial_seasons: int = 0
+    local_seasons: int = 0
+    unreleased_seasons: int = 0
+    next_air_date: str | None = None
+
+
+@dataclass(frozen=True)
+class RequestSearchLocalSignalRecord:
+    """Detached local-demand snapshot used to rank and decorate discovery hits."""
+
+    item: MediaItemRecord | None = None
+    request_source: str | None = None
+    request_count: int = 0
+    first_requested_at: str | None = None
+    last_requested_at: str | None = None
+    requested_seasons: list[int] | None = None
+    requested_episodes: dict[str, list[int]] | None = None
+    launch_count: int = 0
+    view_count: int = 0
+    session_count: int = 0
+    active_session_count: int = 0
+    completed_session_count: int = 0
+    resume_position_seconds: int | None = None
+    ranking_boost: float = 0.0
+    ranking_signals: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestDiscoveryRailRecord:
+    """One backend-owned zero-query discovery rail for consumer search."""
+
+    rail_id: str
+    title: str
+    description: str
+    query: str
+    media_type: str
+    items: list[RequestSearchCandidateRecord]
+
+
+@dataclass(frozen=True)
+class RequestEditorialFamilyRecord:
+    """One backend-owned editorial discovery family for consumer search."""
+
+    family_id: str
+    title: str
+    description: str
+    family: str
+    media_type: str
+    items: list[RequestSearchCandidateRecord]
+
+
+@dataclass(frozen=True)
+class RequestReleaseWindowRecord:
+    """One backend-owned release-window family for consumer search."""
+
+    window_id: str
+    title: str
+    description: str
+    window: str
+    media_type: str
+    items: list[RequestSearchCandidateRecord]
+
+
+@dataclass(frozen=True)
+class RequestDiscoveryProjectionActionRecord:
+    """One follow-up discovery action emitted from the current backend window."""
+
+    kind: str
+    value: str
+    media_type: str | None = None
+
+
+@dataclass(frozen=True)
+class RequestDiscoveryProjectionItemRecord:
+    """One grouped discovery pivot derived from the current backend window."""
+
+    projection_id: str
+    label: str
+    projection_type: str
+    match_count: int
+    image_path: str | None
+    action: RequestDiscoveryProjectionActionRecord
+    sample_titles: tuple[str, ...] = ()
+    local_match_count: int = 0
+    requested_match_count: int = 0
+    active_match_count: int = 0
+    completed_match_count: int = 0
+    preview_signals: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestDiscoveryProjectionGroupRecord:
+    """One grouped discovery-projection section for people, companies, and franchises."""
+
+    group_id: str
+    title: str
+    description: str
+    projection_type: str
+    items: list[RequestDiscoveryProjectionItemRecord]
+
+
+@dataclass(frozen=True)
+class RequestSearchPageRecord:
+    """One paginated backend-ranked request-search window."""
+
+    items: list[RequestSearchCandidateRecord]
+    offset: int
+    limit: int
+    total_count: int
+    has_previous_page: bool
+    has_next_page: bool
+    result_window_complete: bool
+
+
+@dataclass(frozen=True)
+class RequestDiscoveryFacetBucketRecord:
+    """One selectable discovery facet bucket computed from the backend result window."""
+
+    value: str
+    label: str
+    count: int
+    selected: bool = False
+
+
+@dataclass(frozen=True)
+class RequestDiscoverySortOptionRecord:
+    """One supported discovery sort choice exposed to GraphQL consumers."""
+
+    value: str
+    label: str
+    selected: bool = False
+
+
+@dataclass(frozen=True)
+class RequestDiscoveryFacetSetRecord:
+    """Facet metadata derived from the backend-owned discovery window."""
+
+    genres: tuple[RequestDiscoveryFacetBucketRecord, ...] = ()
+    release_years: tuple[RequestDiscoveryFacetBucketRecord, ...] = ()
+    languages: tuple[RequestDiscoveryFacetBucketRecord, ...] = ()
+    companies: tuple[RequestDiscoveryFacetBucketRecord, ...] = ()
+    networks: tuple[RequestDiscoveryFacetBucketRecord, ...] = ()
+    sorts: tuple[RequestDiscoverySortOptionRecord, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestDiscoveryPageRecord:
+    """One paginated backend-owned discovery page with additive facet metadata."""
+
+    items: list[RequestSearchCandidateRecord]
+    offset: int
+    limit: int
+    total_count: int
+    has_previous_page: bool
+    has_next_page: bool
+    result_window_complete: bool
+    facets: RequestDiscoveryFacetSetRecord
+
+
+@dataclass(frozen=True)
+class ConsumerPlaybackActivityItemRecord:
+    """One consumer activity row grouped by item for shared playback history surfaces."""
+
+    item_id: str
+    title: str
+    subtitle: str | None = None
+    poster_path: str | None = None
+    state: str | None = None
+    request: ItemRequestSummaryRecord | None = None
+    playback_ready: bool = False
+    last_activity_at: str | None = None
+    last_viewed_at: str | None = None
+    last_launched_at: str | None = None
+    view_count: int = 0
+    launch_count: int = 0
+    session_count: int = 0
+    active_session_count: int = 0
+    last_session_key: str | None = None
+    resume_position_seconds: int | None = None
+    duration_seconds: int | None = None
+    progress_percent: float | None = None
+    completed: bool = False
+    last_target: str | None = None
+
+
+@dataclass(frozen=True)
+class ConsumerPlaybackDeviceRecord:
+    """One recent device bucket derived from retained consumer activity events."""
+
+    device_key: str
+    device_label: str
+    last_seen_at: str
+    last_activity_at: str | None = None
+    last_viewed_at: str | None = None
+    last_launched_at: str | None = None
+    launch_count: int = 0
+    view_count: int = 0
+    session_count: int = 0
+    active_session_count: int = 0
+    last_session_key: str | None = None
+    resume_position_seconds: int | None = None
+    duration_seconds: int | None = None
+    progress_percent: float | None = None
+    completed_session_count: int = 0
+    last_target: str | None = None
+
+
+@dataclass(frozen=True)
+class ConsumerPlaybackSessionRecord:
+    """One retained consumer playback session rolled up across shared activity events."""
+
+    session_key: str
+    item_id: str
+    device_key: str
+    device_label: str
+    started_at: str
+    last_seen_at: str
+    last_target: str | None = None
+    active: bool = False
+    resume_position_seconds: int | None = None
+    duration_seconds: int | None = None
+    progress_percent: float | None = None
+    completed: bool = False
+
+
+@dataclass(frozen=True)
+class ConsumerPlaybackActivityRecord:
+    """Shared consumer activity snapshot for continue-watching, watch, and account surfaces."""
+
+    generated_at: str
+    total_item_count: int = 0
+    total_view_count: int = 0
+    total_launch_count: int = 0
+    total_session_count: int = 0
+    active_session_count: int = 0
+    items: tuple[ConsumerPlaybackActivityItemRecord, ...] = ()
+    devices: tuple[ConsumerPlaybackDeviceRecord, ...] = ()
+    recent_sessions: tuple[ConsumerPlaybackSessionRecord, ...] = ()
+
+
+@dataclass(frozen=True)
 class LibraryRecoveryRecord:
     """One recovered or permanently-skipped library item."""
 
@@ -1521,6 +2622,23 @@ class RecoveryTargetStage(enum.StrEnum):
     FINALIZE = "finalize"
 
 
+class WorkflowCheckpointStatus(enum.StrEnum):
+    """Durable status for one persisted item-workflow checkpoint."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class WorkflowResumeStage(enum.StrEnum):
+    """Next resumable worker stage named in one checkpoint record."""
+
+    NONE = "none"
+    DEBRID = "debrid_item"
+    FINALIZE = "finalize_item"
+
+
 @dataclass(frozen=True)
 class RecoveryPlanRecord:
     """Intentional recovery plan exposed to GraphQL and shared worker logic."""
@@ -1531,6 +2649,71 @@ class RecoveryPlanRecord:
     next_retry_at: str | None
     recovery_attempt_count: int
     is_in_cooldown: bool
+
+
+@dataclass(frozen=True)
+class WorkflowCheckpointRecord:
+    """Detached durable workflow checkpoint representation for worker orchestration."""
+
+    workflow_name: str
+    stage_name: str
+    resume_stage: WorkflowResumeStage
+    status: WorkflowCheckpointStatus
+    item_request_id: str | None = None
+    selected_stream_id: str | None = None
+    provider: str | None = None
+    provider_download_id: str | None = None
+    checkpoint_payload: dict[str, object] = field(default_factory=dict)
+    compensation_payload: dict[str, object] = field(default_factory=dict)
+    last_error: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkflowDrillCandidateRecord:
+    """Detached workflow checkpoint plus current recovery posture for drill execution."""
+
+    media_item_id: str
+    tenant_id: str | None
+    item_state: ItemState
+    recovery_plan: RecoveryPlanRecord
+    checkpoint: WorkflowCheckpointRecord
+
+
+def _build_request_search_lifecycle_record(
+    *,
+    checkpoint: WorkflowCheckpointRecord | None,
+    recovery_plan: RecoveryPlanRecord | None,
+) -> RequestSearchLifecycleRecord | None:
+    """Merge checkpoint and recovery posture into one request-search lifecycle summary."""
+
+    if checkpoint is None and recovery_plan is None:
+        return None
+
+    return RequestSearchLifecycleRecord(
+        stage_name=(checkpoint.stage_name if checkpoint is not None else None),
+        stage_status=(
+            checkpoint.status.value if checkpoint is not None else None
+        ),
+        provider=(checkpoint.provider if checkpoint is not None else None),
+        provider_download_id=(
+            checkpoint.provider_download_id if checkpoint is not None else None
+        ),
+        last_error=(checkpoint.last_error if checkpoint is not None else None),
+        updated_at=(checkpoint.updated_at if checkpoint is not None else None),
+        recovery_reason=(
+            recovery_plan.reason if recovery_plan is not None else None
+        ),
+        retry_at=(
+            recovery_plan.next_retry_at if recovery_plan is not None else None
+        ),
+        recovery_attempt_count=(
+            recovery_plan.recovery_attempt_count if recovery_plan is not None else 0
+        ),
+        in_cooldown=(
+            recovery_plan.is_in_cooldown if recovery_plan is not None else False
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -1740,6 +2923,29 @@ class ActiveStreamDetailRecord:
 
 
 @dataclass(frozen=True)
+class MediaEntryLifecycleRecord:
+    """Expanded lifecycle view for one item-detail media-entry row."""
+
+    owner_kind: str
+    owner_id: str | None = None
+    active_roles: tuple[str, ...] = ()
+    source_key: str | None = None
+    source_attachment_id: str | None = None
+    provider_family: str = "none"
+    locator_source: str = "locator"
+    match_basis: str | None = None
+    restricted_fallback: bool = False
+    refresh_state: str | None = None
+    expires_at: str | None = None
+    last_refreshed_at: str | None = None
+    last_refresh_error: str | None = None
+    effective_refresh_state: str = "unknown"
+    ready_for_direct: bool = False
+    ready_for_hls: bool = False
+    ready_for_playback: bool = False
+
+
+@dataclass(frozen=True)
 class MediaEntryDetailRecord:
     """VFS-facing media-entry projection derived from the current persisted playback attachment layer."""
 
@@ -1750,6 +2956,7 @@ class MediaEntryDetailRecord:
     local_path: str | None = None
     download_url: str | None = None
     unrestricted_url: str | None = None
+    source_attachment_id: str | None = None
     provider: str | None = None
     provider_download_id: str | None = None
     provider_file_id: str | None = None
@@ -1764,6 +2971,7 @@ class MediaEntryDetailRecord:
     active_for_direct: bool = False
     active_for_hls: bool = False
     is_active_stream: bool = False
+    lifecycle: MediaEntryLifecycleRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -1821,6 +3029,779 @@ def _normalize_requested_media_type(media_type: str | None) -> str | None:
     if normalized in {"movie", "show", "season", "episode"}:
         return normalized
     return None
+
+
+_REQUEST_DISCOVERY_SORT_CHOICES: dict[str, tuple[str, str, str]] = {
+    "popular": ("Popular", "popularity.desc", "popularity.desc"),
+    "newest": ("Newest", "primary_release_date.desc", "first_air_date.desc"),
+    "oldest": ("Oldest", "primary_release_date.asc", "first_air_date.asc"),
+    "rating": ("Top rated", "vote_average.desc", "vote_average.desc"),
+}
+
+
+def _normalize_request_discovery_sort(sort: str | None) -> str:
+    if sort is None:
+        return "popular"
+    normalized = sort.strip().casefold()
+    if normalized in _REQUEST_DISCOVERY_SORT_CHOICES:
+        return normalized
+    return "popular"
+
+
+def _tmdb_discovery_sort(media_type: str, *, sort: str) -> str:
+    _label, movie_sort, show_sort = _REQUEST_DISCOVERY_SORT_CHOICES[sort]
+    return movie_sort if media_type == "movie" else show_sort
+
+
+def _normalize_discovery_filter_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _request_discovery_editorial_weight(family: str) -> float:
+    if family == "trending":
+        return 1.4
+    if family == "anticipated":
+        return 1.15
+    if family in {"newly-released", "returning"}:
+        return 1.1
+    return 0.8
+
+
+def _request_discovery_release_window_weight(window: str) -> float:
+    if window == "theatrical":
+        return 1.2
+    if window == "digital":
+        return 1.1
+    if window == "returning":
+        return 1.05
+    if window == "limited-series":
+        return 1.0
+    return 0.0
+
+
+def _request_discovery_sort_key(
+    hit: TmdbSearchResult,
+    *,
+    sort: str,
+    blend_boost: float = 0.0,
+) -> tuple[float | int | str, ...]:
+    if sort == "oldest":
+        return (
+            hit.year if hit.year is not None else 9999,
+            -blend_boost,
+            -hit.popularity,
+            hit.title.casefold(),
+            hit.tmdb_id,
+        )
+    if sort == "newest":
+        return (
+            -(hit.year or 0) - blend_boost,
+            -hit.popularity,
+            hit.title.casefold(),
+            hit.tmdb_id,
+        )
+    if sort == "rating":
+        return (
+            -(hit.vote_average + (blend_boost * 0.35)),
+            -(hit.vote_count + int(blend_boost * 100)),
+            -(hit.popularity + (blend_boost * 8.0)),
+            hit.title.casefold(),
+            hit.tmdb_id,
+        )
+
+    blended_score = (
+        hit.popularity
+        + (hit.vote_average * 1.75)
+        + min(hit.vote_count / 750.0, 12.0)
+        + ((hit.year or 0) / 1000.0)
+        + (blend_boost * 20.0)
+    )
+    return (
+        -blended_score,
+        -(hit.year or 0),
+        hit.title.casefold(),
+        hit.tmdb_id,
+    )
+
+
+def _sort_request_discovery_hits(
+    hits: list[TmdbSearchResult],
+    *,
+    sort: str,
+    blend_boosts: dict[str, float] | None = None,
+    local_boosts: dict[str, float] | None = None,
+) -> list[TmdbSearchResult]:
+    boosts = blend_boosts or {}
+    local = local_boosts or {}
+    return sorted(
+        hits,
+        key=lambda hit: _request_discovery_sort_key(
+            hit,
+            sort=sort,
+            blend_boost=boosts.get(f"{hit.media_type}:{hit.tmdb_id}", 0.0)
+            + local.get(_request_search_local_signal_key(hit.media_type, hit.tmdb_id), 0.0),
+        ),
+    )
+
+
+def _request_discovery_filter_selected(
+    selected_value: str | None,
+    *,
+    value: str,
+    label: str,
+) -> bool:
+    if selected_value is None:
+        return False
+    normalized_selected = selected_value.strip().casefold()
+    return normalized_selected in {value.strip().casefold(), label.strip().casefold()}
+
+
+def _is_studio_like_name(name: str) -> bool:
+    lowered = name.casefold()
+    return any(token in lowered for token in _REQUEST_DISCOVERY_STUDIO_HINTS)
+
+
+def _append_sample_title(sample_titles: tuple[str, ...], title: str) -> tuple[str, ...]:
+    if title in sample_titles:
+        return sample_titles
+    if len(sample_titles) >= 3:
+        return sample_titles
+    return (*sample_titles, title)
+
+
+def _build_request_projection_preview_signals(entry: dict[str, object]) -> tuple[str, ...]:
+    """Return concise grouped-pivot continuation signals for one projection item."""
+
+    labels: list[str] = []
+    requested_match_count = int(entry.get("requested_match_count", 0))
+    active_match_count = int(entry.get("active_match_count", 0))
+    completed_match_count = int(entry.get("completed_match_count", 0))
+    local_match_count = int(entry.get("local_match_count", 0))
+
+    if requested_match_count > 0:
+        labels.append(
+            "1 requested title"
+            if requested_match_count == 1
+            else f"{requested_match_count} requested titles"
+        )
+    if active_match_count > 0:
+        labels.append(
+            "1 resume path"
+            if active_match_count == 1
+            else f"{active_match_count} resume paths"
+        )
+    elif completed_match_count > 0:
+        labels.append(
+            "1 completed title"
+            if completed_match_count == 1
+            else f"{completed_match_count} completed titles"
+        )
+    if local_match_count > 0 and not labels:
+        labels.append(
+            "1 local title"
+            if local_match_count == 1
+            else f"{local_match_count} local titles"
+        )
+
+    return tuple(labels[:3])
+
+
+def _dominant_projection_media_type(media_counts: Counter[str]) -> str | None:
+    """Return the most common media type represented in one projection bucket."""
+
+    if not media_counts:
+        return None
+    return media_counts.most_common(1)[0][0]
+
+
+def _request_projection_continuation_score(entry: dict[str, object]) -> tuple[int, int, int, int, int]:
+    """Return one deterministic continuation score for grouped-pivot ordering."""
+
+    return (
+        int(entry.get("active_match_count", 0)),
+        int(entry.get("requested_match_count", 0)),
+        int(entry.get("completed_match_count", 0)),
+        int(entry.get("local_match_count", 0)),
+        int(entry.get("match_count", 0)),
+    )
+
+
+async def _build_request_discovery_blend_boosts(
+    service: MediaService,
+    client: TmdbMetadataClient,
+    *,
+    selected_media_types: list[str],
+) -> dict[str, float]:
+    boosts: dict[str, float] = {}
+
+    for family in _REQUEST_EDITORIAL_DISCOVERY_FAMILIES:
+        if family["media_type"] not in selected_media_types:
+            continue
+        for page_number in range(1, _REQUEST_DISCOVERY_EDITORIAL_BLEND_PAGE_LIMIT + 1):
+            page_result = await service._fetch_request_editorial_page(
+                client,
+                media_type=family["media_type"],
+                family=family["family"],
+                page=page_number,
+            )
+            if not page_result.results:
+                break
+            weight = _request_discovery_editorial_weight(family["family"])
+            for index, hit in enumerate(page_result.results):
+                key = f"{hit.media_type}:{hit.tmdb_id}"
+                boost = max(0.15, weight - (index * 0.03))
+                boosts[key] = max(boosts.get(key, 0.0), boost)
+            if page_number >= page_result.total_pages:
+                break
+
+    for window in _REQUEST_RELEASE_WINDOWS:
+        if window["media_type"] not in selected_media_types:
+            continue
+        for page_number in range(1, _REQUEST_DISCOVERY_RELEASE_WINDOW_BLEND_PAGE_LIMIT + 1):
+            page_result = await service._fetch_request_release_window_page(
+                client,
+                media_type=window["media_type"],
+                window=window["window"],
+                page=page_number,
+            )
+            if not page_result.results:
+                break
+            weight = _request_discovery_release_window_weight(window["window"])
+            for index, hit in enumerate(page_result.results):
+                key = f"{hit.media_type}:{hit.tmdb_id}"
+                boost = max(0.1, weight - (index * 0.025))
+                boosts[key] = max(boosts.get(key, 0.0), boost)
+            if page_number >= page_result.total_pages:
+                break
+
+    return boosts
+
+
+async def _build_request_discovery_facets(
+    hits: list[TmdbSearchResult],
+    *,
+    client: TmdbMetadataClient | None,
+    selected_genre: str | None,
+    selected_release_year: int | None,
+    selected_language: str | None,
+    selected_company: str | None,
+    selected_network: str | None,
+    selected_sort: str,
+) -> RequestDiscoveryFacetSetRecord:
+    genre_counts: Counter[str] = Counter()
+    year_counts: Counter[int] = Counter()
+    language_counts: Counter[str] = Counter()
+    company_counts: Counter[tuple[str, str]] = Counter()
+    network_counts: Counter[tuple[str, str]] = Counter()
+    for hit in hits:
+        for genre_name in hit.genre_names:
+            if genre_name.strip():
+                genre_counts[genre_name.strip()] += 1
+        if hit.year is not None:
+            year_counts[int(hit.year)] += 1
+        if hit.original_language:
+            language_counts[hit.original_language] += 1
+
+    if client is not None and hits:
+        semaphore = asyncio.Semaphore(_REQUEST_DISCOVERY_FACET_DETAIL_CONCURRENCY)
+        detail_hits = hits[:_REQUEST_DISCOVERY_FACET_DETAIL_WINDOW]
+
+        async def load_detail(
+            hit: TmdbSearchResult,
+        ) -> MovieMetadata | ShowMetadata | None:
+            async with semaphore:
+                if hit.media_type == "movie":
+                    return await client.get_movie(hit.tmdb_id)
+                return await client.get_show(hit.tmdb_id)
+
+        details = await asyncio.gather(
+            *(load_detail(hit) for hit in detail_hits),
+            return_exceptions=True,
+        )
+
+        for detail in details:
+            if isinstance(detail, Exception) or detail is None:
+                continue
+
+            for company in detail.companies:
+                identifier = company.get("id", "").strip()
+                label = company.get("name", "").strip()
+                if identifier and label:
+                    company_counts[(identifier, label)] += 1
+
+            if isinstance(detail, ShowMetadata):
+                for network in detail.networks:
+                    identifier = network.get("id", "").strip()
+                    label = network.get("name", "").strip()
+                    if identifier and label:
+                        network_counts[(identifier, label)] += 1
+
+    genres = tuple(
+        RequestDiscoveryFacetBucketRecord(
+            value=genre_name,
+            label=genre_name,
+            count=count,
+            selected=(selected_genre == genre_name),
+        )
+        for genre_name, count in sorted(
+            genre_counts.items(),
+            key=lambda item: (-item[1], item[0].casefold()),
+        )[:12]
+    )
+    release_years = tuple(
+        RequestDiscoveryFacetBucketRecord(
+            value=str(year),
+            label=str(year),
+            count=count,
+            selected=(selected_release_year == year),
+        )
+        for year, count in sorted(
+            year_counts.items(),
+            key=lambda item: (-item[1], -item[0]),
+        )[:12]
+    )
+    languages = tuple(
+        RequestDiscoveryFacetBucketRecord(
+            value=language,
+            label=language.upper(),
+            count=count,
+            selected=(selected_language == language),
+        )
+        for language, count in sorted(
+            language_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:12]
+    )
+    companies = tuple(
+        RequestDiscoveryFacetBucketRecord(
+            value=identifier,
+            label=label,
+            count=count,
+            selected=_request_discovery_filter_selected(
+                selected_company,
+                value=identifier,
+                label=label,
+            ),
+        )
+        for (identifier, label), count in sorted(
+            company_counts.items(),
+            key=lambda item: (-item[1], item[0][1].casefold(), item[0][0]),
+        )[:12]
+    )
+    networks = tuple(
+        RequestDiscoveryFacetBucketRecord(
+            value=identifier,
+            label=label,
+            count=count,
+            selected=_request_discovery_filter_selected(
+                selected_network,
+                value=identifier,
+                label=label,
+            ),
+        )
+        for (identifier, label), count in sorted(
+            network_counts.items(),
+            key=lambda item: (-item[1], item[0][1].casefold(), item[0][0]),
+        )[:12]
+    )
+    sorts = tuple(
+        RequestDiscoverySortOptionRecord(
+            value=value,
+            label=label,
+            selected=(selected_sort == value),
+        )
+        for value, (label, _movie_sort, _show_sort) in _REQUEST_DISCOVERY_SORT_CHOICES.items()
+    )
+    return RequestDiscoveryFacetSetRecord(
+        genres=genres,
+        release_years=release_years,
+        languages=languages,
+        companies=companies,
+        networks=networks,
+        sorts=sorts,
+    )
+
+
+def _build_request_discovery_projection_groups(
+    items: list[RequestSearchCandidateRecord],
+    profiles: list[TmdbDiscoveryProfile],
+    *,
+    local_signals: dict[str, RequestSearchLocalSignalRecord] | None = None,
+    limit_per_group: int,
+) -> list[RequestDiscoveryProjectionGroupRecord]:
+    signal_map = local_signals or {}
+    group_buckets: dict[str, dict[str, dict[str, object]]] = {
+        "people": {},
+        "studios": {},
+        "companies": {},
+        "collections": {},
+        "franchises": {},
+    }
+
+    def add_projection(
+        group_id: str,
+        *,
+        projection_id: str,
+        label: str,
+        projection_type: str,
+        action_kind: str,
+        action_value: str,
+        media_type: str,
+        sample_title: str,
+        image_path: str | None,
+        is_local: bool,
+        is_requested: bool,
+        is_active: bool,
+        is_completed: bool,
+    ) -> None:
+        bucket = group_buckets[group_id]
+        entry = bucket.get(projection_id)
+        if entry is None:
+            entry = {
+                "projection_id": projection_id,
+                "label": label,
+                "projection_type": projection_type,
+                "action_kind": action_kind,
+                "action_value": action_value,
+                "image_path": image_path,
+                "match_count": 0,
+                "sample_titles": (),
+                "media_counts": Counter(),
+                "local_match_count": 0,
+                "requested_match_count": 0,
+                "active_match_count": 0,
+                "completed_match_count": 0,
+            }
+            bucket[projection_id] = entry
+
+        entry["match_count"] = int(entry["match_count"]) + 1
+        if entry["image_path"] is None and image_path is not None:
+            entry["image_path"] = image_path
+        entry["sample_titles"] = _append_sample_title(
+            cast(tuple[str, ...], entry["sample_titles"]),
+            sample_title,
+        )
+        cast(Counter[str], entry["media_counts"])[media_type] += 1
+        if is_local:
+            entry["local_match_count"] = int(entry["local_match_count"]) + 1
+        if is_requested:
+            entry["requested_match_count"] = int(entry["requested_match_count"]) + 1
+        if is_active:
+            entry["active_match_count"] = int(entry["active_match_count"]) + 1
+        if is_completed:
+            entry["completed_match_count"] = int(entry["completed_match_count"]) + 1
+
+    for item, profile in zip(items, profiles, strict=False):
+        signal = (
+            signal_map.get(_request_search_local_signal_key(item.media_type, item.tmdb_id))
+            if item.tmdb_id
+            else None
+        )
+        signal_is_local = signal is not None and (
+            signal.item is not None
+            or signal.request_count > 0
+            or signal.launch_count > 0
+            or signal.view_count > 0
+            or signal.session_count > 0
+            or signal.completed_session_count > 0
+            or signal.resume_position_seconds is not None
+        )
+        signal_is_requested = signal is not None and signal.request_count > 0
+        signal_is_active = signal is not None and (
+            signal.active_session_count > 0 or signal.resume_position_seconds is not None
+        )
+        signal_is_completed = signal is not None and (
+            signal.completed_session_count > 0 and not signal_is_active
+        )
+        if not item.tmdb_id:
+            continue
+
+        for person in profile.people[:4]:
+            add_projection(
+                "people",
+                projection_id=f"person:{person.tmdb_id}",
+                label=person.name,
+                projection_type="person",
+                action_kind="query",
+                action_value=person.name,
+                media_type=item.media_type,
+                sample_title=item.title,
+                image_path=person.image_path,
+                is_local=signal_is_local,
+                is_requested=signal_is_requested,
+                is_active=signal_is_active,
+                is_completed=signal_is_completed,
+            )
+
+        for company in profile.companies[:4]:
+            target_group = "studios" if _is_studio_like_name(company.name) else "companies"
+            projection_type = "studio" if target_group == "studios" else "company"
+            add_projection(
+                target_group,
+                projection_id=f"company:{company.tmdb_id}",
+                label=company.name,
+                projection_type=projection_type,
+                action_kind="company",
+                action_value=company.tmdb_id,
+                media_type=item.media_type,
+                sample_title=item.title,
+                image_path=company.image_path,
+                is_local=signal_is_local,
+                is_requested=signal_is_requested,
+                is_active=signal_is_active,
+                is_completed=signal_is_completed,
+            )
+
+        if profile.collection is not None:
+            collection = profile.collection
+            add_projection(
+                "collections",
+                projection_id=f"collection:{collection.tmdb_id}",
+                label=collection.name,
+                projection_type="collection",
+                action_kind="query",
+                action_value=collection.name,
+                media_type=item.media_type,
+                sample_title=item.title,
+                image_path=collection.image_path,
+                is_local=signal_is_local,
+                is_requested=signal_is_requested,
+                is_active=signal_is_active,
+                is_completed=signal_is_completed,
+            )
+            franchise_label = collection.name
+            if franchise_label.casefold().endswith(" collection"):
+                franchise_label = franchise_label[: -len(" collection")].strip() or collection.name
+            add_projection(
+                "franchises",
+                projection_id=f"franchise:{collection.tmdb_id}",
+                label=franchise_label,
+                projection_type="franchise",
+                action_kind="query",
+                action_value=franchise_label,
+                media_type=item.media_type,
+                sample_title=item.title,
+                image_path=collection.image_path,
+                is_local=signal_is_local,
+                is_requested=signal_is_requested,
+                is_active=signal_is_active,
+                is_completed=signal_is_completed,
+            )
+
+    group_definitions = (
+        (
+            "people",
+            "People around this window",
+            "Pivot through cast, creators, and directors tied to the current discovery window.",
+            "person",
+        ),
+        (
+            "studios",
+            "Studios behind these titles",
+            "Narrow the current window with studio-backed production signatures.",
+            "studio",
+        ),
+        (
+            "companies",
+            "Companies in this window",
+            "Follow production-company clusters without dropping out of the current discover flow.",
+            "company",
+        ),
+        (
+            "collections",
+            "Collections in this window",
+            "Continue exact multi-title collections already present in the current window.",
+            "collection",
+        ),
+        (
+            "franchises",
+            "Franchises to continue",
+            "Jump from the current window into broader recurring worlds and sequel chains.",
+            "franchise",
+        ),
+    )
+
+    groups: list[RequestDiscoveryProjectionGroupRecord] = []
+    for group_id, title, description, projection_type in group_definitions:
+        bucket = group_buckets[group_id]
+        if not bucket:
+            continue
+        ordered_items = sorted(
+            bucket.values(),
+            key=lambda entry: (
+                -_request_projection_continuation_score(entry)[0],
+                -_request_projection_continuation_score(entry)[1],
+                -_request_projection_continuation_score(entry)[2],
+                -_request_projection_continuation_score(entry)[3],
+                -_request_projection_continuation_score(entry)[4],
+                str(entry["label"]).casefold(),
+                str(entry["projection_id"]),
+            ),
+        )[:limit_per_group]
+        groups.append(
+            RequestDiscoveryProjectionGroupRecord(
+                group_id=group_id,
+                title=title,
+                description=description,
+                projection_type=projection_type,
+                items=[
+                    RequestDiscoveryProjectionItemRecord(
+                        projection_id=cast(str, entry["projection_id"]),
+                        label=cast(str, entry["label"]),
+                        projection_type=cast(str, entry["projection_type"]),
+                        match_count=int(entry["match_count"]),
+                        image_path=cast(str | None, entry["image_path"]),
+                        action=RequestDiscoveryProjectionActionRecord(
+                            kind=cast(str, entry["action_kind"]),
+                            value=cast(str, entry["action_value"]),
+                            media_type=_dominant_projection_media_type(
+                                cast(Counter[str], entry["media_counts"]),
+                            ),
+                        ),
+                        sample_titles=cast(tuple[str, ...], entry["sample_titles"]),
+                        local_match_count=int(entry["local_match_count"]),
+                        requested_match_count=int(entry["requested_match_count"]),
+                        active_match_count=int(entry["active_match_count"]),
+                        completed_match_count=int(entry["completed_match_count"]),
+                        preview_signals=_build_request_projection_preview_signals(entry),
+                    )
+                    for entry in ordered_items
+                ],
+            )
+        )
+
+    return groups
+
+
+def _request_search_local_signal_key(media_type: str, tmdb_id: str) -> str:
+    """Return the normalized lookup key used for local search/discovery signals."""
+
+    return f"{media_type}:{tmdb_id}"
+
+
+def _build_request_search_ranking_signals(
+    signal: RequestSearchLocalSignalRecord,
+) -> tuple[str, ...]:
+    """Return concise local-demand reasons for one surfaced request candidate."""
+
+    labels: list[str] = []
+    if signal.request_count > 0:
+        labels.append(
+            "Requested locally"
+            if signal.request_count == 1
+            else f"Requested {signal.request_count}x"
+        )
+
+    if signal.active_session_count > 0 or signal.resume_position_seconds is not None:
+        labels.append("Resume activity")
+    elif signal.completed_session_count > 0:
+        labels.append("Completed locally")
+    elif signal.session_count > 0 or signal.launch_count > 0 or signal.view_count > 0:
+        labels.append("Watched locally")
+
+    if signal.item is not None and not labels:
+        labels.append("In library")
+
+    return tuple(labels[:3])
+
+
+def _build_request_search_local_boost(signal: RequestSearchLocalSignalRecord) -> float:
+    """Return one small additive local-demand boost for ranking request candidates."""
+
+    boost = 0.0
+    if signal.item is not None:
+        boost += 0.06
+    boost += min(signal.request_count, 5) * 0.04
+    boost += min(signal.launch_count, 4) * 0.02
+    boost += min(signal.view_count, 6) * 0.01
+    boost += min(signal.session_count, 4) * 0.015
+    if signal.active_session_count > 0 or signal.resume_position_seconds is not None:
+        boost += 0.09
+    elif signal.completed_session_count > 0:
+        boost += 0.04
+    return round(boost, 3)
+
+
+def _request_search_score(
+    hit: TmdbSearchResult,
+    *,
+    query: str,
+    local_boost: float = 0.0,
+) -> tuple[int, float, float, int]:
+    """Return a deterministic ranking tuple for one request-search hit."""
+
+    lowered_query = query.casefold()
+    title = hit.title.casefold()
+    if title == lowered_query:
+        query_score = 500
+    elif title.startswith(lowered_query):
+        query_score = 350
+    elif lowered_query in title:
+        query_score = 200
+    else:
+        query_score = 100
+    return (query_score, local_boost, hit.popularity, hit.year or 0)
+
+
+def _sort_request_search_hits(
+    hits: list[TmdbSearchResult],
+    *,
+    query: str,
+    local_boosts: dict[str, float] | None = None,
+) -> list[TmdbSearchResult]:
+    """Sort request-search hits with stable relevance ordering."""
+
+    boosts = local_boosts or {}
+    return sorted(
+        hits,
+        key=lambda hit: (
+            -_request_search_score(
+                hit,
+                query=query,
+                local_boost=boosts.get(_request_search_local_signal_key(hit.media_type, hit.tmdb_id), 0.0),
+            )[0],
+            -_request_search_score(
+                hit,
+                query=query,
+                local_boost=boosts.get(_request_search_local_signal_key(hit.media_type, hit.tmdb_id), 0.0),
+            )[1],
+            -_request_search_score(
+                hit,
+                query=query,
+                local_boost=boosts.get(_request_search_local_signal_key(hit.media_type, hit.tmdb_id), 0.0),
+            )[2],
+            -_request_search_score(
+                hit,
+                query=query,
+                local_boost=boosts.get(_request_search_local_signal_key(hit.media_type, hit.tmdb_id), 0.0),
+            )[3],
+            hit.title.casefold(),
+            hit.tmdb_id,
+        ),
+    )
+
+
+def _sort_request_window_hits(
+    hits: list[TmdbSearchResult],
+    *,
+    local_boosts: dict[str, float] | None = None,
+) -> list[TmdbSearchResult]:
+    """Sort release and editorial windows with local-demand-aware ordering."""
+
+    boosts = local_boosts or {}
+    return sorted(
+        hits,
+        key=lambda hit: (
+            -boosts.get(_request_search_local_signal_key(hit.media_type, hit.tmdb_id), 0.0),
+            -hit.popularity,
+            -(hit.year or 0),
+            hit.title.casefold(),
+            hit.tmdb_id,
+        ),
+    )
 
 
 def _merge_request_attributes_for_external_ref(
@@ -2147,6 +4128,8 @@ _candidate_matches_partial_scope = _media_stream_candidates.candidate_matches_pa
 _candidate_parsed_seasons = _media_stream_candidates.candidate_parsed_seasons
 _dedupe_title_aliases = _media_stream_candidates._dedupe_title_aliases
 _extract_title_aliases = _media_stream_candidates.extract_title_aliases
+attach_parse_validation = _media_stream_candidates.attach_parse_validation
+parse_stage_rejection_reason = _media_stream_candidates.parse_stage_rejection_reason
 rank_persisted_streams_for_item = _media_stream_candidates.rank_persisted_streams_for_item
 select_stream_candidate = _media_stream_candidates.select_stream_candidate
 parse_stream_candidate_title = _media_stream_candidates.parse_stream_candidate_title
@@ -3376,8 +5359,10 @@ class MediaService:
             for raw_title in normalized_titles:
                 parsed_candidate = parse_stream_candidate_title(raw_title, infohash=infohash)
                 validation = validate_parsed_stream_candidate(item, parsed_candidate)
-                if not validation.ok:
-                    continue
+                parsed_payload = attach_parse_validation(
+                    parsed_candidate.parsed_title,
+                    validation,
+                )
                 if requested_seasons is not None and not _candidate_matches_partial_scope(
                     _candidate_parsed_seasons(parsed_candidate.parsed_title),
                     requested_seasons,
@@ -3391,7 +5376,7 @@ class MediaService:
                         media_item_id=item_id,
                         infohash=parsed_candidate.infohash,
                         raw_title=parsed_candidate.raw_title,
-                        parsed_title=parsed_candidate.parsed_title,
+                        parsed_title=parsed_payload,
                         rank=0,
                         lev_ratio=None,
                         resolution=parsed_candidate.resolution,
@@ -3399,9 +5384,11 @@ class MediaService:
                     session.add(existing)
                     existing_by_key[stream_key] = existing
                 else:
-                    existing.parsed_title = parsed_candidate.parsed_title
+                    existing.parsed_title = parsed_payload
                     existing.resolution = parsed_candidate.resolution
 
+                if not validation.ok:
+                    continue
                 persisted.append(existing)
 
             await session.commit()
@@ -3767,6 +5754,156 @@ class MediaService:
                 has_scrape_candidates=bool(item.scrape_candidates),
             )
 
+    @staticmethod
+    def _build_workflow_checkpoint_record(
+        checkpoint: ItemWorkflowCheckpointORM,
+    ) -> WorkflowCheckpointRecord:
+        """Return one detached workflow checkpoint record safe for worker resumption."""
+
+        return WorkflowCheckpointRecord(
+            workflow_name=checkpoint.workflow_name,
+            stage_name=checkpoint.stage_name,
+            resume_stage=WorkflowResumeStage(checkpoint.resume_stage),
+            status=WorkflowCheckpointStatus(checkpoint.status),
+            item_request_id=checkpoint.item_request_id,
+            selected_stream_id=checkpoint.selected_stream_id,
+            provider=checkpoint.provider,
+            provider_download_id=checkpoint.provider_download_id,
+            checkpoint_payload=dict(cast(dict[str, object], checkpoint.checkpoint_payload or {})),
+            compensation_payload=dict(
+                cast(dict[str, object], checkpoint.compensation_payload or {})
+            ),
+            last_error=checkpoint.last_error,
+            updated_at=_serialize_datetime(checkpoint.updated_at),
+        )
+
+    async def get_workflow_checkpoint(
+        self,
+        *,
+        media_item_id: str,
+        workflow_name: str = "item_pipeline",
+    ) -> WorkflowCheckpointRecord | None:
+        """Return the current persisted workflow checkpoint for one media item."""
+
+        async with self._db.session() as session:
+            checkpoint = (
+                await session.execute(
+                    select(ItemWorkflowCheckpointORM).where(
+                        ItemWorkflowCheckpointORM.item_id == media_item_id,
+                        ItemWorkflowCheckpointORM.workflow_name == workflow_name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if checkpoint is None:
+                return None
+            return self._build_workflow_checkpoint_record(checkpoint)
+
+    async def list_workflow_drill_candidates(
+        self,
+        *,
+        workflow_name: str = "item_pipeline",
+        limit: int = 100,
+    ) -> list[WorkflowDrillCandidateRecord]:
+        """Return recoverable workflow checkpoints with their current item recovery posture."""
+
+        bounded_limit = max(1, min(limit, 500))
+        async with self._db.session() as session:
+            rows = (
+                await session.execute(
+                    select(ItemWorkflowCheckpointORM, MediaItemORM)
+                    .join(MediaItemORM, MediaItemORM.id == ItemWorkflowCheckpointORM.item_id)
+                    .options(selectinload(MediaItemORM.scrape_candidates))
+                    .where(
+                        ItemWorkflowCheckpointORM.workflow_name == workflow_name,
+                        ItemWorkflowCheckpointORM.status.in_(
+                            (
+                                WorkflowCheckpointStatus.PENDING.value,
+                                WorkflowCheckpointStatus.RUNNING.value,
+                                WorkflowCheckpointStatus.FAILED.value,
+                            )
+                        ),
+                    )
+                    .order_by(ItemWorkflowCheckpointORM.updated_at.desc())
+                    .limit(bounded_limit)
+                )
+            ).all()
+
+        candidates: list[WorkflowDrillCandidateRecord] = []
+        for checkpoint, item in rows:
+            item_state = ItemState(item.state)
+            candidates.append(
+                WorkflowDrillCandidateRecord(
+                    media_item_id=item.id,
+                    tenant_id=item.tenant_id,
+                    item_state=item_state,
+                    recovery_plan=_build_recovery_plan_record(
+                        state=item_state,
+                        next_retry_at=item.next_retry_at,
+                        recovery_attempt_count=item.recovery_attempt_count or 0,
+                        has_scrape_candidates=bool(item.scrape_candidates),
+                    ),
+                    checkpoint=self._build_workflow_checkpoint_record(checkpoint),
+                )
+            )
+        return candidates
+
+    async def persist_workflow_checkpoint(
+        self,
+        *,
+        media_item_id: str,
+        stage_name: str,
+        resume_stage: WorkflowResumeStage,
+        status: WorkflowCheckpointStatus,
+        workflow_name: str = "item_pipeline",
+        item_request_id: str | None = None,
+        selected_stream_id: str | None = None,
+        provider: str | None = None,
+        provider_download_id: str | None = None,
+        checkpoint_payload: dict[str, object] | None = None,
+        compensation_payload: dict[str, object] | None = None,
+        last_error: str | None = None,
+    ) -> WorkflowCheckpointRecord:
+        """Upsert one durable item-workflow checkpoint for resumable stage execution."""
+
+        async with self._db.session() as session:
+            item = (
+                await session.execute(select(MediaItemORM).where(MediaItemORM.id == media_item_id))
+            ).scalar_one_or_none()
+            if item is None:
+                raise ValueError(f"unknown media_item_id={media_item_id}")
+
+            checkpoint = (
+                await session.execute(
+                    select(ItemWorkflowCheckpointORM).where(
+                        ItemWorkflowCheckpointORM.item_id == media_item_id,
+                        ItemWorkflowCheckpointORM.workflow_name == workflow_name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if checkpoint is None:
+                checkpoint = ItemWorkflowCheckpointORM(
+                    item_id=media_item_id,
+                    workflow_name=workflow_name,
+                    stage_name=stage_name,
+                    resume_stage=resume_stage.value,
+                    status=status.value,
+                )
+                session.add(checkpoint)
+
+            checkpoint.stage_name = stage_name
+            checkpoint.resume_stage = resume_stage.value
+            checkpoint.status = status.value
+            checkpoint.item_request_id = item_request_id
+            checkpoint.selected_stream_id = selected_stream_id
+            checkpoint.provider = provider
+            checkpoint.provider_download_id = provider_download_id
+            checkpoint.checkpoint_payload = dict(checkpoint_payload or {})
+            checkpoint.compensation_payload = dict(compensation_payload or {})
+            checkpoint.last_error = last_error
+
+            await session.commit()
+            return self._build_workflow_checkpoint_record(checkpoint)
+
     async def get_stats_snapshot(self) -> MediaStatsSnapshot:
         """Return aggregated statistics for dashboard compatibility routes."""
 
@@ -3885,6 +6022,7 @@ class MediaService:
         search: str | None = None,
         extended: bool = False,
         tenant_id: str | None = None,
+        allowed_item_ids: set[str] | None = None,
     ) -> MediaItemsPage:
         """Return paginated item summaries for current library compatibility routes."""
 
@@ -3905,11 +6043,12 @@ class MediaService:
         filtered = [
             item
             for item in items
-            if _matches_item_type(item, item_types)
+            if (allowed_item_ids is None or item.id in allowed_item_ids)
+            and _matches_item_type(item, item_types)
             and _matches_state(item, states)
             and _matches_search(item, search)
         ]
-        ordered = _sort_items(filtered, sort)
+        ordered = _sort_items(filtered, sort, search=search)
         total_items = len(ordered)
         total_pages = max(1, (total_items + bounded_limit - 1) // bounded_limit)
         start = (bounded_page - 1) * bounded_limit
@@ -3924,6 +6063,1970 @@ class MediaService:
             limit=bounded_limit,
             total_items=total_items,
             total_pages=total_pages,
+        )
+
+    async def search_item_details(
+        self,
+        *,
+        limit: int = 24,
+        offset: int = 0,
+        states: list[str] | None = None,
+        query: str | None = None,
+        provider: str | None = None,
+        attachment_state: str | None = None,
+        stream: str | None = None,
+        has_errors: bool = False,
+        sort: str | None = None,
+        tenant_id: str | None = None,
+    ) -> MediaItemsPage:
+        """Return paginated item-detail rows for the playback recovery control surface."""
+
+        bounded_limit = max(1, min(limit, 100))
+        bounded_offset = max(0, offset)
+        playback_service = PlaybackSourceService(self._db)
+
+        async with self._db.session() as session:
+            statement = (
+                select(MediaItemORM)
+                .options(
+                    *_projection_item_load_options(),
+                    selectinload(MediaItemORM.show).selectinload(ShowORM.seasons),
+                    selectinload(MediaItemORM.item_requests),
+                    selectinload(MediaItemORM.playback_attachments),
+                    selectinload(MediaItemORM.media_entries).selectinload(
+                        MediaEntryORM.source_attachment
+                    ),
+                    selectinload(MediaItemORM.subtitle_entries),
+                    selectinload(MediaItemORM.active_streams),
+                )
+                .order_by(MediaItemORM.created_at.desc())
+            )
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+            rows = ((await session.execute(statement)).scalars().all())
+
+        details = [
+            _build_detail_record(
+                item,
+                extended=True,
+                playback_service=playback_service,
+            )
+            for item in rows
+        ]
+        filtered = [
+            item
+            for item in details
+            if _matches_state(item, states)
+            and _matches_playback_recovery_text_query(item, query)
+            and _matches_playback_recovery_provider(item, provider)
+            and _matches_playback_recovery_attachment_state(item, attachment_state)
+            and _matches_playback_recovery_stream(item, stream)
+            and (not has_errors or _item_has_playback_errors(item))
+        ]
+        ordered = _sort_playback_recovery_items(filtered, sort)
+        total_items = len(ordered)
+        total_pages = max(1, (total_items + bounded_limit - 1) // bounded_limit)
+        paged_items = ordered[bounded_offset : bounded_offset + bounded_limit]
+
+        return MediaItemsPage(
+            success=True,
+            items=paged_items,
+            page=(bounded_offset // bounded_limit) + 1,
+            limit=bounded_limit,
+            total_items=total_items,
+            total_pages=total_pages,
+        )
+
+
+    async def _fetch_request_search_page(
+        self,
+        client: TmdbMetadataClient,
+        *,
+        query: str,
+        media_type: str,
+        page: int,
+    ) -> TmdbSearchPage:
+        if media_type == "movie":
+            return await client.search_movie_page(query, page=page)
+        return await client.search_show_page(query, page=page)
+
+    async def _collect_ranked_request_search_hits(
+        self,
+        *,
+        query: str,
+        media_type: str | None,
+        scan_target: int,
+    ) -> tuple[list[TmdbSearchResult], bool]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return ([], True)
+
+        normalized_media_type = _normalize_requested_media_type(media_type)
+        if normalized_media_type in {"season", "episode"}:
+            normalized_media_type = "show"
+
+        client = self._resolve_tmdb_client()
+        if client is None:
+            return ([], True)
+
+        selected_media_types = (
+            [normalized_media_type]
+            if normalized_media_type in {"movie", "show"}
+            else ["movie", "show"]
+        )
+        raw_hits: list[TmdbSearchResult] = []
+        window_complete = True
+        per_type_scan_target = max(20, scan_target // max(len(selected_media_types), 1))
+
+        for selected_media_type in selected_media_types:
+            page_number = 1
+            total_pages: int | None = None
+            media_hits: list[TmdbSearchResult] = []
+            while page_number <= _REQUEST_SEARCH_MAX_REMOTE_PAGES:
+                page_result = await self._fetch_request_search_page(
+                    client,
+                    query=normalized_query,
+                    media_type=selected_media_type,
+                    page=page_number,
+                )
+                total_pages = page_result.total_pages
+                media_hits.extend(page_result.results)
+                if page_number >= total_pages or not page_result.results:
+                    break
+                if len(media_hits) >= per_type_scan_target:
+                    window_complete = False
+                    break
+                page_number += 1
+
+            if total_pages is not None and page_number < total_pages:
+                window_complete = False
+            raw_hits.extend(media_hits)
+
+        if not raw_hits:
+            return ([], True)
+
+        deduped: dict[str, TmdbSearchResult] = {}
+        for hit in raw_hits:
+            external_ref = f"tmdb:{hit.tmdb_id}"
+            current = deduped.get(external_ref)
+            if current is None or _request_search_score(hit, query=normalized_query) > _request_search_score(
+                current, query=normalized_query
+            ):
+                deduped[external_ref] = hit
+
+        return (_sort_request_search_hits(list(deduped.values()), query=normalized_query), window_complete)
+
+    async def _build_request_search_local_signal_map(
+        self,
+        hits: list[TmdbSearchResult],
+        *,
+        tenant_id: str | None,
+    ) -> dict[str, RequestSearchLocalSignalRecord]:
+        """Return batched local-demand signals for the current TMDB hit window."""
+
+        if not hits or not hasattr(self._db, "session"):
+            return {}
+
+        external_refs = [f"tmdb:{hit.tmdb_id}" for hit in hits if hit.tmdb_id]
+        if not external_refs:
+            return {}
+
+        now = datetime.now(UTC)
+        active_cutoff = now - _CONSUMER_PLAYBACK_ACTIVE_WINDOW
+        playback_cutoff = now - _REQUEST_LOCAL_SIGNAL_PLAYBACK_WINDOW
+
+        async with self._db.session() as session:
+            item_query = select(MediaItemORM).where(MediaItemORM.external_ref.in_(external_refs))
+            if tenant_id is not None:
+                item_query = item_query.where(MediaItemORM.tenant_id == tenant_id)
+            item_rows = (
+                await session.execute(item_query.options(selectinload(MediaItemORM.media_entries)))
+            ).scalars().all()
+
+            latest_items_by_ref: dict[str, MediaItemORM] = {}
+            for row in item_rows:
+                current = latest_items_by_ref.get(row.external_ref)
+                if current is None or row.created_at > current.created_at:
+                    latest_items_by_ref[row.external_ref] = row
+
+            if not latest_items_by_ref:
+                return {}
+
+            selected_items = list(latest_items_by_ref.values())
+            item_ids = [row.id for row in selected_items]
+
+            request_rows = (
+                await session.execute(
+                    select(ItemRequestORM)
+                    .where(ItemRequestORM.media_item_id.in_(item_ids))
+                    .order_by(ItemRequestORM.last_requested_at.desc(), ItemRequestORM.created_at.desc())
+                )
+            ).scalars().all()
+            latest_requests: dict[str, ItemRequestORM] = {}
+            for row in request_rows:
+                latest_requests.setdefault(row.media_item_id, row)
+
+            event_query = select(ConsumerPlaybackActivityEventORM).where(
+                ConsumerPlaybackActivityEventORM.item_id.in_(item_ids),
+                ConsumerPlaybackActivityEventORM.occurred_at >= playback_cutoff,
+            )
+            if tenant_id is not None:
+                event_query = event_query.where(ConsumerPlaybackActivityEventORM.tenant_id == tenant_id)
+            events = (
+                await session.execute(
+                    event_query.order_by(
+                        ConsumerPlaybackActivityEventORM.occurred_at.desc(),
+                        ConsumerPlaybackActivityEventORM.created_at.desc(),
+                    )
+                )
+            ).scalars().all()
+
+        playback_rollups: dict[str, dict[str, object]] = {}
+        for event in events:
+            payload = cast(dict[str, object], event.payload or {})
+            session_key = _coerce_activity_payload_str(payload, "session_key")
+            position_seconds = _coerce_activity_payload_seconds(payload, "position_seconds")
+            completed = _coerce_activity_payload_bool(payload, "completed")
+            is_completed = bool(completed or event.activity_kind == "complete")
+
+            rollup = playback_rollups.setdefault(
+                event.item_id,
+                {
+                    "launch_count": 0,
+                    "view_count": 0,
+                    "session_keys": set(),
+                    "active_session_keys": set(),
+                    "completed_session_keys": set(),
+                    "resume_position_seconds": None,
+                    "progress_recorded_at": None,
+                },
+            )
+            if event.activity_kind == "launch":
+                rollup["launch_count"] = int(rollup["launch_count"]) + 1
+            elif event.activity_kind == "view":
+                rollup["view_count"] = int(rollup["view_count"]) + 1
+
+            if session_key is not None:
+                cast(set[str], rollup["session_keys"]).add(session_key)
+                if event.occurred_at >= active_cutoff and not is_completed:
+                    cast(set[str], rollup["active_session_keys"]).add(session_key)
+                if is_completed:
+                    cast(set[str], rollup["completed_session_keys"]).add(session_key)
+
+            progress_recorded_at = cast(datetime | None, rollup["progress_recorded_at"])
+            if (position_seconds is not None or is_completed) and (
+                progress_recorded_at is None
+                or event.occurred_at >= progress_recorded_at
+            ):
+                rollup["resume_position_seconds"] = None if is_completed else position_seconds
+                rollup["progress_recorded_at"] = event.occurred_at
+
+        signal_map: dict[str, RequestSearchLocalSignalRecord] = {}
+        for hit in hits:
+            external_ref = f"tmdb:{hit.tmdb_id}"
+            item_row = latest_items_by_ref.get(external_ref)
+            if item_row is None:
+                continue
+
+            latest_request = latest_requests.get(item_row.id)
+            playback = playback_rollups.get(item_row.id, {})
+            signal = RequestSearchLocalSignalRecord(
+                item=_build_media_item_record_from_orm(item_row),
+                request_source=(
+                    _normalize_request_source(latest_request.request_source)
+                    if latest_request is not None
+                    else None
+                ),
+                request_count=(int(latest_request.request_count) if latest_request is not None else 0),
+                first_requested_at=(
+                    _serialize_datetime(latest_request.first_requested_at)
+                    if latest_request is not None
+                    else None
+                ),
+                last_requested_at=(
+                    _serialize_datetime(latest_request.last_requested_at)
+                    if latest_request is not None
+                    else None
+                ),
+                requested_seasons=(
+                    _clone_requested_seasons(latest_request.requested_seasons)
+                    if latest_request is not None and latest_request.requested_seasons is not None
+                    else None
+                ),
+                requested_episodes=(
+                    _clone_requested_episodes(latest_request.requested_episodes)
+                    if latest_request is not None and latest_request.requested_episodes is not None
+                    else None
+                ),
+                launch_count=int(playback.get("launch_count", 0)),
+                view_count=int(playback.get("view_count", 0)),
+                session_count=len(cast(set[str], playback.get("session_keys", set()))),
+                active_session_count=len(cast(set[str], playback.get("active_session_keys", set()))),
+                completed_session_count=len(cast(set[str], playback.get("completed_session_keys", set()))),
+                resume_position_seconds=cast(int | None, playback.get("resume_position_seconds")),
+            )
+            signal = replace(
+                signal,
+                ranking_boost=_build_request_search_local_boost(signal),
+            )
+            signal = replace(
+                signal,
+                ranking_signals=_build_request_search_ranking_signals(signal),
+            )
+            signal_map[_request_search_local_signal_key(hit.media_type, hit.tmdb_id)] = signal
+
+        return signal_map
+
+
+    async def _build_request_search_candidate_record(
+        self,
+        hit: TmdbSearchResult,
+        *,
+        tenant_id: str | None,
+        local_signal: RequestSearchLocalSignalRecord | None = None,
+    ) -> RequestSearchCandidateRecord:
+        resolved_media_type = "movie" if hit.media_type == "movie" else "show"
+        external_ref = f"tmdb:{hit.tmdb_id}"
+        existing_item = (
+            local_signal.item
+            if local_signal is not None and local_signal.item is not None
+            else await self.get_item_by_external_id(
+                external_ref,
+                media_type=resolved_media_type,
+                tenant_id=tenant_id,
+            )
+        )
+        existing_attributes = existing_item.attributes if existing_item is not None else {}
+        workflow_checkpoint = (
+            await self.get_workflow_checkpoint(media_item_id=existing_item.id)
+            if existing_item is not None
+            else None
+        )
+        recovery_plan = (
+            await self.get_recovery_plan(media_item_id=existing_item.id)
+            if existing_item is not None
+            else None
+        )
+        return RequestSearchCandidateRecord(
+            external_ref=external_ref,
+            title=existing_item.title if existing_item is not None else hit.title,
+            media_type=resolved_media_type,
+            tmdb_id=hit.tmdb_id,
+            tvdb_id=(
+                str(existing_attributes.get("tvdb_id"))
+                if existing_attributes.get("tvdb_id") is not None
+                else None
+            ),
+            imdb_id=(
+                str(existing_attributes.get("imdb_id"))
+                if existing_attributes.get("imdb_id") is not None
+                else None
+            ),
+            poster_path=_normalize_poster_path(
+                hit.poster_path
+                if hit.poster_path is not None
+                else _extract_string(existing_attributes, "poster_path")
+            ),
+            overview=hit.overview,
+            year=hit.year,
+            is_requested=existing_item is not None,
+            requested_item_id=(existing_item.id if existing_item is not None else None),
+            requested_state=(existing_item.state.value if existing_item is not None else None),
+            requested_seasons=(
+                list(local_signal.requested_seasons)
+                if local_signal is not None and local_signal.requested_seasons is not None
+                else None
+            ),
+            requested_episodes=(
+                _clone_requested_episodes(local_signal.requested_episodes)
+                if local_signal is not None and local_signal.requested_episodes is not None
+                else None
+            ),
+            request_source=(local_signal.request_source if local_signal is not None else None),
+            request_count=(local_signal.request_count if local_signal is not None else 0),
+            first_requested_at=(local_signal.first_requested_at if local_signal is not None else None),
+            last_requested_at=(local_signal.last_requested_at if local_signal is not None else None),
+            lifecycle=_build_request_search_lifecycle_record(
+                checkpoint=workflow_checkpoint,
+                recovery_plan=recovery_plan,
+            ),
+            ranking_signals=(
+                local_signal.ranking_signals
+                if local_signal is not None
+                else ()
+            ),
+        )
+
+    async def _build_request_candidate_season_preview(
+        self,
+        *,
+        metadata: ShowMetadata | None,
+        requested_item_id: str | None,
+        requested_seasons: list[int] | None,
+        requested_episodes: dict[str, list[int]] | None,
+        tenant_id: str | None,
+    ) -> tuple[RequestCandidateSeasonSummaryRecord | None, tuple[RequestCandidateSeasonRecord, ...]]:
+        """Build one focused show-season preview for the dedicated requester detail route."""
+
+        if metadata is None or not metadata.seasons:
+            return None, ()
+
+        local_season_numbers: set[int] = set()
+        if requested_item_id is not None:
+            detail = await self.get_item_detail(
+                requested_item_id,
+                media_type="item",
+                extended=False,
+                tenant_id=tenant_id,
+            )
+            if detail is not None and detail.covered_season_numbers is not None:
+                local_season_numbers = {
+                    int(season_number)
+                    for season_number in detail.covered_season_numbers
+                    if isinstance(season_number, int) and season_number > 0
+                }
+
+        normalized_requested_seasons = {
+            int(season_number)
+            for season_number in (requested_seasons or [])
+            if isinstance(season_number, int) and season_number > 0
+        }
+        normalized_requested_episodes = {
+            str(season_key): sorted(
+                {
+                    int(episode_number)
+                    for episode_number in episode_numbers
+                    if int(episode_number) > 0
+                }
+            )
+            for season_key, episode_numbers in (requested_episodes or {}).items()
+        }
+
+        now_utc = datetime.now(UTC)
+        preview: list[RequestCandidateSeasonRecord] = []
+        next_air_date: datetime | None = None
+
+        for season_payload in metadata.seasons:
+            if not isinstance(season_payload, dict):
+                continue
+            season_number = _extract_int(cast(dict[str, object], season_payload), "season_number")
+            if season_number is None or season_number < 1:
+                continue
+
+            episode_count = _extract_int(cast(dict[str, object], season_payload), "episode_count")
+            air_date = _extract_string(cast(dict[str, object], season_payload), "air_date")
+            parsed_air_date = _parse_calendar_datetime(air_date)
+            is_released = parsed_air_date is None or parsed_air_date <= now_utc
+            if (
+                parsed_air_date is not None
+                and parsed_air_date > now_utc
+                and (next_air_date is None or parsed_air_date < next_air_date)
+            ):
+                next_air_date = parsed_air_date
+
+            requested_episode_numbers = normalized_requested_episodes.get(str(season_number))
+            requested_all_episodes = season_number in normalized_requested_seasons
+            requested_episode_count = (
+                len(requested_episode_numbers)
+                if requested_episode_numbers is not None
+                else 0
+            )
+            if requested_all_episodes and episode_count is not None:
+                requested_episode_count = episode_count
+            elif (
+                not requested_all_episodes
+                and episode_count is not None
+                and requested_episode_numbers is not None
+                and len(requested_episode_numbers) >= episode_count
+            ):
+                requested_all_episodes = True
+                requested_episode_count = episode_count
+
+            has_local_coverage = season_number in local_season_numbers
+            is_requested = requested_all_episodes or requested_episode_count > 0
+            if has_local_coverage:
+                status = "local"
+            elif not is_released:
+                status = "upcoming"
+            elif requested_all_episodes:
+                status = "requested"
+            elif requested_episode_count > 0:
+                status = "partial"
+            else:
+                status = "available"
+
+            preview.append(
+                RequestCandidateSeasonRecord(
+                    season_number=season_number,
+                    title=_extract_string(cast(dict[str, object], season_payload), "name"),
+                    episode_count=episode_count,
+                    air_date=air_date,
+                    is_released=is_released,
+                    has_local_coverage=has_local_coverage,
+                    is_requested=is_requested,
+                    requested_episode_count=requested_episode_count,
+                    requested_all_episodes=requested_all_episodes,
+                    status=status,
+                )
+            )
+
+        if not preview:
+            return None, ()
+
+        return (
+            RequestCandidateSeasonSummaryRecord(
+                total_seasons=len(preview),
+                released_seasons=sum(1 for season in preview if season.is_released),
+                requested_seasons=sum(1 for season in preview if season.is_requested),
+                partial_seasons=sum(
+                    1
+                    for season in preview
+                    if season.status == "partial"
+                ),
+                local_seasons=sum(
+                    1
+                    for season in preview
+                    if season.has_local_coverage
+                ),
+                unreleased_seasons=sum(
+                    1
+                    for season in preview
+                    if not season.is_released
+                ),
+                next_air_date=_serialize_datetime(next_air_date),
+            ),
+            tuple(sorted(preview, key=lambda season: season.season_number)),
+        )
+
+    async def _build_request_history_candidate_record(
+        self,
+        *,
+        item_row: MediaItemORM,
+        request_row: ItemRequestORM,
+    ) -> RequestSearchCandidateRecord | None:
+        """Build one persisted requester-history candidate without a TMDB round-trip."""
+
+        external_ref = item_row.external_ref.strip() if item_row.external_ref else ""
+        if not external_ref:
+            return None
+
+        attributes = (
+            dict(cast(dict[str, object], item_row.attributes))
+            if isinstance(item_row.attributes, dict)
+            else {}
+        )
+        normalized_media_type = _canonical_item_type_name(
+            _extract_string(attributes, "item_type")
+        )
+        if normalized_media_type not in {"movie", "show"}:
+            return None
+
+        aired_at = _parse_calendar_datetime(_extract_string(attributes, "aired_at"))
+        workflow_checkpoint = await self.get_workflow_checkpoint(media_item_id=item_row.id)
+        recovery_plan = await self.get_recovery_plan(media_item_id=item_row.id)
+
+        return RequestSearchCandidateRecord(
+            external_ref=external_ref,
+            title=item_row.title,
+            media_type=normalized_media_type,
+            tmdb_id=_extract_string(attributes, "tmdb_id"),
+            tvdb_id=_extract_string(attributes, "tvdb_id"),
+            imdb_id=_extract_string(attributes, "imdb_id"),
+            poster_path=_extract_string(attributes, "poster_path"),
+            overview=_extract_string(attributes, "overview") or "",
+            year=(aired_at.year if aired_at is not None else _extract_int(attributes, "year")),
+            is_requested=True,
+            requested_item_id=item_row.id,
+            requested_state=item_row.state.value,
+            requested_seasons=_clone_requested_seasons(request_row.requested_seasons),
+            requested_episodes=_clone_requested_episodes(request_row.requested_episodes),
+            request_source=_normalize_request_source(request_row.request_source),
+            request_count=int(request_row.request_count or 0),
+            first_requested_at=_serialize_datetime(request_row.first_requested_at),
+            last_requested_at=_serialize_datetime(request_row.last_requested_at),
+            lifecycle=_build_request_search_lifecycle_record(
+                checkpoint=workflow_checkpoint,
+                recovery_plan=recovery_plan,
+            ),
+        )
+
+    async def search_request_candidates(
+        self,
+        *,
+        query: str,
+        media_type: str | None = None,
+        limit: int = 12,
+        tenant_id: str | None = None,
+    ) -> list[RequestSearchCandidateRecord]:
+        """Return TMDB-backed request-search hits plus current local request state."""
+
+        page = await self.search_request_candidates_page(
+            query=query,
+            media_type=media_type,
+            limit=limit,
+            offset=0,
+            tenant_id=tenant_id,
+        )
+        return page.items
+
+    async def get_request_candidate(
+        self,
+        *,
+        external_ref: str,
+        media_type: str,
+        tenant_id: str | None = None,
+    ) -> RequestSearchCandidateRecord | None:
+        """Return one request candidate by external reference without a search fallback."""
+
+        normalized_external_ref = external_ref.strip()
+        normalized_media_type = _canonical_item_type_name(media_type)
+
+        if not normalized_external_ref:
+            return None
+        if normalized_media_type not in {"movie", "show"}:
+            raise ValueError("mediaType must be either movie or show")
+
+        existing_item = await self.get_item_by_external_id(
+            normalized_external_ref,
+            media_type=normalized_media_type,
+            tenant_id=tenant_id,
+        )
+        existing_attributes = (
+            existing_item.attributes
+            if existing_item is not None and isinstance(existing_item.attributes, dict)
+            else {}
+        )
+        tmdb_id = (
+            normalized_external_ref.partition(":")[2].strip()
+            if normalized_external_ref.startswith("tmdb:")
+            else _extract_string(existing_attributes, "tmdb_id")
+        )
+        if not tmdb_id:
+            return None
+
+        client = self._resolve_tmdb_client()
+        metadata = None
+        external_ids: dict[str, str | None] = {}
+        if client is not None:
+            if normalized_media_type == "movie":
+                metadata = await client.get_movie(tmdb_id)
+                external_ids = await client.get_external_ids(tmdb_id, "movie")
+            else:
+                metadata = await client.get_show(tmdb_id)
+                external_ids = await client.get_external_ids(tmdb_id, "tv")
+
+        if metadata is None and existing_item is None:
+            return None
+
+        hit = TmdbSearchResult.model_validate(
+            {
+                "id": tmdb_id,
+                "media_type": normalized_media_type,
+                "title": (
+                    metadata.title
+                    if metadata is not None
+                    else existing_item.title
+                ),
+                "year": (metadata.year if metadata is not None else None),
+                "overview": (
+                    metadata.overview
+                    if metadata is not None
+                    else _extract_string(existing_attributes, "overview") or ""
+                ),
+                "poster_path": (
+                    metadata.poster_path
+                    if metadata is not None
+                    else _extract_string(existing_attributes, "poster_path")
+                ),
+                "popularity": 0.0,
+                "vote_average": 0.0,
+                "vote_count": 0,
+                "original_language": None,
+                "genre_names": (
+                    list(metadata.genres)
+                    if metadata is not None and hasattr(metadata, "genres")
+                    else []
+                ),
+            }
+        )
+        local_signal = (
+            await self._build_request_search_local_signal_map(
+                [hit],
+                tenant_id=tenant_id,
+            )
+        ).get(_request_search_local_signal_key(hit.media_type, hit.tmdb_id))
+        candidate = await self._build_request_search_candidate_record(
+            hit,
+            tenant_id=tenant_id,
+            local_signal=local_signal,
+        )
+
+        if existing_item is None and external_ids:
+            candidate = replace(
+                candidate,
+                tvdb_id=external_ids.get("tvdb_id"),
+                imdb_id=external_ids.get("imdb_id"),
+            )
+
+        if normalized_media_type == "show":
+            season_summary, season_preview = await self._build_request_candidate_season_preview(
+                metadata=(metadata if isinstance(metadata, ShowMetadata) else None),
+                requested_item_id=candidate.requested_item_id,
+                requested_seasons=candidate.requested_seasons,
+                requested_episodes=candidate.requested_episodes,
+                tenant_id=tenant_id,
+            )
+            candidate = replace(
+                candidate,
+                season_summary=season_summary,
+                season_preview=season_preview,
+            )
+
+        return candidate
+
+    async def get_request_history_page(
+        self,
+        *,
+        media_type: str | None = None,
+        limit: int = 6,
+        offset: int = 0,
+        tenant_id: str | None = None,
+    ) -> RequestSearchPageRecord:
+        """Return one paged view of the most recent persisted requester history."""
+
+        normalized_media_type = (
+            _canonical_item_type_name(media_type)
+            if media_type is not None
+            else None
+        )
+        if normalized_media_type not in {None, "movie", "show"}:
+            raise ValueError("mediaType must be either movie or show when provided")
+
+        bounded_limit = max(1, min(limit, 24))
+        bounded_offset = max(0, offset)
+
+        async with self._db.session() as session:
+            statement = (
+                select(ItemRequestORM, MediaItemORM)
+                .join(MediaItemORM, MediaItemORM.id == ItemRequestORM.media_item_id)
+                .order_by(
+                    ItemRequestORM.last_requested_at.desc(),
+                    ItemRequestORM.created_at.desc(),
+                )
+            )
+            if tenant_id is not None:
+                statement = statement.where(MediaItemORM.tenant_id == tenant_id)
+
+            rows = (await session.execute(statement)).all()
+
+        latest_rows: list[tuple[ItemRequestORM, MediaItemORM]] = []
+        seen_item_ids: set[str] = set()
+        for request_row, item_row in rows:
+            if item_row.id in seen_item_ids:
+                continue
+            seen_item_ids.add(item_row.id)
+
+            attributes = (
+                dict(cast(dict[str, object], item_row.attributes))
+                if isinstance(item_row.attributes, dict)
+                else {}
+            )
+            item_media_type = _canonical_item_type_name(
+                _extract_string(attributes, "item_type")
+            )
+            if item_media_type not in {"movie", "show"}:
+                continue
+            if normalized_media_type is not None and item_media_type != normalized_media_type:
+                continue
+            latest_rows.append((request_row, item_row))
+
+        total_count = len(latest_rows)
+        paged_rows = latest_rows[bounded_offset : bounded_offset + bounded_limit]
+        items = [
+            candidate
+            for candidate in await asyncio.gather(
+                *[
+                    self._build_request_history_candidate_record(
+                        item_row=item_row,
+                        request_row=request_row,
+                    )
+                    for request_row, item_row in paged_rows
+                ]
+            )
+            if candidate is not None
+        ]
+
+        return RequestSearchPageRecord(
+            items=items,
+            offset=bounded_offset,
+            limit=bounded_limit,
+            total_count=total_count,
+            has_previous_page=bounded_offset > 0,
+            has_next_page=bounded_offset + bounded_limit < total_count,
+            result_window_complete=True,
+        )
+
+    async def search_request_candidates_page(
+        self,
+        *,
+        query: str,
+        media_type: str | None = None,
+        limit: int = 12,
+        offset: int = 0,
+        tenant_id: str | None = None,
+    ) -> RequestSearchPageRecord:
+        """Return one bounded backend-ranked request-search page."""
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            return RequestSearchPageRecord(
+                items=[],
+                offset=max(offset, 0),
+                limit=max(1, min(limit, 40)),
+                total_count=0,
+                has_previous_page=max(offset, 0) > 0,
+                has_next_page=False,
+                result_window_complete=True,
+            )
+
+        bounded_limit = max(1, min(limit, 40))
+        bounded_offset = max(0, offset)
+        scan_target = min(
+            max(
+                bounded_offset + bounded_limit + 40,
+                _REQUEST_SEARCH_DEFAULT_SCAN_WINDOW,
+            ),
+            _REQUEST_SEARCH_MAX_SCAN_WINDOW,
+        )
+        ordered_hits, window_complete = await self._collect_ranked_request_search_hits(
+            query=normalized_query,
+            media_type=media_type,
+            scan_target=scan_target,
+        )
+        local_signals = await self._build_request_search_local_signal_map(
+            ordered_hits,
+            tenant_id=tenant_id,
+        )
+        local_boosts = {
+            key: signal.ranking_boost
+            for key, signal in local_signals.items()
+            if signal.ranking_boost > 0
+        }
+        ordered_hits = _sort_request_search_hits(
+            ordered_hits,
+            query=normalized_query,
+            local_boosts=local_boosts,
+        )
+        paged_hits = ordered_hits[bounded_offset : bounded_offset + bounded_limit]
+        items = [
+            await self._build_request_search_candidate_record(
+                hit,
+                tenant_id=tenant_id,
+                local_signal=local_signals.get(
+                    _request_search_local_signal_key(hit.media_type, hit.tmdb_id)
+                ),
+            )
+            for hit in paged_hits
+        ]
+        total_count = len(ordered_hits)
+        has_next_page = (bounded_offset + bounded_limit) < total_count or not window_complete
+
+        return RequestSearchPageRecord(
+            items=items,
+            offset=bounded_offset,
+            limit=bounded_limit,
+            total_count=total_count,
+            has_previous_page=bounded_offset > 0,
+            has_next_page=has_next_page,
+            result_window_complete=window_complete,
+        )
+
+    async def _fetch_request_discovery_page(
+        self,
+        client: TmdbMetadataClient,
+        *,
+        media_type: str,
+        page: int,
+        genre: str | None,
+        release_year: int | None,
+        original_language: str | None,
+        company: str | None,
+        network: str | None,
+        sort: str,
+    ) -> TmdbSearchPage:
+        if media_type == "movie":
+            return await client.discover_movie_page(
+                page=page,
+                genre=genre,
+                release_year=release_year,
+                original_language=original_language,
+                company=company,
+                sort_by=_tmdb_discovery_sort("movie", sort=sort),
+            )
+        return await client.discover_show_page(
+            page=page,
+            genre=genre,
+            release_year=release_year,
+            original_language=original_language,
+            network=network,
+            sort_by=_tmdb_discovery_sort("show", sort=sort),
+        )
+
+    async def _fetch_request_editorial_page(
+        self,
+        client: TmdbMetadataClient,
+        *,
+        media_type: str,
+        family: str,
+        page: int,
+    ) -> TmdbSearchPage:
+        fetch_page = (
+            getattr(client, "editorial_movie_page", None)
+            if media_type == "movie"
+            else getattr(client, "editorial_show_page", None)
+        )
+        if fetch_page is None:
+            return TmdbSearchPage(results=[], page=page, total_pages=1, total_results=0)
+        return await fetch_page(family=family, page=page)
+
+    async def _fetch_request_release_window_page(
+        self,
+        client: TmdbMetadataClient,
+        *,
+        media_type: str,
+        window: str,
+        page: int,
+    ) -> TmdbSearchPage:
+        fetch_page = (
+            getattr(client, "release_window_movie_page", None)
+            if media_type == "movie"
+            else getattr(client, "release_window_show_page", None)
+        )
+        if fetch_page is None:
+            return TmdbSearchPage(results=[], page=page, total_pages=1, total_results=0)
+        return await fetch_page(window=window, page=page)
+
+    async def discover_request_candidates_page(
+        self,
+        *,
+        media_type: str | None = None,
+        genre: str | None = None,
+        release_year: int | None = None,
+        original_language: str | None = None,
+        company: str | None = None,
+        network: str | None = None,
+        sort: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        tenant_id: str | None = None,
+    ) -> RequestDiscoveryPageRecord:
+        """Return one backend-owned discover page with additive facet metadata."""
+
+        bounded_limit = max(1, min(limit, 40))
+        bounded_offset = max(0, offset)
+        normalized_media_type = _normalize_requested_media_type(media_type)
+        if normalized_media_type in {"season", "episode"}:
+            normalized_media_type = "show"
+        selected_media_types = (
+            [normalized_media_type]
+            if normalized_media_type in {"movie", "show"}
+            else ["movie", "show"]
+        )
+        normalized_genre = _normalize_discovery_filter_value(genre)
+        normalized_original_language = _normalize_discovery_filter_value(original_language)
+        if normalized_original_language is not None:
+            normalized_original_language = normalized_original_language.casefold()
+        normalized_company = _normalize_discovery_filter_value(company)
+        normalized_network = _normalize_discovery_filter_value(network)
+        normalized_sort = _normalize_request_discovery_sort(sort)
+        client = self._resolve_tmdb_client()
+        facets = await _build_request_discovery_facets(
+            [],
+            client=client,
+            selected_genre=normalized_genre,
+            selected_release_year=release_year,
+            selected_language=normalized_original_language,
+            selected_company=normalized_company,
+            selected_network=normalized_network,
+            selected_sort=normalized_sort,
+        )
+        if client is None:
+            return RequestDiscoveryPageRecord(
+                items=[],
+                offset=bounded_offset,
+                limit=bounded_limit,
+                total_count=0,
+                has_previous_page=bounded_offset > 0,
+                has_next_page=False,
+                result_window_complete=True,
+                facets=facets,
+            )
+
+        scan_target = min(
+            max(
+                bounded_offset + bounded_limit + 40,
+                _REQUEST_DISCOVER_DEFAULT_SCAN_WINDOW,
+            ),
+            _REQUEST_DISCOVER_MAX_SCAN_WINDOW,
+        )
+        per_type_scan_target = max(20, scan_target // max(len(selected_media_types), 1))
+        raw_hits: list[TmdbSearchResult] = []
+        window_complete = True
+
+        for selected_media_type in selected_media_types:
+            page_number = 1
+            total_pages: int | None = None
+            media_hits: list[TmdbSearchResult] = []
+            while page_number <= _REQUEST_DISCOVER_MAX_REMOTE_PAGES:
+                page_result = await self._fetch_request_discovery_page(
+                    client,
+                    media_type=selected_media_type,
+                    page=page_number,
+                    genre=normalized_genre,
+                    release_year=release_year,
+                    original_language=normalized_original_language,
+                    company=normalized_company,
+                    network=normalized_network,
+                    sort=normalized_sort,
+                )
+                total_pages = page_result.total_pages
+                media_hits.extend(page_result.results)
+                if page_number >= total_pages or not page_result.results:
+                    break
+                if len(media_hits) >= per_type_scan_target:
+                    window_complete = False
+                    break
+                page_number += 1
+
+            if total_pages is not None and page_number < total_pages:
+                window_complete = False
+            raw_hits.extend(media_hits)
+
+        deduped: dict[str, TmdbSearchResult] = {}
+        for hit in raw_hits:
+            key = f"{hit.media_type}:{hit.tmdb_id}"
+            current = deduped.get(key)
+            if current is None or _request_discovery_sort_key(
+                hit,
+                sort=normalized_sort,
+            ) < _request_discovery_sort_key(
+                current,
+                sort=normalized_sort,
+            ):
+                deduped[key] = hit
+
+        local_signals = await self._build_request_search_local_signal_map(
+            list(deduped.values()),
+            tenant_id=tenant_id,
+        )
+        local_boosts = {
+            key: signal.ranking_boost
+            for key, signal in local_signals.items()
+            if signal.ranking_boost > 0
+        }
+        blend_boosts = await _build_request_discovery_blend_boosts(
+            self,
+            client,
+            selected_media_types=selected_media_types,
+        )
+        ordered_hits = _sort_request_discovery_hits(
+            list(deduped.values()),
+            sort=normalized_sort,
+            blend_boosts=blend_boosts,
+            local_boosts=local_boosts,
+        )
+        paged_hits = ordered_hits[bounded_offset : bounded_offset + bounded_limit]
+        items = [
+            await self._build_request_search_candidate_record(
+                hit,
+                tenant_id=tenant_id,
+                local_signal=local_signals.get(
+                    _request_search_local_signal_key(hit.media_type, hit.tmdb_id)
+                ),
+            )
+            for hit in paged_hits
+        ]
+        facets = await _build_request_discovery_facets(
+            ordered_hits,
+            client=client,
+            selected_genre=normalized_genre,
+            selected_release_year=release_year,
+            selected_language=normalized_original_language,
+            selected_company=normalized_company,
+            selected_network=normalized_network,
+            selected_sort=normalized_sort,
+        )
+        total_count = len(ordered_hits)
+        has_next_page = (bounded_offset + bounded_limit) < total_count or not window_complete
+
+        return RequestDiscoveryPageRecord(
+            items=items,
+            offset=bounded_offset,
+            limit=bounded_limit,
+            total_count=total_count,
+            has_previous_page=bounded_offset > 0,
+            has_next_page=has_next_page,
+            result_window_complete=window_complete,
+            facets=facets,
+        )
+
+    async def discover_request_projection_groups(
+        self,
+        *,
+        media_type: str | None = None,
+        genre: str | None = None,
+        release_year: int | None = None,
+        original_language: str | None = None,
+        company: str | None = None,
+        network: str | None = None,
+        sort: str | None = None,
+        limit_per_group: int = 6,
+        tenant_id: str | None = None,
+    ) -> list[RequestDiscoveryProjectionGroupRecord]:
+        """Return grouped discovery follow-ups derived from the current backend window."""
+
+        bounded_limit = max(1, min(limit_per_group, 8))
+        page = await self.discover_request_candidates_page(
+            media_type=media_type,
+            genre=genre,
+            release_year=release_year,
+            original_language=original_language,
+            company=company,
+            network=network,
+            sort=sort,
+            limit=_REQUEST_DISCOVERY_PROJECTION_WINDOW,
+            offset=0,
+            tenant_id=tenant_id,
+        )
+        if not page.items:
+            return []
+
+        client = self._resolve_tmdb_client()
+        if client is None:
+            return []
+
+        semaphore = asyncio.Semaphore(_REQUEST_DISCOVERY_FACET_DETAIL_CONCURRENCY)
+
+        async def load_profile(
+            item: RequestSearchCandidateRecord,
+        ) -> TmdbDiscoveryProfile | None:
+            if not item.tmdb_id:
+                return None
+            async with semaphore:
+                return await client.get_discovery_profile(item.tmdb_id, item.media_type)
+
+        local_signal_map = await self._build_request_search_local_signal_map(
+            page.items,
+            tenant_id=tenant_id,
+        )
+        item_profiles = [
+            (item, profile)
+            for item, profile in zip(
+                page.items,
+                await asyncio.gather(
+                    *(load_profile(item) for item in page.items),
+                    return_exceptions=False,
+                ),
+                strict=False,
+            )
+            if profile is not None
+        ]
+        if not item_profiles:
+            return []
+
+        return _build_request_discovery_projection_groups(
+            [item for item, _profile in item_profiles],
+            [profile for _item, profile in item_profiles],
+            local_signals={
+                _request_search_local_signal_key(item.media_type, item.tmdb_id): signal
+                for item, signal in ((entry, local_signal_map.get(_request_search_local_signal_key(entry.media_type, entry.tmdb_id))) for entry, _profile in item_profiles)
+                if item.tmdb_id and signal is not None
+            },
+            limit_per_group=bounded_limit,
+        )
+
+    async def discover_request_editorial_families(
+        self,
+        *,
+        limit_per_family: int = 8,
+        family_ids: list[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> list[RequestEditorialFamilyRecord]:
+        """Return backend-owned editorial discovery families for consumer search."""
+
+        bounded_limit = max(1, min(limit_per_family, 12))
+        selected_family_ids = {
+            family_id.strip() for family_id in family_ids or [] if family_id.strip()
+        }
+        family_definitions = [
+            family
+            for family in _REQUEST_EDITORIAL_DISCOVERY_FAMILIES
+            if not selected_family_ids or family["id"] in selected_family_ids
+        ]
+        if not family_definitions:
+            return []
+
+        client = self._resolve_tmdb_client()
+        if client is None:
+            return []
+
+        expanded_limit = min(40, max(bounded_limit * 2, bounded_limit))
+        families: list[RequestEditorialFamilyRecord] = []
+        for family in family_definitions:
+            page_number = 1
+            total_pages: int | None = None
+            raw_hits: list[TmdbSearchResult] = []
+            while page_number <= min(_REQUEST_DISCOVER_MAX_REMOTE_PAGES, 4):
+                page_result = await self._fetch_request_editorial_page(
+                    client,
+                    media_type=cast(str, family["media_type"]),
+                    family=cast(str, family["family"]),
+                    page=page_number,
+                )
+                total_pages = page_result.total_pages
+                raw_hits.extend(page_result.results)
+                if page_number >= total_pages or not page_result.results:
+                    break
+                if len(raw_hits) >= expanded_limit:
+                    break
+                page_number += 1
+
+            deduped: dict[str, TmdbSearchResult] = {}
+            for hit in raw_hits:
+                deduped.setdefault(f"{hit.media_type}:{hit.tmdb_id}", hit)
+
+            ordered_hits = list(deduped.values())
+            local_signals = await self._build_request_search_local_signal_map(
+                ordered_hits,
+                tenant_id=tenant_id,
+            )
+            local_boosts = {
+                key: signal.ranking_boost
+                for key, signal in local_signals.items()
+                if signal.ranking_boost > 0
+            }
+            ordered_hits = _sort_request_window_hits(
+                ordered_hits,
+                local_boosts=local_boosts,
+            )[:expanded_limit]
+            items: list[RequestSearchCandidateRecord] = []
+            for hit in ordered_hits:
+                items.append(
+                    await self._build_request_search_candidate_record(
+                        hit,
+                        tenant_id=tenant_id,
+                        local_signal=local_signals.get(
+                            _request_search_local_signal_key(hit.media_type, hit.tmdb_id)
+                        ),
+                    )
+                )
+                if len(items) >= bounded_limit:
+                    break
+
+            if not items and total_pages == 1:
+                continue
+
+            families.append(
+                RequestEditorialFamilyRecord(
+                    family_id=cast(str, family["id"]),
+                    title=cast(str, family["title"]),
+                    description=cast(str, family["description"]),
+                    family=cast(str, family["family"]),
+                    media_type=cast(str, family["media_type"]),
+                    items=items,
+                )
+            )
+
+        return families
+
+    async def discover_request_release_windows(
+        self,
+        *,
+        limit_per_window: int = 8,
+        window_ids: list[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> list[RequestReleaseWindowRecord]:
+        """Return backend-owned release-window families for consumer search."""
+
+        bounded_limit = max(1, min(limit_per_window, 12))
+        selected_window_ids = {
+            window_id.strip() for window_id in window_ids or [] if window_id.strip()
+        }
+        window_definitions = [
+            window
+            for window in _REQUEST_RELEASE_WINDOWS
+            if not selected_window_ids or window["id"] in selected_window_ids
+        ]
+        if not window_definitions:
+            return []
+
+        client = self._resolve_tmdb_client()
+        if client is None:
+            return []
+
+        expanded_limit = min(40, max(bounded_limit * 2, bounded_limit))
+        windows: list[RequestReleaseWindowRecord] = []
+        for window in window_definitions:
+            page_number = 1
+            total_pages: int | None = None
+            raw_hits: list[TmdbSearchResult] = []
+            while page_number <= min(_REQUEST_DISCOVER_MAX_REMOTE_PAGES, 4):
+                page_result = await self._fetch_request_release_window_page(
+                    client,
+                    media_type=cast(str, window["media_type"]),
+                    window=cast(str, window["window"]),
+                    page=page_number,
+                )
+                total_pages = page_result.total_pages
+                raw_hits.extend(page_result.results)
+                if page_number >= total_pages or not page_result.results:
+                    break
+                if len(raw_hits) >= expanded_limit:
+                    break
+                page_number += 1
+
+            deduped: dict[str, TmdbSearchResult] = {}
+            for hit in raw_hits:
+                deduped.setdefault(f"{hit.media_type}:{hit.tmdb_id}", hit)
+
+            ordered_hits = list(deduped.values())
+            local_signals = await self._build_request_search_local_signal_map(
+                ordered_hits,
+                tenant_id=tenant_id,
+            )
+            local_boosts = {
+                key: signal.ranking_boost
+                for key, signal in local_signals.items()
+                if signal.ranking_boost > 0
+            }
+            ordered_hits = _sort_request_window_hits(
+                ordered_hits,
+                local_boosts=local_boosts,
+            )[:expanded_limit]
+            items: list[RequestSearchCandidateRecord] = []
+            for hit in ordered_hits:
+                items.append(
+                    await self._build_request_search_candidate_record(
+                        hit,
+                        tenant_id=tenant_id,
+                        local_signal=local_signals.get(
+                            _request_search_local_signal_key(hit.media_type, hit.tmdb_id)
+                        ),
+                    )
+                )
+                if len(items) >= bounded_limit:
+                    break
+
+            if not items and total_pages == 1:
+                continue
+
+            windows.append(
+                RequestReleaseWindowRecord(
+                    window_id=cast(str, window["id"]),
+                    title=cast(str, window["title"]),
+                    description=cast(str, window["description"]),
+                    window=cast(str, window["window"]),
+                    media_type=cast(str, window["media_type"]),
+                    items=items,
+                )
+            )
+
+        return windows
+
+    async def discover_request_candidates(
+        self,
+        *,
+        limit_per_rail: int = 8,
+        rail_ids: list[str] | None = None,
+        tenant_id: str | None = None,
+    ) -> list[RequestDiscoveryRailRecord]:
+        """Return backend-owned zero-query discovery rails for consumer search."""
+
+        bounded_limit = max(1, min(limit_per_rail, 12))
+        selected_rail_ids = {rail_id.strip() for rail_id in rail_ids or [] if rail_id.strip()}
+        rail_definitions = [
+            rail
+            for rail in _REQUEST_DISCOVERY_RAILS
+            if not selected_rail_ids or rail["id"] in selected_rail_ids
+        ]
+        if not rail_definitions:
+            return []
+
+        expanded_limit = min(40, max(bounded_limit * 3, bounded_limit))
+        discovery_results = await asyncio.gather(
+            *[
+                self.search_request_candidates(
+                    query=cast(str, rail["query"]),
+                    media_type=cast(str, rail["media_type"]),
+                    limit=expanded_limit,
+                    tenant_id=tenant_id,
+                )
+                for rail in rail_definitions
+            ]
+        )
+
+        seen_external_refs: set[str] = set()
+        rails: list[RequestDiscoveryRailRecord] = []
+        for rail, candidates in zip(rail_definitions, discovery_results, strict=True):
+            unique_candidates: list[RequestSearchCandidateRecord] = []
+            for candidate in candidates:
+                if candidate.external_ref in seen_external_refs:
+                    continue
+                seen_external_refs.add(candidate.external_ref)
+                unique_candidates.append(candidate)
+                if len(unique_candidates) >= bounded_limit:
+                    break
+            if not unique_candidates:
+                continue
+            rails.append(
+                RequestDiscoveryRailRecord(
+                    rail_id=cast(str, rail["id"]),
+                    title=cast(str, rail["title"]),
+                    description=cast(str, rail["description"]),
+                    query=cast(str, rail["query"]),
+                    media_type=cast(str, rail["media_type"]),
+                    items=unique_candidates,
+                )
+            )
+
+        return rails
+
+    async def record_consumer_playback_activity(
+        self,
+        *,
+        item_id: str,
+        tenant_id: str,
+        actor_id: str,
+        actor_type: str,
+        activity_kind: str,
+        target: str | None = None,
+        device_key: str,
+        device_label: str,
+        session_key: str | None = None,
+        position_seconds: int | None = None,
+        duration_seconds: int | None = None,
+        completed: bool = False,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        """Persist one consumer playback activity event with optional session progress."""
+
+        normalized_item_id = _normalize_internal_item_id(item_id)
+        normalized_tenant_id = tenant_id.strip() or "global"
+        normalized_actor_id = actor_id.strip()
+        normalized_actor_type = actor_type.strip().casefold() or "unknown"
+        normalized_activity_kind = activity_kind.strip().casefold()
+        normalized_target = (target or "").strip().casefold() or None
+        normalized_device_key = device_key.strip()[:128] or "unknown-device"
+        normalized_device_label = device_label.strip()[:256] or "Current device"
+        normalized_session_key = (session_key or "").strip()[:128] or None
+        normalized_position_seconds = position_seconds
+        normalized_duration_seconds = duration_seconds
+        normalized_completed = bool(completed or normalized_activity_kind == "complete")
+
+        if normalized_actor_type != "user":
+            return
+        if not normalized_actor_id:
+            raise ValueError("actor_id must not be empty")
+        if normalized_activity_kind not in {"view", "launch", "progress", "complete"}:
+            raise ValueError("activity_kind must be one of view, launch, progress, or complete")
+        if normalized_activity_kind == "launch" and normalized_target not in {"direct", "hls"}:
+            raise ValueError("launch activity requires a direct or hls target")
+        if normalized_activity_kind != "launch":
+            normalized_target = None
+        if normalized_activity_kind in {"progress", "complete"} and normalized_session_key is None:
+            raise ValueError("progress and complete activity require a session_key")
+        if (
+            normalized_session_key is None
+            and (
+                normalized_position_seconds is not None
+                or normalized_duration_seconds is not None
+                or normalized_completed
+            )
+        ):
+            raise ValueError("session_key is required when progress fields are recorded")
+        if normalized_position_seconds is not None and normalized_position_seconds < 0:
+            raise ValueError("position_seconds must be non-negative")
+        if normalized_duration_seconds is not None and normalized_duration_seconds < 0:
+            raise ValueError("duration_seconds must be non-negative")
+        if (
+            normalized_position_seconds is not None
+            and normalized_duration_seconds is not None
+            and normalized_position_seconds > normalized_duration_seconds
+        ):
+            raise ValueError("position_seconds must not exceed duration_seconds")
+        payload: dict[str, object] = {}
+        if normalized_session_key is not None:
+            payload["session_key"] = normalized_session_key
+        if normalized_position_seconds is not None:
+            payload["position_seconds"] = normalized_position_seconds
+        if normalized_duration_seconds is not None:
+            payload["duration_seconds"] = normalized_duration_seconds
+        if normalized_completed:
+            payload["completed"] = True
+
+        async with self._db.session() as session:
+            item = (
+                (
+                    await session.execute(
+                        select(MediaItemORM)
+                        .options(*_projection_item_load_options())
+                        .where(
+                            MediaItemORM.id == normalized_item_id,
+                            MediaItemORM.tenant_id == normalized_tenant_id,
+                        )
+                    )
+                )
+                .scalars()
+                .one_or_none()
+            )
+            if item is None:
+                raise ItemNotFoundError(f"item not found: {normalized_item_id}")
+
+            session.add(
+                ConsumerPlaybackActivityEventORM(
+                    tenant_id=normalized_tenant_id,
+                    actor_id=normalized_actor_id,
+                    actor_type=normalized_actor_type,
+                    item_id=item.id,
+                    activity_kind=normalized_activity_kind,
+                    target=normalized_target,
+                    device_key=normalized_device_key,
+                    device_label=normalized_device_label,
+                    payload=payload,
+                    occurred_at=occurred_at or datetime.now(UTC),
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
+    async def get_consumer_playback_activity(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        actor_type: str,
+        item_limit: int = 12,
+        device_limit: int = 6,
+        history_limit: int = 240,
+        focus_item_id: str | None = None,
+    ) -> ConsumerPlaybackActivityRecord:
+        """Return shared consumer activity, session posture, and recent device rollups."""
+
+        normalized_tenant_id = tenant_id.strip() or "global"
+        normalized_actor_id = actor_id.strip()
+        normalized_actor_type = actor_type.strip().casefold() or "unknown"
+        bounded_item_limit = max(1, min(item_limit, 24))
+        bounded_device_limit = max(1, min(device_limit, 12))
+        bounded_history_limit = max(20, min(history_limit, 1000))
+        normalized_focus_item_id = (
+            _normalize_internal_item_id(focus_item_id) if focus_item_id is not None else None
+        )
+        now = datetime.now(UTC)
+        active_cutoff = now - _CONSUMER_PLAYBACK_ACTIVE_WINDOW
+
+        if normalized_actor_type != "user" or not normalized_actor_id:
+            return ConsumerPlaybackActivityRecord(generated_at=now.isoformat())
+
+        async with self._db.session() as session:
+            event_query = select(ConsumerPlaybackActivityEventORM).where(
+                ConsumerPlaybackActivityEventORM.tenant_id == normalized_tenant_id,
+                ConsumerPlaybackActivityEventORM.actor_id == normalized_actor_id,
+                ConsumerPlaybackActivityEventORM.actor_type == normalized_actor_type,
+            )
+            if normalized_focus_item_id is not None:
+                event_query = event_query.where(
+                    ConsumerPlaybackActivityEventORM.item_id == normalized_focus_item_id
+                )
+            events = (
+                (
+                    await session.execute(
+                        event_query
+                        .order_by(
+                            ConsumerPlaybackActivityEventORM.occurred_at.desc(),
+                            ConsumerPlaybackActivityEventORM.created_at.desc(),
+                        )
+                        .limit(bounded_history_limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+            if not events:
+                return ConsumerPlaybackActivityRecord(generated_at=now.isoformat())
+
+            total_view_count = 0
+            total_launch_count = 0
+            item_rollups: dict[str, dict[str, Any]] = {}
+            device_rollups: dict[str, dict[str, Any]] = {}
+            session_rollups: dict[str, dict[str, Any]] = {}
+            ordered_item_ids: list[str] = []
+            ordered_device_keys: list[str] = []
+            ordered_session_keys: list[str] = []
+
+            for event in events:
+                occurred_at = event.occurred_at
+                payload = cast(dict[str, object], event.payload or {})
+                session_key = _coerce_activity_payload_str(payload, "session_key")
+                position_seconds = _coerce_activity_payload_seconds(payload, "position_seconds")
+                duration_seconds = _coerce_activity_payload_seconds(payload, "duration_seconds")
+                completed = _coerce_activity_payload_bool(payload, "completed")
+                is_completed = bool(completed or event.activity_kind == "complete")
+
+                if event.activity_kind == "launch":
+                    total_launch_count += 1
+                elif event.activity_kind == "view":
+                    total_view_count += 1
+
+                item_bucket = item_rollups.get(event.item_id)
+                if item_bucket is None:
+                    item_bucket = {
+                        "last_activity_at": occurred_at,
+                        "last_viewed_at": None,
+                        "last_launched_at": None,
+                        "view_count": 0,
+                        "launch_count": 0,
+                        "session_keys": set(),
+                        "active_session_keys": set(),
+                        "last_session_key": None,
+                        "resume_position_seconds": None,
+                        "duration_seconds": None,
+                        "progress_percent": None,
+                        "completed": False,
+                        "progress_recorded_at": None,
+                        "last_target": None,
+                    }
+                    item_rollups[event.item_id] = item_bucket
+                    ordered_item_ids.append(event.item_id)
+                if (
+                    item_bucket["last_activity_at"] is None
+                    or occurred_at > item_bucket["last_activity_at"]
+                ):
+                    item_bucket["last_activity_at"] = occurred_at
+                    if session_key is not None:
+                        item_bucket["last_session_key"] = session_key
+                if event.activity_kind in {"view", "progress", "complete"} and (
+                    item_bucket["last_viewed_at"] is None
+                    or occurred_at > item_bucket["last_viewed_at"]
+                ):
+                    item_bucket["last_viewed_at"] = occurred_at
+                if event.activity_kind == "view":
+                    item_bucket["view_count"] = int(item_bucket["view_count"]) + 1
+                if event.activity_kind == "launch":
+                    item_bucket["launch_count"] = int(item_bucket["launch_count"]) + 1
+                    if (
+                        item_bucket["last_launched_at"] is None
+                        or occurred_at > item_bucket["last_launched_at"]
+                    ):
+                        item_bucket["last_launched_at"] = occurred_at
+                        item_bucket["last_target"] = event.target
+                if session_key is not None:
+                    cast(set[str], item_bucket["session_keys"]).add(session_key)
+                    if occurred_at >= active_cutoff and not is_completed:
+                        cast(set[str], item_bucket["active_session_keys"]).add(session_key)
+                progress_recorded_at = cast(datetime | None, item_bucket["progress_recorded_at"])
+                if (
+                    position_seconds is not None
+                    or duration_seconds is not None
+                    or is_completed
+                ) and (progress_recorded_at is None or occurred_at >= progress_recorded_at):
+                    item_bucket["resume_position_seconds"] = (
+                        None if is_completed else position_seconds
+                    )
+                    item_bucket["duration_seconds"] = duration_seconds
+                    item_bucket["progress_percent"] = _build_progress_percent(
+                        position_seconds,
+                        duration_seconds,
+                        completed=is_completed,
+                    )
+                    item_bucket["completed"] = is_completed
+                    item_bucket["progress_recorded_at"] = occurred_at
+
+                device_bucket = device_rollups.get(event.device_key)
+                if device_bucket is None:
+                    device_bucket = {
+                        "device_label": event.device_label,
+                        "last_seen_at": occurred_at,
+                        "last_activity_at": occurred_at,
+                        "last_viewed_at": None,
+                        "last_launched_at": None,
+                        "launch_count": 0,
+                        "view_count": 0,
+                        "session_keys": set(),
+                        "active_session_keys": set(),
+                        "last_session_key": None,
+                        "resume_position_seconds": None,
+                        "duration_seconds": None,
+                        "progress_percent": None,
+                        "completed_session_count": 0,
+                        "completed_session_keys": set(),
+                        "progress_recorded_at": None,
+                        "last_target": None,
+                    }
+                    device_rollups[event.device_key] = device_bucket
+                    ordered_device_keys.append(event.device_key)
+                if (
+                    device_bucket["last_seen_at"] is None
+                    or occurred_at > device_bucket["last_seen_at"]
+                ):
+                    device_bucket["last_seen_at"] = occurred_at
+                    device_bucket["device_label"] = event.device_label
+                if (
+                    device_bucket["last_activity_at"] is None
+                    or occurred_at > device_bucket["last_activity_at"]
+                ):
+                    device_bucket["last_activity_at"] = occurred_at
+                    if session_key is not None:
+                        device_bucket["last_session_key"] = session_key
+                if event.activity_kind == "launch":
+                    device_bucket["launch_count"] = int(device_bucket["launch_count"]) + 1
+                    if (
+                        device_bucket["last_launched_at"] is None
+                        or occurred_at > device_bucket["last_launched_at"]
+                    ):
+                        device_bucket["last_launched_at"] = occurred_at
+                        device_bucket["last_target"] = event.target
+                elif event.activity_kind == "view":
+                    device_bucket["view_count"] = int(device_bucket["view_count"]) + 1
+                if event.activity_kind in {"view", "progress", "complete"} and (
+                    device_bucket["last_viewed_at"] is None
+                    or occurred_at > device_bucket["last_viewed_at"]
+                ):
+                    device_bucket["last_viewed_at"] = occurred_at
+                if session_key is not None:
+                    cast(set[str], device_bucket["session_keys"]).add(session_key)
+                    if occurred_at >= active_cutoff and not is_completed:
+                        cast(set[str], device_bucket["active_session_keys"]).add(session_key)
+                device_progress_recorded_at = cast(
+                    datetime | None,
+                    device_bucket["progress_recorded_at"],
+                )
+                if (
+                    position_seconds is not None
+                    or duration_seconds is not None
+                    or is_completed
+                ) and (
+                    device_progress_recorded_at is None
+                    or occurred_at >= device_progress_recorded_at
+                ):
+                    device_bucket["resume_position_seconds"] = (
+                        None if is_completed else position_seconds
+                    )
+                    device_bucket["duration_seconds"] = duration_seconds
+                    device_bucket["progress_percent"] = _build_progress_percent(
+                        position_seconds,
+                        duration_seconds,
+                        completed=is_completed,
+                    )
+                    device_bucket["progress_recorded_at"] = occurred_at
+                if is_completed and session_key is not None:
+                    completed_session_keys = cast(
+                        set[str],
+                        device_bucket["completed_session_keys"],
+                    )
+                    if session_key not in completed_session_keys:
+                        completed_session_keys.add(session_key)
+                        device_bucket["completed_session_count"] = int(
+                            device_bucket["completed_session_count"]
+                        ) + 1
+
+                if session_key is not None:
+                    session_bucket = session_rollups.get(session_key)
+                    if session_bucket is None:
+                        session_bucket = {
+                            "item_id": event.item_id,
+                            "device_key": event.device_key,
+                            "device_label": event.device_label,
+                            "started_at": occurred_at,
+                            "last_seen_at": occurred_at,
+                            "last_target": event.target,
+                            "resume_position_seconds": None,
+                            "duration_seconds": None,
+                            "progress_percent": None,
+                            "completed": False,
+                            "progress_recorded_at": None,
+                        }
+                        session_rollups[session_key] = session_bucket
+                        ordered_session_keys.append(session_key)
+                    else:
+                        if occurred_at < cast(datetime, session_bucket["started_at"]):
+                            session_bucket["started_at"] = occurred_at
+                        if occurred_at > cast(datetime, session_bucket["last_seen_at"]):
+                            session_bucket["last_seen_at"] = occurred_at
+                    session_bucket["item_id"] = event.item_id
+                    session_bucket["device_key"] = event.device_key
+                    session_bucket["device_label"] = event.device_label
+                    if event.target is not None:
+                        session_bucket["last_target"] = event.target
+                    session_progress_recorded_at = cast(
+                        datetime | None,
+                        session_bucket["progress_recorded_at"],
+                    )
+                    if (
+                        position_seconds is not None
+                        or duration_seconds is not None
+                        or is_completed
+                    ) and (
+                        session_progress_recorded_at is None
+                        or occurred_at >= session_progress_recorded_at
+                    ):
+                        session_bucket["resume_position_seconds"] = (
+                            None if is_completed else position_seconds
+                        )
+                        session_bucket["duration_seconds"] = duration_seconds
+                        session_bucket["progress_percent"] = _build_progress_percent(
+                            position_seconds,
+                            duration_seconds,
+                            completed=is_completed,
+                        )
+                        session_bucket["progress_recorded_at"] = occurred_at
+                    if is_completed:
+                        session_bucket["completed"] = True
+
+            if normalized_focus_item_id is not None and normalized_focus_item_id not in item_rollups:
+                return ConsumerPlaybackActivityRecord(generated_at=now.isoformat())
+
+            selected_item_ids = ordered_item_ids[:bounded_item_limit]
+            item_rows = (
+                (
+                    await session.execute(
+                        select(MediaItemORM)
+                        .options(*_projection_item_load_options())
+                        .where(
+                            MediaItemORM.tenant_id == normalized_tenant_id,
+                            MediaItemORM.id.in_(selected_item_ids),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            summaries_by_id = {
+                row.id: _build_summary_record(row, extended=True)
+                for row in item_rows
+            }
+
+        items = tuple(
+            _build_consumer_activity_item_record(
+                summaries_by_id[item_id],
+                last_activity_at=cast(datetime | None, item_rollups[item_id]["last_activity_at"]),
+                last_viewed_at=cast(datetime | None, item_rollups[item_id]["last_viewed_at"]),
+                last_launched_at=cast(datetime | None, item_rollups[item_id]["last_launched_at"]),
+                view_count=int(item_rollups[item_id]["view_count"]),
+                launch_count=int(item_rollups[item_id]["launch_count"]),
+                session_count=len(cast(set[str], item_rollups[item_id]["session_keys"])),
+                active_session_count=len(
+                    cast(set[str], item_rollups[item_id]["active_session_keys"])
+                ),
+                last_session_key=cast(str | None, item_rollups[item_id]["last_session_key"]),
+                resume_position_seconds=cast(
+                    int | None,
+                    item_rollups[item_id]["resume_position_seconds"],
+                ),
+                duration_seconds=cast(int | None, item_rollups[item_id]["duration_seconds"]),
+                progress_percent=cast(float | None, item_rollups[item_id]["progress_percent"]),
+                completed=bool(item_rollups[item_id]["completed"]),
+                last_target=cast(str | None, item_rollups[item_id]["last_target"]),
+            )
+            for item_id in selected_item_ids
+            if item_id in summaries_by_id
+        )
+
+        devices = tuple(
+            ConsumerPlaybackDeviceRecord(
+                device_key=device_key,
+                device_label=str(device_rollups[device_key]["device_label"]),
+                last_seen_at=_serialize_datetime(
+                    cast(datetime | None, device_rollups[device_key]["last_seen_at"])
+                )
+                or now.isoformat(),
+                last_activity_at=_serialize_datetime(
+                    cast(datetime | None, device_rollups[device_key]["last_activity_at"])
+                ),
+                last_viewed_at=_serialize_datetime(
+                    cast(datetime | None, device_rollups[device_key]["last_viewed_at"])
+                ),
+                last_launched_at=_serialize_datetime(
+                    cast(datetime | None, device_rollups[device_key]["last_launched_at"])
+                ),
+                launch_count=int(device_rollups[device_key]["launch_count"]),
+                view_count=int(device_rollups[device_key]["view_count"]),
+                session_count=len(cast(set[str], device_rollups[device_key]["session_keys"])),
+                active_session_count=len(
+                    cast(set[str], device_rollups[device_key]["active_session_keys"])
+                ),
+                last_session_key=cast(
+                    str | None,
+                    device_rollups[device_key]["last_session_key"],
+                ),
+                resume_position_seconds=cast(
+                    int | None,
+                    device_rollups[device_key]["resume_position_seconds"],
+                ),
+                duration_seconds=cast(int | None, device_rollups[device_key]["duration_seconds"]),
+                progress_percent=cast(
+                    float | None,
+                    device_rollups[device_key]["progress_percent"],
+                ),
+                completed_session_count=int(
+                    device_rollups[device_key]["completed_session_count"]
+                ),
+                last_target=cast(str | None, device_rollups[device_key]["last_target"]),
+            )
+            for device_key in ordered_device_keys[:bounded_device_limit]
+        )
+
+        recent_sessions = tuple(
+            ConsumerPlaybackSessionRecord(
+                session_key=session_key,
+                item_id=str(session_rollups[session_key]["item_id"]),
+                device_key=str(session_rollups[session_key]["device_key"]),
+                device_label=str(session_rollups[session_key]["device_label"]),
+                started_at=_serialize_datetime(
+                    cast(datetime | None, session_rollups[session_key]["started_at"])
+                )
+                or now.isoformat(),
+                last_seen_at=_serialize_datetime(
+                    cast(datetime | None, session_rollups[session_key]["last_seen_at"])
+                )
+                or now.isoformat(),
+                last_target=cast(str | None, session_rollups[session_key]["last_target"]),
+                active=(
+                    cast(datetime, session_rollups[session_key]["last_seen_at"]) >= active_cutoff
+                    and not bool(session_rollups[session_key]["completed"])
+                ),
+                resume_position_seconds=cast(
+                    int | None,
+                    session_rollups[session_key]["resume_position_seconds"],
+                ),
+                duration_seconds=cast(
+                    int | None,
+                    session_rollups[session_key]["duration_seconds"],
+                ),
+                progress_percent=cast(
+                    float | None,
+                    session_rollups[session_key]["progress_percent"],
+                ),
+                completed=bool(session_rollups[session_key]["completed"]),
+            )
+            for session_key in ordered_session_keys[:_CONSUMER_PLAYBACK_SESSION_LIMIT]
+        )
+
+        return ConsumerPlaybackActivityRecord(
+            generated_at=now.isoformat(),
+            total_item_count=len(items),
+            total_view_count=total_view_count,
+            total_launch_count=total_launch_count,
+            total_session_count=len(session_rollups),
+            active_session_count=sum(
+                1
+                for session in session_rollups.values()
+                if cast(datetime, session["last_seen_at"]) >= active_cutoff
+                and not bool(session["completed"])
+            ),
+            items=items,
+            devices=devices,
+            recent_sessions=recent_sessions,
         )
 
     async def _hydrate_summary_records(

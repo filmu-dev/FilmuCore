@@ -75,6 +75,57 @@ class TorrentDownloadManifest:
     duplicate_path_count: int = 0
 
 
+@dataclass(frozen=True)
+class TorrentSelectedFileEvidence:
+    """One selected file plus normalized validation evidence for debrid selection checks."""
+
+    file_id: str
+    file_name: str
+    file_path: str | None = None
+    file_size_bytes: int | None = None
+    selected: bool = False
+    media_type: str | None = None
+    download_url: str | None = None
+    container_root: str | None = None
+    scope_season: int | None = None
+    scope_episodes: tuple[int, ...] = ()
+    matched_expected_content: bool = False
+    match_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TorrentDownloadValidation:
+    """Selection validation result with explicit selected-file and container evidence."""
+
+    manifest: TorrentDownloadManifest
+    selected_file_ids: tuple[str, ...] = ()
+    selected_file_evidence: tuple[TorrentSelectedFileEvidence, ...] = ()
+    matched_file_ids: tuple[str, ...] = ()
+    rejection_reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.rejection_reason is None
+
+
+@dataclass(frozen=True)
+class TorrentDownloadContainerCandidate:
+    """One deterministic container-scoped candidate derived from a provider payload."""
+
+    container_root: str | None
+    variant_id: str
+    validation: TorrentDownloadValidation
+    candidate_rank: int = 0
+
+
+class TorrentDownloadValidationError(ValueError):
+    """Raised when the provider-side file/container selection fails validation."""
+
+    def __init__(self, validation: TorrentDownloadValidation) -> None:
+        self.validation = validation
+        super().__init__(validation.rejection_reason or "download_manifest_validation_failed")
+
+
 @runtime_checkable
 class DebridDownloadClient(Protocol):
     """Structural interface for debrid provider clients used in the download pipeline."""
@@ -267,6 +318,214 @@ def build_download_manifest(
     )
 
 
+def _normalize_identity_path(*, file_path: str | None, file_name: str | None) -> str | None:
+    identity_path = (file_path or file_name or "").strip()
+    return identity_path or None
+
+
+def _container_root(identity_path: str | None) -> str | None:
+    if identity_path is None or "/" not in identity_path:
+        return None
+    root = identity_path.split("/", 1)[0].strip()
+    return root or None
+
+
+def _extract_scope_tokens(identity_path: str | None) -> tuple[int | None, tuple[int, ...]]:
+    if identity_path is None:
+        return None, ()
+
+    normalized = identity_path.casefold()
+    match = re.search(r"\bs(?P<season>\d{1,2})e(?P<episodes>\d{1,3}(?:e\d{1,3})*)\b", normalized)
+    if match is not None:
+        season = int(match.group("season"))
+        episodes = tuple(
+            int(token)
+            for token in re.findall(r"\d{1,3}", match.group("episodes"))
+        )
+        return season, episodes
+
+    match = re.search(r"\b(?P<season>\d{1,2})x(?P<episode>\d{1,3})\b", normalized)
+    if match is not None:
+        return int(match.group("season")), (int(match.group("episode")),)
+
+    season_match = re.search(r"\bseason[\s._-]?(?P<season>\d{1,2})\b", normalized)
+    episode_match = re.search(r"\bepisode[\s._-]?(?P<episode>\d{1,3})\b", normalized)
+    if season_match is not None and episode_match is not None:
+        return int(season_match.group("season")), (int(episode_match.group("episode")),)
+    if season_match is not None:
+        return int(season_match.group("season")), ()
+
+    return None, ()
+
+
+def _coerce_expected_scope_value(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _file_matches_expected_content(
+    evidence: TorrentSelectedFileEvidence,
+    *,
+    expected_season: int | None,
+    expected_episode: int | None,
+) -> tuple[bool, str | None]:
+    if expected_episode is not None:
+        if expected_season is not None and evidence.scope_season != expected_season:
+            return False, None
+        if expected_episode in evidence.scope_episodes:
+            return True, "expected_episode"
+        return False, None
+
+    if expected_season is not None:
+        if evidence.scope_season == expected_season:
+            return True, "expected_season"
+        return False, None
+
+    if evidence.scope_season is not None or evidence.scope_episodes:
+        return False, None
+    if evidence.media_type == "episode":
+        return False, None
+    return True, "movie_content"
+
+
+def validate_download_manifest(
+    files: list[TorrentFile],
+    *,
+    download_urls: list[str],
+    settings: DownloadersSettings,
+    expected_parsed_title: dict[str, object] | None = None,
+) -> TorrentDownloadValidation:
+    """Validate one provider manifest against selected-file and expected-content rules."""
+
+    manifest = build_download_manifest(files, download_urls=download_urls, settings=settings)
+    evidence_rows: list[TorrentSelectedFileEvidence] = []
+    matched_file_ids: list[str] = []
+    expected_season = _coerce_expected_scope_value((expected_parsed_title or {}).get("season"))
+    expected_episode = _coerce_expected_scope_value((expected_parsed_title or {}).get("episode"))
+
+    for file in manifest.files:
+        identity_path = _normalize_identity_path(file_path=file.file_path, file_name=file.file_name)
+        scope_season, scope_episodes = _extract_scope_tokens(identity_path)
+        matched_expected_content, match_reason = _file_matches_expected_content(
+            TorrentSelectedFileEvidence(
+                file_id=file.file_id,
+                file_name=file.file_name,
+                file_path=file.file_path,
+                file_size_bytes=file.file_size_bytes,
+                selected=file.selected,
+                media_type=file.media_type,
+                download_url=file.download_url,
+                container_root=_container_root(identity_path),
+                scope_season=scope_season,
+                scope_episodes=scope_episodes,
+            ),
+            expected_season=expected_season,
+            expected_episode=expected_episode,
+        )
+        evidence = TorrentSelectedFileEvidence(
+            file_id=file.file_id,
+            file_name=file.file_name,
+            file_path=file.file_path,
+            file_size_bytes=file.file_size_bytes,
+            selected=file.selected,
+            media_type=file.media_type,
+            download_url=file.download_url,
+            container_root=_container_root(identity_path),
+            scope_season=scope_season,
+            scope_episodes=scope_episodes,
+            matched_expected_content=matched_expected_content,
+            match_reason=match_reason,
+        )
+        if matched_expected_content:
+            matched_file_ids.append(file.file_id)
+        evidence_rows.append(evidence)
+
+    rejection_reason: str | None = None
+    if not manifest.files:
+        rejection_reason = "no_downloadable_files"
+    elif manifest.unresolved_file_count > 0:
+        rejection_reason = "download_manifest_incomplete"
+    elif manifest.duplicate_path_count > 0:
+        rejection_reason = "download_manifest_duplicate_paths"
+    elif manifest.multi_container:
+        rejection_reason = "download_manifest_multi_container"
+    elif expected_episode is not None and not matched_file_ids:
+        rejection_reason = "download_manifest_no_matching_episode"
+    elif expected_season is not None and not matched_file_ids:
+        rejection_reason = "download_manifest_no_matching_season"
+    elif expected_season is None and expected_episode is None and not matched_file_ids:
+        rejection_reason = "download_manifest_unexpected_episode_content"
+
+    return TorrentDownloadValidation(
+        manifest=manifest,
+        selected_file_ids=tuple(file.file_id for file in manifest.files),
+        selected_file_evidence=tuple(evidence_rows),
+        matched_file_ids=tuple(matched_file_ids),
+        rejection_reason=rejection_reason,
+    )
+
+
+def build_download_container_candidates(
+    files: list[TorrentFile],
+    *,
+    download_urls: list[str],
+    settings: DownloadersSettings,
+    expected_parsed_title: dict[str, object] | None = None,
+) -> tuple[TorrentDownloadContainerCandidate, ...]:
+    """Split one provider payload into deterministic container-scoped validation candidates."""
+
+    full_validation = validate_download_manifest(
+        files,
+        download_urls=download_urls,
+        settings=settings,
+        expected_parsed_title=expected_parsed_title,
+    )
+    if not full_validation.manifest.files:
+        return (
+            TorrentDownloadContainerCandidate(
+                container_root=None,
+                variant_id="__root__",
+                validation=full_validation,
+                candidate_rank=0,
+            ),
+        )
+
+    files_by_root: dict[str | None, list[TorrentFile]] = {}
+    for file in full_validation.manifest.files:
+        identity_path = _normalize_identity_path(file_path=file.file_path, file_name=file.file_name)
+        root = _container_root(identity_path)
+        files_by_root.setdefault(root, []).append(file)
+
+    if len(files_by_root) <= 1:
+        sole_root = next(iter(files_by_root), None)
+        return (
+            TorrentDownloadContainerCandidate(
+                container_root=sole_root,
+                variant_id=sole_root or "__root__",
+                validation=full_validation,
+                candidate_rank=0,
+            ),
+        )
+
+    ordered_roots = sorted(files_by_root, key=lambda value: (value is not None, value or ""))
+    candidates: list[TorrentDownloadContainerCandidate] = []
+    for rank, root in enumerate(ordered_roots):
+        validation = validate_download_manifest(
+            files_by_root[root],
+            download_urls=[],
+            settings=settings,
+            expected_parsed_title=expected_parsed_title,
+        )
+        candidates.append(
+            TorrentDownloadContainerCandidate(
+                container_root=root,
+                variant_id=root or "__root__",
+                validation=validation,
+                candidate_rank=rank,
+            )
+        )
+    return tuple(candidates)
+
+
 def _normalize_torrent_file(
     file_payload: dict[str, Any],
     *,
@@ -429,6 +688,12 @@ class RealDebridPlaybackClient:
         return PlaybackAttachmentProviderUnrestrictedLink(
             download_url=download_url,
             restricted_url=link,
+            provider=request.provider,
+            provider_download_id=request.provider_download_id,
+            original_filename=payload.get("filename")
+            if isinstance(payload.get("filename"), str)
+            else None,
+            file_size=payload.get("filesize") if isinstance(payload.get("filesize"), int) else None,
         )
 
     async def add_magnet(self, magnet_url: str) -> str:
@@ -668,7 +933,26 @@ class RealDebridPlaybackClient:
             )
             return None
 
-        return await self.unrestrict_link(projection.restricted_url, request=request)
+        unrestricted = await self.unrestrict_link(projection.restricted_url, request=request)
+        if unrestricted is None:
+            return None
+        return PlaybackAttachmentProviderUnrestrictedLink(
+            download_url=unrestricted.download_url,
+            restricted_url=unrestricted.restricted_url or projection.restricted_url,
+            expires_at=unrestricted.expires_at,
+            provider=projection.provider or unrestricted.provider or request.provider,
+            provider_download_id=(
+                projection.provider_download_id
+                or unrestricted.provider_download_id
+                or request.provider_download_id
+            ),
+            provider_file_id=projection.provider_file_id or unrestricted.provider_file_id,
+            provider_file_path=projection.provider_file_path or unrestricted.provider_file_path,
+            original_filename=projection.original_filename or unrestricted.original_filename,
+            file_size=(
+                projection.file_size if projection.file_size is not None else unrestricted.file_size
+            ),
+        )
 
 
 @dataclass(slots=True)
@@ -750,7 +1034,15 @@ class AllDebridPlaybackClient:
             )
             return None
 
-        return PlaybackAttachmentProviderUnrestrictedLink(download_url=download_url)
+        return PlaybackAttachmentProviderUnrestrictedLink(
+            download_url=download_url,
+            provider=request.provider,
+            provider_download_id=request.provider_download_id,
+            original_filename=data.get("filename")
+            if isinstance(data.get("filename"), str)
+            else None,
+            file_size=data.get("filesize") if isinstance(data.get("filesize"), int) else None,
+        )
 
     async def add_magnet(self, magnet_url: str) -> str:
         await _acquire_download_rate_limit(provider="alldebrid", limiter=self.limiter)
@@ -897,7 +1189,13 @@ class DebridLinkPlaybackClient:
         _ = request
         if not link:
             return None
-        return PlaybackAttachmentProviderUnrestrictedLink(download_url=link)
+        return PlaybackAttachmentProviderUnrestrictedLink(
+            download_url=link,
+            provider=request.provider,
+            provider_download_id=request.provider_download_id,
+            original_filename=request.original_filename,
+            file_size=request.file_size,
+        )
 
     async def add_magnet(self, magnet_url: str) -> str:
         await _acquire_download_rate_limit(provider="debridlink", limiter=self.limiter)

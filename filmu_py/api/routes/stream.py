@@ -543,6 +543,25 @@ def _is_selected_hls_failed_lease_error(exc: HTTPException) -> bool:
     )
 
 
+def _is_hls_transcode_source_error(exc: HTTPException) -> bool:
+    """Return whether one HLS route exception represents remote-direct transcode policy failure."""
+
+    detail = exc.detail if isinstance(exc.detail, str) else ""
+    return exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE and detail.startswith(
+        "HLS transcode source "
+    )
+
+
+def _retry_after_header_value(exc: HTTPException, *, fallback_seconds: int) -> str:
+    """Return one normalized `Retry-After` header value for client-facing HLS failures."""
+
+    if exc.headers is not None:
+        retry_after = exc.headers.get("Retry-After")
+        if retry_after is not None and retry_after.isdigit():
+            return retry_after
+    return str(fallback_seconds)
+
+
 async def _run_hls_failed_lease_refresh_trigger(
     *,
     request: Request,
@@ -954,13 +973,23 @@ async def _resolve_validated_hls_transcode_source(
         return str(refreshed_descriptor.locator)
     except HTTPException as exc:
         PLAYBACK_RISK_EVENTS.labels(surface="hls", reason="transcode_source_unavailable").inc()
+        deferred_reason = exc.headers.get("X-Filmu-Refresh-Deferred") if exc.headers else None
+        if deferred_reason == "refresh_rate_limited":
+            detail = "HLS transcode source refresh is rate limited"
+        elif deferred_reason == "provider_circuit_open":
+            detail = "HLS transcode source refresh is paused while provider recovery is in progress"
+        else:
+            direct_refresh_detail = (
+                exc.detail
+                if isinstance(exc.detail, str)
+                and exc.detail.startswith("Selected direct playback lease refresh failed")
+                else _stable_direct_playback_refresh_detail()
+            )
+            detail = f"HLS transcode source is unavailable: {direct_refresh_detail}"
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "HLS transcode source is unavailable: "
-                f"{_stable_direct_playback_refresh_detail()}"
-            ),
-            headers={"Retry-After": "10"},
+            detail=detail,
+            headers={"Retry-After": _retry_after_header_value(exc, fallback_seconds=10)},
         ) from exc
 
 
@@ -1339,6 +1368,8 @@ async def get_hls_playlist(
     except HTTPException as exc:
         if _is_selected_hls_failed_lease_error(exc):
             _start_hls_failed_lease_refresh_trigger(request=request, item_identifier=item_id)
+        if _is_hls_transcode_source_error(exc):
+            _start_direct_playback_refresh_trigger(request=request, item_identifier=item_id)
         raise _normalize_hls_route_error(exc) from exc
     if source_kind == "remote_playlist" and source_key == "media-entry:restricted-fallback":
         _start_hls_restricted_fallback_refresh_trigger(request=request, item_identifier=item_id)
@@ -1472,6 +1503,8 @@ async def get_hls_file(
         except HTTPException as exc:
             if _is_selected_hls_failed_lease_error(exc):
                 _start_hls_failed_lease_refresh_trigger(request=request, item_identifier=item_id)
+            if _is_hls_transcode_source_error(exc):
+                _start_direct_playback_refresh_trigger(request=request, item_identifier=item_id)
             raise _normalize_hls_route_error(exc) from exc
         if source_kind == "remote_playlist" and source_key == "media-entry:restricted-fallback":
             _start_hls_restricted_fallback_refresh_trigger(request=request, item_identifier=item_id)

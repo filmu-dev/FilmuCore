@@ -35,6 +35,7 @@ from filmu_py.services.media import (
     ItemActionResult,
     ItemRequestSummaryRecord,
     MediaEntryDetailRecord,
+    MediaEntryLifecycleRecord,
     MediaItemsPage,
     MediaItemSpecializationRecord,
     MediaItemSummaryRecord,
@@ -164,6 +165,7 @@ class DummyMediaService:
                     local_path=None,
                     download_url="https://api.real-debrid.com/restricted-link",
                     unrestricted_url="https://cdn.example.com/direct",
+                    source_attachment_id="attachment-7",
                     provider="realdebrid",
                     provider_download_id="torrent-123",
                     provider_file_id="file-7",
@@ -174,6 +176,25 @@ class DummyMediaService:
                     active_for_direct=True,
                     active_for_hls=False,
                     is_active_stream=True,
+                    lifecycle=MediaEntryLifecycleRecord(
+                        owner_kind="media-entry",
+                        owner_id="media-entry-1",
+                        active_roles=("direct",),
+                        source_key="persisted",
+                        source_attachment_id="attachment-7",
+                        provider_family="debrid",
+                        locator_source="unrestricted-url",
+                        match_basis="source-attachment-id",
+                        restricted_fallback=False,
+                        refresh_state="ready",
+                        expires_at="2026-03-19T12:00:00+00:00",
+                        last_refreshed_at="2026-03-12T12:00:00+00:00",
+                        last_refresh_error=None,
+                        effective_refresh_state="ready",
+                        ready_for_direct=True,
+                        ready_for_hls=True,
+                        ready_for_playback=True,
+                    ),
                 )
             ]
             playback_attachments = [
@@ -413,9 +434,29 @@ def test_get_item_route_returns_detail_payload() -> None:
     assert media_service.last_detail_tenant_id == "tenant-main"
     assert body["media_entries"][0]["provider_download_id"] == "torrent-123"
     assert body["media_entries"][0]["original_filename"] == "Movie.mkv"
+    assert body["media_entries"][0]["source_attachment_id"] == "attachment-7"
     assert body["media_entries"][0]["active_for_direct"] is True
     assert body["media_entries"][0]["active_for_hls"] is False
     assert body["media_entries"][0]["is_active_stream"] is True
+    assert body["media_entries"][0]["lifecycle"] == {
+        "owner_kind": "media-entry",
+        "owner_id": "media-entry-1",
+        "active_roles": ["direct"],
+        "source_key": "persisted",
+        "source_attachment_id": "attachment-7",
+        "provider_family": "debrid",
+        "locator_source": "unrestricted-url",
+        "match_basis": "source-attachment-id",
+        "restricted_fallback": False,
+        "refresh_state": "ready",
+        "expires_at": "2026-03-19T12:00:00+00:00",
+        "last_refreshed_at": "2026-03-12T12:00:00+00:00",
+        "last_refresh_error": None,
+        "effective_refresh_state": "ready",
+        "ready_for_direct": True,
+        "ready_for_hls": True,
+        "ready_for_playback": True,
+    }
     assert body["next_retry_at"] == "2026-03-22T22:00:00Z"
     assert body["recovery_attempt_count"] == 2
     assert body["is_in_cooldown"] is True
@@ -716,6 +757,60 @@ def test_build_detail_record_prefers_persisted_media_entries_over_attachment_pro
     assert detail.active_stream is not None
     assert detail.active_stream.direct_owner is not None
     assert detail.active_stream.direct_owner.media_entry_index == 0
+
+
+def test_build_detail_record_reuses_richer_media_entry_lifecycle_identity() -> None:
+    created_at = datetime(2026, 3, 12, 10, tzinfo=UTC)
+    refreshed_at = datetime(2026, 3, 12, 11, tzinfo=UTC)
+    item = MediaItemORM(
+        id="item-provider-identity-lifecycle",
+        external_ref="tt6677889",
+        title="Provider Identity Lifecycle Movie",
+        state="completed",
+        attributes={"item_type": "movie"},
+    )
+    media_entry = MediaEntryORM(
+        id="media-entry-provider-identity",
+        item_id=item.id,
+        entry_type="media",
+        kind="remote-direct",
+        original_filename="Provider Identity Movie.mkv",
+        download_url="https://api.real-debrid.com/restricted-provider-identity",
+        unrestricted_url="https://cdn.example.com/provider-identity",
+        provider="realdebrid",
+        provider_download_id="torrent-provider-identity",
+        provider_file_id="file-provider-identity",
+        provider_file_path="folder/Provider Identity Movie.mkv",
+        size_bytes=789,
+        refresh_state="stale",
+        expires_at=datetime(2026, 3, 19, 12, tzinfo=UTC),
+        last_refreshed_at=refreshed_at,
+        last_refresh_error="refresh pending",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    item.media_entries = [media_entry]
+
+    detail = _build_detail_record(item, extended=True)
+
+    assert detail.media_entries is not None
+    lifecycle = detail.media_entries[0].lifecycle
+    assert lifecycle is not None
+    assert lifecycle.owner_kind == "media-entry"
+    assert lifecycle.owner_id == media_entry.id
+    assert lifecycle.source_attachment_id is None
+    assert lifecycle.provider_family == "debrid"
+    assert lifecycle.locator_source == "unrestricted-url"
+    assert lifecycle.match_basis == "provider-file-id"
+    assert lifecycle.restricted_fallback is False
+    assert lifecycle.refresh_state == "stale"
+    assert lifecycle.expires_at == "2026-03-19T12:00:00+00:00"
+    assert lifecycle.last_refreshed_at == "2026-03-12T11:00:00+00:00"
+    assert lifecycle.last_refresh_error == "refresh pending"
+    assert lifecycle.effective_refresh_state == "stale"
+    assert lifecycle.ready_for_direct is True
+    assert lifecycle.ready_for_hls is True
+    assert lifecycle.ready_for_playback is True
 
 
 def test_build_detail_record_prefers_persisted_active_stream_relation() -> None:

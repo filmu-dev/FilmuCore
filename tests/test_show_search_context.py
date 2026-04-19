@@ -218,6 +218,24 @@ def test_rank_streams_post_filter_allows_correct_episode() -> None:
     assert validation is None
 
 
+def test_rank_streams_post_filter_allows_episode_range_covering_expected_episode() -> None:
+    item = MediaItemRecord(
+        id="episode-1",
+        external_ref="tvdb:1",
+        title="Show Title",
+        state=tasks.ItemState.SCRAPED,
+        attributes={"item_type": "episode", "season_number": 2, "episode_number": 4},
+    )
+    ranged = _FakeStream(
+        id="stream-1",
+        raw_title="Show.Title.S02E03-E05",
+        parsed_title={"season": 2, "episode": [3, 4, 5]},
+    )
+
+    validation = tasks._post_rank_expected_scope_reason(item, ranged)
+    assert validation is None
+
+
 # ---------------------------------------------------------------------------
 # Fix 5 — season_override threads partial_seasons into the scrape query
 # ---------------------------------------------------------------------------

@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import uuid4
 
 _SCHEMA_VERSION = 2
 _DEFAULT_OVERRIDE_WINDOW_HOURS = 4
 _MAX_HISTORY_ENTRIES = 20
+VfsRolloutAction = Literal["promote", "hold", "clear_hold", "rollback", "clear_rollback"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +311,147 @@ def has_active_rollback(
     return build_vfs_rollout_control_state(raw_state, now=now).rollback_active
 
 
+def derive_vfs_rollout_allowed_actions(
+    raw_state: Mapping[str, object] | None,
+    *,
+    canary_decision: str,
+    merge_gate: str,
+    now: datetime | None = None,
+) -> tuple[VfsRolloutAction, ...]:
+    """Return the operator actions allowed for the current rollout posture."""
+
+    state = build_vfs_rollout_control_state(raw_state, now=now)
+    allowed: list[VfsRolloutAction] = []
+    if state.promotion_pause_active:
+        allowed.append("clear_hold")
+    if state.rollback_active:
+        allowed.append("clear_rollback")
+    if state.rollback_active:
+        return tuple(dict.fromkeys(allowed))
+    if merge_gate == "ready" and canary_decision == "promote_to_next_environment_class":
+        allowed.extend(("promote", "hold", "rollback"))
+    elif merge_gate == "hold":
+        allowed.extend(("hold", "rollback"))
+    elif merge_gate == "blocked" and canary_decision == "rollback_current_environment":
+        allowed.append("rollback")
+    elif canary_decision:
+        allowed.extend(("hold", "rollback"))
+    return tuple(dict.fromkeys(allowed))
+
+
+def execute_vfs_rollout_action(
+    raw_state: Mapping[str, object] | None,
+    *,
+    action: VfsRolloutAction,
+    actor_id: str | None,
+    canary_decision: str,
+    merge_gate: str,
+    reason: str | None = None,
+    target_environment_class: str | None = None,
+    expected_canary_decision: str | None = None,
+    expected_merge_gate: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Execute one validated rollout action against the persisted state."""
+
+    current_time = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    state = build_vfs_rollout_control_state(raw_state, now=current_time)
+    cleaned_reason = _clean_text(reason)
+    cleaned_target_environment_class = _clean_text(target_environment_class, allow_empty=True)
+    observed_canary_decision = _clean_text(canary_decision, allow_empty=True) or ""
+    observed_merge_gate = _clean_text(merge_gate, allow_empty=True) or ""
+    if expected_canary_decision is not None:
+        cleaned_expected_decision = _clean_text(
+            expected_canary_decision,
+            allow_empty=True,
+        ) or ""
+        if cleaned_expected_decision != observed_canary_decision:
+            raise ValueError("rollout_decision_mismatch")
+    if expected_merge_gate is not None:
+        cleaned_expected_merge_gate = _clean_text(expected_merge_gate, allow_empty=True) or ""
+        if cleaned_expected_merge_gate != observed_merge_gate:
+            raise ValueError("rollout_merge_gate_mismatch")
+    allowed_actions = derive_vfs_rollout_allowed_actions(
+        state_to_mapping(state),
+        canary_decision=observed_canary_decision,
+        merge_gate=observed_merge_gate,
+        now=current_time,
+    )
+    if action not in allowed_actions:
+        raise ValueError(f"rollout_action_not_allowed:{action}")
+
+    updates: dict[str, object | None] = {}
+    if action == "promote":
+        if not cleaned_target_environment_class:
+            raise ValueError("target_environment_class_required")
+        current_environment_class = state.environment_class.strip()
+        if cleaned_target_environment_class == current_environment_class:
+            raise ValueError("target_environment_class_must_change")
+        updates = {
+            "environment_class": cleaned_target_environment_class,
+            "promotion_paused": False,
+            "promotion_pause_reason": None,
+            "promotion_pause_expires_at": None,
+            "rollback_requested": False,
+            "rollback_reason": None,
+            "rollback_expires_at": None,
+        }
+    elif action == "hold":
+        updates = {
+            "promotion_paused": True,
+            "promotion_pause_reason": (
+                cleaned_reason
+                or "repeat_windows_soak_before_next_promotion_step"
+            ),
+        }
+    elif action == "clear_hold":
+        updates = {
+            "promotion_paused": False,
+            "promotion_pause_reason": None,
+            "promotion_pause_expires_at": None,
+        }
+    elif action == "rollback":
+        if not cleaned_reason:
+            raise ValueError("rollback_reason_required")
+        if not cleaned_target_environment_class:
+            raise ValueError("target_environment_class_required")
+        current_environment_class = state.environment_class.strip()
+        if cleaned_target_environment_class == current_environment_class:
+            raise ValueError("target_environment_class_must_change")
+        updates = {
+            "environment_class": cleaned_target_environment_class,
+            "promotion_paused": False,
+            "promotion_pause_reason": None,
+            "promotion_pause_expires_at": None,
+            "rollback_requested": True,
+            "rollback_reason": cleaned_reason,
+        }
+    elif action == "clear_rollback":
+        updates = {
+            "rollback_requested": False,
+            "rollback_reason": None,
+            "rollback_expires_at": None,
+        }
+
+    next_state = apply_vfs_rollout_control_updates(
+        raw_state,
+        updates,
+        actor_id=actor_id,
+        now=current_time,
+    )
+    history = next_state.get("history")
+    if isinstance(history, list) and history:
+        latest = history[0]
+        if isinstance(latest, dict):
+            latest["action"] = f"execute_{action}"
+            latest["summary"] = _summarize_rollout_action(
+                action=action,
+                environment_class=cleaned_target_environment_class or next_state.get("environment_class"),
+                reason=cleaned_reason,
+            )
+    return next_state
+
+
 def _pick_text(current: str | None, incoming: object | None, *, allow_empty: bool = False) -> str | None:
     if incoming is None:
         return current
@@ -495,6 +638,32 @@ def _serialize_history_entry(entry: VfsRolloutLedgerEntry) -> dict[str, object]:
             "notes": entry.notes,
         }
     )
+
+
+def state_to_mapping(state: VfsRolloutControlState) -> dict[str, object]:
+    """Return one mapping view of the normalized state for policy helpers."""
+
+    return serialize_vfs_rollout_control_state(state)
+
+
+def _summarize_rollout_action(
+    *,
+    action: VfsRolloutAction,
+    environment_class: object | None,
+    reason: str | None,
+) -> str:
+    cleaned_environment_class = _clean_text(environment_class, allow_empty=True) or "unset"
+    summary_map = {
+        "promote": "promotion executed",
+        "hold": "promotion hold executed",
+        "clear_hold": "promotion hold cleared",
+        "rollback": "rollback executed",
+        "clear_rollback": "rollback cleared",
+    }
+    summary = summary_map[action]
+    if reason:
+        return f"{summary}: {reason} ({cleaned_environment_class})"
+    return f"{summary} ({cleaned_environment_class})"
 
 
 def _strip_none_values(payload: dict[str, object]) -> dict[str, object]:
