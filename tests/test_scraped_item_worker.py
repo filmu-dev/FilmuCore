@@ -3513,12 +3513,10 @@ def test_worker_plugin_registry_refreshes_when_plugin_settings_payload_changes(m
     assert third is not first
     builtin_calls = [call for call in build_calls if call["phase"] == "builtin"]
     assert len(builtin_calls) == 2
-    assert cast(dict[str, object], builtin_calls[0]["settings"])["scraping"] == {
-        "torrentio": {"enabled": False}
-    }
-    assert cast(dict[str, object], builtin_calls[1]["settings"])["scraping"] == {
-        "torrentio": {"enabled": True}
-    }
+    first_scraping = cast(dict[str, object], builtin_calls[0]["settings"])["scraping"]
+    second_scraping = cast(dict[str, object], builtin_calls[1]["settings"])["scraping"]
+    assert cast(dict[str, object], first_scraping)["torrentio"]["enabled"] is False
+    assert cast(dict[str, object], second_scraping)["torrentio"]["enabled"] is True
 
 
 def test_transition_item_enqueues_scraped_item_processing_job() -> None:

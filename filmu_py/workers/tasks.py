@@ -266,6 +266,10 @@ async def _resolve_runtime_settings(ctx: dict[str, Any]) -> Settings:
     explicit = ctx.get("settings")
     current = explicit if isinstance(explicit, Settings) else get_settings()
     db = ctx.get("db")
+    if explicit is not None and not isinstance(db, DatabaseRuntime):
+        ctx["settings"] = current
+        ctx["plugin_settings_payload"] = current.to_compatibility_dict()
+        return current
     if not isinstance(db, DatabaseRuntime):
         db = DatabaseRuntime(current.postgres_dsn, echo=False)
         ctx["db"] = db
