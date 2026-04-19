@@ -449,8 +449,6 @@ def _namespace_from_payload(payload: object) -> object:
     if isinstance(payload, list):
         return [_namespace_from_payload(value) for value in payload]
     return payload
-
-
 def _raise_graphql_compat_error(exc: Exception) -> None:
     """Normalize compatibility-route exceptions into GraphQL-safe errors."""
 
