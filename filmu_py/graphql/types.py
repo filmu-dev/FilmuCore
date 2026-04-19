@@ -2554,19 +2554,6 @@ class GQLMediaItemsPage:
 
 
 @strawberry.type
-class GQLMediaItemSummaryPage:
-    """Paginated summary page for browse and search surfaces."""
-
-    items: list[GQLMediaItem]
-    total_count: int = strawberry.field(name="totalCount")
-    page: int
-    limit: int
-    total_pages: int = strawberry.field(name="totalPages")
-    has_previous_page: bool = strawberry.field(name="hasPreviousPage")
-    has_next_page: bool = strawberry.field(name="hasNextPage")
-
-
-@strawberry.type
 class GQLFilmuSettings:
     """Core filmu settings exposed through GraphQL compatibility schema."""
 

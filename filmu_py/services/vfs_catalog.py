@@ -31,13 +31,11 @@ from filmu_py.services.media import (
 )
 from filmu_py.services.mount_worker import (
     MountMediaEntryQueryBlockedReason,
-    MountMediaEntryQueryContract,
     MountMediaEntryQueryExecutor,
     MountMediaEntryQueryStrategy,
     MountPlaybackSnapshotSupplier,
     PersistedMountMediaEntryQueryExecutor,
     build_mount_media_entry_query_contract,
-    build_mount_media_entry_query_contract_from_snapshot,
 )
 from filmu_py.services.playback import (
     DirectFileLinkLifecycleSnapshot,

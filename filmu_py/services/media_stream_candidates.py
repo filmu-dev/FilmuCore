@@ -280,9 +280,10 @@ def _candidate_has_complete_marker(candidate: ParsedStreamCandidateRecord) -> bo
     other = candidate.parsed_title.get("other")
     if isinstance(other, str) and other.casefold() == "complete":
         return True
-    if isinstance(other, list):
-        if any(isinstance(value, str) and value.casefold() == "complete" for value in other):
-            return True
+    if isinstance(other, list) and any(
+        isinstance(value, str) and value.casefold() == "complete" for value in other
+    ):
+        return True
     return bool(re.search(r"\b(?:complete|season[ ._-]*pack|full[ ._-]*season)\b", candidate.raw_title, re.IGNORECASE))
 
 

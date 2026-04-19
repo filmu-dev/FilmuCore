@@ -488,10 +488,8 @@ async fn stale_http_status_triggers_inline_refresh_and_read_succeeds() {
 async fn prepare_read_request_uses_unrestricted_url_field_when_it_differs_from_locator() {
     let fresh_locator = "https://edge.example.com/current/movie.mkv";
     let stale_unrestricted_url = "https://cdn.example.com/old/movie.mkv";
-    let state = seeded_state_with_movie_locator_and_unrestricted_url(
-        fresh_locator,
-        stale_unrestricted_url,
-    );
+    let state =
+        seeded_state_with_movie_locator_and_unrestricted_url(fresh_locator, stale_unrestricted_url);
     let runtime = MountRuntime::new(Arc::clone(&state), "session-read-tests".to_owned());
     let movie_inode = common::movie_inode();
     let handle = runtime

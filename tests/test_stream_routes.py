@@ -9622,7 +9622,7 @@ def test_background_hls_generation_failure_preserves_usable_output_and_records_s
             playlist_path.write_text("#EXTM3U\n#EXTINF:2,\nsegment_00001.ts\n", encoding="utf-8")
             segment_path.write_bytes(b"segment")
 
-        asyncio.create_task(write_initial_playlist())
+        process.playlist_task = asyncio.create_task(write_initial_playlist())
         return process
 
     monkeypatch.setattr(

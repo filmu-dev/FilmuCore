@@ -19,11 +19,6 @@ from pydantic import AnyUrl, SecretStr
 
 from filmu_py.api.models import (
     EventTypesResponse,
-    ServingGovernanceResponse,
-    ServingHandleResponse,
-    ServingPathResponse,
-    ServingSessionResponse,
-    ServingStatusResponse,
 )
 from filmu_py.api.routes import default as default_routes
 from filmu_py.api.routes import runtime_governance
@@ -56,6 +51,8 @@ from filmu_py.services.media import (
     ConsumerPlaybackActivityRecord,
     ConsumerPlaybackDeviceRecord,
     ConsumerPlaybackSessionRecord,
+    EnrichmentResult,
+    ItemRequestSummaryRecord,
     MediaEntryDetailRecord,
     MediaItemRecord,
     MediaItemSpecializationRecord,
@@ -65,21 +62,16 @@ from filmu_py.services.media import (
     RecoveryMechanism,
     RecoveryPlanRecord,
     RecoveryTargetStage,
-    ResolvedPlaybackAttachmentRecord,
-    ResolvedPlaybackSnapshotRecord,
     RequestCandidateSeasonRecord,
     RequestCandidateSeasonSummaryRecord,
+    RequestItemServiceResult,
     RequestSearchCandidateRecord,
     RequestSearchLifecycleRecord,
     RequestSearchPageRecord,
+    ResolvedPlaybackAttachmentRecord,
+    ResolvedPlaybackSnapshotRecord,
     StatsProjection,
     WorkflowCheckpointRecord,
-    WorkflowCheckpointStatus,
-    WorkflowDrillCandidateRecord,
-    WorkflowResumeStage,
-    RequestItemServiceResult,
-    EnrichmentResult,
-    ItemRequestSummaryRecord,
 )
 from filmu_py.services.playback import (
     DirectPlaybackRefreshControlPlaneTriggerResult,

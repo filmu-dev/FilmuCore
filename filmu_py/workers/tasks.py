@@ -38,7 +38,7 @@ from filmu_py.plugins.interfaces import ScraperResult as PluginScraperResult
 from filmu_py.plugins.loader import PluginRuntimePolicy, load_plugins
 from filmu_py.plugins.registry import PluginRegistry
 from filmu_py.rtn import RankingProfile
-from filmu_py.services.debrid import DebridRateLimitError, TorrentInfo
+from filmu_py.services.debrid import DebridRateLimitError
 from filmu_py.services.media import (
     MediaItemRecord,
     MediaService,
@@ -46,8 +46,8 @@ from filmu_py.services.media import (
     RecoveryTargetStage,
     ScrapeCandidateRecord,
     SelectedStreamCandidateRecord,
-    WorkflowDrillCandidateRecord,
     WorkflowCheckpointStatus,
+    WorkflowDrillCandidateRecord,
     WorkflowResumeStage,
     _build_recovery_plan_record,
     _evaluate_show_completion,
@@ -2888,7 +2888,12 @@ async def debrid_item(ctx: dict[str, object], item_id: str) -> str:
             return item_id
 
         item_request_id = await media_service.get_latest_item_request_id(media_item_id=item_id)
-        existing_checkpoint = await media_service.get_workflow_checkpoint(media_item_id=item_id)
+        get_workflow_checkpoint = getattr(media_service, "get_workflow_checkpoint", None)
+        existing_checkpoint = (
+            await get_workflow_checkpoint(media_item_id=item_id)
+            if callable(get_workflow_checkpoint)
+            else None
+        )
         if (
             existing_checkpoint is not None
             and existing_checkpoint.resume_stage is WorkflowResumeStage.FINALIZE
@@ -3297,7 +3302,12 @@ async def finalize_item(ctx: dict[str, object], item_id: str) -> str:
         ):
             return item_id
 
-        existing_checkpoint = await media_service.get_workflow_checkpoint(media_item_id=item_id)
+        get_workflow_checkpoint = getattr(media_service, "get_workflow_checkpoint", None)
+        existing_checkpoint = (
+            await get_workflow_checkpoint(media_item_id=item_id)
+            if callable(get_workflow_checkpoint)
+            else None
+        )
         if item.state in (ItemState.PARTIALLY_COMPLETED, ItemState.ONGOING):
             logger.debug(
                 "finalize_item re-entered from holding state",

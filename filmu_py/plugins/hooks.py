@@ -56,7 +56,7 @@ class PluginHookWorkerExecutor:
     """Fan out published events to registered plugin hook workers safely."""
 
     timeout_seconds: float = 5.0
-    _background_tasks: set[asyncio.Task["PluginHookInvocationResult"]] = field(default_factory=set)
+    _background_tasks: set[asyncio.Task[PluginHookInvocationResult]] = field(default_factory=set)
 
     def _matching_hooks(
         self,

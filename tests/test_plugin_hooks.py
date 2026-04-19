@@ -11,8 +11,8 @@ from typing import Any, cast
 
 import pytest
 
-from filmu_py.core.plugin_hook_queue_status import PluginHookQueueStatusStore
 from filmu_py.core.event_bus import EventBus
+from filmu_py.core.plugin_hook_queue_status import PluginHookQueueStatusStore
 from filmu_py.plugins.hooks import (
     PluginHookWorkerExecutor,
     QueuedPluginHookDispatcher,

@@ -7,19 +7,18 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, make_url
-from sqlalchemy.ext.asyncio import AsyncEngine
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .migrations import run_migrations, should_use_async_engine
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass(frozen=True)

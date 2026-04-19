@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     SecretStr,
     field_validator,
     model_validator,
@@ -861,6 +862,7 @@ class Settings(BaseSettings):
         extra="ignore",
         validate_assignment=True,
     )
+    _compatibility_optional_blocks: frozenset[str] | None = PrivateAttr(default=None)
 
     env: Literal["development", "staging", "production"] = Field(
         default="development",
@@ -1290,11 +1292,13 @@ class Settings(BaseSettings):
                 OrchestrationSettings(),
             ),
         }
+        allowed_optional_blocks = self._compatibility_optional_blocks
         payload.update(
             {
                 key: value
                 for key, value in optional_blocks.items()
                 if value is not None
+                and (allowed_optional_blocks is None or key in allowed_optional_blocks)
             }
         )
         return cast(dict[str, Any], _strip_compatibility_runtime_keys(payload))
@@ -1309,7 +1313,7 @@ class Settings(BaseSettings):
         database = cast(dict[str, Any], payload.get("database", {}))
         database_host = database.get("host", DEFAULT_POSTGRES_DSN)
 
-        return cls(
+        settings = cls(
             FILMU_PY_VERSION=payload.get("version", "0.1.0"),
             FILMU_PY_API_KEY=SecretStr(
                 str(payload.get("api_key") or os.getenv("FILMU_PY_API_KEY", ""))
@@ -1354,6 +1358,25 @@ class Settings(BaseSettings):
                 cast(dict[str, Any], downloaders.get("debrid_link", {})).get("api_key") or None
             ),
         )
+        object.__setattr__(
+            settings,
+            "_compatibility_optional_blocks",
+            frozenset(
+                key
+                for key in (
+                    "oidc",
+                    "access_policy",
+                    "tenant_quotas",
+                    "control_plane",
+                    "log_shipper",
+                    "plugin_runtime",
+                    "observability",
+                    "orchestration",
+                )
+                if key in payload
+            ),
+        )
+        return settings
 
 
 _runtime_settings: Settings | None = None

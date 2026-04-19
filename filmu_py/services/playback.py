@@ -1145,22 +1145,60 @@ class PlaybackSourceService:
         preferred: PlaybackAttachment,
         fallback: PlaybackAttachment,
     ) -> PlaybackAttachment:
+        preferred_attachment = cast(object, preferred)
         return PlaybackAttachment(
-            kind=preferred.kind,
-            locator=preferred.locator,
-            source_key=preferred.source_key,
-            resolver_authoritative=preferred.resolver_authoritative,
-            provider=preferred.provider or fallback.provider,
-            provider_download_id=preferred.provider_download_id or fallback.provider_download_id,
-            provider_file_id=preferred.provider_file_id or fallback.provider_file_id,
-            provider_file_path=preferred.provider_file_path or fallback.provider_file_path,
-            original_filename=preferred.original_filename or fallback.original_filename,
-            file_size=preferred.file_size if preferred.file_size is not None else fallback.file_size,
-            local_path=preferred.local_path or fallback.local_path,
-            restricted_url=preferred.restricted_url or fallback.restricted_url,
-            unrestricted_url=preferred.unrestricted_url or fallback.unrestricted_url,
-            expires_at=preferred.expires_at or fallback.expires_at,
-            refresh_state=preferred.refresh_state or fallback.refresh_state,
+            kind=cast(PlaybackAttachmentKind, getattr(preferred_attachment, "kind", fallback.kind)),
+            locator=cast(str, getattr(preferred_attachment, "locator", fallback.locator)),
+            source_key=cast(str, getattr(preferred_attachment, "source_key", fallback.source_key)),
+            resolver_authoritative=cast(
+                bool,
+                getattr(
+                    preferred_attachment,
+                    "resolver_authoritative",
+                    fallback.resolver_authoritative,
+                ),
+            ),
+            provider=cast(str | None, getattr(preferred_attachment, "provider", None))
+            or fallback.provider,
+            provider_download_id=cast(
+                str | None,
+                getattr(preferred_attachment, "provider_download_id", None),
+            )
+            or fallback.provider_download_id,
+            provider_file_id=cast(str | None, getattr(preferred_attachment, "provider_file_id", None))
+            or fallback.provider_file_id,
+            provider_file_path=cast(
+                str | None,
+                getattr(preferred_attachment, "provider_file_path", None),
+            )
+            or fallback.provider_file_path,
+            original_filename=cast(
+                str | None,
+                getattr(preferred_attachment, "original_filename", None),
+            )
+            or fallback.original_filename,
+            file_size=cast(int | None, getattr(preferred_attachment, "file_size", None))
+            if getattr(preferred_attachment, "file_size", None) is not None
+            else fallback.file_size,
+            local_path=cast(str | None, getattr(preferred_attachment, "local_path", None))
+            or fallback.local_path,
+            restricted_url=cast(
+                str | None,
+                getattr(preferred_attachment, "restricted_url", None),
+            )
+            or fallback.restricted_url,
+            unrestricted_url=cast(
+                str | None,
+                getattr(preferred_attachment, "unrestricted_url", None),
+            )
+            or fallback.unrestricted_url,
+            expires_at=cast(datetime | None, getattr(preferred_attachment, "expires_at", None))
+            or fallback.expires_at,
+            refresh_state=cast(
+                PlaybackAttachmentRefreshState | None,
+                getattr(preferred_attachment, "refresh_state", None),
+            )
+            or fallback.refresh_state,
         )
 
     @staticmethod

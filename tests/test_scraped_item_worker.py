@@ -42,9 +42,9 @@ from filmu_py.services.media import (
     RequestMetadataResolution,
     ScrapeCandidateRecord,
     ShowCompletionResult,
-    WorkflowDrillCandidateRecord,
     WorkflowCheckpointRecord,
     WorkflowCheckpointStatus,
+    WorkflowDrillCandidateRecord,
     WorkflowResumeStage,
     _build_recovery_plan_record,
     attach_parse_validation,
@@ -1533,8 +1533,8 @@ def test_debrid_item_persists_entries_and_enqueues_finalize(monkeypatch: Any) ->
         "provider_failure_types": [],
         "selected_provider_priority": 0,
         "selected_container_root": None,
-        "matched_file_ids": [],
-        "selected_file_ids": [],
+        "matched_file_ids": ["file-1"],
+        "selected_file_ids": ["file-1"],
     }
     assert redis.calls[-1] == (
         "finalize_item",

@@ -4,8 +4,8 @@ from filmu_py.db.models import MediaItemORM
 from filmu_py.services.media import (
     ParsedStreamCandidateValidation,
     attach_parse_validation,
-    parse_stream_candidate_title,
     parse_stage_rejection_reason,
+    parse_stream_candidate_title,
     validate_parsed_stream_candidate,
 )
 

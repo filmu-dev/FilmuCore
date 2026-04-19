@@ -61,7 +61,6 @@ from filmu_py.services.tmdb import (
     ShowMetadata,
     TmdbDiscoveryProfile,
     TmdbMetadataClient,
-    TmdbNamedReference,
     TmdbSearchPage,
     TmdbSearchResult,
     build_tmdb_metadata_client,
@@ -3210,6 +3209,14 @@ def _build_request_projection_preview_signals(entry: dict[str, object]) -> tuple
     return tuple(labels[:3])
 
 
+def _dominant_projection_media_type(media_counts: Counter[str]) -> str | None:
+    """Return the most common media type represented in one projection bucket."""
+
+    if not media_counts:
+        return None
+    return media_counts.most_common(1)[0][0]
+
+
 def _request_projection_continuation_score(entry: dict[str, object]) -> tuple[int, int, int, int, int]:
     """Return one deterministic continuation score for grouped-pivot ordering."""
 
@@ -3223,7 +3230,7 @@ def _request_projection_continuation_score(entry: dict[str, object]) -> tuple[in
 
 
 async def _build_request_discovery_blend_boosts(
-    service: "MediaService",
+    service: MediaService,
     client: TmdbMetadataClient,
     *,
     selected_media_types: list[str],
@@ -6307,10 +6314,12 @@ class MediaService:
                     cast(set[str], rollup["completed_session_keys"]).add(session_key)
 
             progress_recorded_at = cast(datetime | None, rollup["progress_recorded_at"])
-            if position_seconds is not None or is_completed:
-                if progress_recorded_at is None or event.occurred_at >= progress_recorded_at:
-                    rollup["resume_position_seconds"] = None if is_completed else position_seconds
-                    rollup["progress_recorded_at"] = event.occurred_at
+            if (position_seconds is not None or is_completed) and (
+                progress_recorded_at is None
+                or event.occurred_at >= progress_recorded_at
+            ):
+                rollup["resume_position_seconds"] = None if is_completed else position_seconds
+                rollup["progress_recorded_at"] = event.occurred_at
 
         signal_map: dict[str, RequestSearchLocalSignalRecord] = {}
         for hit in hits:
@@ -6508,9 +6517,12 @@ class MediaService:
             air_date = _extract_string(cast(dict[str, object], season_payload), "air_date")
             parsed_air_date = _parse_calendar_datetime(air_date)
             is_released = parsed_air_date is None or parsed_air_date <= now_utc
-            if parsed_air_date is not None and parsed_air_date > now_utc:
-                if next_air_date is None or parsed_air_date < next_air_date:
-                    next_air_date = parsed_air_date
+            if (
+                parsed_air_date is not None
+                and parsed_air_date > now_utc
+                and (next_air_date is None or parsed_air_date < next_air_date)
+            ):
+                next_air_date = parsed_air_date
 
             requested_episode_numbers = normalized_requested_episodes.get(str(season_number))
             requested_all_episodes = season_number in normalized_requested_seasons
@@ -7713,19 +7725,22 @@ class MediaService:
                     if occurred_at >= active_cutoff and not is_completed:
                         cast(set[str], item_bucket["active_session_keys"]).add(session_key)
                 progress_recorded_at = cast(datetime | None, item_bucket["progress_recorded_at"])
-                if position_seconds is not None or duration_seconds is not None or is_completed:
-                    if progress_recorded_at is None or occurred_at >= progress_recorded_at:
-                        item_bucket["resume_position_seconds"] = (
-                            None if is_completed else position_seconds
-                        )
-                        item_bucket["duration_seconds"] = duration_seconds
-                        item_bucket["progress_percent"] = _build_progress_percent(
-                            position_seconds,
-                            duration_seconds,
-                            completed=is_completed,
-                        )
-                        item_bucket["completed"] = is_completed
-                        item_bucket["progress_recorded_at"] = occurred_at
+                if (
+                    position_seconds is not None
+                    or duration_seconds is not None
+                    or is_completed
+                ) and (progress_recorded_at is None or occurred_at >= progress_recorded_at):
+                    item_bucket["resume_position_seconds"] = (
+                        None if is_completed else position_seconds
+                    )
+                    item_bucket["duration_seconds"] = duration_seconds
+                    item_bucket["progress_percent"] = _build_progress_percent(
+                        position_seconds,
+                        duration_seconds,
+                        completed=is_completed,
+                    )
+                    item_bucket["completed"] = is_completed
+                    item_bucket["progress_recorded_at"] = occurred_at
 
                 device_bucket = device_rollups.get(event.device_key)
                 if device_bucket is None:
@@ -7786,21 +7801,24 @@ class MediaService:
                     datetime | None,
                     device_bucket["progress_recorded_at"],
                 )
-                if position_seconds is not None or duration_seconds is not None or is_completed:
-                    if (
-                        device_progress_recorded_at is None
-                        or occurred_at >= device_progress_recorded_at
-                    ):
-                        device_bucket["resume_position_seconds"] = (
-                            None if is_completed else position_seconds
-                        )
-                        device_bucket["duration_seconds"] = duration_seconds
-                        device_bucket["progress_percent"] = _build_progress_percent(
-                            position_seconds,
-                            duration_seconds,
-                            completed=is_completed,
-                        )
-                        device_bucket["progress_recorded_at"] = occurred_at
+                if (
+                    position_seconds is not None
+                    or duration_seconds is not None
+                    or is_completed
+                ) and (
+                    device_progress_recorded_at is None
+                    or occurred_at >= device_progress_recorded_at
+                ):
+                    device_bucket["resume_position_seconds"] = (
+                        None if is_completed else position_seconds
+                    )
+                    device_bucket["duration_seconds"] = duration_seconds
+                    device_bucket["progress_percent"] = _build_progress_percent(
+                        position_seconds,
+                        duration_seconds,
+                        completed=is_completed,
+                    )
+                    device_bucket["progress_recorded_at"] = occurred_at
                 if is_completed and session_key is not None:
                     completed_session_keys = cast(
                         set[str],
@@ -7844,21 +7862,24 @@ class MediaService:
                         datetime | None,
                         session_bucket["progress_recorded_at"],
                     )
-                    if position_seconds is not None or duration_seconds is not None or is_completed:
-                        if (
-                            session_progress_recorded_at is None
-                            or occurred_at >= session_progress_recorded_at
-                        ):
-                            session_bucket["resume_position_seconds"] = (
-                                None if is_completed else position_seconds
-                            )
-                            session_bucket["duration_seconds"] = duration_seconds
-                            session_bucket["progress_percent"] = _build_progress_percent(
-                                position_seconds,
-                                duration_seconds,
-                                completed=is_completed,
-                            )
-                            session_bucket["progress_recorded_at"] = occurred_at
+                    if (
+                        position_seconds is not None
+                        or duration_seconds is not None
+                        or is_completed
+                    ) and (
+                        session_progress_recorded_at is None
+                        or occurred_at >= session_progress_recorded_at
+                    ):
+                        session_bucket["resume_position_seconds"] = (
+                            None if is_completed else position_seconds
+                        )
+                        session_bucket["duration_seconds"] = duration_seconds
+                        session_bucket["progress_percent"] = _build_progress_percent(
+                            position_seconds,
+                            duration_seconds,
+                            completed=is_completed,
+                        )
+                        session_bucket["progress_recorded_at"] = occurred_at
                     if is_completed:
                         session_bucket["completed"] = True
 

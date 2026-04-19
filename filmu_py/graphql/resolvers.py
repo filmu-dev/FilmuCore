@@ -16,11 +16,10 @@ from typing import Any, Literal, cast
 
 import strawberry
 from fastapi import HTTPException
-
-from filmu_py.api.deps import get_auth_context
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
+from filmu_py.api.deps import get_auth_context
 from filmu_py.audit import audit_action
 from filmu_py.core.metadata_reindex_status import MetadataReindexStatusStore
 from filmu_py.core.queue_status import QueueStatusReader
@@ -32,18 +31,30 @@ from filmu_py.graphql.types import (
     AccessPolicyRevisionWriteInput,
     ControlPlanePendingRecoveryInput,
     ExecuteVfsRolloutActionInput,
-    GQLAccessPolicyRevision,
     GQLAccessPolicyAudit,
     GQLAccessPolicyAuditAlert,
     GQLAccessPolicyAuditEntry,
     GQLAccessPolicyContext,
     GQLAccessPolicyDecision,
+    GQLAccessPolicyRevision,
     GQLAccessPolicyRevisionList,
     GQLActiveStream,
     GQLActiveStreamOwner,
     GQLApiKeyRotationResult,
     GQLCalendarEntry,
     GQLCalendarReleaseWindow,
+    GQLConsumerPlaybackActivity,
+    GQLConsumerPlaybackActivityItem,
+    GQLConsumerPlaybackDevice,
+    GQLConsumerPlaybackItem,
+    GQLConsumerPlaybackSession,
+    GQLConsumerProfile,
+    GQLConsumerProfileAvailabilityItem,
+    GQLConsumerProfileAvailabilitySummary,
+    GQLConsumerProfileIdentity,
+    GQLConsumerProfileLibrary,
+    GQLConsumerProfilePlaybackSummary,
+    GQLConsumerProfileWorkspace,
     GQLControlPlaneAckRecovery,
     GQLControlPlaneAutomation,
     GQLControlPlaneConsumerSummary,
@@ -65,38 +76,22 @@ from filmu_py.graphql.types import (
     GQLDownloaderProviderSummary,
     GQLDownloaderReasonSummary,
     GQLDownloaderStatusCodeSummary,
-    GQLOperationsGovernance,
-    GQLOperationsSlice,
-    GQLRolloutEvidence,
     GQLFilmuSettings,
     GQLGovernanceArtifactInventoryItem,
     GQLGovernanceEvidenceCheck,
     GQLGovernanceStatusCount,
     GQLHealthCheck,
     GQLItemEvent,
+    GQLItemRequestSummary,
     GQLItemWorkflowDrillStatus,
     GQLLibraryStats,
     GQLMarkSelectedHlsMediaEntryStaleResult,
     GQLMediaEntry,
     GQLMediaEntryLifecycle,
     GQLMediaItem,
-    GQLConsumerPlaybackActivity,
-    GQLConsumerPlaybackActivityItem,
-    GQLConsumerPlaybackActivityType,
-    GQLConsumerPlaybackDevice,
-    GQLConsumerProfile,
-    GQLConsumerProfileAvailabilityItem,
-    GQLConsumerProfileAvailabilitySummary,
-    GQLConsumerProfileIdentity,
-    GQLConsumerProfileLibrary,
-    GQLConsumerProfilePlaybackSummary,
-    GQLConsumerProfileWorkspace,
-    GQLConsumerPlaybackItem,
-    GQLConsumerPlaybackSession,
-    GQLItemRequestSummary,
     GQLMediaItemDetail,
-    GQLMediaItemSummaryPage,
     GQLMediaItemsPage,
+    GQLMediaItemSummaryPage,
     GQLMetadataReindexHistoryPoint,
     GQLMetadataReindexStatus,
     GQLNamedCountBucket,
@@ -105,6 +100,8 @@ from filmu_py.graphql.types import (
     GQLObservabilityFieldContractSummary,
     GQLObservabilityPipelineStage,
     GQLObservabilityRolloutSummary,
+    GQLOperationsGovernance,
+    GQLOperationsSlice,
     GQLOperatorActionItem,
     GQLOperatorGapItem,
     GQLPersistMediaEntryControlResult,
@@ -112,10 +109,9 @@ from filmu_py.graphql.types import (
     GQLPlaybackAttachment,
     GQLPlaybackGateGovernance,
     GQLPlaybackRefreshTriggerResult,
-    GQLRecordConsumerPlaybackActivityResult,
     GQLPluginCapabilityStatus,
-    GQLPluginEventStatus,
     GQLPluginEventsPage,
+    GQLPluginEventStatus,
     GQLPluginGovernance,
     GQLPluginGovernanceOverride,
     GQLPluginGovernanceSummary,
@@ -127,27 +123,28 @@ from filmu_py.graphql.types import (
     GQLPluginRuntimeOverview,
     GQLPluginRuntimePublisherSummary,
     GQLPluginRuntimeRow,
+    GQLPluginRuntimeWarning,
     GQLPluginStreamControlAction,
     GQLPluginStreamControlResult,
-    GQLPluginRuntimeWarning,
     GQLProofArtifact,
     GQLQueueAlert,
+    GQLRecordConsumerPlaybackActivityResult,
     GQLRecoveryMechanism,
     GQLRecoveryPlan,
-    GQLRequestLifecycle,
     GQLRecoveryTargetStage,
+    GQLRequestLifecycle,
     GQLResolvedPlayback,
     GQLResolvedPlaybackAttachment,
+    GQLRolloutEvidence,
     GQLRuntimeLifecycleSnapshot,
     GQLRuntimeLifecycleTransition,
-    GQLTenantQuotaPolicy,
-    TenantQuotaPolicyWriteInput,
     GQLServingGovernance,
     GQLServingHandle,
     GQLServingPath,
     GQLServingSession,
     GQLServingStatus,
     GQLStreamCandidate,
+    GQLTenantQuotaPolicy,
     GQLVfsBlockedItem,
     GQLVfsBreadcrumb,
     GQLVfsCatalogDelta,
@@ -186,31 +183,32 @@ from filmu_py.graphql.types import (
     PersistMediaEntryControlInput,
     PersistPlaybackAttachmentControlInput,
     PersistVfsRolloutControlInput,
-    PluginStreamControlInput,
     PluginGovernanceOverrideWriteInput,
+    PluginStreamControlInput,
     RecordConsumerPlaybackActivityInput,
-    RequestItemInput,
-    RequestItemResult,
+    RequestCandidateSeasonPreview,
+    RequestCandidateSeasonSummary,
     RequestDiscoveryFacetBucket,
     RequestDiscoveryFacets,
+    RequestDiscoveryPage,
     RequestDiscoveryProjectionAction,
     RequestDiscoveryProjectionGroup,
     RequestDiscoveryProjectionItem,
-    RequestEditorialFamily,
-    RequestReleaseWindow,
-    RequestDiscoveryPage,
     RequestDiscoveryRail,
     RequestDiscoverySortOption,
-    RequestCandidateSeasonPreview,
-    RequestCandidateSeasonSummary,
-    RequestSearchLifecycle,
-    RequestSearchPage,
     RequestedEpisodeScope,
     RequestedEpisodeScopeInput,
+    RequestEditorialFamily,
+    RequestItemInput,
+    RequestItemResult,
+    RequestReleaseWindow,
     RequestSearchCandidate,
+    RequestSearchLifecycle,
+    RequestSearchPage,
     ResetItemResult,
     RetryItemResult,
     SettingsUpdateInput,
+    TenantQuotaPolicyWriteInput,
 )
 from filmu_py.observability_convergence import (
     build_observability_convergence_snapshot,
@@ -220,11 +218,6 @@ from filmu_py.services.governance_posture import (
     build_downloader_execution_trend_summary,
     build_downloader_provider_summaries,
     build_downloader_reason_summaries,
-    build_rollout_action_items,
-    build_rollout_artifact_inventory,
-    build_rollout_evidence_posture,
-    build_rollout_gap_items,
-    build_rollout_status_counts,
     build_playback_gate_governance_posture,
     build_plugin_proof_coverage_summaries,
     build_plugin_runtime_action_items,
@@ -232,6 +225,11 @@ from filmu_py.services.governance_posture import (
     build_plugin_runtime_gap_items,
     build_plugin_runtime_overview_posture,
     build_plugin_runtime_rows,
+    build_rollout_action_items,
+    build_rollout_artifact_inventory,
+    build_rollout_evidence_posture,
+    build_rollout_gap_items,
+    build_rollout_status_counts,
     build_vfs_generation_history_posture,
     build_vfs_generation_history_summary,
     build_vfs_runtime_rollout_posture,
@@ -271,27 +269,27 @@ from filmu_py.services.graphql_support_posture import (
 from filmu_py.services.media import (
     ArqNotEnabledError,
     CalendarProjectionRecord,
-    ConsumerPlaybackActivityRecord,
     ConsumerPlaybackActivityItemRecord,
+    ConsumerPlaybackActivityRecord,
     ItemActionResult,
-    ItemRequestSummaryRecord,
     ItemNotFoundError,
+    ItemRequestSummaryRecord,
     MediaItemRecord,
     MediaItemSummaryRecord,
     RecoveryPlanRecord,
     RequestCandidateSeasonRecord,
     RequestCandidateSeasonSummaryRecord,
-    RequestSearchCandidateRecord,
     RequestDiscoveryFacetBucketRecord,
+    RequestDiscoveryFacetSetRecord,
+    RequestDiscoveryPageRecord,
     RequestDiscoveryProjectionActionRecord,
     RequestDiscoveryProjectionGroupRecord,
     RequestDiscoveryProjectionItemRecord,
-    RequestEditorialFamilyRecord,
-    RequestReleaseWindowRecord,
-    RequestDiscoveryFacetSetRecord,
-    RequestDiscoveryPageRecord,
     RequestDiscoveryRailRecord,
     RequestDiscoverySortOptionRecord,
+    RequestEditorialFamilyRecord,
+    RequestReleaseWindowRecord,
+    RequestSearchCandidateRecord,
     RequestSearchLifecycleRecord,
     RequestSearchPageRecord,
     StatsProjection,
@@ -3241,18 +3239,6 @@ def _build_media_item_summary(record: MediaItemSummaryRecord) -> GQLMediaItem:
     )
 
 
-def _build_media_item_summary_page(page: MediaItemsPage) -> GQLMediaItemSummaryPage:
-    return GQLMediaItemSummaryPage(
-        items=[_build_media_item_summary(record) for record in page.items],
-        page=page.page,
-        limit=page.limit,
-        total_count=page.total_items,
-        total_pages=page.total_pages,
-        has_previous_page=page.page > 1,
-        has_next_page=page.page < page.total_pages,
-    )
-
-
 def _normalize_consumer_media_kind(media_kind: str | None) -> list[str] | None:
     if media_kind is None:
         return None
@@ -4074,9 +4060,9 @@ async def _build_media_items_page(
     *,
     offset: int,
 ) -> GQLMediaItemsPage:
-    records = cast(list[MediaItemSummaryRecord], getattr(page, "items"))
-    total_items = int(getattr(page, "total_items"))
-    limit = int(getattr(page, "limit"))
+    records = cast(list[MediaItemSummaryRecord], page.items)
+    total_items = int(page.total_items)
+    limit = int(page.limit)
     return GQLMediaItemsPage(
         items=[await _build_media_item_detail(info, record) for record in records],
         total_count=total_items,
@@ -4088,11 +4074,11 @@ async def _build_media_items_page(
 
 
 def _build_media_item_summary_page(page: object) -> GQLMediaItemSummaryPage:
-    records = cast(list[MediaItemSummaryRecord], getattr(page, "items"))
-    total_items = int(getattr(page, "total_items"))
-    limit = int(getattr(page, "limit"))
-    current_page = int(getattr(page, "page"))
-    total_pages = int(getattr(page, "total_pages"))
+    records = cast(list[MediaItemSummaryRecord], page.items)
+    total_items = int(page.total_items)
+    limit = int(page.limit)
+    current_page = int(page.page)
+    total_pages = int(page.total_pages)
     return GQLMediaItemSummaryPage(
         items=[_build_media_item_summary(record) for record in records],
         total_count=total_items,
@@ -6796,10 +6782,7 @@ class CoreMutationResolver:
             sorted(
                 {
                     *(input.requested_seasons or []),
-                    *(
-                        int(season_number)
-                        for season_number in (requested_episodes or {}).keys()
-                    ),
+                    *(int(season_number) for season_number in (requested_episodes or {})),
                 }
             )
             or None
