@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER_SCRIPT = REPO_ROOT / "scripts" / "rollout_script_helpers.ps1"
 PWSH = "pwsh"
