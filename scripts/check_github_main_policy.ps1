@@ -18,6 +18,45 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
+function Get-DotEnvMap {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $map
+    }
+
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            continue
+        }
+        $index = $trimmed.IndexOf('=')
+        if ($index -lt 1) {
+            continue
+        }
+        $map[$trimmed.Substring(0, $index).Trim()] = $trimmed.Substring($index + 1)
+    }
+
+    return $map
+}
+
+function Get-EnvValue {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][hashtable] $DotEnv
+    )
+
+    $processValue = [System.Environment]::GetEnvironmentVariable($Name)
+    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
+        return [string] $processValue
+    }
+    if ($DotEnv.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace([string] $DotEnv[$Name])) {
+        return [string] $DotEnv[$Name]
+    }
+    return ''
+}
+
 function Get-DefaultContractPath {
     return (Join-Path $repoRoot 'ops\rollout\github-main-policy.contract.json')
 }
@@ -53,7 +92,10 @@ function Test-CommandAvailable {
 }
 
 function Invoke-GhApiJson {
-    param([Parameter(Mandatory = $true)][string] $Path)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][hashtable] $DotEnv
+    )
 
     if (Test-CommandAvailable -Name 'gh') {
         $output = & gh api $Path 2>$null
@@ -67,9 +109,12 @@ function Invoke-GhApiJson {
         }
     }
 
-    $token = [string] $env:GH_TOKEN
+    $token = Get-EnvValue -Name 'GH_TOKEN' -DotEnv $DotEnv
     if ([string]::IsNullOrWhiteSpace($token)) {
-        $token = [string] $env:GITHUB_TOKEN
+        $token = Get-EnvValue -Name 'GITHUB_TOKEN' -DotEnv $DotEnv
+    }
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $token = Get-EnvValue -Name 'FILMU_POLICY_ADMIN_TOKEN' -DotEnv $DotEnv
     }
     if ([string]::IsNullOrWhiteSpace($token)) {
         return $null
@@ -230,6 +275,7 @@ $freshnessWindowHours = 24
 if ($contract.PSObject.Properties.Name -contains 'freshness_window_hours') {
     $freshnessWindowHours = [Math]::Max(1, [int] $contract.freshness_window_hours)
 }
+$dotEnv = Get-DotEnvMap -Path (Join-Path $repoRoot '.env')
 $expected = New-ExpectedPolicy `
     -Branch $Branch `
     -RequirePlaybackGate:$RequirePlaybackGate `
@@ -260,8 +306,8 @@ $result = [ordered]@{
 }
 
 if ($ValidateCurrent) {
-    $repoPayload = Invoke-GhApiJson -Path "repos/$Repository"
-    $branchProtectionPayload = Invoke-GhApiJson -Path "repos/$Repository/branches/$escapedBranch/protection"
+    $repoPayload = Invoke-GhApiJson -Path "repos/$Repository" -DotEnv $dotEnv
+    $branchProtectionPayload = Invoke-GhApiJson -Path "repos/$Repository/branches/$escapedBranch/protection" -DotEnv $dotEnv
 
     $canValidate = ($null -ne $repoPayload) -and ($null -ne $branchProtectionPayload)
     if (-not $canValidate) {
