@@ -17,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'rollout_script_helpers.ps1')
 
 function Get-DefaultContractPath {
     return (Join-Path $repoRoot 'ops\rollout\github-main-policy.contract.json')
@@ -53,9 +54,12 @@ function Test-CommandAvailable {
 }
 
 function Invoke-GhApiJson {
-    param([Parameter(Mandatory = $true)][string] $Path)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][hashtable] $DotEnv
+    )
 
-    if (Test-CommandAvailable -Name 'gh') {
+    if (Test-GhAuthenticated) {
         $output = & gh api $Path 2>$null
         if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace([string] $output)) {
             try {
@@ -67,9 +71,12 @@ function Invoke-GhApiJson {
         }
     }
 
-    $token = [string] $env:GH_TOKEN
+    $token = Get-EnvValue -Name 'GH_TOKEN' -DotEnv $DotEnv
     if ([string]::IsNullOrWhiteSpace($token)) {
-        $token = [string] $env:GITHUB_TOKEN
+        $token = Get-EnvValue -Name 'GITHUB_TOKEN' -DotEnv $DotEnv
+    }
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $token = Get-EnvValue -Name 'FILMU_POLICY_ADMIN_TOKEN' -DotEnv $DotEnv
     }
     if ([string]::IsNullOrWhiteSpace($token)) {
         return $null
@@ -230,6 +237,7 @@ $freshnessWindowHours = 24
 if ($contract.PSObject.Properties.Name -contains 'freshness_window_hours') {
     $freshnessWindowHours = [Math]::Max(1, [int] $contract.freshness_window_hours)
 }
+$dotEnv = Get-DotEnvMap -Path (Join-Path $repoRoot '.env')
 $expected = New-ExpectedPolicy `
     -Branch $Branch `
     -RequirePlaybackGate:$RequirePlaybackGate `
@@ -260,8 +268,8 @@ $result = [ordered]@{
 }
 
 if ($ValidateCurrent) {
-    $repoPayload = Invoke-GhApiJson -Path "repos/$Repository"
-    $branchProtectionPayload = Invoke-GhApiJson -Path "repos/$Repository/branches/$escapedBranch/protection"
+    $repoPayload = Invoke-GhApiJson -Path "repos/$Repository" -DotEnv $dotEnv
+    $branchProtectionPayload = Invoke-GhApiJson -Path "repos/$Repository/branches/$escapedBranch/protection" -DotEnv $dotEnv
 
     $canValidate = ($null -ne $repoPayload) -and ($null -ne $branchProtectionPayload)
     if (-not $canValidate) {
@@ -271,6 +279,7 @@ if ($ValidateCurrent) {
             status = 'unverified'
             details = 'Current GitHub repository policy could not be validated from this environment. Install/authenticate gh with repo-admin access, then rerun with -ValidateCurrent.'
             gh_available = (Test-CommandAvailable -Name 'gh')
+            gh_authenticated = (Test-GhAuthenticated)
             stale = $false
             failure_reasons = $failureReasons
             required_actions = $requiredActions

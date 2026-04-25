@@ -101,6 +101,7 @@ def test_github_main_policy_script_emits_normalized_artifact_fields() -> None:
     assert "artifact_kind" in script
     assert "captured_at" in script
     assert "expires_at" in script
+    assert "FILMU_POLICY_ADMIN_TOKEN" in script
     assert "failure_reasons" in script
     assert "required_actions" in script
 
@@ -120,6 +121,17 @@ def test_playback_gate_runner_script_emits_contract_fields_and_github_hosted_che
     assert "policy_admin_token" in script
     assert "failure_reasons" in script
     assert "required_actions" in script
+
+
+def test_rollout_evidence_capture_script_uses_configured_oidc_kid_and_reuses_fresh_artifacts() -> None:
+    script = (REPO_ROOT / "scripts" / "capture_rollout_evidence.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "-KeyId ([string] $octKey.kid)" in script
+    assert "Get-FreshArtifactPayload" in script
+    assert "Test-CanCaptureCanonicalRunnerArtifact" in script
+    assert "Test-CanValidateGithubMainPolicy" in script
 
 
 def test_media_server_provider_gate_script_emits_contract_and_taxonomy_fields() -> None:

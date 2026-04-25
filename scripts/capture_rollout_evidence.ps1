@@ -13,45 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-
-function Get-DotEnvMap {
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    $map = @{}
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $map
-    }
-
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
-            continue
-        }
-        $index = $trimmed.IndexOf('=')
-        if ($index -lt 1) {
-            continue
-        }
-        $map[$trimmed.Substring(0, $index).Trim()] = $trimmed.Substring($index + 1)
-    }
-
-    return $map
-}
-
-function Get-EnvValue {
-    param(
-        [Parameter(Mandatory = $true)][string] $Name,
-        [Parameter(Mandatory = $true)][hashtable] $DotEnv
-    )
-
-    $processValue = [System.Environment]::GetEnvironmentVariable($Name)
-    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
-        return [string] $processValue
-    }
-    if ($DotEnv.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace([string] $DotEnv[$Name])) {
-        return [string] $DotEnv[$Name]
-    }
-    return ''
-}
+. (Join-Path $PSScriptRoot 'rollout_script_helpers.ps1')
 
 function Get-JsonEnvValue {
     param(
@@ -95,13 +57,14 @@ function New-Hs256Jwt {
         [Parameter(Mandatory = $true)][string] $Issuer,
         [Parameter(Mandatory = $true)][string] $Audience,
         [Parameter(Mandatory = $true)][byte[]] $SymmetricKeyBytes,
+        [Parameter(Mandatory = $true)][string] $KeyId,
         [Parameter(Mandatory = $true)][string] $Subject
     )
 
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $headerJson = [ordered]@{
         alg = 'HS256'
-        kid = 'local-rollout'
+        kid = $KeyId
         typ = 'JWT'
     } | ConvertTo-Json -Compress
     $payloadJson = [ordered]@{
@@ -167,8 +130,97 @@ function Get-BackendHeaders {
         -Issuer ([string] $oidc.issuer) `
         -Audience ([string] $oidc.audience) `
         -SymmetricKeyBytes $rawKeyBytes `
+        -KeyId ([string] $octKey.kid) `
         -Subject 'ops://rollout-capture'
     return @{ authorization = ('Bearer {0}' -f $jwt) }
+}
+
+function Get-FreshArtifactPayload {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        $payload = Read-JsonFile -Path $Path
+    }
+    catch {
+        return $null
+    }
+
+    if ($null -eq $payload) {
+        return $null
+    }
+
+    $expiresAt = $null
+    if ($payload.PSObject.Properties.Name -contains 'expires_at') {
+        try {
+            $expiresAt = [DateTimeOffset]::Parse([string] $payload.expires_at)
+        }
+        catch {
+            $expiresAt = $null
+        }
+    }
+
+    if ($null -eq $expiresAt) {
+        return $null
+    }
+
+    if ($expiresAt -le [DateTimeOffset]::UtcNow) {
+        return $null
+    }
+
+    return $payload
+}
+
+function Test-IsCanonicalRunnerArtifact {
+    param([AllowNull()][object] $Payload)
+
+    if ($null -eq $Payload) {
+        return $false
+    }
+
+    if ([string] $Payload.status -eq 'ready' -and [string] $Payload.runner_environment -eq 'github-hosted') {
+        return $true
+    }
+
+    foreach ($check in @($Payload.checks)) {
+        if ([string] $check.name -eq 'github_hosted_runner' -and [bool] $check.ok) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-IsValidatedGithubPolicyArtifact {
+    param([AllowNull()][object] $Payload)
+
+    if ($null -eq $Payload) {
+        return $false
+    }
+
+    if ($null -eq $Payload.validation) {
+        return $false
+    }
+
+    return ([string] $Payload.validation.status -ne 'unverified')
+}
+
+function Test-CanCaptureCanonicalRunnerArtifact {
+    $runnerEnvironment = [string] [System.Environment]::GetEnvironmentVariable('RUNNER_ENVIRONMENT')
+    $githubActions = [string] [System.Environment]::GetEnvironmentVariable('GITHUB_ACTIONS')
+    return (
+        [string]::Equals($githubActions, 'true', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($runnerEnvironment, 'github-hosted', [System.StringComparison]::OrdinalIgnoreCase)
+    )
+}
+
+function Test-CanValidateGithubMainPolicy {
+    param([Parameter(Mandatory = $true)][hashtable] $DotEnv)
+
+    return (Test-GithubMainPolicyValidationAvailable -DotEnv $DotEnv)
 }
 
 function Write-JsonFile {
@@ -320,27 +372,40 @@ $captures = [ordered]@{
     operations_governance = $operationsGovernanceArtifactPath
 }
 
-$runnerScriptPath = Join-Path $PSScriptRoot 'check_playback_gate_runner.ps1'
-$runnerArgs = @(
-    '-NoProfile',
-    '-File',
-    $runnerScriptPath,
-    '-NoExitOnFailure',
-    '-AsJson',
-    '-OutputPath',
-    $runnerArtifactPath
-)
-if (-not $SkipProviderGateReadiness) {
-    $runnerArgs += '-RequireProviderGate'
-}
-& pwsh @runnerArgs | Out-Null
-$runnerPayload = Read-JsonFile -Path $runnerArtifactPath
-$runnerStatus = [string] $runnerPayload.status
-$runnerFailureCount = @(
-    $runnerPayload.checks | Where-Object {
-        [bool] $_.required -and -not [bool] $_.ok
+$runnerPayload = $null
+$freshRunnerPayload = Get-FreshArtifactPayload -Path $runnerArtifactPath
+if (Test-CanCaptureCanonicalRunnerArtifact) {
+    $runnerScriptPath = Join-Path $PSScriptRoot 'check_playback_gate_runner.ps1'
+    $runnerArgs = @(
+        '-NoProfile',
+        '-File',
+        $runnerScriptPath,
+        '-NoExitOnFailure',
+        '-AsJson',
+        '-OutputPath',
+        $runnerArtifactPath
+    )
+    if (-not $SkipProviderGateReadiness) {
+        $runnerArgs += '-RequireProviderGate'
     }
-).Count
+    & pwsh @runnerArgs | Out-Null
+    $runnerPayload = Read-JsonFile -Path $runnerArtifactPath
+}
+elseif (($null -ne $freshRunnerPayload) -and (Test-IsCanonicalRunnerArtifact -Payload $freshRunnerPayload)) {
+    $runnerPayload = $freshRunnerPayload
+}
+
+$runnerStatus = if ($null -ne $runnerPayload) { [string] $runnerPayload.status } else { 'missing_or_stale' }
+$runnerFailureCount = if ($null -ne $runnerPayload) {
+    @(
+        $runnerPayload.checks | Where-Object {
+            [bool] $_.required -and -not [bool] $_.ok
+        }
+    ).Count
+}
+else {
+    'unknown'
+}
 Add-Check -Checks $checks -Name 'playback_gate_runner_ready' `
     -Passed:($runnerStatus -eq 'ready') `
     -Observed:$runnerStatus `
@@ -353,35 +418,42 @@ Add-Check -Checks $checks -Name 'playback_gate_runner_required_failures' `
 $githubPolicyPayload = $null
 $githubValidationStatus = 'skipped'
 if (-not $SkipGithubMainPolicyValidation) {
-    $policyScriptPath = Join-Path $PSScriptRoot 'check_github_main_policy.ps1'
-    $policyArgs = @(
-        '-NoProfile',
-        '-File',
-        $policyScriptPath,
-        '-RequirePlaybackGate',
-        '-RequireProviderGate',
-        '-RequireWindowsVfsGate',
-        '-RequireWindowsVfsProvidersGate',
-        '-MinimumApprovingReviewCount',
-        '1',
-        '-RequireAdminsEnforced',
-        '-ValidateCurrent',
-        '-OutputPath',
-        $githubPolicyArtifactPath,
-        '-AsJson'
-    )
-    & pwsh @policyArgs | Out-Null
-    if (Test-Path -LiteralPath $githubPolicyArtifactPath) {
-        $githubPolicyPayload = Read-JsonFile -Path $githubPolicyArtifactPath
-        if ($null -ne $githubPolicyPayload.validation) {
-            $githubValidationStatus = [string] $githubPolicyPayload.validation.status
-        }
-        else {
-            $githubValidationStatus = 'unverified'
+    $freshGithubPolicyPayload = Get-FreshArtifactPayload -Path $githubPolicyArtifactPath
+    if (Test-CanValidateGithubMainPolicy -DotEnv $dotEnv) {
+        $policyScriptPath = Join-Path $PSScriptRoot 'check_github_main_policy.ps1'
+        $policyArgs = @(
+            '-NoProfile',
+            '-File',
+            $policyScriptPath,
+            '-RequirePlaybackGate',
+            '-RequireProviderGate',
+            '-RequireWindowsVfsGate',
+            '-RequireWindowsVfsProvidersGate',
+            '-MinimumApprovingReviewCount',
+            '1',
+            '-RequireAdminsEnforced',
+            '-ValidateCurrent',
+            '-OutputPath',
+            $githubPolicyArtifactPath,
+            '-AsJson'
+        )
+        & pwsh @policyArgs | Out-Null
+        if (Test-Path -LiteralPath $githubPolicyArtifactPath) {
+            $githubPolicyPayload = Read-JsonFile -Path $githubPolicyArtifactPath
         }
     }
+    elseif (($null -ne $freshGithubPolicyPayload) -and (Test-IsValidatedGithubPolicyArtifact -Payload $freshGithubPolicyPayload)) {
+        $githubPolicyPayload = $freshGithubPolicyPayload
+    }
+
+    if ($null -ne $githubPolicyPayload -and $null -ne $githubPolicyPayload.validation) {
+        $githubValidationStatus = [string] $githubPolicyPayload.validation.status
+    }
+    elseif ($null -ne $githubPolicyPayload) {
+        $githubValidationStatus = 'unverified'
+    }
     else {
-        $githubValidationStatus = 'missing_artifact'
+        $githubValidationStatus = 'missing_or_stale_artifact'
     }
     Add-Check -Checks $checks -Name 'github_main_policy_ready' `
         -Passed:($githubValidationStatus -eq 'ready') `
