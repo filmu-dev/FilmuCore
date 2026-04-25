@@ -17,45 +17,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-
-function Get-DotEnvMap {
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    $map = @{}
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $map
-    }
-
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
-            continue
-        }
-        $index = $trimmed.IndexOf('=')
-        if ($index -lt 1) {
-            continue
-        }
-        $map[$trimmed.Substring(0, $index).Trim()] = $trimmed.Substring($index + 1)
-    }
-
-    return $map
-}
-
-function Get-EnvValue {
-    param(
-        [Parameter(Mandatory = $true)][string] $Name,
-        [Parameter(Mandatory = $true)][hashtable] $DotEnv
-    )
-
-    $processValue = [System.Environment]::GetEnvironmentVariable($Name)
-    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
-        return [string] $processValue
-    }
-    if ($DotEnv.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace([string] $DotEnv[$Name])) {
-        return [string] $DotEnv[$Name]
-    }
-    return ''
-}
+. (Join-Path $PSScriptRoot 'rollout_script_helpers.ps1')
 
 function Get-DefaultContractPath {
     return (Join-Path $repoRoot 'ops\rollout\github-main-policy.contract.json')
@@ -97,7 +59,7 @@ function Invoke-GhApiJson {
         [Parameter(Mandatory = $true)][hashtable] $DotEnv
     )
 
-    if (Test-CommandAvailable -Name 'gh') {
+    if (Test-GhAuthenticated) {
         $output = & gh api $Path 2>$null
         if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace([string] $output)) {
             try {
@@ -317,6 +279,7 @@ if ($ValidateCurrent) {
             status = 'unverified'
             details = 'Current GitHub repository policy could not be validated from this environment. Install/authenticate gh with repo-admin access, then rerun with -ValidateCurrent.'
             gh_available = (Test-CommandAvailable -Name 'gh')
+            gh_authenticated = (Test-GhAuthenticated)
             stale = $false
             failure_reasons = $failureReasons
             required_actions = $requiredActions

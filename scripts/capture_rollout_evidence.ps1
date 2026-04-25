@@ -13,45 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-
-function Get-DotEnvMap {
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    $map = @{}
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $map
-    }
-
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
-            continue
-        }
-        $index = $trimmed.IndexOf('=')
-        if ($index -lt 1) {
-            continue
-        }
-        $map[$trimmed.Substring(0, $index).Trim()] = $trimmed.Substring($index + 1)
-    }
-
-    return $map
-}
-
-function Get-EnvValue {
-    param(
-        [Parameter(Mandatory = $true)][string] $Name,
-        [Parameter(Mandatory = $true)][hashtable] $DotEnv
-    )
-
-    $processValue = [System.Environment]::GetEnvironmentVariable($Name)
-    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
-        return [string] $processValue
-    }
-    if ($DotEnv.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace([string] $DotEnv[$Name])) {
-        return [string] $DotEnv[$Name]
-    }
-    return ''
-}
+. (Join-Path $PSScriptRoot 'rollout_script_helpers.ps1')
 
 function Get-JsonEnvValue {
     param(
@@ -258,17 +220,7 @@ function Test-CanCaptureCanonicalRunnerArtifact {
 function Test-CanValidateGithubMainPolicy {
     param([Parameter(Mandatory = $true)][hashtable] $DotEnv)
 
-    if ($null -ne (Get-Command gh -ErrorAction SilentlyContinue)) {
-        return $true
-    }
-
-    foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN', 'FILMU_POLICY_ADMIN_TOKEN')) {
-        if (-not [string]::IsNullOrWhiteSpace((Get-EnvValue -Name $name -DotEnv $DotEnv))) {
-            return $true
-        }
-    }
-
-    return $false
+    return (Test-GithubMainPolicyValidationAvailable -DotEnv $DotEnv)
 }
 
 function Write-JsonFile {
